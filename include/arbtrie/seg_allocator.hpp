@@ -251,13 +251,8 @@ namespace arbtrie
 
       // keeps track of the segments that are mlocked....
       // TODO: this needs to get refactored
-#ifdef __cpp_lib_hardware_interference_size
-      static constexpr size_t CACHE_LINE_SIZE = std::hardware_destructive_interference_size;
-#else
-      static constexpr size_t CACHE_LINE_SIZE = 64;
-#endif
-      alignas(CACHE_LINE_SIZE) std::atomic<uint32_t> _total_mlocked = 0;
-      alignas(CACHE_LINE_SIZE) std::array<std::atomic<int32_t>, 256> _mlocked;
+      alignas(ARBTRIE_CACHE_LINE_SIZE) std::atomic<uint32_t> _total_mlocked = 0;
+      alignas(ARBTRIE_CACHE_LINE_SIZE) std::array<std::atomic<int32_t>, 256> _mlocked;
 
       /**
        *  This is the highest the alloc_ptr is allowed to
