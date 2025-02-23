@@ -120,8 +120,8 @@ if(ENABLE_COVERAGE)
         COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters
         
         # Run tests (continue even if they fail)
-        COMMAND ${CMAKE_BINARY_DIR}/arbtrie-tests ] || true
-        COMMAND ${CMAKE_BINARY_DIR}/arbt || true
+        COMMAND ${CMAKE_BINARY_DIR}/bin/arbtrie-tests || true
+        COMMAND ${CMAKE_BINARY_DIR}/bin/arbt || true
         
         # Capture coverage data
         COMMAND ${LCOV} 
