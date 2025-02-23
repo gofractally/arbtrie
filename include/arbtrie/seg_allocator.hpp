@@ -277,12 +277,6 @@ namespace arbtrie
        */
       std::array<std::unique_ptr<circular_buffer<uint32_t, 1024 * 1024>>, 64> _rcache_queues;
 
-      // to allocate a new session in thread-safe way you
-      // load, find first non-zero bit, and attempt to set it via C&S,
-      // the index of the bit is the session id.
-      // Reverse the process to free a session
-      std::atomic<uint64_t> _free_sessions = -1ull;
-
       std::atomic<bool> _done = false;
 
       mapping                          _header_file;

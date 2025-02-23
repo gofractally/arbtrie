@@ -1,6 +1,7 @@
 #pragma once
 #include <assert.h>
 #include <arbtrie/config.hpp>
+#include <arbtrie/padded_atomic.hpp>
 #include <arbtrie/rdtsc.hpp>
 #include <arbtrie/size_weighted_age.hpp>
 
@@ -253,6 +254,9 @@ namespace arbtrie
          shared_atomic64 session_lock_ptrs[64];
          static_assert(sizeof(shared_atomic64) == 64);
          static_assert(sizeof(session_lock_ptrs) == 64 * 64);
+
+         // Bitmap of available session slots, shared across processes
+         padded_atomic<uint64_t> free_sessions{-1ull};
 
          // circular buffer described, big enough to hold every
          // potentially allocated segment which is subseuently freed.

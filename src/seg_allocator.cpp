@@ -39,14 +39,14 @@ namespace arbtrie
    }
    uint32_t seg_allocator::alloc_session_num()
    {
-      auto fs_bits = _free_sessions.load(std::memory_order_relaxed);
+      auto fs_bits = _header->free_sessions.load(std::memory_order_relaxed);
       if (fs_bits == 0)
          throw std::runtime_error("max of 64 sessions can be in use");
 
       auto fs          = std::countr_zero(fs_bits);
       auto new_fs_bits = fs_bits & ~(1 << fs);
 
-      while (not _free_sessions.compare_exchange_strong(fs_bits, new_fs_bits))
+      while (not _header->free_sessions.compare_exchange_strong(fs_bits, new_fs_bits))
       {
          if (fs_bits == 0)
             throw std::runtime_error("max of 64 sessions can be in use");
@@ -61,7 +61,7 @@ namespace arbtrie
 
    void seg_allocator::release_session_num(uint32_t sn)
    {
-      _free_sessions.fetch_or(uint64_t(1) << sn);
+      _header->free_sessions.fetch_or(uint64_t(1) << sn);
    }
 
    void seg_allocator::start_compact_thread()
@@ -544,7 +544,7 @@ namespace arbtrie
          // find new last min
          // TODO: only iterate over active sessions instead of all sessions
          // this is so infrequent it probably doesn't matter.
-         auto fs      = ~_free_sessions.load();
+         auto fs      = ~_header->free_sessions.load();
          auto num_ses = std::popcount(fs);
          for (uint32_t i = 0; fs and i < max_session_count; ++i)
          {
@@ -571,7 +571,7 @@ namespace arbtrie
 
    void seg_allocator::set_session_end_ptrs(uint32_t e)
    {
-      auto     fs      = ~_free_sessions.load();
+      auto     fs      = ~_header->free_sessions.load();
       auto     num_ses = std::popcount(fs);
       uint32_t min     = -1;
       for (uint32_t i = 0; fs and i < max_session_count; ++i)
@@ -935,7 +935,7 @@ namespace arbtrie
 
       std::cerr << "E - end idx: " << _header->end_ptr.load() << "\n";
 
-      auto fs      = ~_free_sessions.load();
+      auto fs      = ~_header->free_sessions.load();
       auto num_ses = std::popcount(fs);
       std::cerr << "active sessions: " << num_ses << "\n";
       for (uint32_t i = 0; i < max_session_count; ++i)
