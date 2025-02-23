@@ -8,6 +8,7 @@
 #include <arbtrie/node_handle.hpp>
 #include <arbtrie/node_header.hpp>
 #include <arbtrie/node_meta.hpp>
+#include <arbtrie/padded_atomic.hpp>
 #include <arbtrie/rdtsc.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
 #include <arbtrie/sync_lock.hpp>
@@ -274,12 +275,6 @@ namespace arbtrie
       // Difficulty threshold for read bit updates (0-4294967295)
       std::atomic<uint32_t> _cache_difficulty{uint32_t(-1) -
                                               (uint32_t(-1) / 16)};  // 1 in 16 probability
-
-      struct aligned_atomic64 : public std::atomic<uint64_t>
-      {
-         char padding[std::hardware_destructive_interference_size - sizeof(std::atomic<uint64_t>)];
-      } __attribute__((__aligned__(std::hardware_destructive_interference_size)));
-      static_assert(sizeof(aligned_atomic64) == std::hardware_destructive_interference_size);
 
       /**
        * Each session has its own read cache queue to track read operations
