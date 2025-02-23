@@ -4,25 +4,29 @@
 namespace arbtrie
 {
    seg_alloc_session::seg_alloc_session(seg_alloc_session&& mv)
-       : _sega(mv._sega),
-         _session_num(mv._session_num),
+       : _session_num(mv._session_num),
          _alloc_seg_num(mv._alloc_seg_num),
          _alloc_seg_ptr(mv._alloc_seg_ptr),
+         _in_alloc(mv._in_alloc),
          _session_lock_ptr(mv._session_lock_ptr),
-         _segment_read_stat(mv._segment_read_stat),
+         _sega(mv._sega),
+         _nested_read_lock(mv._nested_read_lock),
          _rcache_queue(mv._rcache_queue)
    {
-      mv._session_num = -1;
+      mv._alloc_seg_ptr = nullptr;
+      mv._alloc_seg_num = -1ull;
+      mv._rcache_queue  = nullptr;
    }
 
    seg_alloc_session::seg_alloc_session(seg_allocator& a, uint32_t ses_num)
        : _session_num(ses_num),
          _alloc_seg_num(-1ull),
          _alloc_seg_ptr(nullptr),
+         _in_alloc(false),
          _session_lock_ptr(a._session_lock_ptrs[ses_num]),
-         _segment_read_stat(a._session_seg_read_stats[ses_num]),
          _sega(a),
-         _rcache_queue(*a._rcache_queues[ses_num])
+         _nested_read_lock(0),
+         _rcache_queue(a._rcache_queues[ses_num].get())
    {
    }
 
@@ -84,7 +88,6 @@ namespace arbtrie
             assert(cur_apos + sizeof(uint64_t) <= segment_size);
             memset(((char*)sh) + cur_apos, 0, sizeof(node_header));
          }
-         //smeta.free(segment_size - sh->_alloc_pos);
          smeta.finalize_segment(segment_size - sh->_alloc_pos);  // not alloc
          sh->_alloc_pos.store(uint32_t(-1), std::memory_order_release);
          _sega.push_dirty_segment(_alloc_seg_num);
@@ -102,7 +105,6 @@ namespace arbtrie
 
       auto new_alloc_pos =
           rounded_size + sh->_alloc_pos.fetch_add(rounded_size, std::memory_order_relaxed);
-      //sh->_num_objects++;
 
       auto loc = _alloc_seg_num * segment_size + cur_apos;
 

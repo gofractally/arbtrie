@@ -93,7 +93,7 @@ namespace arbtrie
          {
             // try_set_read() returns true if read bit was already set
             _meta.start_pending_cache();
-            _rlock._session._rcache_queue.push(address().to_int());
+            _rlock._session._rcache_queue->push(address().to_int());
          }
       }
    }

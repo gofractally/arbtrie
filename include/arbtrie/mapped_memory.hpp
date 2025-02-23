@@ -69,6 +69,7 @@ namespace arbtrie
             }
          };
          static_assert(sizeof(state_data) == sizeof(uint64_t));
+         static_assert(std::is_trivially_copyable_v<state_data>);
 
          auto get_free_state() const
          {
@@ -91,12 +92,6 @@ namespace arbtrie
             while (
                 not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
                updated = state_data(expected).free_object(size).to_int();
-            /*
-            uint64_t so = size;
-            so <<= 32;
-            so += 1;
-            _free_space_and_obj.fetch_add(so, std::memory_order_relaxed);
-            */
          }
 
          // doesn't increment object count
@@ -168,15 +163,15 @@ namespace arbtrie
                updated = state_data(expected).set_last_sync_page(page_num).to_int();
          }
 
-         //std::atomic<uint64_t> _last_sync_pos;
-         // position of alloc pointer when last synced
+         // std::atomic<uint64_t> _last_sync_pos;
+         //  position of alloc pointer when last synced
 
          /**
           *   As data is written, this tracks the data-weighted
           *   average of time since data without read-bit set
           *   was written. By default this is the average allocation
           *   time, but when compacting data the incoming data may
-          *   provide an alternative time to be averaged int. 
+          *   provide an alternative time to be averaged int.
           *
           *   - written by allocator thread
           *   - read by compactor after allocator thread is done with segment
@@ -186,7 +181,7 @@ namespace arbtrie
           *     threads.
           *
           *   - not stored on the segment_header because compactor
-          *   iterates over all segment meta and we don't want to 
+          *   iterates over all segment meta and we don't want to
           *   page in from disk segments just to read this time.
           *
           *   TODO: must this be atomic?
@@ -227,9 +222,9 @@ namespace arbtrie
       static_assert(sizeof(segment_header) <= 64);
 
       /**
-        * The data stored in the alloc header is not written to disk on sync
-        * and may be in a corrupt state after a hard crash. All values contained
-        * within the allocator_header must be reconstructed from the segments
+       * The data stored in the alloc header is not written to disk on sync
+       * and may be in a corrupt state after a hard crash. All values contained
+       * within the allocator_header must be reconstructed from the segments
        */
       struct allocator_header
       {

@@ -1,12 +1,15 @@
 #pragma once
 #include <arbtrie/circular_buffer.hpp>
+#include <arbtrie/config.hpp>
 #include <arbtrie/debug.hpp>
 #include <arbtrie/id_alloc.hpp>
 #include <arbtrie/mapped_memory.hpp>
 #include <arbtrie/mapping.hpp>
+#include <arbtrie/node_handle.hpp>
 #include <arbtrie/node_header.hpp>
+#include <arbtrie/node_meta.hpp>
+#include <arbtrie/rdtsc.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
-#include <arbtrie/segment_read_stats.hpp>
 #include <arbtrie/sync_lock.hpp>
 #include <thread>
 
@@ -172,8 +175,6 @@ namespace arbtrie
       std::pair<segment_number, mapped_memory::segment_header*> get_new_segment();
 
       void compact_loop2();
-      void aggregate_read_stats();
-
       void compact_loop();
       void compact_segment(seg_alloc_session& ses, uint64_t seg_num);
       void promote_rcache_data();
@@ -288,16 +289,6 @@ namespace arbtrie
        */
       aligned_atomic64 _session_lock_ptrs[64];
       static_assert(sizeof(_session_lock_ptrs) == 64 * std::hardware_destructive_interference_size);
-
-      /**
-       * As sessions are allocated, they are given memory to track the
-       * number of bytes read. The compactor thread sums the results from
-       * the individual threads and updates the segment meta data it uses
-       * to prioritize compaction. Each session is given its own on the
-       * assumption that each session belongs to its own thread and we
-       * do not want write contention on read access.
-       */
-      std::array<std::unique_ptr<segment_read_stat>, 64> _session_seg_read_stats;
 
       /**
        * Each session has its own read cache queue to track read operations

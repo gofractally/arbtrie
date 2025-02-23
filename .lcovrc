@@ -1,0 +1,16 @@
+# LCOV configuration file
+
+# Disable function coverage as it's causing issues with LLVM/Clang
+lcov_function_coverage = 0
+
+# Disable branch coverage
+lcov_branch_coverage = 0
+
+# Don't check consistency of data
+check_data_consistency = 0
+
+# Don't try to derive function end lines
+derive_function_end_line = 0
+
+# Ignore unused pattern errors
+ignore_errors = unused 

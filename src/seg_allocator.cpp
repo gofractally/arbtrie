@@ -55,13 +55,8 @@ namespace arbtrie
          fs          = std::countr_zero(fs_bits);
          new_fs_bits = fs_bits & ~(1 << fs);
       }
-      if (not _session_seg_read_stats[fs])
-         _session_seg_read_stats[fs].reset(new segment_read_stat);
       if (not _rcache_queues[fs])
          _rcache_queues[fs].reset(new circular_buffer<uint32_t, 1024 * 1024>());
-      //    std::cerr << "   alloc session bits: " << fs << " " <<std::bitset<64>(new_fs_bits) << "\n";
-      //    std::cerr << "   new fs bits: " << std::bitset<64>(new_fs_bits) << "\n";
-      //    _free_sessions.store(new_fs_bits);
       return fs;
    }
 
@@ -126,77 +121,20 @@ namespace arbtrie
       }
    }
 
-   void seg_allocator::aggregate_read_stats()
-   {
-      auto& srs        = _session_seg_read_stats;
-      auto& msrs       = srs[_compactor_session->_session_num];
-      auto  num_blocks = _block_alloc.num_blocks();
-
-      // TODO: we know the "max session number" so
-      // there is no need to iterate over all 64
-      // TODO: if we can prove that the compactor session
-      // is always session 0, then we can skip the
-      // check for ses.
-      //
-      // These optimizations should only help
-      // compactor CPU usage and are likely hardly
-      // measurable.
-      for (auto& ptr : srs)
-      {
-         if (&ptr != &msrs and bool(ptr))
-            msrs->accumulate(*ptr, num_blocks);
-      }
-   }
-
-      /*
-   void seg_allocator::select_segments()
-   {
-      auto num_segs = _block_alloc.num_blocks();
-      auto& rstats  = _compactor_session->get_read_stats();
-
-      for( uint32_t seg = 0; seg < num_segs; ++seg ) {
-         // don't include segments that are in active allocation
-         // ... how do I know that without looking at header?
-         auto& sm = _header->seg_meta[seg];
-
-         auto free_data                  = sm.get_free_space_and_objs();
-         size_weighted_age& unread_data  = sm._base_time;
-         size_weighted_age& read_data    = rstats.get_age_weight(seg);
-
-         if( fs.
-         if( fs.first > compact_free_space_threshold )
-            // schedule..
-      }
-   }
-   void seg_allocator::sort_selected_segments() {}
-      */
-
    /**
     *  1. aggregate read stats from per-thread counters
     */
    void seg_allocator::compact_loop2()
    {
-      if (not _compactor_session)
-         _compactor_session.emplace(start_session());
-
-      while (not _done.load())
+      auto ses = start_session();
+      while (not _done.load(std::memory_order_relaxed))
       {
-         aggregate_read_stats();
-         // read frequency 2x unread frequency or 50% freed data
-         // select_segments();
-         // segments are sorted by frequency with each segment appearing
-         // twice.. once for its read frequency and once for its unread frequency
-         // sort_selected_segments();
-
-         // process them in order moving the data to a new segment in the
-         // order of most frequently accessed to least. The frequency of the
-         // "read items" is the difference between the base time and the read time.
-
-         // do not move unread data from a segment unless it
-         // comprises less than 50% of a segment size and it is a space
-         // recovery justification.
+         if (compact_next_segment())
+         {
+            promote_rcache_data();
+         }
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
-      _compactor_session.reset();
    }
    void seg_allocator::compact_loop()
    {

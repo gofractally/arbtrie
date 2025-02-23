@@ -1,10 +1,12 @@
 #pragma once
 #include <arbtrie/circular_buffer.hpp>
+#include <arbtrie/config.hpp>
+#include <arbtrie/id_alloc.hpp>
 #include <arbtrie/mapped_memory.hpp>
 #include <arbtrie/mapping.hpp>
+#include <arbtrie/node_handle.hpp>
 #include <arbtrie/node_header.hpp>
 #include <arbtrie/node_meta.hpp>
-#include <arbtrie/segment_read_stats.hpp>
 #include <arbtrie/sync_lock.hpp>
 #include <atomic>
 #include <memory>
@@ -53,12 +55,11 @@ namespace arbtrie
       mapped_memory::segment_header* _alloc_seg_ptr = nullptr;
       bool                           _in_alloc      = false;
 
-      std::atomic<uint64_t>&              _session_lock_ptr;
-      std::unique_ptr<segment_read_stat>& _segment_read_stat;
-      seg_allocator&                      _sega;
-      int                                 _nested_read_lock = 0;
+      std::atomic<uint64_t>& _session_lock_ptr;
+      seg_allocator&         _sega;
+      int                    _nested_read_lock = 0;
 
       // Reference to the read cache queue from seg_allocator
-      circular_buffer<uint32_t, 1024 * 1024>& _rcache_queue;
+      circular_buffer<uint32_t, 1024 * 1024>* _rcache_queue;
    };
 }  // namespace arbtrie

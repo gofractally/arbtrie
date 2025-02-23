@@ -21,7 +21,6 @@ namespace arbtrie
       assert(size >= sizeof(node_header));
       assert(type != node_type::undefined);
 
-      //auto& atom           = _session._sega._id_alloc.get(id);
       auto [loc, node_ptr] = _session.alloc_data(size, adr);
 
       init(node_ptr);
@@ -41,7 +40,6 @@ namespace arbtrie
    inline std::pair<node_meta_type&, id_address> read_lock::get_new_meta_node(id_region reg)
    {
       return _session._sega._id_alloc.get_new_id(reg);
-      //auto [atom, id]      = _session._sega._id_alloc.get_new_id(reg);
    }
 
    inline object_ref read_lock::alloc(id_region reg, uint32_t size, node_type type, auto init)
@@ -59,7 +57,6 @@ namespace arbtrie
       auto [loc, node_ptr] = _session.alloc_data(size, id);
       //ARBTRIE_WARN( "alloc id: ", id, " type: " , node_type_names[type], " loc: ", loc._offset, " size: ", size);
 
-      //init(node_ptr);
       init(node_ptr);
       if constexpr (update_checksum_on_modify)
          node_ptr->update_checksum();
@@ -111,7 +108,7 @@ namespace arbtrie
          if (not(ap == 0 or ap > loc.abs_index()))
          {
             ARBTRIE_WARN("ap: ", ap, "  loc: ", loc.aligned_index(), " abs: ", loc.abs_index(),
-                          "loc.segment: ", loc.segment());
+                         "loc.segment: ", loc.segment());
             abort();
          }
       }
@@ -120,10 +117,6 @@ namespace arbtrie
 
       return (node_header*)((char*)_session._sega._block_alloc.get(loc.segment()) +
                             loc.abs_index());
-   }
-   inline void read_lock::update_read_stats(node_location loc, uint32_t size, uint64_t time)
-   {
-      _session._segment_read_stat->read_bytes(loc.segment(), size, time);
    }
 
    inline void read_lock::free_meta_node(id_address a)
