@@ -239,6 +239,21 @@ namespace arbtrie
          // meta data associated with each segment, indexed by segment number
          segment_meta seg_meta[max_segment_count];
 
+         /**
+          *  Lower 32 bits represent R* above (session's view of recycling queue)
+          *  Upper 32 bits represent what compactor has pushed to the session
+          *
+          *  Allocator takes the min of the lower 32 bits to determine the lock position.
+          *  These need to be in shared memory for inter-process coordination.
+          */
+         struct alignas(64) shared_atomic64 : public std::atomic<uint64_t>
+         {
+            char padding[64 - sizeof(std::atomic<uint64_t>)];
+         };
+         shared_atomic64 session_lock_ptrs[64];
+         static_assert(sizeof(shared_atomic64) == 64);
+         static_assert(sizeof(session_lock_ptrs) == 64 * 64);
+
          // circular buffer described, big enough to hold every
          // potentially allocated segment which is subseuently freed.
          //

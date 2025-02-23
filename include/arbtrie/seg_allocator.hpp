@@ -282,15 +282,6 @@ namespace arbtrie
       static_assert(sizeof(aligned_atomic64) == std::hardware_destructive_interference_size);
 
       /**
-       *  Lower 32 bits represent R* above
-       *  Upper 32 bits represent what compactor has pushed to the session
-       *
-       *  Allocator takes the min of the lower 32 bits to determine the lock position.
-       */
-      aligned_atomic64 _session_lock_ptrs[64];
-      static_assert(sizeof(_session_lock_ptrs) == 64 * std::hardware_destructive_interference_size);
-
-      /**
        * Each session has its own read cache queue to track read operations
        * for promoting data during compaction.
        */

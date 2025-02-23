@@ -24,13 +24,12 @@ namespace arbtrie
       }
       _header = reinterpret_cast<mapped_memory::allocator_header*>(_header_file.data());
 
-      for (auto& sptr : _session_lock_ptrs)
+      for (auto& sptr : _header->session_lock_ptrs)
          sptr.store(uint32_t(-1ull));
       _done.store(false);
 
       for (auto& i : _mlocked)
          i.store(-1, std::memory_order_relaxed);
-      ;
    }
 
    seg_allocator::~seg_allocator()
@@ -551,7 +550,8 @@ namespace arbtrie
          {
             if (fs & (1ull << i))
             {
-               if (uint32_t p = _session_lock_ptrs[i].load(std::memory_order_acquire); p < min)
+               if (uint32_t p = _header->session_lock_ptrs[i].load(std::memory_order_acquire);
+                   p < min)
                   min = p;
 
                // we can't find anything lower than this
@@ -578,7 +578,7 @@ namespace arbtrie
       {
          if (fs & (1ull << i))
          {
-            uint64_t p = _session_lock_ptrs[i].load(std::memory_order_relaxed);
+            uint64_t p = _header->session_lock_ptrs[i].load(std::memory_order_relaxed);
 
             if (uint32_t(p) < min)
                min = uint32_t(p);
@@ -586,7 +586,7 @@ namespace arbtrie
             p &= ~uint64_t(uint32_t(-1));  // clear the lower bits, to get accurate diff
             auto delta = (uint64_t(e) << 32) - p;
             assert((delta << 32) == 0);
-            auto ep = _session_lock_ptrs[i].fetch_add(delta, std::memory_order_release);
+            auto ep = _header->session_lock_ptrs[i].fetch_add(delta, std::memory_order_release);
          }
       }
       if (e > (1 << 20))
@@ -929,7 +929,7 @@ namespace arbtrie
       std::cerr << "A - alloc idx: " << _header->alloc_ptr.load() << "\n";
       for (uint32_t i = 0; i < max_session_count; ++i)
       {
-         if (auto p = _session_lock_ptrs[i].load(); uint32_t(p) != uint32_t(-1))
+         if (auto p = _header->session_lock_ptrs[i].load(); uint32_t(p) != uint32_t(-1))
             std::cerr << "R" << i << ": " << uint32_t(p) << "\n";
       }
 
@@ -942,7 +942,7 @@ namespace arbtrie
       {
          if (fs & (1ull << i))
          {
-            if (auto p = _session_lock_ptrs[i].load(); uint32_t(p) == uint32_t(-1))
+            if (auto p = _header->session_lock_ptrs[i].load(); uint32_t(p) == uint32_t(-1))
                std::cerr << "R" << i << ": UNLOCKED \n";
          }
       }

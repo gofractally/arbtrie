@@ -23,7 +23,7 @@ namespace arbtrie
          _alloc_seg_num(-1ull),
          _alloc_seg_ptr(nullptr),
          _in_alloc(false),
-         _session_lock_ptr(a._session_lock_ptrs[ses_num]),
+         _session_lock_ptr(a._header->session_lock_ptrs[ses_num]),
          _sega(a),
          _nested_read_lock(0),
          _rcache_queue(a._rcache_queues[ses_num].get())
