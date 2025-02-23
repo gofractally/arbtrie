@@ -169,6 +169,14 @@ if(ENABLE_COVERAGE)
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Generating coverage report for all tests..."
     )
+
+    # Add target to just reset coverage data
+    add_custom_target(coverage-reset
+        COMMAND ${CMAKE_COMMAND} -E make_directory coverage
+        COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Resetting coverage counters..."
+    )
 endif()
 
 # Platform-specific optimizations
