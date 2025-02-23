@@ -8,6 +8,16 @@ if(POLICY CMP0167)
     cmake_policy(SET CMP0167 NEW)
 endif()
 
+# Enable compile commands for IDE support
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Create symlink to compile_commands.json in project root, for IDE support
+if(CMAKE_EXPORT_COMPILE_COMMANDS)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+        ${CMAKE_BINARY_DIR}/compile_commands.json
+        ${CMAKE_SOURCE_DIR}/compile_commands.json)
+endif()
+
 project(arbtrie VERSION 0.1.0 LANGUAGES CXX)
 
 # Define build options
