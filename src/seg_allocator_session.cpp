@@ -26,7 +26,7 @@ namespace arbtrie
          _session_lock_ptr(a._header->session_lock_ptrs[ses_num]),
          _sega(a),
          _nested_read_lock(0),
-         _rcache_queue(a._rcache_queues[ses_num].get())
+         _rcache_queue(a._rcache_queues[ses_num].load(std::memory_order_acquire))
    {
    }
 

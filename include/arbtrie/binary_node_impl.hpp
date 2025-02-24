@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <arbtrie/debug.hpp>
 
 namespace arbtrie

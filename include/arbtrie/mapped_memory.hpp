@@ -4,6 +4,7 @@
 #include <arbtrie/padded_atomic.hpp>
 #include <arbtrie/rdtsc.hpp>
 #include <arbtrie/size_weighted_age.hpp>
+#include <arbtrie/util.hpp>
 
 namespace arbtrie
 {
@@ -14,6 +15,8 @@ namespace arbtrie
    // types that are memory mapped
    namespace mapped_memory
    {
+
+      static constexpr segment_number invalid_segment_num = segment_number(-1);
 
       // meta data about each segment,
       // stored in an array in allocator_header indexed by segment number
@@ -229,34 +232,15 @@ namespace arbtrie
        */
       struct allocator_header
       {
-         // when no segments are available for reuse, advance by segment_size
-         alignas(64) std::atomic<segment_offset> alloc_ptr;    // A below
-         alignas(64) std::atomic<free_segment_index> end_ptr;  // E below
-
          // set to 0 just before exit, set to 1 when opening database
          std::atomic<bool>     clean_exit_flag;
          std::atomic<uint32_t> next_alloc_age = 0;
 
+         // Bitmap of available session slots, shared across processes
+         std::atomic<uint64_t> free_sessions{-1ull};
+
          // meta data associated with each segment, indexed by segment number
          segment_meta seg_meta[max_segment_count];
-
-         /**
-          *  Lower 32 bits represent R* above (session's view of recycling queue)
-          *  Upper 32 bits represent what compactor has pushed to the session
-          *
-          *  Allocator takes the min of the lower 32 bits to determine the lock position.
-          *  These need to be in shared memory for inter-process coordination.
-          */
-         struct alignas(64) shared_atomic64 : public std::atomic<uint64_t>
-         {
-            char padding[64 - sizeof(std::atomic<uint64_t>)];
-         };
-         shared_atomic64 session_lock_ptrs[64];
-         static_assert(sizeof(shared_atomic64) == 64);
-         static_assert(sizeof(session_lock_ptrs) == 64 * 64);
-
-         // Bitmap of available session slots, shared across processes
-         padded_atomic<uint64_t> free_sessions{-1ull};
 
          // circular buffer described, big enough to hold every
          // potentially allocated segment which is subseuently freed.
@@ -277,6 +261,53 @@ namespace arbtrie
          // The values between [A-E) point to recyclable segments assuming no R*
          // is present. Values before A or E and after point to no valid segments
          segment_number free_seg_buffer[max_segment_count];
+
+         /**
+          *  Lower 32 bits represent R* above (session's view of recycling queue)
+          *  Upper 32 bits represent what compactor has pushed to the session, aka E
+          *
+          *  Allocator takes the min of the lower 32 bits to determine the lock position.
+          *  These need to be in shared memory for inter-process coordination.
+          * 
+          * The idea is that we need to ensure consistency between the compactor,
+          * the allocator, and the sessions locking data. Each session knows the
+          * synchronizes with the compactor's end pointer and the find_min algorithm
+          * to determine the correct lock position.
+          */
+         padded_atomic<uint64_t> session_lock_ptrs[64];
+
+         // these methods ensure proper wrapping of the free segment index when
+         // addressing into the free_seg_buffer
+         segment_number&       get_free_seg_slot(free_segment_index index);
+         const segment_number& get_free_seg_slot(free_segment_index index) const;
+
+         void                          push_recycled_segment(segment_number seg_num);
+         void                          broadcast_end_ptr(uint32_t new_end_ptr);
+         std::optional<segment_number> pop_recycled_segment(uint32_t min_rstar);
+
+         /**
+          * These functions are used to manage the free segment queue and ensure
+          * that to the fullest extent possible data is allocated toward the
+          * beginning of the database file and that we can reclaim unused space
+          * on exit.
+          */
+         ///@{
+         std::pair<segment_number, segment_number> sort_queue(segment_number end_segment);
+         std::vector<segment_number> collect_segments(free_segment_index start_idx, size_t count);
+         void push_and_broadcast_batch(const segment_number* segments, size_t count);
+         std::pair<free_segment_index, size_t> claim_all();
+         ///@}
+
+         /**
+          *  Flag to indicate that the compactor is sorting the free segment queue.
+          *  When set, the allocator will wait for the compactor to finish sorting
+          *  before attempting to recycle a segment.
+          */
+         std::atomic<bool> _queue_sort_flag;
+
+         // when no segments are available for reuse, advance by segment_size
+         padded_atomic<segment_offset>     alloc_ptr;  // A below
+         padded_atomic<free_segment_index> end_ptr;    // E below
       };
 
       /// crash recovery:
@@ -284,6 +315,188 @@ namespace arbtrie
       ///    if a lot of free space, then swap them and push to free seg buffer
       /// 2. Update reference counts on all objects in database
       /// 3. ? pray ?
+
+      // Inline implementations
+      inline segment_number& allocator_header::get_free_seg_slot(free_segment_index index)
+      {
+         return free_seg_buffer[index & (max_segment_count - 1)];
+      }
+
+      inline const segment_number& allocator_header::get_free_seg_slot(
+          free_segment_index index) const
+      {
+         return free_seg_buffer[index & (max_segment_count - 1)];
+      }
+
+      inline void allocator_header::push_recycled_segment(segment_number seg_num)
+      {
+         assert(seg_num != invalid_segment_num && "Cannot recycle invalid segment");
+         auto  ep   = end_ptr.load(std::memory_order_relaxed);
+         auto& slot = get_free_seg_slot(ep);
+         //         assert(slot == invalid_segment_num && "Slot must be empty before recycling");
+         slot = seg_num;
+
+         uint32_t new_end_ptr = end_ptr.fetch_add(1, std::memory_order_relaxed);
+
+         // Update session_lock_ptrs for each active session
+         broadcast_end_ptr(new_end_ptr);
+      }
+
+      inline void allocator_header::broadcast_end_ptr(uint32_t new_end_ptr)
+      {
+         auto fs = ~free_sessions.load(std::memory_order_relaxed);
+         while (fs)
+         {
+            auto session_idx = std::countr_zero(fs);
+
+            uint64_t cur         = session_lock_ptrs[session_idx].load(std::memory_order_relaxed);
+            uint32_t cur_end_ptr = cur >> 32;
+            int64_t  diff = static_cast<int64_t>(new_end_ptr) - static_cast<int64_t>(cur_end_ptr);
+            uint64_t adjustment = static_cast<uint64_t>(diff) << 32;
+
+            // because the adjustment has 0's in the lower 32 bits,
+            // the fetch_add will not overwrite the lower 32 bits managed by the session thread
+            session_lock_ptrs[session_idx].fetch_add(adjustment, std::memory_order_relaxed);
+
+            fs &= fs - 1;  // Clear lowest set bit
+         }
+      }
+
+      inline std::optional<segment_number> allocator_header::pop_recycled_segment(
+          uint32_t min_rstar)
+      {
+         do
+         {
+            auto ap = alloc_ptr.load(std::memory_order_relaxed);
+            while (min_rstar - ap > 1)
+            {
+               if (alloc_ptr.compare_exchange_weak(ap, ap + 1))
+               {
+                  auto& slot    = get_free_seg_slot(ap);
+                  auto  seg_num = slot;
+
+                  assert(seg_num != invalid_segment_num && "Found invalid segment in free buffer");
+
+                  slot = invalid_segment_num;
+                  return seg_num;
+               }
+            }
+            // wait for the compactor to finish sorting the queue
+            if (_queue_sort_flag.load(std::memory_order_relaxed))
+            {
+               _queue_sort_flag.wait(true, std::memory_order_relaxed);
+               continue;
+            }
+            return std::nullopt;
+         } while (true);
+      }
+
+      inline std::vector<segment_number> allocator_header::collect_segments(
+          free_segment_index start_idx,
+          size_t             count)
+      {
+         std::vector<segment_number> result;
+         result.reserve(count);
+         for (size_t i = 0; i < count; i++)
+         {
+            auto& slot = get_free_seg_slot(start_idx + i);
+            if (slot != invalid_segment_num)
+            {
+               assert(slot != invalid_segment_num && "Found invalid segment in free buffer");
+               result.push_back(slot);
+               slot = invalid_segment_num;
+            }
+         }
+         return result;
+      }
+
+      inline void allocator_header::push_and_broadcast_batch(const segment_number* segments,
+                                                             size_t                count)
+      {
+         auto ep = end_ptr.load(std::memory_order_relaxed);
+         // Push segments back
+         for (size_t i = 0; i < count; i++)
+         {
+            auto& slot = get_free_seg_slot(ep + i);
+            assert(slot == invalid_segment_num && "Slot must be empty before recycling");
+            slot = segments[i];
+            assert(slot != invalid_segment_num && "Cannot store invalid segment");
+         }
+
+         // Update end_ptr and broadcast
+         uint32_t new_end_ptr = end_ptr.fetch_add(count, std::memory_order_relaxed);
+         broadcast_end_ptr(new_end_ptr);
+      }
+
+      /**
+       * Atomically claims all segments between alloc_ptr and end_ptr.
+       * 
+       * @return A pair containing:
+       *         - first: The starting index where segments were claimed (old alloc_ptr)
+       *         - second: Number of segments claimed (end_ptr - old alloc_ptr), or 0 if no segments available
+       */
+      inline std::pair<free_segment_index, size_t> allocator_header::claim_all()
+      {
+         do
+         {
+            auto ap = alloc_ptr.load(std::memory_order_relaxed);
+            auto ep = end_ptr.load(std::memory_order_relaxed);
+
+            if (ep <= ap)
+               return {ap, 0};
+
+            size_t claim_size = ep - ap;
+            auto   old_ap     = ap;
+
+            if (alloc_ptr.compare_exchange_weak(ap, ep, std::memory_order_relaxed))
+               return {old_ap, claim_size};
+
+         } while (true);
+      }
+
+      inline std::pair<segment_number, segment_number> allocator_header::sort_queue(
+          segment_number end_segment)
+      {
+         // Set flag and ensure it's cleared on exit
+         _queue_sort_flag.store(true, std::memory_order_release);
+         auto guard = scoped_exit(
+             [this]
+             {
+                _queue_sort_flag.store(false, std::memory_order_release);
+                _queue_sort_flag.notify_all();
+             });
+
+         // Try to claim all segments in the queue
+         auto [start_idx, count] = claim_all();
+         if (count == 0)
+            return {invalid_segment_num, end_segment};
+
+         // Collect and sort segments
+         auto batch = collect_segments(start_idx, count);
+         std::sort(batch.begin(), batch.end());
+
+         // Find segments contiguous with end_segment
+         segment_number first_contiguous = invalid_segment_num;
+         segment_number last_contiguous  = end_segment;
+
+         // Search backwards through batch
+         for (size_t i = batch.size(); i > 0; --i)
+         {
+            auto seg = batch[i - 1];
+            if (seg != segment_number(last_contiguous - 1))
+            {
+               // Push non-contiguous segments back
+               push_and_broadcast_batch(batch.data(), i);
+               return {first_contiguous, end_segment};
+            }
+
+            if (first_contiguous == invalid_segment_num)
+               first_contiguous = seg;
+            last_contiguous = seg;
+         }
+
+         return {first_contiguous, end_segment};
+      }
 
    }  // namespace mapped_memory
 

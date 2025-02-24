@@ -1,5 +1,4 @@
 add_executable(arbt arb.cpp)
-add_executable(arbt arb.cpp)
 target_link_libraries(arbt PUBLIC Boost::program_options arbtrie)
 target_include_directories(arbt PUBLIC ${Boost_INCLUDE_DIRS})
 set_target_properties(arbt 

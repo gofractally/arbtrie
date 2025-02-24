@@ -8,6 +8,11 @@ if(POLICY CMP0167)
     cmake_policy(SET CMP0167 NEW)
 endif()
 
+# Set the C++ compiler to LLVM from Homebrew on macOS
+if(APPLE)
+    set(CMAKE_CXX_COMPILER "/opt/homebrew/opt/llvm/bin/clang++")
+endif()
+
 # Enable compile commands for IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -24,6 +29,7 @@ project(arbtrie VERSION 0.1.0 LANGUAGES CXX)
 option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTING "Build tests" OFF)
+option(BUILD_VISUALIZER "Build segment visualizer" )
 
 # Find required packages
 find_package(Threads REQUIRED)
@@ -36,6 +42,11 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 if(BUILD_TESTING)
     find_package(Catch2 3 REQUIRED)
     enable_testing()
+endif()
+
+# Only find Qt if building visualizer
+if(BUILD_VISUALIZER)
+    add_subdirectory(visualizer)
 endif()
 
 # Main library
@@ -57,13 +68,14 @@ target_include_directories(arbtrie
 )
 
 target_link_libraries(arbtrie PUBLIC Threads::Threads)
-target_compile_features(arbtrie PUBLIC cxx_std_20)
+target_compile_features(arbtrie PUBLIC cxx_std_23)
 
 # Compiler options
 target_compile_options(arbtrie 
     PUBLIC 
-        -std=c++20
+        -std=c++23
         -Wno-vla-extension
+        $<$<CONFIG:Debug>:-O0 -g>
 )
 
 # Sanitizer configuration

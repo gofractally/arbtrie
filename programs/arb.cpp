@@ -29,9 +29,9 @@ uint64_t bswap(uint64_t x)
 }
 void indent(int depth)
 {
-   std::cerr << depth << "|";
+   std::cout << depth << "|";
    for (int i = 0; i < depth; ++i)
-      std::cerr << "    ";
+      std::cout << "    ";
 }
 namespace arbtrie
 {
@@ -49,9 +49,9 @@ namespace arbtrie
 
    void print_hex(std::string_view v)
    {
-      std::cerr << std::setfill('0');
+      std::cout << std::setfill('0');
       for (auto c : v)
-         std::cerr << std::hex << std::setw(2) << uint16_t(uint8_t(c));
+         std::cout << std::hex << std::setw(2) << uint16_t(uint8_t(c));
    }
 }  // namespace arbtrie
 
@@ -106,16 +106,16 @@ void print_pre(session_rlock&           state,
 void print(session_rlock& state, const arbtrie::index_node* in, int depth )
 {
    indent(depth);
-   std::cerr << "index node: "<< in->id() << " with " << in->num_branches() <<" branches\n";
+   std::cout << "index node: "<< in->id() << " with " << in->num_branches() <<" branches\n";
    for( uint16_t i = 0; i < 257; ++i ) {
       indent(depth+1);
       auto b = in->get_branch(i);
 
       if( b ) {
-      std::cerr << i << "]  id: " <<  (b ? *b : object_id()) <<"  ";
-      std::cerr << "ref: " << state.get(*b).ref() <<"\n";
+      std::cout << i << "]  id: " <<  (b ? *b : object_id()) <<"  ";
+      std::cout << "ref: " << state.get(*b).ref() <<"\n";
       } else {
-      std::cerr << i << "]  id: null \n";
+      std::cout << i << "]  id: null \n";
       }
 
    }
@@ -136,16 +136,16 @@ void print_pre(session_rlock&           state,
        {
           if (0 == br)
           {
-             std::cerr << depth << " |" << node_type_names[in->get_type()][0] << "  ";
-             //std::cerr << prefix;
+             std::cout << depth << " |" << node_type_names[in->get_type()][0] << "  ";
+             //std::cout << prefix;
              print_hex(prefix);
-             std::cerr << "   " << bid << "  ";
+             std::cout << "   " << bid << "  ";
              auto va = state.get(bid);
-             std::cerr << node_type_names[va.type()] << "    ";
-             // std::cerr << va->value();
+             std::cout << node_type_names[va.type()] << "    ";
+             // std::cout << va->value();
              // assert(to_upper(prefix) == va->value());
              //print_hex(to_str(va->value()));
-             std::cerr << "\n";
+             std::cout << "\n";
              return;
           }
           auto c = branch_to_char(br);
@@ -164,18 +164,18 @@ void print_pre(session_rlock&           state,
    for (int i = 0; i < bn->num_branches(); ++i)
    {
       //auto k = bn->get_key(i);
-      std::cerr << depth << " |B  ";
+      std::cout << depth << " |B  ";
       auto kvp = bn->get_key_val_ptr(i);
       print_hex(prefix);
-      std::cerr << "-";
+      std::cout << "-";
       print_hex(std::string(to_str(kvp->key())));
 
-      std::cerr << "     ";
+      std::cout << "     ";
       for (auto s : path)
-         std::cerr << s << " ";
-      std::cerr << to_hex(kvp->key());
-      //std::cerr << (prefix + std::string(kvp->key()));
-      std::cerr << "\n";
+         std::cout << s << " ";
+      std::cout << to_hex(kvp->key());
+      //std::cout << (prefix + std::string(kvp->key()));
+      std::cout << "\n";
       /*
       if (prefix.size() + kvp->key().size() > 8)
       {
@@ -187,15 +187,15 @@ void print_pre(session_rlock&           state,
       auto v = kvp->value();
       if (bn->is_obj_id(i))  //kvp->is_value_node())
       {
-         std::cerr << " id: " << kvp->value_id() << "  ";
+         std::cout << " id: " << kvp->value_id() << "  ";
          auto vr = state.get(kvp->value_id());
          v       = vr.as<value_node>()->value();
-         std::cerr << "ref: " << vr.ref() << " ";
+         std::cout << "ref: " << vr.ref() << " ";
       }
-      //   std::cerr << "koff: " << bn->key_offset(i) << " ksize: ";
-      //   std::cerr << k.size() <<" ";
-      std::cerr << "'";
-      std::cerr << kvp->key() << "' = '" << v << "'\n";
+      //   std::cout << "koff: " << bn->key_offset(i) << " ksize: ";
+      //   std::cout << k.size() <<" ";
+      std::cout << "'";
+      std::cout << kvp->key() << "' = '" << v << "'\n";
       */
    }
 }
@@ -216,10 +216,10 @@ void print_pre(session_rlock&           state,
       case node_type::full:
          return print_pre(state, obj.as<full_node>(), prefix, path, depth);
       case node_type::value:
-         std::cerr << "VALUE: id: " << i << "\n";
+         std::cout << "VALUE: id: " << i << "\n";
          return;
       default:
-         std::cerr << "UNKNOWN!: id: " << i << "  " << obj.type() << "\n";
+         std::cout << "UNKNOWN!: id: " << i << "  " << obj.type() << "\n";
          return;
    }
 }
@@ -229,7 +229,7 @@ void print(session_rlock& state, const binary_node* bn, int depth = 0)
    assert(depth < 6);
    assert(bn->get_type() == node_type::binary);
    //indent(depth);
-   std::cerr << "BN   r" << state.get(bn->address()).ref() << "    binary node " << bn->address()
+   std::cout << "BN   r" << state.get(bn->address()).ref() << "    binary node " << bn->address()
              << " with " << std::dec << bn->num_branches()
              << " branches and ref : " << state.get(bn->address()).ref() << " size: " << bn->size()
              << "  spare: " << bn->spare_capacity() << "  "
@@ -246,34 +246,34 @@ void print(session_rlock& state, const binary_node* bn, int depth = 0)
       auto v = kvp->value();
       if (bn->is_obj_id(i))  //kvp->is_value_node())
       {
-         std::cerr << " id: " << kvp->value_id() << "  ";
+         std::cout << " id: " << kvp->value_id() << "  ";
          auto vr = state.get(kvp->value_id());
          v       = vr.as<value_node>()->value();
-         std::cerr << "ref: " << vr.ref() << " ";
+         std::cout << "ref: " << vr.ref() << " ";
       }
-      //   std::cerr << "koff: " << bn->key_offset(i) << " ksize: ";
-      //   std::cerr << k.size() <<" ";
-      std::cerr << "'";
+      //   std::cout << "koff: " << bn->key_offset(i) << " ksize: ";
+      //   std::cout << k.size() <<" ";
+      std::cout << "'";
       //    print_hex(kvp->key());
-      std::cerr << to_str(kvp->key()) << "' = '" << to_str(v) << "'\n";
+      std::cout << to_str(kvp->key()) << "' = '" << to_str(v) << "'\n";
    }
    */
 }
 
 void print(session_rlock& state, const full_node* sl, int depth = 0)
 {
-   std::cerr << "FULL r" << state.get(sl->address()).ref() << "   cpre\""
+   std::cout << "FULL r" << state.get(sl->address()).ref() << "   cpre\""
              << to_str(sl->get_prefix()) << "\" cps: " << sl->get_prefix().size()
              << " id: " << sl->address() << " ";
    /**             
    if (sl->has_eof_value())
    {
-      std::cerr << " = '" << to_str(state.get(sl->get_branch(0)).as<value_node>()->value())
+      std::cout << " = '" << to_str(state.get(sl->get_branch(0)).as<value_node>()->value())
                 << "' branches: " << std::dec << sl->num_branches() << " \n";
    }
    else
    {
-      std::cerr << "\n";
+      std::cout << "\n";
    }
    sl->visit_branches_with_br(
        [&](int br, id_address bid)
@@ -281,8 +281,8 @@ void print(session_rlock& state, const full_node* sl, int depth = 0)
           if (not br)
              return;
           indent(depth);
-          //std::cerr << "'"<<char(br-1)<<"' -> ";
-          std::cerr << "'" << br << "' -> ";
+          //std::cout << "'"<<char(br-1)<<"' -> ";
+          std::cout << "'" << br << "' -> ";
           print(state, bid, depth + 1);
        });
        */
@@ -292,7 +292,7 @@ void print(session_rlock& state, const setlist_node* sl, int depth = 0)
 {
    //  auto gsl = sl->get_setlist();
    //   for( auto b : gsl ) {
-   //     std::cerr << int(b) <<"\n";
+   //     std::cout << int(b) <<"\n";
    // }
    sl->visit_branches_with_br(
        [&](int br, id_address bid)
@@ -300,8 +300,8 @@ void print(session_rlock& state, const setlist_node* sl, int depth = 0)
           if (not br)
              return;
           indent(depth);
-          //std::cerr << "'"<<char(br-1)<<"' -> ";
-          std::cerr << "'" << br << "' -> ";
+          //std::cout << "'"<<char(br-1)<<"' -> ";
+          std::cout << "'" << br << "' -> ";
           print(state, bid, depth + 1);
        });
    assert(sl->validate());
@@ -311,8 +311,8 @@ void print(session_rlock& state, const setlist_node* sl, int depth = 0)
    {
       indent(depth);
       auto byte_id = sl->get_by_index(i);
-      std::cerr << "'" << std::dec << uint16_t(byte_id.first) << "' -> ";
-      std::cerr << "  ref: " << std::dec << state.get(byte_id.second).ref() << " id: " << std::dec
+      std::cout << "'" << std::dec << uint16_t(byte_id.first) << "' -> ";
+      std::cout << "  ref: " << std::dec << state.get(byte_id.second).ref() << " id: " << std::dec
                 << byte_id.second;
       print(state, byte_id.second, depth + 1);
    }
@@ -361,10 +361,10 @@ void print(session_rlock& state, id_address i, int depth)
          return print(state, obj.as<full_node>(), depth);
       case node_type::value:
          return print(state, obj.as<value_node>(), depth);
-         std::cerr << "VALUE: id: " << i << "\n";
+         std::cout << "VALUE: id: " << i << "\n";
          return;
       default:
-         std::cerr << "UNKNOWN!: id: " << i << " " << obj.type() << " -\n";
+         std::cout << "UNKNOWN!: id: " << i << " " << obj.type() << " -\n";
          return;
    }
 }
@@ -380,7 +380,7 @@ int  main(int argc, char** argv)
    //
    bool sync_compact = false;  //argc > 1;  //true;//false;  // false = use threads
 
-   std::cerr << "resetting database\n";
+   std::cout << "resetting database\n";
    std::filesystem::remove_all("arbtriedb");
    arbtrie::database::create("arbtriedb", {.run_compact_thread = true});
 
@@ -401,7 +401,7 @@ int  main(int argc, char** argv)
       // and push it in vector function until end of file
       v.push_back(str);
    }
-   std::cerr << "loaded " << v.size() << " keys from " << filename << "\n";
+   std::cout << "loaded " << v.size() << " keys from " << filename << "\n";
 
    uint64_t seq = 0;
    try
@@ -473,7 +473,7 @@ int  main(int argc, char** argv)
 
          if (vm["dense-rand"].as<bool>())
          {
-            std::cerr << "insert dense rand \n";
+            std::cout << "insert dense rand \n";
             for (int ro = 0; ro < rounds; ++ro)
             {
                auto start = std::chrono::steady_clock::now();
@@ -510,7 +510,7 @@ int  main(int argc, char** argv)
 
          if (vm["little-endian-seq"].as<bool>())
          {
-            std::cerr << "insert little endian seq\n";
+            std::cout << "insert little endian seq\n";
             for (int ro = 0; ro < rounds; ++ro)
             {
                auto start = std::chrono::steady_clock::now();
@@ -542,7 +542,7 @@ int  main(int argc, char** argv)
          auto start_big_end = seq3;
          if (vm["big-endian-seq"].as<bool>())
          {
-            std::cerr << "insert big endian seq starting with: " << seq3 << "\n";
+            std::cout << "insert big endian seq starting with: " << seq3 << "\n";
             for (int ro = 0; ro < rounds; ++ro)
             {
                auto start = std::chrono::steady_clock::now();
@@ -573,7 +573,7 @@ int  main(int argc, char** argv)
          uint64_t seq4 = -1;
          if (vm["big-endian-rev"].as<bool>())
          {
-            std::cerr << "insert big endian rev seq\n";
+            std::cout << "insert big endian rev seq\n";
             for (int ro = 0; ro < rounds; ++ro)
             {
                auto start = std::chrono::steady_clock::now();
@@ -602,7 +602,7 @@ int  main(int argc, char** argv)
 
          if (vm["rand-string"].as<bool>())
          {
-            std::cerr << "insert to_string(rand) \n";
+            std::cout << "insert to_string(rand) \n";
             for (int ro = 0; ro < rounds; ++ro)
             {
                auto start = std::chrono::steady_clock::now();
@@ -631,7 +631,7 @@ int  main(int argc, char** argv)
 
          if (vm["little-endian-seq"].as<bool>())
          {
-            std::cerr << "get known key little endian seq\n";
+            std::cout << "get known key little endian seq\n";
             uint64_t seq2 = 0;
             for (int ro = 0; true and ro < rounds; ++ro)
             {
@@ -653,7 +653,7 @@ int  main(int argc, char** argv)
                          << "  seq get/sec  total items: " << add_comma(seq) << "\n";
             }
 
-            std::cerr << "get known key little endian rand\n";
+            std::cout << "get known key little endian rand\n";
             for (int ro = 0; true and ro < rounds; ++ro)
             {
                auto start = std::chrono::steady_clock::now();
@@ -676,7 +676,7 @@ int  main(int argc, char** argv)
                          << "  rand get/sec  total items: " << add_comma(seq) << "\n";
             }
          }
-         std::cerr << "get known key big endian seq\n";
+         std::cout << "get known key big endian seq\n";
          for (int ro = 0; true and ro < rounds; ++ro)
          {
             auto start = std::chrono::steady_clock::now();
@@ -697,7 +697,7 @@ int  main(int argc, char** argv)
                       << "  seq get/sec  total items: " << add_comma(seq) << "\n";
          }
 
-         std::cerr << "lower bound random i64\n";
+         std::cout << "lower bound random i64\n";
          for (int ro = 0; true and ro < rounds; ++ro)
          {
             auto start = std::chrono::steady_clock::now();
@@ -758,7 +758,7 @@ int  main(int argc, char** argv)
             rthreads.emplace_back(new std::thread(read_loop));
          }
 
-         std::cerr << "insert dense rand while reading " << rthreads.size() << " threads\n";
+         std::cout << "insert dense rand while reading " << rthreads.size() << " threads\n";
          for (int ro = 0; ro < 20; ++ro)
          {
             auto start = std::chrono::steady_clock::now();
@@ -808,7 +808,7 @@ int  main(int argc, char** argv)
       //      auto l = ws._segas.lock();
       //      print(l, r.address());
       //
-      std::cerr << "wait for cleanup...\n";
+      std::cout << "wait for cleanup...\n";
       usleep(1000000 * 2);
       while (sync_compact and db.compact_next_segment())
       {
@@ -826,7 +826,7 @@ struct environ
 {
    environ()
    {
-      std::cerr << "resetting database\n";
+      std::cout << "resetting database\n";
       std::filesystem::remove_all("arbtriedb");
       arbtrie::database::create("arbtriedb", {.run_compact_thread = true});
       db = new database("arbtriedb", {.run_compact_thread = true});
@@ -903,28 +903,28 @@ void test_binary_node()
 
       last_root = cur_root;
 
-      std::cerr << "root.........\n";
+      std::cout << "root.........\n";
       //    print(state, cur_root.address(), 1);
-      std::cerr << "last_root.........\n";
+      std::cout << "last_root.........\n";
       //     print(state, last_root->address(), 1);
 
-      std::cerr << "\n ========== inserting 'update' = 'world' ==========\n";
+      std::cout << "\n ========== inserting 'update' = 'world' ==========\n";
       ws.upsert(cur_root, to_key_view("update"),
                 to_value_view("long                                                      world"));
 
-      std::cerr << "root.........\n";
+      std::cout << "root.........\n";
       //   print(state, cur_root.address(), 1);
-      std::cerr << "last_root.........\n";
+      std::cout << "last_root.........\n";
       //   print(state, last_root->address(), 1);
 
-      std::cerr << "\n ========== releasing last_root ==========\n";
+      std::cout << "\n ========== releasing last_root ==========\n";
       last_root.reset();
 
-      std::cerr << "\n ========== inserting 'mayday' = 'help me, somebody' ==========\n";
+      std::cout << "\n ========== inserting 'mayday' = 'help me, somebody' ==========\n";
       ws.upsert(cur_root, to_key_view("mayday"), to_value_view("help me, somebody"));
       //    print(state, cur_root.address(), 1);
 
-      std::cerr << "root.........\n";
+      std::cout << "root.........\n";
       //  print(state, cur_root.address(), 1);
    }
    usleep(1000000);
@@ -945,46 +945,46 @@ void test_refactor()
 
          for (int i = 0; i < 1000000; ++i)
          {
-            //     std::cerr << "==================   start upsert  " << i << "=====================\n";
+            //     std::cout << "==================   start upsert  " << i << "=====================\n";
             std::string v            = std::to_string(rand64());
             std::string value_buffer = v + "==============123456790=======" + v;
             ws.upsert(cur_root, to_key_view(v), to_value_view(value_buffer));
-            // std::cerr << " after upsert and set backup\n";
+            // std::cout << " after upsert and set backup\n";
             last_root = cur_root;
             if (i >= 179)
             {
                //  print(state, cur_root.id(), 1);
             }
-            //   std::cerr << " free last root and save cur root\n";
+            //   std::cout << " free last root and save cur root\n";
             //   print(state, cur_root.id(), 1);
             /*
-         std::cerr << "======= set last root = cur_root  =================\n";
-         std::cerr << "before  cr.refs: " << cur_root.references() << "  id: " << cur_root.id()
+         std::cout << "======= set last root = cur_root  =================\n";
+         std::cout << "before  cr.refs: " << cur_root.references() << "  id: " << cur_root.id()
                    << " \n";
          if (last_root)
-            std::cerr << "before  lr.refs: " << last_root->references()
+            std::cout << "before  lr.refs: " << last_root->references()
                       << "  lr id: " << last_root->id() << "\n";
          last_root = cur_root;
-         std::cerr << "after  cr.refs: " << cur_root.references() << "  id: " << cur_root.id()
+         std::cout << "after  cr.refs: " << cur_root.references() << "  id: " << cur_root.id()
                    << " \n";
-         std::cerr << "after  lr.refs: " << last_root->references() << "  lr id: " << last_root->id()
+         std::cout << "after  lr.refs: " << last_root->references() << "  lr id: " << last_root->id()
                    << "\n";
-         std::cerr << "==================   post " << i << "=====================\n";
+         std::cout << "==================   post " << i << "=====================\n";
          print(state, cur_root.id(), 1);
          */
          }
-         std::cerr << "before release cur_root\n";
+         std::cout << "before release cur_root\n";
          //      print(state, cur_root.id(), 1);
          //      env.db->print_stats(std::cout);
       }
-      std::cerr << "before last root\n";
+      std::cout << "before last root\n";
       if (last_root)
       {
          //      print(state, last_root->id(), 1);
          //      env.db->print_stats(std::cout);
       }
    }
-   std::cerr << "before exit after release all roots\n";
+   std::cout << "before exit after release all roots\n";
    //while (env.db->compact_next_segment()) { }
    env.db->print_stats(std::cout);
 }

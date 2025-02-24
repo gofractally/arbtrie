@@ -175,6 +175,7 @@ void print_stat(auto& ws)
    auto start = std::chrono::steady_clock::now();
    auto stats = ws.get_node_stats(ws.get_root());
    auto end   = std::chrono::steady_clock::now();
+
    std::cerr << stats << "\n";
    std::cerr << std::fixed << std::setprecision(3)
              << std::chrono::duration<double, std::milli>(end - start).count() / 1000 << "  sec\n";

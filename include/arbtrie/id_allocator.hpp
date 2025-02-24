@@ -6,6 +6,7 @@
 #include <arbtrie/node_meta.hpp>
 
 #include <mutex>
+#include <sstream>
 
 #define XXH_INLINE_ALL
 #include <arbtrie/xxhash.h>
@@ -115,15 +116,17 @@ namespace arbtrie
 
       void print_free_list()
       {
-         uint64_t id = object_meta(_idheader->_first_free.load()).raw_loc();
-         std::cerr << "'" << id << "'";
+         uint64_t          id = object_meta(_idheader->_first_free.load()).raw_loc();
+         std::stringstream ss;
+         ss << "'" << id << "'";
          while (id)
          {
             id = object_meta(get(object_id(id))).raw_loc();
             if (id)
-               std::cerr << ", " << id;
+               ss << ", " << id;
          }
-         std::cerr << " END\n";
+         ss << " END";
+         ARBTRIE_DEBUG(ss.str());
       }
 
       void free_id(object_id id)
@@ -183,7 +186,7 @@ namespace arbtrie
 
          if (::mlock(ptr, id_block_size))
          {
-            std::cerr << "WARNING: unable to mlock ID lookups\n";
+            ARBTRIE_WARN("unable to mlock ID lookups");
             ::madvise(ptr, id_block_size, MADV_RANDOM);
          }
       }

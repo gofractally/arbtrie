@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 #include <cassert>
@@ -15,6 +16,7 @@
 #include <iostream>
 #include <vector>
 
+#include <arbtrie/debug.hpp>
 #include <arbtrie/mapping.hpp>
 
 namespace arbtrie
@@ -55,7 +57,7 @@ namespace arbtrie
          _fd = ::open(file.native().c_str(), flags, 0644);
          if (_fd == -1)
          {
-            std::cerr << "opening " << file.native() << "\n";
+            ARBTRIE_DEBUG("opening ", file.native());
             throw std::runtime_error("unable to open block file");
          }
 
@@ -164,7 +166,7 @@ namespace arbtrie
             {
                if (::mlock(addr, new_size - _file_size))
                {
-                  std::cerr << "WARNING: unable to mlock ID lookups\n";
+                  ARBTRIE_WARN("unable to mlock ID lookups");
                   ::madvise(addr, new_size - _file_size, MADV_RANDOM);
                }
             }

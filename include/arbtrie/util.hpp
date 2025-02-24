@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <format>
 namespace arbtrie
 {
@@ -97,4 +98,27 @@ namespace arbtrie
    {
       return value_view((const byte_type*)c, strnlen(c, max_value_size));
    }
+
+   /**
+    * RAII utility that executes a cleanup function when going out of scope
+    */
+   template <typename F>
+   class scoped_exit
+   {
+      F _cleanup;
+
+     public:
+      explicit scoped_exit(F&& cleanup) : _cleanup(std::move(cleanup)) {}
+      ~scoped_exit() { _cleanup(); }
+
+      // Prevent copying and moving
+      scoped_exit(const scoped_exit&)            = delete;
+      scoped_exit& operator=(const scoped_exit&) = delete;
+      scoped_exit(scoped_exit&&)                 = delete;
+      scoped_exit& operator=(scoped_exit&&)      = delete;
+   };
+
+   // Deduction guide
+   template <typename F>
+   scoped_exit(F&&) -> scoped_exit<F>;
 }  // namespace arbtrie

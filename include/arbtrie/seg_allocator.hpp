@@ -5,14 +5,15 @@
 #include <arbtrie/id_alloc.hpp>
 #include <arbtrie/mapped_memory.hpp>
 #include <arbtrie/mapping.hpp>
-#include <arbtrie/node_handle.hpp>
 #include <arbtrie/node_header.hpp>
 #include <arbtrie/node_meta.hpp>
 #include <arbtrie/padded_atomic.hpp>
 #include <arbtrie/rdtsc.hpp>
+#include <arbtrie/seg_alloc_dump.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
 #include <arbtrie/sync_lock.hpp>
 #include <thread>
+#include <vector>
 
 /**
  *  @file seg_allocator.hpp
@@ -147,13 +148,13 @@ namespace arbtrie
       seg_allocator(std::filesystem::path dir);
       ~seg_allocator();
 
-      void     dump();
-      void     print_region_stats() { _id_alloc.print_region_stats(); }
-      uint64_t count_ids_with_refs() { return _id_alloc.count_ids_with_refs(); }
-      void     sync(sync_type st = sync_type::sync);
-      void     start_compact_thread();
-      void     stop_compact_thread();
-      bool     compact_next_segment();
+      void           print_region_stats() { _id_alloc.print_region_stats(); }
+      uint64_t       count_ids_with_refs() { return _id_alloc.count_ids_with_refs(); }
+      seg_alloc_dump dump();
+      void           sync(sync_type st = sync_type::sync);
+      void           start_compact_thread();
+      void           stop_compact_thread();
+      bool           compact_next_segment();
 
       seg_alloc_session start_session() { return seg_alloc_session(*this, alloc_session_num()); }
 
@@ -275,7 +276,7 @@ namespace arbtrie
        * Each session has its own read cache queue to track read operations
        * for promoting data during compaction.
        */
-      std::array<std::unique_ptr<circular_buffer<uint32_t, 1024 * 1024>>, 64> _rcache_queues;
+      std::array<std::atomic<circular_buffer<uint32_t, 1024 * 1024>*>, 64> _rcache_queues{};
 
       std::atomic<bool> _done = false;
 
