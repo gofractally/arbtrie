@@ -122,6 +122,7 @@ if(ENABLE_COVERAGE)
         # Run tests (continue even if they fail)
         COMMAND ${CMAKE_BINARY_DIR}/bin/arbtrie-tests || true
         COMMAND ${CMAKE_BINARY_DIR}/bin/arbt || true
+        COMMAND ${CMAKE_BINARY_DIR}/bin/arbtrie-benchmark || true
         
         # Capture coverage data
         COMMAND ${LCOV} 
