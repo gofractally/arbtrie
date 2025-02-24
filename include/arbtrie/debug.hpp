@@ -2,7 +2,9 @@
 #include <atomic>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <thread>
+
 //#include <syncstream>
 // #undef NDEBUG
 #include <cassert>
@@ -72,9 +74,19 @@ namespace arbtrie
       return thread_name;
    }
 
+   namespace detail
+   {
+      static inline std::mutex& debug_mutex()
+      {
+         static std::mutex m;
+         return m;
+      }
+   }  // namespace detail
+
    template <typename... Ts>
    void debug(const char* func, int line, Ts... args)
    {
+      std::lock_guard<std::mutex> lock(detail::debug_mutex());
       auto pre = std::string(thread_name()) + " " + std::string(func) + ":" + std::to_string(line);
       std::cerr << std::setw(20) << std::left << pre << " ";
       for (int x = 0; x < 4 * scope::indent(); ++x)
@@ -93,13 +105,15 @@ namespace arbtrie
 #endif
    }
 
-#if 1  //__DEBUG__
-#define ARBTRIE_DEBUG(...) arbtrie::debug(__func__, __LINE__, __VA_ARGS__)
+// ARBTRIE_WARN is always enabled, even in release builds
 #define ARBTRIE_WARN(...) arbtrie::debug(__func__, __LINE__, "\033[31m", __VA_ARGS__, "\033[0m")
+
+// Debug-only macros
+#ifndef NDEBUG
+#define ARBTRIE_DEBUG(...) arbtrie::debug(__func__, __LINE__, __VA_ARGS__)
 #define ARBTRIE_SCOPE arbtrie::scope __sco__##__LINE__;
 #else
 #define ARBTRIE_DEBUG(...)
-#define ARBTRIE_WARN(...)
 #define ARBTRIE_SCOPE
 #endif
 
