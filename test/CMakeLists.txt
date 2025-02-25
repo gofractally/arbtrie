@@ -1,6 +1,8 @@
 # Add test executable
 add_executable(arbtrie-tests
     arbtrie-tests.cpp
+    hierarchical_bitmap.cpp
+    spmc_circular_buffer.cpp
 )
 
 target_link_libraries(arbtrie-tests 

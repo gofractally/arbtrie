@@ -88,13 +88,45 @@ and potentially everything could fit in pinned RAM.
 
 ## Segment Eviction
 
+All new segments start their life as under `mlock()`. They lose their mlock status when the
+compactor has finished copying the segment to a new segment and pushes it into readlock
+purgatory. While in purgatory it is placed under `madvise(DONTNEED)`. Once it comes out of
+purgatory it is placed under `madvise(MADV_FREE)`. 
+
+At this point the free segments are eligible to recycled back into the pending alloc queue
+and a background thread will attempt to keep that queue full so allocators don't have to
+wait for a new segment. It wants to prioritize blocks that are closest to the head of the
+file to maximize ability to truncate the file. 
+
+When a background thread notices that a session has consumed one or more segments from the
+pending alloc queue it will pick the earliest empty segment in the file, `madvise(WILLNEED)`
+and push it into the pending alloc queue. It will also `mlock()` any segments that have been
+consumed from the pending alloc queue. It will do its best to keep the head of the pending 
+alloc queue under `mlock()` before it is consumed. All of this is designed to keep the database
+users from having to wait on the operating system to page memory. 
+
+
 When it comes time to allocate a new segment it will typically want to write into pinned
 memory, with the exception of the compactor moving cold data to more compact form of cold
-data. In the later case, the compactor wants a memory segment configured with
-`madvise(MADV_SEQUENTIAL)` to enable the OS to load the data that the compactor is rapidly
-filling while letting the OS know to quickly evict the pages again after the compactor has
-written them. Once the compactor has completed this segment it should reset `madvise()` to
-be the OS default. 
+data. In the later case, the compactor will munlock() (or ideally, pull a segment that isn't
+already mlocked). 
+
+1. Always Allocate a the free segment closest to the head of the file.
+2. If there are no free segments, then allocate a new segment from the tail of the file.
+
+## Finding the Segment to Allocate
+
+Rather than maintaining a sorted list, or doing a linear scan of every segment, we can
+maintain a hierarchial bitlist of segments that are free and eligible for allocation.
+
+In a database that supports up to 128 TB of data with 32 MB segments, there about 4
+million segments or about 512 killobytes of data with 1 bit per segment indicating its
+free status.  We can then use a hierarchial bitlist to keep track of groups of 64 bits that
+have at least 1 free bit. This would require 8kb of memory. We repeat the process another
+layer to get to just 16, 64 bit numbers. 
+
+
+
 
 Therefore, most new segment allocs will require a new `mlock()` and the eviction of an
 existing `mlock()` segment. Every segment is assigned an age when it is allocated; therefore,
