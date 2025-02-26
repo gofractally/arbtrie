@@ -213,7 +213,8 @@ namespace arbtrie
    {
       ARBTRIE_REQUIRE_ITR_VALID();
       auto state = _rs->lock();
-      start();
+      if (not start())
+         return false;
       return lower_bound_impl(state, key);
    }
 
@@ -412,16 +413,6 @@ namespace arbtrie
          return false;
       ARBTRIE_REQUIRE_ITR_VALID();
       auto state = _rs->lock();
-      if (is_end()) [[unlikely]]
-      {
-         _path_back    = _path->data();
-         auto oref     = state.get(_path_back->oid);
-         _path_back[0] = {
-             .oid   = _root.address(),
-             .index = cast_and_call(oref.template header<node_header, CacheMode>(),
-                                    [&](const /*arbtrie::node*/ auto* n) { return n->end_index(); })
-                          .to_int()};
-      }
       return prev_impl(state);
    }
 
@@ -435,6 +426,18 @@ namespace arbtrie
    bool iterator<CacheMode>::prev_impl(read_lock& state)
    {
       ARBTRIE_REQUIRE_ITR_VALID();
+      // Handle end() case just like in prev()
+      if (is_end()) [[unlikely]]
+      {
+         _path_back    = _path->data();
+         auto oref     = state.get(_path_back->oid);
+         _path_back[0] = {
+             .oid   = _root.address(),
+             .index = cast_and_call(oref.template header<node_header, CacheMode>(),
+                                    [&](const /*arbtrie::node*/ auto* n) { return n->end_index(); })
+                          .to_int()};
+      }
+
       // Loop until we reach the beginning of the iterator
       while (true)
       {
@@ -498,7 +501,8 @@ namespace arbtrie
       ARBTRIE_REQUIRE_ITR_VALID();
 
       auto state = _rs->lock();
-      start();
+      if (not start())
+         return false;
       if (not lower_bound_impl(state, search))
       {
          assert(is_end());
@@ -523,12 +527,16 @@ namespace arbtrie
    {
       ARBTRIE_REQUIRE_ITR_VALID();
       auto state = _rs->lock();
-      start();
+      if (not start())
+         return false;
 
       // If no prefix is provided, find the last key in the entire tree
       if (prefix.empty())
       {
          end();
+         // Check if the iterator is valid after calling end()
+         if (not valid())
+            return false;
          return prev_impl(state);
       }
 
@@ -562,7 +570,8 @@ namespace arbtrie
    {
       ARBTRIE_REQUIRE_ITR_VALID();
       auto state = _rs->lock();
-      start();
+      if (not start()) [[unlikely]]
+         return false;
 
       // If no prefix is provided, just move to the first key
       if (prefix.empty())
@@ -590,7 +599,8 @@ namespace arbtrie
    {
       ARBTRIE_REQUIRE_ITR_VALID();
       auto state = _rs->lock();
-      start();
+      if (not start())
+         return false;
       assert(is_start());
       lower_bound_impl(state, prefix);  // we are at a key that is >= prefix
       assert(not is_start());
@@ -623,7 +633,8 @@ namespace arbtrie
    {
       ARBTRIE_REQUIRE_ITR_VALID();
       auto state = _rs->lock();
-      start();
+      if (not start())
+         return false;
       lower_bound_impl(state, prefix);
       if (key() == prefix)
          return prev_impl(state);
@@ -870,6 +881,8 @@ namespace arbtrie
    template <iterator_caching_mode CacheMode>
    bool iterator<CacheMode>::start()
    {
+      if (not _root.address()) [[unlikely]]
+         return end();
       clear();
       push_rend(_root.address());
       return valid();
@@ -882,9 +895,14 @@ namespace arbtrie
    template <iterator_caching_mode CacheMode>
    bool iterator<CacheMode>::begin()
    {
+      // Check if the root is valid before asserting
+      if (not _root.address())
+         return false;
+
       assert(valid());
       ARBTRIE_REQUIRE_ITR_VALID();
-      start();
+      if (not start())
+         return false;
       return next();
    }
 

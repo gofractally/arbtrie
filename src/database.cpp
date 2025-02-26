@@ -535,7 +535,12 @@ namespace arbtrie
          {
             // end is in the middle of this node
             auto end_idx = n->lower_bound_idx(char_to_branch(to[pre.size()]));
-            assert(end_idx < n->num_branches());
+            assert(end_idx <= n->num_branches());
+
+            // we started in the middle of the node, and end in this node,
+            // but there are no branches in that range, so return 0
+            if (end_idx == n->num_branches())
+               return 0;
 
             uint8_t end_byte = slp[end_idx];
             auto    end      = begin + end_idx;
@@ -2433,15 +2438,37 @@ namespace arbtrie
 
    write_transaction write_session::start_transaction(int top_root_node)
    {
+      // Check if we're operating on a persistent root node (top_root_node >= 0)
+      // or a temporary root node (top_root_node < 0)
+      //
+      // Persistent root nodes require locking because they're shared across sessions
+      // and need to be protected from concurrent modifications.
+      //
+      // Temporary root nodes don't need locks because they're private to this session
+      // and aren't accessible by other sessions until explicitly committed to a persistent root.
       if (top_root_node >= 0)
          return write_transaction(
              *this, get_mutable_root(top_root_node),
              [this, top_root_node](node_handle commit, bool resume)
              {
-                set_root(std::move(commit), top_root_node);
-                return get_mutable_root(top_root_node);
+                if (top_root_node >= 0)
+                {
+                   set_root(std::move(commit), top_root_node);
+                   // give other writers a chance to grab the lock
+                   _db.modify_lock(top_root_node).unlock();
+                   if (resume)
+                      return get_mutable_root(top_root_node);
+                   return node_handle(*this, {});
+                }
+                if (resume)
+                   return commit;
+                return node_handle(*this, {});
              },
-             [this, top_root_node]() { abort_write(top_root_node); });
+             [this, top_root_node]()
+             {
+                if (top_root_node >= 0)
+                   abort_write(top_root_node);
+             });
       else
          return write_transaction(*this, create_root(), [this](node_handle h, bool) { return h; });
    }

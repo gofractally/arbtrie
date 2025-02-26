@@ -75,7 +75,7 @@ target_compile_options(arbtrie
     PUBLIC 
         -std=c++23
         -Wno-vla-extension
-        $<$<CONFIG:Debug>:-O0 -g>
+        $<$<CONFIG:Debug>:-O0 -g -UNDEBUG -fno-omit-frame-pointer>
 )
 
 # Sanitizer configuration

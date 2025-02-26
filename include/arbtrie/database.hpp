@@ -356,13 +356,16 @@ namespace arbtrie
        * same root at the same time because the last one to commit will overwite
        * the first one to commit. 
        * 
-       * If no top root index is provided, then a temporary root will be created,
-       * the temporary root will be lost unless 
+       * By default, transactions use root index 0. If you need to use multiple
+       * independent roots, you can specify a different root index.
+       * 
+       * If -1 is provided as the top_root_node, then a temporary root will be created.
+       * The temporary root will be lost unless it is saved as a subtree of another root.
        * 
        * @param global_root_idx 
        * @return 
        */
-      write_transaction start_transaction(int top_root_node = -1);
+      write_transaction start_transaction(int top_root_node = 0);
 
       template <sync_type stype = sync_type::sync>
       void sync();

@@ -9,12 +9,12 @@
 #include <arbtrie/node_meta.hpp>
 #include <arbtrie/rdtsc.hpp>
 #include <arbtrie/value_node.hpp>
-#include <cctype>  // for std::toupper
+#include <cctype>      // for std::toupper
+#include <filesystem>  // Add this for std::filesystem
+#include <fstream>     // Add this for std::ifstream
 #include <random>
 #include <string>
 #include <vector>
-#include <fstream>  // Add this for std::ifstream
-#include <filesystem>  // Add this for std::filesystem
 
 template <typename S, typename T>
 S& operator<<(S& stream, const std::optional<T>& obj)
@@ -670,7 +670,7 @@ TEST_CASE("subtree2")
          auto& root = tx.root_handle();
 
          // insert subtree into empty tree
-         auto empty = ws.start_transaction();
+         auto empty = ws.start_transaction(-1);
 
          empty.upsert(to_key_view("subtree"), tx.get_root());
          REQUIRE(tx.root_handle().ref() == 2);  // tx, and value of subtree key
@@ -851,13 +851,13 @@ TEST_CASE("recover")
    node_stats v5;
    environ    env;
    {
-      auto ws   = env.db->start_write_session();
-      auto tx   = ws.start_transaction();
-      auto root = ws.create_root();
+      auto ws = env.db->start_write_session();
+      auto tx = ws.start_transaction();
+      // auto root = ws.create_root();
       load_words(tx);
-      tx.commit();
+      tx.commit_and_continue();
       //ws.set_root<sync_type::sync>(root);
-      auto stats = v1 = ws.get_node_stats(root);
+      auto stats = v1 = ws.get_node_stats(tx.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -868,9 +868,9 @@ TEST_CASE("recover")
    delete env.db;
    env.db = new database("arbtriedb", {.run_compact_thread = false});
    {
-      auto ws    = env.db->start_write_session();
-      auto root  = ws.get_root();
-      auto stats = v2 = ws.get_node_stats(root);
+      auto ws    = env.db->start_read_session();
+      auto rt    = ws.start_transaction();
+      auto stats = v2 = ws.get_node_stats(rt.get_root());
       REQUIRE(v2 == v1);
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
@@ -884,8 +884,7 @@ TEST_CASE("recover")
    {
       auto ws    = env.db->start_write_session();
       auto tx    = ws.start_transaction();
-      auto root  = ws.get_root();
-      auto stats = v3 = ws.get_node_stats(root);
+      auto stats = v3 = ws.get_node_stats(tx.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -903,7 +902,7 @@ TEST_CASE("recover")
          key_view kstr((char*)&i, sizeof(i));
          tx.insert(kstr, kstr);
       }
-      tx.commit();
+      tx.commit_and_continue();
       //ws.set_root<sync_type::sync>(root);
       auto stats = v4 = ws.get_node_stats(tx.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
@@ -917,8 +916,8 @@ TEST_CASE("recover")
    ARBTRIE_WARN("AFTER RECOVER 2");
    {
       auto ws    = env.db->start_write_session();
-      auto root  = ws.get_root();
-      auto stats = v5 = ws.get_node_stats(root);
+      auto rt    = ws.start_transaction();
+      auto stats = v5 = ws.get_node_stats(rt.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -1115,8 +1114,8 @@ TEST_CASE("upper-bound2")
          if (rritr->first != to_str(itr.key()))
          {
             ARBTRIE_DEBUG("i: ", i, " q: ", to_hex(qv),
-                           " ritr: ", to_hex(to_key_view(rritr->first)),
-                           " =? itr: ", to_hex(itr.key()));
+                          " ritr: ", to_hex(to_key_view(rritr->first)),
+                          " =? itr: ", to_hex(itr.key()));
          }
          assert(rritr->first == to_str(itr.key()));
          REQUIRE(rritr->first == to_str(itr.key()));
@@ -1312,7 +1311,7 @@ TEST_CASE("dense-rand-upsert")
                ++count;
                if (print_dbg)
                   ARBTRIE_DEBUG("\t", count, "] ", to_hex(itr.key()),
-                                 "  ref: ", to_hex(ref_itr->first));
+                                "  ref: ", to_hex(ref_itr->first));
                itr.next();
                ++ref_itr;
                if (ref_itr != reference.end())
