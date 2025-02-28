@@ -12,15 +12,6 @@
 
 namespace arbtrie
 {
-   // Debug level counter to track recursion depth
-   thread_local int debug_level = 0;
-
-   // Debug indent based on recursion level
-   std::string debug_indent()
-   {
-      return std::string(debug_level * 2, ' ');
-   }
-
    // Forward declaration for internal implementation
    size_t count_keys(read_lock&                     state,
                      const inner_node_concept auto* node,
@@ -373,8 +364,7 @@ namespace arbtrie
             key_view next_from = range.lower_bound.substr(1);
             key_view next_to =
                 range.upper_bound.empty() ? key_view()
-                : (static_cast<unsigned char>(range.upper_bound[0]) ==
-                   static_cast<unsigned char>(range.lower_bound[0]))
+                : (range.upper_bound[0] == range.lower_bound[0])
                     ? range.upper_bound.substr(1)
                     : key_view();  // If first byte doesn't match, no upper bound in this branch
 
@@ -388,8 +378,7 @@ namespace arbtrie
             {
                child_range = {key_view(), key_view()};  // Fully unbounded for upper limit
             }
-            else if (static_cast<unsigned char>(branch_key[0]) ==
-                     static_cast<unsigned char>(range.upper_bound[0]))
+            else if (branch_key[0] == range.upper_bound[0])
             {
                child_range = {key_view(), range.upper_bound.substr(1)};
             }
@@ -412,11 +401,11 @@ namespace arbtrie
    }
 
    /**
- * Determine whether to use exclusion-based counting or traditional counting
- * based on which approach would require fewer operations.
- * 
- * @return true if exclusion-based counting should be used, false otherwise
- */
+   * Determine whether to use exclusion-based counting or traditional counting
+   * based on which approach would require fewer operations.
+   * 
+   * @return true if exclusion-based counting should be used, false otherwise
+   */
    bool should_count_by_exclusion(const inner_node_concept auto* node,
                                   local_index                    start_idx,
                                   local_index                    end_idx)
@@ -447,34 +436,24 @@ namespace arbtrie
 
       // Try to narrow the range by the node's prefix, removing the common prefix
       if (!range.try_narrow_with_prefix(&node_prefix))
-      {
          return 0;  // No intersection with range
-      }
 
       // Check if the entire node (including its subtree) is in range
       if (range.is_unbounded())
-      {
-         // Use descendants() to get the total count directly for the entire subtree
-         size_t count = node->descendants();
-         return count;
-      }
+         return node->descendants();
 
       // Start with count of node's value if in range
       size_t count = size_t(node->has_eof_value() && range.contains_key(node->get_prefix()));
 
       // Skip children processing if node's prefix exceeds upper bound
       if (range.key_exceeds_range(node_prefix))
-      {
          return count;
-      }
 
       // Find branch indices for traversal
       local_index start_idx = node->lower_bound_index(range.lower_bound);
 
       if (start_idx == node->end_index())
-      {
          return count;  // No branches in range
-      }
 
       local_index end_idx = find_range_end_index(node, range);
 
@@ -483,18 +462,12 @@ namespace arbtrie
           find_range_boundary_branch(state, node, end_idx, range);
 
       // Determine if exclusion-based counting is more efficient
-      bool use_exclusion = should_count_by_exclusion(node, start_idx, end_idx);
-
-      if (use_exclusion)
-      {
-         size_t exclusion_count = count_by_exclusion(state, node, node_addr, start_idx, end_idx,
+      if (should_count_by_exclusion(node, start_idx, end_idx) )
+         return count_by_exclusion(state, node, node_addr, start_idx, end_idx,
                                                      range, end_branch_addr, end_branch_node);
-         return exclusion_count;
-      }
 
       // Traditional approach: count keys in all in-range branches
-      size_t branch_count = count_keys_in_branches(state, node, start_idx, end_idx, range);
-      count += branch_count;
+      count += count_keys_in_branches(state, node, start_idx, end_idx, range);
 
       // Count keys in the boundary branch if needed
       if (end_branch_node)
@@ -511,9 +484,9 @@ namespace arbtrie
    }
 
    /**
- * Specialized implementation for binary_node
- * Binary nodes store a sorted set of complete keys with their values
- */
+    * Specialized implementation for binary_node
+    * Binary nodes store a sorted set of complete keys with their values
+    */
    size_t count_keys(read_lock&         state,
                      const binary_node* node,
                      id_address         node_addr,
@@ -523,18 +496,8 @@ namespace arbtrie
       local_index lower_idx = node->lower_bound_index(range.lower_bound);
       local_index upper_idx = node->upper_bound_index(range.upper_bound);
 
-      // Debug: log each key in the range
-      size_t count = 0;
-      for (local_index i = lower_idx; i != node->end_index() && i != upper_idx;
-           i             = node->next_index(i))
-      {
-         count++;
-      }
-
       // Calculate the count directly from indices
-      size_t index_based_count = upper_idx - lower_idx;
-
-      return index_based_count;
+      return upper_idx - lower_idx;
    }
 
    /**

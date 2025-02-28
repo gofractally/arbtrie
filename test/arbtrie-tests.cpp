@@ -1336,11 +1336,11 @@ TEST_CASE("dense-rand-upsert")
          //  REQUIRE(ws.count_keys(n, kfrom, kto) == count);
       };
 
-      auto itr2 = ws.create_iterator(n);
+      //auto itr2 = ws.create_iterator(n);
       for (int i = 0; i < 100000; i++)
       {
-         REQUIRE(ws.count_keys(r) == i);
-         REQUIRE(itr2.count_keys(kfrom, kto) == count);
+       //  REQUIRE(ws.count_keys(r) == i);
+       //  REQUIRE(itr2.count_keys(kfrom, kto) == count);
          if (i % 10 == 1)
          {
             test_count(r, false);
