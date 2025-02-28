@@ -66,6 +66,7 @@ namespace arbtrie
       // node concept
       ///@{
       //key_view      get_prefix() const { return to_key(key_ptr(), _ksize); }
+      /*
       search_result get_branch(key_view k) const
       {
          throw std::runtime_error("setlist_node::get_branch: not implemented");
@@ -76,6 +77,7 @@ namespace arbtrie
          throw std::runtime_error("setlist_node::get_branch: not implemented");
          return search_result::end();
       }
+      */
 
       // Returns the index of the the branch matching k or end_index() if no match
       local_index get_index(key_view k) const
@@ -89,6 +91,10 @@ namespace arbtrie
             return end_index();
          return local_index(pos + has_eof_value());
       }
+      id_address get_branch(local_index idx) const
+      {
+         return id_address(branch_region(), get_branch_ptr()[idx.to_int() - has_eof_value()]);
+      }
       local_index lower_bound_index(key_view k) const
       {
          if (k.empty())
@@ -99,6 +105,19 @@ namespace arbtrie
          auto sle = slp + num_branches();
 
          while (slp != sle && uint8_t(*slp) < uint8_t(k.front()))
+            ++slp;
+         return local_index(slp - sl + has_eof_value());
+      }
+      local_index upper_bound_index(key_view k) const
+      {
+         if (k.empty())
+            return local_index(-1 + has_eof_value());
+
+         auto sl  = get_setlist_ptr();
+         auto slp = sl;
+         auto sle = slp + num_branches();
+
+         while (slp != sle && uint8_t(*slp) <= uint8_t(k.front()))
             ++slp;
          return local_index(slp - sl + has_eof_value());
       }
@@ -272,6 +291,23 @@ namespace arbtrie
          }
          return slp - sl;
       }
+      int_fast16_t upper_bound_idx(uint_fast16_t br) const
+      {
+         assert(br > 0 and br <= 256);
+         uint8_t br2 = br - 1;
+         auto    sl  = get_setlist_ptr();
+         auto    slp = sl;
+         auto    sle = slp + num_branches();
+
+         while (slp != sle)
+         {
+            if (uint8_t(*slp) > uint8_t(br2))
+               return slp - sl;
+            ++slp;
+         }
+         return slp - sl;
+      }
+
       // find the position of the first branch <= br
       int_fast16_t reverse_lower_bound_idx(uint_fast16_t br) const
       {

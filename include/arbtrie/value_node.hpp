@@ -15,9 +15,12 @@ namespace arbtrie
 
       using node_header::get_type;
 
+      uint32_t descendants() const { return 1; }
+
       // node concept
       ///@{
-      key_view      get_prefix() const { return to_key(key_ptr(), _ksize); }
+      key_view get_prefix() const { return to_key(key_ptr(), _ksize); }
+      /*
       search_result get_branch(key_view k) const
       {
          if (k == key_view())
@@ -30,6 +33,7 @@ namespace arbtrie
             return search_result{get_prefix(), {}, local_index(0)};
          return search_result::end();
       }
+      */
 
       local_index lower_bound_index(key_view k) const
       {

@@ -4,6 +4,7 @@
 #include <arbtrie/file_fwd.hpp>
 #include <arbtrie/transaction.hpp>
 
+#include <iostream>
 #include <utility>
 
 namespace arbtrie
@@ -423,21 +424,63 @@ namespace arbtrie
       if (from > to)
          throw std::runtime_error("count_keys: 'from' key must be less than 'to' key");
 
+
       if (not r.address()) [[unlikely]]
+      {
          return 0;
+      }
+
 
       auto state = _segas.lock();
       auto root  = state.get(r.address());
-      return count_keys(root, from, to);
+      return count_keys(root, from, to, 0);
    }
+
+   uint32_t read_session::count_keys(object_ref& r, key_view from, key_view to) const
+   {
+      return count_keys(r, from, to, 0);
+   }
+
+   uint32_t read_session::count_keys(object_ref& r, key_view from, key_view to, int depth) const
+   {
+      return cast_and_call(r.header(),
+                           [&](const auto* n) { return this->count_keys(r, n, from, to, depth); });
+   }
+
    uint32_t read_session::count_keys(object_ref&       r,
                                      const value_node* v,
                                      key_view          from,
                                      key_view          to) const
    {
+      return count_keys(r, v, from, to, 0);
+   }
+
+   uint32_t read_session::count_keys(object_ref&       r,
+                                     const value_node* v,
+                                     key_view          from,
+                                     key_view          to,
+                                     int               depth) const
+   {
       assert(to == key_view() or from < to);
       auto k = v->key();
-      return k >= from and (to == key_view() or k < to);
+
+      // The key comparison logic needs to be adjusted based on whether we're at the last byte
+      // For the standard half-open range [from, to), we include k if k >= from and k < to
+      // But if we're not at the last byte of the key, we need to include keys where k == to
+      bool in_range;
+
+      if (to.size() > 0 && k.size() > 0 && k.size() < to.size())
+      {
+         // We're not at the last byte of the key, so use inclusive comparison for the endpoint
+         in_range = k >= from and (to == key_view() or k <= to);
+      }
+      else
+      {
+         // We're at the last byte or comparing complete keys, use standard half-open range
+         in_range = k >= from and (to == key_view() or k < to);
+      }
+
+      return in_range;
    }
 
    uint32_t read_session::count_keys(object_ref&        r,
@@ -445,45 +488,83 @@ namespace arbtrie
                                      key_view           from,
                                      key_view           to) const
    {
-      //    ARBTRIE_DEBUG( "binary from: ", to_hex(from), " to: ", to_hex(to), " numb: ", n->num_branches() );
+      return count_keys(r, n, from, to, 0);
+   }
+
+   uint32_t read_session::count_keys(object_ref&        r,
+                                     const binary_node* n,
+                                     key_view           from,
+                                     key_view           to,
+                                     int                depth) const
+   {
+
       assert(to == key_view() or from < to);
       auto start = n->lower_bound_idx(from);
-      //    ARBTRIE_DEBUG ( "start idx: ", start );
+
       assert(start >= 0);
       if (start == n->num_branches())
+      {
          return 0;
+      }
+
       if (to == key_view())
       {
-         //   ARBTRIE_WARN( "numb - start: ", n->num_branches() - start );
-         return n->num_branches() - start;
+         uint32_t count = n->num_branches() - start;
+         return count;
       }
-      // ARBTRIE_DEBUG( "end: ", n->lower_bound_idx(to), " start: ", start, "  delta: ", n->lower_bound_idx(to) - start );
 
-      // ARBTRIE_DEBUG ( "end idx: ", n->lower_bound_idx(to), " numb: ", n->num_branches() );
-      return n->lower_bound_idx(to) - start;
+      uint32_t end_idx = n->lower_bound_idx(to);
+      uint32_t count   = end_idx - start;
+      return count;
    }
+
    uint32_t read_session::count_keys(object_ref&         r,
                                      const setlist_node* n,
                                      key_view            from,
                                      key_view            to) const
    {
-      // ARBTRIE_DEBUG( "setlist from: ", to_str(from), " to: ", to_str(to), "  pre: ", to_str(n->get_prefix()) );
+      return count_keys(r, n, from, to, 0);
+   }
+
+   uint32_t read_session::count_keys(object_ref&         r,
+                                     const setlist_node* n,
+                                     key_view            from,
+                                     key_view            to,
+                                     int                 depth) const
+   {
       assert(to == key_view() or from < to);
       auto pre = n->get_prefix();
       if (to.size() and to < pre)
+      {
          return 0;
+      }
 
       auto slp = n->get_setlist_ptr();
 
       auto count_range = [&](const id_index* pos, const id_index* end)
       {
          uint32_t count = 0;
-         while (pos < end)
+
+         // Check for empty range or invalid range
+         if (pos >= end)
          {
-            auto bref = r.rlock().get(id_address(n->branch_region(), *pos));
-            count += count_keys(bref, key_view(), key_view());
+            return count;
+         }
+
+         // Standard C++ half-open range semantics [begin, end)
+         // We include pos and everything up to but not including end
+         while (pos <= end)
+         {
+            auto byte_value = n->get_setlist_ptr()[pos - n->get_branch_ptr()];
+
+            auto     bref         = r.rlock().get(id_address(n->branch_region(), *pos));
+            uint32_t branch_count = count_keys(bref, key_view(), key_view(), depth + 1);
+
+            count += branch_count;
+
             ++pos;
          }
+
          return count;
       };
 
@@ -495,27 +576,41 @@ namespace arbtrie
             // and the end is after all keys in this node
             return n->descendants();
          }
-         // ARBTRIE_DEBUG( "begging to middle" );
 
          // else the end is within this node
-         auto    begin    = n->get_branch_ptr();
-         auto    end_idx  = n->lower_bound_idx(char_to_branch(to[pre.size()]));
+         auto begin = n->get_branch_ptr();
+         int  end_idx;
+
+         end_idx = n->upper_bound_idx(char_to_branch(to[pre.size()]));
+
          uint8_t end_byte = slp[end_idx];
          auto    end      = begin + end_idx;
          auto    abs_end  = begin + n->num_branches();
          auto    delta    = end - begin;
          auto    to_tail  = to.substr(pre.size() + 1);
 
-         //   TODO: optimize by subtracting from descendants
-         //   if( delta > n->num_branches()/2 ) // subtract tail from n->desendants()
-         //      return n->descendants() - count_range( end, begin + n->num_branches() );
-         //   else // sum everything to this point
+         uint64_t count = n->has_eof_value();
 
-         uint64_t count = n->has_eof_value() + count_range(begin, end);
-         if (end != abs_end and end_byte == uint8_t(to[pre.size()]))
+         if (to_tail.size() > 0 and end < abs_end)
+            count += count_range(begin, end + 1);
+         else
+            count += count_range(begin, end);
+
+
+         // Check if we need to process the endpoint branch
+         bool isLastByteOfEnd = to.size() == pre.size() + 1;
+         if (end_byte == uint8_t(to[pre.size()]))
          {
-            auto sref = r.rlock().get(id_address(n->branch_region(), *end));
-            count += count_keys(sref, key_view(), to.substr(pre.size() + 1));
+            // Two cases:
+            // 1. end == abs_end: We're at the end of the branches, but the end key would be in this branch if it existed
+            // 2. end < abs_end: We have a branch to process for the end key
+            if (end < abs_end && !isLastByteOfEnd)
+            {
+               auto     sref = r.rlock().get(id_address(n->branch_region(), *end));
+               uint32_t tail_count =
+                   count_keys(sref, key_view(), to.substr(pre.size() + 1), depth + 1);
+               count += tail_count;
+            }
          }
 
          return count;
@@ -528,7 +623,6 @@ namespace arbtrie
 
          auto    start_idx  = n->lower_bound_idx(char_to_branch(from[pre.size()]));
          uint8_t start_byte = slp[start_idx];
-         // ARBTRIE_DEBUG( "start branch: ", start_byte );
          auto start = begin + start_idx;
 
          if (to.size() > pre.size())
@@ -540,86 +634,113 @@ namespace arbtrie
             // we started in the middle of the node, and end in this node,
             // but there are no branches in that range, so return 0
             if (end_idx == n->num_branches())
+            {
                return 0;
+            }
 
             uint8_t end_byte = slp[end_idx];
             auto    end      = begin + end_idx;
+
 
             uint32_t count            = 0;
             bool     counted_end_byte = false;
             if (start_byte == uint8_t(from[pre.size()]))
             {
                counted_end_byte = start_byte == end_byte;
-               //      ARBTRIE_WARN( "start_byte == from[pre.size()]" );
-               auto sref  = r.rlock().get(id_address(n->branch_region(), *start));
-               auto btail = from.substr(pre.size() + 1);
-               auto etail = (end_byte == start_byte) ? to.substr(pre.size() + 1) : key_view();
-               count      = count_keys(sref, btail, etail);
+               auto     sref  = r.rlock().get(id_address(n->branch_region(), *start));
+               auto     btail = from.substr(pre.size() + 1);
+               auto     etail = (end_byte == start_byte) ? to.substr(pre.size() + 1) : key_view();
+               uint32_t start_count = count_keys(sref, btail, etail, depth + 1);
+               count = start_count;
                ++start;
             }
-            count += count_range(start, end);
-            //  ARBTRIE_DEBUG( "after count_range(...): ", count,  " end byte: ", end_byte, " to[pre.size()] = ", to[pre.size()] );
+
+            uint32_t range_count = count_range(start, end);
+            count += range_count;
+
             assert(end < abs_end);
 
-            // ARBTRIE_WARN( "end byte: ", end_byte, " start: ", start_byte, " to[pre.size]: ", to[pre.size()] );
-            if (!counted_end_byte and end_byte == to[pre.size()])
+            if (!counted_end_byte && end_byte == to[pre.size()])
             {
-               auto sref  = r.rlock().get(id_address(n->branch_region(), *end));
-               auto etail = to.substr(pre.size() + 1);
-               //   ARBTRIE_WARN( "END BYTE == to[pre.size()] aka: ", to[pre.size()], " init count: ", count, " etail: '", to_str(etail), "'" );
-               count += count_keys(sref, key_view(), etail);
+               auto     sref      = r.rlock().get(id_address(n->branch_region(), *end));
+               auto     etail     = to.substr(pre.size() + 1);
+               uint32_t end_count = count_keys(sref, key_view(), etail, depth + 1);
+               count += end_count;
             }
-            // ARBTRIE_DEBUG( "final count: ", count );
+
             return count;
          }
          else
-         {  // begin in middle and end is beyond the end of this node
-            // ARBTRIE_WARN( "begin in middle, end beyond this node" );
-            // TODO: optimize by counting from abs begin to begin and subtracting from
-            // descendants()
+         {
+
             uint32_t count = 0;
             if (start_byte == uint8_t(from[pre.size()]))
             {
-               auto sref  = r.rlock().get(id_address(n->branch_region(), *start));
-               auto btail = from.substr(pre.size() + 1);
-               count += count_keys(sref, btail, key_view());
+               auto     sref        = r.rlock().get(id_address(n->branch_region(), *start));
+               auto     btail       = from.substr(pre.size() + 1);
+               uint32_t start_count = count_keys(sref, btail, key_view(), depth + 1);
+               count += start_count;
                ++start;
             }
-            return count + count_range(start, abs_end);
+
+            uint32_t range_count = count_range(start, abs_end);
+            count += range_count;
+
+            return count;
          }
       }
    }
+
    uint32_t read_session::count_keys(object_ref&      r,
                                      const full_node* n,
                                      key_view         from,
                                      key_view         to) const
    {
+      return count_keys(r, n, from, to, 0);
+   }
+
+   uint32_t read_session::count_keys(object_ref&      r,
+                                     const full_node* n,
+                                     key_view         from,
+                                     key_view         to,
+                                     int              depth) const
+   {
+
       assert(to == key_view() or from < to);
       auto pre = n->get_prefix();
       if (to.size() and to < pre)
+      {
          return 0;
+      }
 
       uint64_t count = 0;
-
-      //ARBTRIE_WARN( "full from ", to_hex( from ), " -> ", to_hex(to) );
 
       auto count_range = [&](branch_index_type pos, branch_index_type end)
       {
          uint64_t c    = 0;
          auto     opos = pos;
+
+
+         // Check for empty range or invalid range
+         if (pos >= end)
+         {
+            return 0ULL;  // Return 0 as uint64_t to match return type
+         }
+
+         // Standard C++ half-open range semantics [begin, end)
+         // We include pos and everything up to but not including end
          while (pos < end)
          {
             auto adr = n->get_branch(pos);
             if (adr)
             {
                auto bref = r.rlock().get(adr);
-               auto bc   = count_keys(bref, key_view(), key_view());
+               auto bc   = count_keys(bref, key_view(), key_view(), depth + 1);
+
                c += bc;
-               //          ARBTRIE_DEBUG( "   ", to_hex( pos-1), " => ", bc, " total: ", c );
             }
             ++pos;
          }
-         //    ARBTRIE_DEBUG( "count_range ", to_hex(opos-1), " -> ", to_hex( end-1), " count: ", c );
          return c;
       };
 
@@ -627,21 +748,38 @@ namespace arbtrie
       {
          // the start is at or before this node
          if (to.size() <= pre.size())
-            return n->descendants();  // end is after this node
+         {
+            // end is after this node
+            return n->descendants();
+         }
 
          // else the end is within this node
-
          auto end_byte = char_to_branch(to[pre.size()]);
-         auto end_idx  = n->lower_bound(end_byte);
 
-         //   ARBTRIE_WARN( "begin to middle" );
-         //   note that branch_id 1 is byte 0 because eof value is branch 0
-         count = n->has_eof_value() + count_range(char_to_branch(0), end_idx.first);
-         if (end_idx.first != max_branch_count and end_byte == end_idx.first)
+         if (to.size() > pre.size() + 1)
+            ++end_byte;
+
+         auto end_idx = n->lower_bound(end_byte);
+
+
+         uint64_t count = 0;
+         if (n->has_eof_value())
          {
-            auto sref = r.rlock().get(end_idx.second);
-            count += count_keys(sref, key_view(), to.substr(pre.size() + 1));
+            count = 1;
          }
+
+         count += count_range(char_to_branch(0), end_idx.first);
+
+         bool isLastByteOfEnd = to.size() == pre.size() + 1;
+
+         if (end_idx.first != max_branch_count and end_byte == end_idx.first and !isLastByteOfEnd)
+         {
+            auto     sref = r.rlock().get(end_idx.second);
+            uint32_t tail_count =
+                count_keys(sref, key_view(), to.substr(pre.size() + 1), depth + 1);
+            count += tail_count;
+         }
+
          return count;
       }
       else
@@ -652,7 +790,6 @@ namespace arbtrie
 
          if (to.size() > pre.size())
          {
-            //   ARBTRIE_WARN( "middle to middle" );
             // begin and end are in the middle of this node
             auto end_byte = char_to_branch(to[pre.size()]);
             auto end_idx  = n->lower_bound(end_byte);
@@ -661,48 +798,47 @@ namespace arbtrie
             if (start_byte == start_idx.first)
             {
                counted_end_byte = start_byte == end_byte;
-               auto sref        = r.rlock().get(start_idx.second);
-               auto btail       = from.substr(pre.size() + 1);
-               auto etail       = (end_byte == start_byte) ? to.substr(pre.size() + 1) : key_view();
-               count            = count_keys(sref, btail, etail);
-               //        ARBTRIE_WARN( "count first: ", to_hex( start_idx.first-1), " cnt: ", count,
-               //                      " node: ", start_idx.second );
+               auto     sref  = r.rlock().get(start_idx.second);
+               auto     btail = from.substr(pre.size() + 1);
+               auto     etail = (end_byte == start_byte) ? to.substr(pre.size() + 1) : key_view();
+               uint32_t start_count = count_keys(sref, btail, etail, depth + 1);
+               count = start_count;
                start_idx.first++;
             }
-            count += count_range(start_idx.first, end_idx.first);
+
+            uint32_t range_count = count_range(start_idx.first, end_idx.first);
+            count += range_count;
 
             if (not counted_end_byte and end_byte == end_idx.first)
             {
-               //      ARBTRIE_WARN( "count end: ", to_hex(end_idx.first-1) );
-               auto sref  = r.rlock().get(end_idx.second);
-               auto etail = to.substr(pre.size() + 1);
-               auto ce    = count_keys(sref, key_view(), etail);
-               count += ce;
-               //     ARBTRIE_WARN( "CE:  ", ce, " count: ", count );
+               auto     sref      = r.rlock().get(end_idx.second);
+               auto     etail     = to.substr(pre.size() + 1);
+               uint32_t end_count = count_keys(sref, key_view(), etail, depth + 1);
+               count += end_count;
             }
+
             return count;
          }
          else
          {
-            // ARBTRIE_WARN( "middle to end" );
             // begin in the middle and end is beyond the end of this node
+
             uint64_t count = 0;
             if (start_idx.first == start_byte)
             {
-               auto sref  = r.rlock().get(start_idx.second);
-               auto btail = from.substr(pre.size() + 1);
-               count += count_keys(sref, btail, key_view());
+               auto     sref        = r.rlock().get(start_idx.second);
+               auto     btail       = from.substr(pre.size() + 1);
+               uint32_t start_count = count_keys(sref, btail, key_view(), depth + 1);
+               count += start_count;
                ++start_idx.first;
             }
-            return count + count_range(start_idx.first, max_branch_count);
+
+            uint32_t range_count = count_range(start_idx.first, max_branch_count);
+            count += range_count;
+
+            return count;
          }
       }
-   }
-
-   uint32_t read_session::count_keys(object_ref& r, key_view from, key_view to) const
-   {
-      return cast_and_call(r.header(),
-                           [&](const auto* n) { return this->count_keys(r, n, from, to); });
    }
 
    template <upsert_mode mode>

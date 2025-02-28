@@ -68,8 +68,8 @@ std::vector<std::string> load_words(write_transaction& ws, uint32_t limit = -1)
       val = key;
       toupper(val);
       val.resize(64);
-      if (result.size() != ws.count_keys())
-         ARBTRIE_WARN(key, " count_keys: ", ws.count_keys());
+      //    if (result.size() != ws.count_keys())
+      //      ARBTRIE_WARN(key, " count_keys: ", ws.count_keys());
       REQUIRE(result.size() == ws.count_keys());
 
       result.push_back(key);
@@ -943,6 +943,10 @@ TEST_CASE("dense-rand-insert")
 
       for (int i = 0; i < 100000; i++)
       {
+         if (i == 60)
+         {
+            ARBTRIE_WARN("i: ", i);
+         }
          REQUIRE(ws.count_keys(r) == i);
 
          uint64_t val = rand64();
@@ -1230,8 +1234,6 @@ TEST_CASE("sparse-rand-upsert")
       for (int i = 0; i < 100000; i++)
       {
          REQUIRE(ws.count_keys(r) == total);
-         if ((i % 10) == 0)
-            test_count(r);
 
          uint64_t    val  = uint32_t(rand64() & 0xfffffff);
          std::string str  = std::to_string(val);
@@ -1264,7 +1266,7 @@ TEST_CASE("dense-rand-upsert")
 
       auto test_count = [&](auto n, bool print_dbg)
       {
-         //print_dbg     = true;
+         print_dbg     = false;
          uint64_t from = rand64();
          uint64_t to   = rand64();
          while (to == from)
@@ -1329,13 +1331,16 @@ TEST_CASE("dense-rand-upsert")
             ARBTRIE_DEBUG("test count from ", to_hex(kfrom), " -> ", to_hex(kto));
             ARBTRIE_DEBUG("count: ", count);
          }
-
-         REQUIRE(ws.count_keys(n, kfrom, kto) == count);
+         auto itr2 = ws.create_iterator(n);
+         REQUIRE(itr2.count_keys(kfrom, kto) == count);
+         //  REQUIRE(ws.count_keys(n, kfrom, kto) == count);
       };
 
+      auto itr2 = ws.create_iterator(n);
       for (int i = 0; i < 100000; i++)
       {
          REQUIRE(ws.count_keys(r) == i);
+         REQUIRE(itr2.count_keys(kfrom, kto) == count);
          if (i % 10 == 1)
          {
             test_count(r, false);

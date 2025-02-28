@@ -349,6 +349,21 @@ namespace arbtrie
       ///@{
       constexpr key_view get_prefix() const { return key_view(); }
       local_index lower_bound_index(key_view k) const { return local_index(lower_bound_idx(k)); }
+      local_index upper_bound_index(key_view k) const
+      {
+         if (k.empty())
+            return end_index();
+         auto idx = lower_bound_idx(k);
+         if (idx == num_branches()) [[unlikely]]
+            return end_index();
+         assert(idx >= 0);
+         auto key = get_branch_key(local_index(idx));
+         if (key == k)
+            return local_index(idx + 1);
+         return local_index(idx);
+      }
+
+      uint32_t descendants() const { return num_branches(); }
 
       constexpr local_index next_index(local_index idx) const { return ++idx; }
       constexpr local_index prev_index(local_index idx) const

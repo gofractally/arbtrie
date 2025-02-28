@@ -136,26 +136,52 @@ namespace arbtrie
               std::invocable<bool, value_type> auto&& callback);
 
       inline uint32_t count_keys(object_ref& r, key_view from, key_view to) const;
+      inline uint32_t count_keys(object_ref& r, key_view from, key_view to, int depth) const;
       inline uint32_t count_keys(object_ref& r,
                                  const auto* inner,
                                  key_view    from,
                                  key_view    to) const;
+      inline uint32_t count_keys(object_ref& r,
+                                 const auto* inner,
+                                 key_view    from,
+                                 key_view    to,
+                                 int         depth) const;
       inline uint32_t count_keys(object_ref&        r,
                                  const binary_node* inner,
                                  key_view           from,
                                  key_view           to) const;
+      inline uint32_t count_keys(object_ref&        r,
+                                 const binary_node* inner,
+                                 key_view           from,
+                                 key_view           to,
+                                 int                depth) const;
       inline uint32_t count_keys(object_ref&         r,
                                  const setlist_node* inner,
                                  key_view            from,
                                  key_view            to) const;
+      inline uint32_t count_keys(object_ref&         r,
+                                 const setlist_node* inner,
+                                 key_view            from,
+                                 key_view            to,
+                                 int                 depth) const;
       inline uint32_t count_keys(object_ref&      r,
                                  const full_node* inner,
                                  key_view         from,
                                  key_view         to) const;
+      inline uint32_t count_keys(object_ref&      r,
+                                 const full_node* inner,
+                                 key_view         from,
+                                 key_view         to,
+                                 int              depth) const;
       inline uint32_t count_keys(object_ref&       r,
                                  const value_node* inner,
                                  key_view          from,
                                  key_view          to) const;
+      inline uint32_t count_keys(object_ref&       r,
+                                 const value_node* inner,
+                                 key_view          from,
+                                 key_view          to,
+                                 int               depth) const;
 
       /** creates a new handle for address, retains it */
       node_handle create_handle(id_address a) { return node_handle(*this, a); }

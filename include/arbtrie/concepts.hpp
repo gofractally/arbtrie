@@ -61,13 +61,13 @@ namespace arbtrie
       constexpr index_type  operator++(int)
       {
          index_type tmp = *this;
-         ++(*this);
+         ++value;
          return tmp;
       }
       constexpr index_type operator--(int)
       {
          index_type tmp = *this;
-         --(*this);
+         --value;
          return tmp;
       }
       index_type& operator=(const index_type& other) { return value = other.value, *this; }
@@ -79,6 +79,12 @@ namespace arbtrie
       constexpr bool operator>(const index_type& other) const { return value > other.value; }
       constexpr bool operator<=(const index_type& other) const { return value <= other.value; }
       constexpr bool operator>=(const index_type& other) const { return value >= other.value; }
+
+      // Add a subtract operator
+      constexpr size_t operator-(const index_type& other) const
+      {
+         return static_cast<size_t>(value - other.value);
+      }
    };
 
    template <index_types T>
@@ -104,7 +110,6 @@ namespace arbtrie
     * The search_result is used to return the result of a search operation a node.
     * If the search found nothing then the address is invalid, and the local_index
     * is set to local_end_index.
-    */
    struct search_result
    {
       // represents the part of the key that matched
@@ -124,6 +129,7 @@ namespace arbtrie
       bool operator==(const search_result& other) const { return loc_idx == other.loc_idx; }
       bool operator!=(const search_result& other) const { return loc_idx != other.loc_idx; }
    };
+    */
 
    /**
     * A static array of all possible branch characters.
@@ -173,12 +179,12 @@ namespace arbtrie
           * @return a search_result struct containing the matched portion of the key, the local index of the branch,
           * and the address of the node to search for the rest of the key (if any)
           */
-        { node.get_branch(key) } -> std::same_as<search_result>; // point lookup
-        { node.get_type(bindex) } -> std::same_as<value_type::types>; // get the type of the node
+      //  { node.get_branch(key) } -> std::same_as<search_result>; // point lookup
+      //  { node.get_type(bindex) } -> std::same_as<value_type::types>; // get the type of the node
         /**
          * Returns the first branch that is greater than or equal to the key.
          */
-        { node.lower_bound(key) } -> std::same_as<search_result>; // range lookup
+       // { node.lower_bound(key) } -> std::same_as<search_result>; // range lookup
         { node.next_index(bindex) } -> std::same_as<local_index>; // next branch
         { node.prev_index(bindex) } -> std::same_as<local_index>; // previous branch
         { node.get_prefix() } -> std::same_as<key_view>; // get the prefix of the node
@@ -271,5 +277,148 @@ namespace arbtrie
    template <typename T>
    concept is_id_address =
        std::is_same_v<std::remove_cv_t<std::remove_pointer_t<std::remove_cv_t<T>>>, id_address>;
+
+   // Define a struct to encapsulate key range operations
+   struct key_range
+   {
+      key_view lower_bound;  ///< the lower bound of the range, empty means unbounded
+      key_view upper_bound;  ///< the upper bound of the range, empty means unbounded
+
+      // Get the first byte of the lower bound of the range
+      uint8_t get_begin_byte() const
+      {
+         return lower_bound.empty() ? 0x00 : static_cast<uint8_t>(lower_bound[0]);
+      }
+
+      // Get the first byte of the upper bound of the range
+      uint8_t get_end_byte() const
+      {
+         return upper_bound.empty() ? 0xff : static_cast<uint8_t>(upper_bound[0]);
+      }
+
+      // Check if the upper bound has only one byte remaining
+      bool is_last_byte_of_end() const { return upper_bound.size() == 1; }
+
+      // Check if range is unbounded (both lower and upper bounds are empty)
+      bool is_unbounded() const { return lower_bound.empty() && upper_bound.empty(); }
+
+      // Check if range contains no keys (when upper_bound < lower_bound OR bounds are equal but not unbounded)
+      bool is_empty_range() const
+      {
+         // A range is empty when:
+         // 1. Upper bound is less than lower bound, OR
+         // 2. Bounds are equal but not unbounded
+         return upper_bound < lower_bound || (lower_bound == upper_bound && !is_unbounded());
+      }
+
+      // Attempts to narrow the range by a given prefix and updates the prefix
+      // Returns true if the prefix intersects with the range (narrowing was successful)
+      // Returns false if the prefix doesn't overlap with the range
+      // Modifies both this range's boundaries and the prefix by consuming the common prefix
+      bool try_narrow_with_prefix(key_view* prefix)
+      {
+         // Compute common prefixes
+         key_view cp_from = common_prefix(*prefix, lower_bound);
+         key_view cp_to   = common_prefix(*prefix, upper_bound);
+
+         // Prune if prefix doesn't align with range
+         if ((cp_from.size() < prefix->size() && lower_bound.size() > 0 &&
+              (*prefix)[cp_from.size()] < lower_bound[cp_from.size()]) ||
+             (cp_to.size() < prefix->size() && upper_bound.size() > 0 &&
+              (*prefix)[cp_to.size()] >= upper_bound[cp_to.size()]))
+            return false;  // Outside range - no prefix consumed
+
+         // Determine the amount of prefix that will be consumed (minimum common prefix length)
+         // We consume the minimum length that matches both lower_bound and upper_bound
+         size_t prefix_consumed = std::min(prefix->size(), std::min(cp_from.size(), cp_to.size()));
+
+         // Adjust slices after processing prefix
+         lower_bound = lower_bound.size() > prefix_consumed ? lower_bound.substr(prefix_consumed)
+                                                            : key_view();
+         upper_bound = upper_bound.size() > prefix_consumed ? upper_bound.substr(prefix_consumed)
+                                                            : key_view();
+
+         // Also adjust the prefix by the same amount
+         if (prefix_consumed < prefix->size())
+            *prefix = prefix->substr(prefix_consumed);
+         else
+            *prefix = key_view();  // Empty prefix if completely consumed
+
+         return true;
+      }
+
+      // Creates a new range by advancing the lower bound by one byte
+      // Precondition: This should only be called when examining the exact byte that matches lower_bound[0]
+      //
+      // Returns: A new key_range where:
+      //   - 'lower_bound' is advanced by one byte (lower_bound.substr(1))
+      //   - 'upper_bound' is either:
+      //     * Empty if the original 'upper_bound' was empty
+      //     * Advanced by one byte if lower_bound[0] == upper_bound[0]
+      //     * Unchanged if lower_bound[0] != upper_bound[0]
+      key_range with_advanced_from() const
+      {
+         key_view next_from = lower_bound.substr(1);
+         key_view next_to   = upper_bound.empty()                  ? key_view()
+                              : (upper_bound[0] == lower_bound[0]) ? upper_bound.substr(1)
+                                                                   : upper_bound;
+         return {next_from, next_to};
+      }
+
+      // Creates a new range by advancing the upper bound by one byte
+      // Precondition: This should only be called when examining the exact byte that matches upper_bound[0]
+      //
+      // Returns: A new key_range where:
+      //   - 'lower_bound' is either empty or advanced by one byte if not empty
+      //   - 'upper_bound' is advanced by one byte (upper_bound.substr(1))
+      key_range with_advanced_to() const
+      {
+         key_view next_from = lower_bound.empty() ? key_view() : lower_bound.substr(1);
+         key_view next_to   = upper_bound.substr(1);
+         return {next_from, next_to};
+      }
+
+      // Creates a new range that spans from the minimum possible key to the
+      // current upper bound advanced by one byte
+      // Used when we've already satisfied the lower bound constraint and only need to enforce the upper bound
+      //
+      // Returns: A new key_range where:
+      //   - 'lower_bound' is empty (meaning any key is included)
+      //   - 'upper_bound' is advanced by one byte (upper_bound.substr(1))
+      // This represents keys in range ["", upper_bound.substr(1))
+      key_range with_everything_to() const { return {key_view(), upper_bound.substr(1)}; }
+
+      // Check if a range containing the given prefix is entirely within this range
+      bool contains_prefix(key_view prefix) const
+      {
+         // We need lower_bound to be empty (no lower bound) and the prefix to be beyond the upper bound
+         return lower_bound.empty() && (upper_bound.empty() || prefix > upper_bound);
+      }
+
+      // Check if a key is within the range [lower_bound, upper_bound)
+      bool contains_key(key_view prefix) const
+      {
+         // Check if key >= lower_bound (empty lower_bound is always <= any key)
+         bool above_lower_bound = prefix >= lower_bound;
+
+         // Check if key < upper_bound (or upper_bound is empty meaning no upper bound)
+         bool below_upper_bound = upper_bound.empty() || prefix < upper_bound;
+
+         return above_lower_bound && below_upper_bound;
+      }
+
+      // Check if a key exceeds the upper bound of the range
+      bool key_exceeds_range(key_view key) const
+      {
+         return !upper_bound.empty() && key > upper_bound;
+      }
+
+      // Check if a key is past the lower bound of the range
+      bool is_past_begin_prefix(key_view prefix) const
+      {
+         // Either no lower bound constraint (lower_bound is empty) or the prefix is lexicographically greater
+         return lower_bound.empty() || prefix > lower_bound;
+      }
+   };
 
 }  // namespace arbtrie

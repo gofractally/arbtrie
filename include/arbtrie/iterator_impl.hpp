@@ -999,6 +999,17 @@ namespace arbtrie
    }
 
    template <iterator_caching_mode CacheMode>
+   iterator<CacheMode>::iterator(write_session& s, node_handle r)
+       : _rs(&s),
+         _root(std::move(r)),
+         _path(std::make_unique<std::array<path_entry, max_key_length + 1>>()),
+         _branches(std::make_unique<std::array<char, max_key_length>>())
+   {
+      clear();
+      push_rend(_root.address());
+   }
+
+   template <iterator_caching_mode CacheMode>
    iterator<CacheMode>::iterator(const iterator& other)
        : _rs(other._rs),
          _root(other._root),
@@ -1055,11 +1066,13 @@ namespace arbtrie
       }
       return *this;
    }
+   size_t count_keys_impl(read_lock& state, id_address root, key_view begin, key_view end);
 
    template <iterator_caching_mode CacheMode>
-   uint32_t iterator<CacheMode>::count_keys(key_view from, key_view to) const
+   uint32_t iterator<CacheMode>::count_keys(key_view lower_bound, key_view upper_bound) const
    {
-      return _rs->count_keys(_root, from, to);
+      auto state = _rs->lock();
+      return count_keys_impl(state, _root.address(), lower_bound, upper_bound);
    }
 
    //==============================================================

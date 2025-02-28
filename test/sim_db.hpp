@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -143,23 +144,52 @@ namespace sim
                                 std::string        prefix,
                                 uint32_t&          count)
       {
+         std::cout << "Counting keys in node with prefix: '" << prefix << "'" << std::endl;
+         std::cout << "Range: [" << (from.empty() ? "(empty)" : std::string(from)) << ", "
+                   << (to.empty() ? "(empty)" : std::string(to)) << ")" << std::endl;
+         std::cout << "Current count before processing node: " << count << std::endl;
+
          for (const auto& [k, v] : current->data)
          {
             std::string full_key = prefix + k;
+            std::cout << "  Examining key: '" << full_key << "'";
 
             // Check if this key is in range
-            if (full_key >= from && (to.empty() || full_key < to))
+            bool in_range = full_key >= from && (to.empty() || full_key < to);
+            std::cout << " - In range: " << (in_range ? "yes" : "no");
+
+            if (in_range)
             {
                // Count both string values and subtrees as keys
-               if (std::holds_alternative<std::string>(v) ||
-                   std::holds_alternative<std::shared_ptr<recursive_map>>(v))
+               if (std::holds_alternative<std::string>(v))
                {
                   ++count;
+                  std::cout << " - Type: string - Counted (new count: " << count << ")";
+               }
+               else if (std::holds_alternative<std::shared_ptr<recursive_map>>(v))
+               {
+                  ++count;
+                  std::cout << " - Type: subtree - Counted as leaf node (new count: " << count
+                            << ")";
+               }
+               else
+               {
+                  std::cout << " - Type: unknown - Not counted";
                }
             }
+            std::cout << std::endl;
 
             // We don't recursively count keys in subtrees as they are treated as leaf nodes
+            // If we wanted to count recursively, we would do:
+            // if (std::holds_alternative<std::shared_ptr<recursive_map>>(v))
+            // {
+            //    auto subtree = std::get<std::shared_ptr<recursive_map>>(v);
+            //    count_keys_recursive(subtree, from, to, full_key + "/", count);
+            // }
          }
+
+         std::cout << "Final count after processing node with prefix '" << prefix << "': " << count
+                   << std::endl;
       }
 
       template <typename Callback>

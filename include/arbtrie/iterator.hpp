@@ -1,7 +1,6 @@
 #pragma once
 #include <arbtrie/arbtrie.hpp>
 #include <arbtrie/concepts.hpp>
-#include <arbtrie/database.hpp>
 #include <arbtrie/node_handle.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
 #include <arbtrie/seg_allocator.hpp>
@@ -150,6 +149,7 @@ namespace arbtrie
       friend class arbtrie::write_transaction;
 
       iterator(read_session& s, node_handle r);
+      iterator(write_session& s, node_handle r);
 
      public:
       iterator(const iterator& other);
@@ -362,7 +362,7 @@ namespace arbtrie
        * @param to The end key (exclusive)
        * @return The number of keys in the range
        */
-      uint32_t count_keys(key_view from = {}, key_view to = {}) const;
+      uint32_t count_keys(key_view lower_bound = {}, key_view upper_bound = {}) const;
 
      protected:
       template <typename... Args>

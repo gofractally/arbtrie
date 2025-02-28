@@ -36,6 +36,14 @@ namespace arbtrie
             return next_index(begin_index());
          return next_index(local_index(uint8_t(k.front())));
       }
+      local_index upper_bound_index(key_view k) const
+      {
+         if (k.empty())
+            return next_index(begin_index());
+         if (uint8_t(k.front()) == 0xff)
+            return end_index();
+         return next_index(local_index(uint8_t(k.front()) + 1));
+      }
 
       /**
        * Returns the index of the branch that matches the given key exactly or end_index() if no match
@@ -103,6 +111,7 @@ namespace arbtrie
          assert(get_branch(index.to_int()));
          return value_type::make_value_node(get_branch(index.to_int()));
       }
+
       /*
       value_type get_branch_value(uint8_t branch) const
       {
@@ -232,6 +241,14 @@ namespace arbtrie
          return *this;
       }
 
+      id_address get_branch(local_index br) const
+      {
+         assert(br.to_int() < max_branch_count);
+         assert(br.to_int() > 0);
+
+         //if (br == 0) return _eof_value;
+         return id_address(branch_region(), branch(br.to_int() - 1));
+      }
       id_address get_branch(branch_index_type br) const
       {
          assert(br < max_branch_count);
