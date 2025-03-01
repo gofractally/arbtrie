@@ -118,8 +118,12 @@ namespace arbtrie
       friend class write_session;
       friend class write_transaction;
 
-      database& _db;
-      read_session(database& db);
+      database* _db;
+      read_session(database* db);
+
+      // Move operations can now be enabled with pointer members
+      read_session(read_session&&)            = default;
+      read_session& operator=(read_session&&) = default;
 
       int get(object_ref& root, key_view key, std::invocable<bool, value_type> auto&& callback);
       int get(object_ref&                             root,
@@ -135,62 +139,15 @@ namespace arbtrie
               key_view                                key,
               std::invocable<bool, value_type> auto&& callback);
 
-      inline uint32_t count_keys(object_ref& r, key_view from, key_view to) const;
-      inline uint32_t count_keys(object_ref& r, key_view from, key_view to, int depth) const;
-      inline uint32_t count_keys(object_ref& r,
-                                 const auto* inner,
-                                 key_view    from,
-                                 key_view    to) const;
-      inline uint32_t count_keys(object_ref& r,
-                                 const auto* inner,
-                                 key_view    from,
-                                 key_view    to,
-                                 int         depth) const;
-      inline uint32_t count_keys(object_ref&        r,
-                                 const binary_node* inner,
-                                 key_view           from,
-                                 key_view           to) const;
-      inline uint32_t count_keys(object_ref&        r,
-                                 const binary_node* inner,
-                                 key_view           from,
-                                 key_view           to,
-                                 int                depth) const;
-      inline uint32_t count_keys(object_ref&         r,
-                                 const setlist_node* inner,
-                                 key_view            from,
-                                 key_view            to) const;
-      inline uint32_t count_keys(object_ref&         r,
-                                 const setlist_node* inner,
-                                 key_view            from,
-                                 key_view            to,
-                                 int                 depth) const;
-      inline uint32_t count_keys(object_ref&      r,
-                                 const full_node* inner,
-                                 key_view         from,
-                                 key_view         to) const;
-      inline uint32_t count_keys(object_ref&      r,
-                                 const full_node* inner,
-                                 key_view         from,
-                                 key_view         to,
-                                 int              depth) const;
-      inline uint32_t count_keys(object_ref&       r,
-                                 const value_node* inner,
-                                 key_view          from,
-                                 key_view          to) const;
-      inline uint32_t count_keys(object_ref&       r,
-                                 const value_node* inner,
-                                 key_view          from,
-                                 key_view          to,
-                                 int               depth) const;
-
       /** creates a new handle for address, retains it */
       node_handle create_handle(id_address a) { return node_handle(*this, a); }
-      read_lock   lock() { return _segas.lock(); }
+      read_lock   lock() { return _segas->lock(); }
 
      public:
-      seg_alloc_session _segas;
+      ~read_session();
+      std::unique_ptr<seg_alloc_session> _segas;
 
-      uint64_t count_ids_with_refs() { return _segas.count_ids_with_refs(); }
+      uint64_t count_ids_with_refs() { return _segas->count_ids_with_refs(); }
 
       template <iterator_caching_mode CacheMode = noncaching>
       auto create_iterator(node_handle h)
@@ -204,13 +161,6 @@ namespace arbtrie
             return read_transaction(*this, create_root());
          return read_transaction(*this, get_root(top_root_node));
       }
-
-      /**
-       * count the keys in the range [from,to)
-       */
-      uint32_t count_keys(const node_handle& r,
-                          key_view           from = {},
-                          key_view           to   = {});  //iterator::npos);
 
       /**
        *  This version of get reduces the need to copy to an
@@ -318,12 +268,42 @@ namespace arbtrie
       }
    };
 
-   class write_session : public read_session
+   /**
+    * @class write_session
+    * @brief A session that provides write access to the database
+    * 
+    * This class uses shared ownership semantics through std::shared_ptr.
+    * Transactions created from this session will hold a shared_ptr to ensure
+    * the session remains alive as long as any transaction needs it.
+    * 
+    * @example
+    * ```
+    * // Create a session through the factory method
+    * auto session = database::start_write_session_shared();
+    * 
+    * // Start a transaction - automatically keeps the session alive
+    * auto tx = session->start_transaction();
+    * 
+    * // Store multiple sessions in containers
+    * std::vector<std::shared_ptr<write_session>> sessions;
+    * sessions.push_back(database::start_write_session_shared());
+    * ```
+    */
+   class write_session : public read_session, public std::enable_shared_from_this<write_session>
    {
       friend class database;
       friend class write_transaction;
 
-      write_session(database& db) : read_session(db) {}
+      // Private constructor - use database::start_write_session() instead
+      write_session(database* db) : read_session(db) {}
+
+      // Copy operations still deleted to prevent accidental copying
+      write_session(const write_session&)            = delete;
+      write_session& operator=(const write_session&) = delete;
+
+      // Move operations are now allowed since base class is movable
+      write_session(write_session&&)            = default;
+      write_session& operator=(write_session&&) = default;
 
       id_address upsert(session_rlock& state, id_address root, key_view key, const value_type& val);
 
@@ -359,8 +339,8 @@ namespace arbtrie
       //
       // @returns the prior root so caller can choose when/where
       // to release it, if ignored it will be released immediately
-      template <sync_type sype = sync_type::none>
-      node_handle set_root(node_handle, int index = 0);
+      template <sync_type stype = sync_type::none>
+      node_handle set_root(node_handle r, int index = 0);
 
       // Designed to only be called by write_transaction objects
       // which will take a lock on the root until they either commit
@@ -369,27 +349,37 @@ namespace arbtrie
 
       void abort_write(int index);
 
+      /**
+       * Static factory method to create a shared_ptr to write_session
+       * This allows us to create a shared_ptr even with a private constructor
+       */
+      static std::shared_ptr<write_session> create(database* db)
+      {
+         return std::shared_ptr<write_session>(new write_session(db));
+      }
+
      public:
       ~write_session();
 
       /**
-       * The database supports up to 488 top root nodes that are 
-       * saved in the database file header. Each of these top roots
-       * can be independently written to and read from and recovered
-       * from a crash.  
-       * 
-       * It is considered an error to start two transactions on the
-       * same root at the same time because the last one to commit will overwite
-       * the first one to commit. 
-       * 
-       * By default, transactions use root index 0. If you need to use multiple
-       * independent roots, you can specify a different root index.
-       * 
+       * Start a new transaction with global root 
+       * if top_root_node is provided, then the transaction will operate on that root
        * If -1 is provided as the top_root_node, then a temporary root will be created.
        * The temporary root will be lost unless it is saved as a subtree of another root.
        * 
-       * @param global_root_idx 
-       * @return 
+       * The database supports up to 488 top root nodes that can be accessed by index.
+       * This limit is based upon the minimum disk sync unit being 4kb; therefore,
+       * it can sync up to 488 id_address values without extra cost.
+       * 
+       * It is possible to write to independent top roots in parallel because there
+       * would be no conflict in updating the root; however, if two threads attempt 
+       * to get, modify, and set the same root then the last write will win.
+       * 
+       * The transaction will hold a shared_ptr to this session, ensuring that
+       * the session remains valid for the lifetime of the transaction.
+       * 
+       * @param top_root_node The index of the root node to use, or -1 for a temporary root
+       * @return write_transaction A new transaction object
        */
       write_transaction start_transaction(int top_root_node = 0);
 
@@ -519,8 +509,19 @@ namespace arbtrie
 
       static void create(std::filesystem::path dir, config = {});
 
-      write_session start_write_session();
-      read_session  start_read_session();
+      /**
+       * @brief Start a new write session for modifying the database
+       * 
+       * Returns a shared_ptr to a write_session, which can be stored in containers
+       * and will automatically manage the session's lifetime. Transactions created 
+       * from this session will hold a shared_ptr to it, ensuring that the session 
+       * remains alive as long as any transaction needs it.
+       * 
+       * @return std::shared_ptr<write_session> A shared pointer to a new write session
+       */
+      std::shared_ptr<write_session> start_write_session();
+
+      read_session start_read_session();
 
       void start_compact_thread();
       void stop_compact_thread();
@@ -587,8 +588,15 @@ namespace arbtrie
    template <typename NodeType>
    void retain_children(session_rlock& state, const NodeType* in);
 
-   inline read_session::read_session(database& db) : _db(db), _segas(db._sega.start_session()) {}
-   inline write_session::~write_session() {}
+   inline read_session::read_session(database* db)
+       : _db(db), _segas(std::make_unique<seg_alloc_session>(db->_sega.start_session()))
+   {
+   }
+
+   inline read_session::~read_session()
+   {
+      // unique_ptr will handle cleanup automatically
+   }
 
    inline void release_node(object_ref&& r);
    inline void release_node(object_ref& r)
@@ -616,7 +624,7 @@ namespace arbtrie
          return -1;
       }
       int  size  = -1;
-      auto state = _segas.lock();
+      auto state = _segas->lock();
       auto ref   = state.get(r.address());
       get(ref, key,
           [&](bool found, value_type vt)
@@ -642,7 +650,7 @@ namespace arbtrie
 
       std::optional<node_handle> result;
 
-      auto state = _segas.lock();
+      auto state = _segas->lock();
       auto ref   = state.get(r.address());
       get(ref, key,
           [&](bool found, value_type vt)
@@ -810,7 +818,7 @@ namespace arbtrie
 
    void read_session::visit_nodes(const node_handle& h, auto&& on_node)
    {
-      auto state = _segas.lock();
+      auto state = _segas->lock();
       visit_node(state.get(h.address()), 0, on_node);
    }
 
@@ -834,21 +842,21 @@ namespace arbtrie
       {
          if constexpr (stype != sync_type::none)
          {
-            _segas.sync(stype);
+            _segas->sync(stype);
          }
          {  // lock scope
-            std::unique_lock lock(_db._root_change_mutex[index]);
-            old_r = _db._dbm->top_root[index].exchange(new_r, std::memory_order_relaxed);
+            std::unique_lock lock(_db->_root_change_mutex[index]);
+            old_r = _db->_dbm->top_root[index].exchange(new_r, std::memory_order_relaxed);
          }
          if constexpr (stype != sync_type::none)
          {
             if (old_r != new_r)
             {
-               _db._dbfile.sync(stype);
+               _db->_dbfile.sync(stype);
             }
          }
       }
-      _db.modify_lock(index).unlock();
+      _db->modify_lock(index).unlock();
       return r.give(id_address(old_r));
    }
 
@@ -862,11 +870,13 @@ namespace arbtrie
    {
       if constexpr (stype != sync_type::none)
       {
-         std::unique_lock lock(_db._root_change_mutex);
-         _db._sega.sync(stype);
-         _db._dbfile.sync(stype);
+         std::unique_lock lock(_db->_root_change_mutex);
+         _db->_sega.sync(stype);
+         _db->_dbfile.sync(stype);
       }
    }
+
+   inline write_session::~write_session() {}
 }  // namespace arbtrie
 
 #include <arbtrie/iterator_impl.hpp>

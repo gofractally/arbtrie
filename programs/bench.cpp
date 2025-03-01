@@ -82,21 +82,21 @@ int64_t get_test(benchmark_config   cfg,
    std::cerr << "-----------------------------------------------------------------------\n";
 
    std::vector<char> key;
-   auto              root  = ws.get_root();
+   auto              root  = ws->get_root();
    auto              start = std::chrono::steady_clock::now();
    for (uint64_t i = 0; i < cfg.items; ++i)
    {
       make_key(i, key);
       key_view kstr(key.data(), key.size());
-      ws.get(root, kstr,
-             [=](bool found, const value_type& r)
-             {
-                if (not found)
-                {
-                   ARBTRIE_WARN("seq: ", i);
-                   abort();
-                }
-             });
+      ws->get(root, kstr,
+              [=](bool found, const value_type& r)
+              {
+                 if (not found)
+                 {
+                    ARBTRIE_WARN("seq: ", i);
+                    abort();
+                 }
+              });
    }
    auto   end    = std::chrono::steady_clock::now();
    auto   delta  = end - start;
@@ -128,9 +128,9 @@ std::vector<int> insert_test(benchmark_config   cfg,
    std::vector<int> result;
    result.reserve(cfg.rounds);
 
-   auto tx = ws.start_transaction(0);
+   auto tx = ws->start_transaction(0);
    if constexpr (not mode.is_update() or mode.is_insert())
-      tx.set_root(ws.create_root());
+      tx.set_root(ws->create_root());
 
    uint64_t          seq = 0;
    std::vector<char> key;
@@ -173,7 +173,7 @@ std::vector<int> insert_test(benchmark_config   cfg,
 void print_stat(auto& ws)
 {
    auto start = std::chrono::steady_clock::now();
-   auto stats = ws.get_node_stats(ws.get_root());
+   auto stats = ws->get_node_stats(ws->get_root());
    auto end   = std::chrono::steady_clock::now();
 
    std::cerr << stats << "\n";

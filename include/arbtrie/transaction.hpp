@@ -1,6 +1,7 @@
 #pragma once
 #include <arbtrie/iterator.hpp>
 #include <functional>
+#include <memory>
 
 namespace arbtrie
 {
@@ -10,17 +11,39 @@ namespace arbtrie
    /**
     * A write transaction is a mutable iterator that knows how
     * to commit and abort the node_handle that it manages. 
+    * 
+    * Transactions hold a shared_ptr to their parent session, ensuring
+    * that the session remains valid for the lifetime of the transaction.
+    * This means you don't need to worry about keeping sessions alive -
+    * they will be automatically managed through shared ownership.
+    *
+    * Example of usage:
+    * ```
+    * // Create a session
+    * auto session = db->start_write_session_shared();
+    * 
+    * // Create a transaction - session will be kept alive automatically
+    * auto tx = session->start_transaction();
+    * 
+    * // Even if you reset or destroy the session variable,
+    * // the transaction can still be used safely
+    * session.reset();
+    * 
+    * // Transaction still works because it holds a reference to the session
+    * tx.insert("key", "value");
+    * tx.commit();
+    * ```
     */
    class write_transaction : public mutable_iterator<caching>
    {
      private:
       friend class write_session;
 
-      write_transaction(write_session&                                ws,
+      write_transaction(std::shared_ptr<write_session>                ws,
                         node_handle                                   r,
                         std::function<node_handle(node_handle, bool)> commit_callback,
                         std::function<void()>                         abort_callback = {})
-          : mutable_iterator<caching>(ws, std::move(r))
+          : mutable_iterator<caching>(*ws, std::move(r)), _ws(std::move(ws))
       {
          assert(commit_callback);
          _abort_callback  = abort_callback;
@@ -52,7 +75,8 @@ namespace arbtrie
          return std::move(_root);
       }
 
-      /** commits the changes back to the source of the
+      /** 
+       * Commits the changes back to the source of the
        * transaction, but can only be called once.
        */
       void commit()
@@ -93,7 +117,7 @@ namespace arbtrie
        */
       write_transaction start_transaction()
       {
-         return write_transaction(*_ws, get_root(),
+         return write_transaction(_ws, get_root(),
                                   [this](node_handle commit, bool resume)
                                   {
                                      set_root(resume ? commit : std::move(commit));
@@ -102,7 +126,7 @@ namespace arbtrie
       }
 
      private:
-      write_session*                                _ws;
+      std::shared_ptr<write_session>                _ws;
       std::function<void()>                         _abort_callback;
       std::function<node_handle(node_handle, bool)> _commit_callback;
    };

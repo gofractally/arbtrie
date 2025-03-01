@@ -151,79 +151,79 @@ TEST_CASE("update-size")
 {
    environ env;
    {
-      auto ws   = env.db->start_write_session();
-      auto root = ws.create_root();
+      auto ws = env.db->start_write_session();
+      auto tx = ws->start_transaction();
 
       std::string big_value;
 
-      auto old_key_size = ws.upsert(root, to_key_view("hello"), to_value_view("world"));
+      auto old_key_size = tx.upsert(to_key_view("hello"), to_value_view("world"));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("hello"), to_value_view("new world"));
+      old_key_size = tx.upsert(to_key_view("hello"), to_value_view("new world"));
       REQUIRE(old_key_size == 5);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view("the old world"));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("the old world"));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view("world"));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("world"));
       REQUIRE(old_key_size == 13);
-      old_key_size = ws.remove(root, to_key_view("goodbye"));
+      old_key_size = tx.remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 5);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.remove(root, to_key_view("goodbye"));
+      old_key_size = tx.remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 0);
       big_value.resize(10);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       big_value.resize(0);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 10);
       big_value.resize(1000);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 0);
       big_value.resize(500);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 1000);
       big_value.resize(50);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
       big_value.resize(300);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
-      old_key_size = ws.remove(root, to_key_view("goodbye"));
+      old_key_size = tx.remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 300);
 
       big_value.resize(60);
-      old_key_size = ws.upsert(root, to_key_view("afill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("afill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("bfill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("bfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("cfill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("cfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("dfill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("dfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("efill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("efill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("ffill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("ffill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       std::string key = "fill";
       for (int i = 0; i < 22; ++i)
       {
-         old_key_size = ws.upsert(root, to_key_view(key), to_value_view(big_value));
+         old_key_size = tx.upsert(to_key_view(key), to_value_view(big_value));
          key += 'a';
       }
 
       big_value.resize(500);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       big_value.resize(50);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
       big_value.resize(300);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
       big_value.resize(50);
       /// this will should change a key that is currely a 4 byte ptr to an inline 50 bytes
       /// but the existing binary node is unable to accomodate the extra space
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 300);
 
       env.db->print_stats(std::cerr);
@@ -234,101 +234,100 @@ TEST_CASE("update-size-shared")
 {
    environ env;
    {
-      auto ws   = env.db->start_write_session();
-      auto root = ws.create_root();
+      auto ws = env.db->start_write_session();
+      auto tx = ws->start_transaction();
 
       std::optional<node_handle> tmp;
       std::string                big_value;
 
-      auto old_key_size = ws.upsert(root, to_key_view("hello"), to_value_view("world"));
+      auto old_key_size = tx.upsert(to_key_view("hello"), to_value_view("world"));
       REQUIRE(old_key_size == -1);
-      tmp          = root;
-      old_key_size = ws.upsert(root, to_key_view("hello"), to_value_view("new world"));
+      tmp          = tx.get_root();
+      old_key_size = tx.upsert(to_key_view("hello"), to_value_view("new world"));
       REQUIRE(old_key_size == 5);
-      tmp          = root;
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view("the old world"));
+      tmp          = tx.get_root();
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("the old world"));
       REQUIRE(old_key_size == -1);
-      tmp          = root;
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view("world"));
+      tmp          = tx.get_root();
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("world"));
       REQUIRE(old_key_size == 13);
-      tmp          = root;
-      old_key_size = ws.remove(root, to_key_view("goodbye"));
+      tmp          = tx.get_root();
+      old_key_size = tx.remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 5);
-      tmp          = root;
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      tmp          = tx.get_root();
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      tmp          = root;
-      old_key_size = ws.remove(root, to_key_view("goodbye"));
+      tmp          = tx.get_root();
+      old_key_size = tx.remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 0);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(10);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(0);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 10);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(1000);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 0);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(500);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 1000);
-
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(50);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(300);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
-      tmp          = root;
-      old_key_size = ws.remove(root, to_key_view("goodbye"));
+      tmp          = tx.get_root();
+      old_key_size = tx.remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 300);
-      tmp = root;
+      tmp = tx.get_root();
 
       big_value.resize(60);
-      old_key_size = ws.upsert(root, to_key_view("afill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("afill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("bfill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("bfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("cfill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("cfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("dfill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("dfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("efill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("efill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = ws.upsert(root, to_key_view("ffill"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("ffill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       std::string key = "fill";
       for (int i = 0; i < 22; ++i)
       {
-         old_key_size = ws.upsert(root, to_key_view(key), to_value_view(big_value));
+         old_key_size = tx.upsert(to_key_view(key), to_value_view(big_value));
          key += 'a';
-         tmp = root;
+         tmp = tx.get_root();
       }
 
       big_value.resize(500);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(50);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(300);
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
-      tmp = root;
+      tmp = tx.get_root();
       big_value.resize(50);
       /// this will should change a key that is currely a 4 byte ptr to an inline 50 bytes
       /// but the existing binary node is unable to accomodate the extra space
-      old_key_size = ws.upsert(root, to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 300);
-      tmp = root;
+      tmp = tx.get_root();
 
       env.db->print_stats(std::cerr);
       ARBTRIE_WARN("resetting temp");
@@ -361,7 +360,7 @@ TEST_CASE("insert-words")
    {
       environ env;
       auto    ws    = env.db->start_write_session();
-      auto    tx    = ws.start_transaction();
+      auto    tx    = ws->start_transaction();
       auto    start = std::chrono::steady_clock::now();
 
       int  count    = 0;
@@ -480,7 +479,7 @@ TEST_CASE("insert-words")
       for (int i = 0; i < keys.size(); ++i)
       {
          // ARBTRIE_DEBUG( "check before remove: ", keys[i], " i: ", i, " shared: ", shared );
-         // ARBTRIE_DEBUG( "ws.count: ", ws.count_keys(root), " i: ", i );
+         // ARBTRIE_DEBUG( "ws.count: ", ws->count_keys(root), " i: ", i );
          REQUIRE(cnt - i == tx.count_keys());
          auto buf = tx.get<std::string>(to_key_view(keys[i]));
          REQUIRE(buf);
@@ -495,7 +494,7 @@ TEST_CASE("insert-words")
          tx.remove(to_key_view(keys[i]));
          //ARBTRIE_DEBUG( "after remove: ", keys[i] );
          /*{
-         auto l = ws._segas.lock();
+         auto l = ws->_segas->lock();
          validate_refcount( l, root.address(), int(shared+1) );
          }
          */
@@ -536,55 +535,49 @@ TEST_CASE("insert-words")
 TEST_CASE("update")
 {
    environ env;
-   auto    ws   = env.db->start_write_session();
-   auto    root = ws.create_root();
-   ws.upsert(root, to_key_view("hello"), to_value_view("world"));
-   ws.update(root, to_key_view("hello"), to_value_view("heaven"));
-   ws.get(root, to_key_view("hello"),
-          [](bool found, const value_type& val)
-          {
-             REQUIRE(found);
-             REQUIRE(val.view() == to_value_view("heaven"));
-          });
-   ws.update(root, to_key_view("hello"), to_value_view("small"));
-   ws.get(root, to_key_view("hello"),
-          [](bool found, const value_type& val)
-          {
-             REQUIRE(found);
-             REQUIRE(val.view() == to_value_view("small"));
-          });
-   ws.update(root, to_key_view("hello"),
+   auto    ws = env.db->start_write_session();
+   auto    tx = ws->start_transaction();
+
+   tx.upsert(to_key_view("hello"), to_value_view("world"));
+   tx.update(to_key_view("hello"), to_value_view("heaven"));
+   auto val = tx.get<std::string>(to_key_view("hello"));
+   REQUIRE(val);
+   REQUIRE(*val == "heaven");
+
+   tx.update(to_key_view("hello"), to_value_view("small"));
+   val = tx.get<std::string>(to_key_view("hello"));
+   REQUIRE(val);
+   REQUIRE(*val == "small");
+
+   tx.update(to_key_view("hello"), to_value_view("medium"));
+   val = tx.get<std::string>(to_key_view("hello"));
+   REQUIRE(val);
+   REQUIRE(*val == "medium");
+
+   tx.update(to_key_view("hello"),
              to_value_view(
                  "heaven is a great place to go! Let's get out of here. This line must be long."));
-   ws.get(
-       root, to_key_view("hello"),
-       [](bool found, const value_type& val)
-       {
-          REQUIRE(found);
-          REQUIRE(
-              val.view() ==
-              to_value_view(
-                  "heaven is a great place to go! Let's get out of here. This line must be long."));
-       });
+   val = tx.get<std::string>(to_key_view("hello"));
+   REQUIRE(val);
+   REQUIRE(*val == "heaven is a great place to go! Let's get out of here. This line must be long.");
+
    INFO("setting a short (inline) value over an existing non-inline value");
-   ws.update(root, to_key_view("hello"), to_value_view("short"));
+   tx.update(to_key_view("hello"), to_value_view("short"));
 
    SECTION("updating an inline value that is smaller than object id to big value")
    {
-      ws.upsert(root, to_key_view("a"), to_value_view("a"));
-      ws.update(root, to_key_view("a"),
+      tx.upsert(to_key_view("a"), to_value_view("a"));
+      tx.update(to_key_view("a"),
                 to_value_view("object_id is larger than 'a'.. what do we do here? This must be "
                               "longer than 63 bytes"));
    }
 
    env.db->print_stats(std::cerr);
-   ws.get(root, to_key_view("hello"),
-          [](bool found, const value_type& val)
-          {
-             REQUIRE(found);
-             REQUIRE(val.view() == to_value_view("short"));
-          });
-   root = ws.create_root();
+   val = tx.get<std::string>(to_key_view("hello"));
+   REQUIRE(val);
+   REQUIRE(*val == "short");
+
+   tx.abort();
    env.db->print_stats(std::cerr);
 }
 
@@ -594,7 +587,7 @@ TEST_CASE("random-size-updates-shared")
    {
       auto ws = env.db->start_write_session();
       {
-         auto tx    = ws.start_transaction();
+         auto tx    = ws->start_transaction();
          auto words = load_words(tx);
 
          std::optional<node_handle> tmp;
@@ -618,15 +611,15 @@ TEST_CASE("random-size-updates-shared")
             REQUIRE(postsize == data.size());
             tmp = tx.get_root();
             //  if( i % 1000 == 0 ) {
-            //     ARBTRIE_DEBUG( "i: ", i, " ", ws.count_ids_with_refs() );
+            //     ARBTRIE_DEBUG( "i: ", i, " ", ws->count_ids_with_refs() );
             //  }
          }
          env.db->print_stats(std::cerr);
-         ARBTRIE_DEBUG("references before release: ", ws.count_ids_with_refs());
+         ARBTRIE_DEBUG("references before release: ", ws->count_ids_with_refs());
       }
-      ARBTRIE_DEBUG("references after release: ", ws.count_ids_with_refs());
+      ARBTRIE_DEBUG("references after release: ", ws->count_ids_with_refs());
       env.db->print_stats(std::cerr);
-      REQUIRE(0 == ws.count_ids_with_refs());
+      REQUIRE(0 == ws->count_ids_with_refs());
    }
    // let the compactor catch up
    usleep(1000000 * 2);
@@ -637,9 +630,9 @@ TEST_CASE("remove")
 {
    environ env;
    auto    ws = env.db->start_write_session();
-   ARBTRIE_DEBUG("references before start: ", ws.count_ids_with_refs());
+   ARBTRIE_DEBUG("references before start: ", ws->count_ids_with_refs());
    {
-      write_transaction tx    = ws.start_transaction();
+      write_transaction tx    = ws->start_transaction();
       auto              words = load_words(tx);
 
       // remove key that does not exist
@@ -649,10 +642,10 @@ TEST_CASE("remove")
       auto share = tx.get_root();
       r          = tx.remove(to_key_view("xcvbn"));
       REQUIRE(r == -1);
-      ARBTRIE_DEBUG("references before release: ", ws.count_ids_with_refs());
+      ARBTRIE_DEBUG("references before release: ", ws->count_ids_with_refs());
    }
-   ARBTRIE_DEBUG("references after release: ", ws.count_ids_with_refs());
-   REQUIRE(ws.count_ids_with_refs() == 0);
+   ARBTRIE_DEBUG("references after release: ", ws->count_ids_with_refs());
+   REQUIRE(ws->count_ids_with_refs() == 0);
 }
 
 TEST_CASE("subtree2")
@@ -661,7 +654,7 @@ TEST_CASE("subtree2")
    {
       auto ws = env.db->start_write_session();
       {
-         auto tx = ws.start_transaction();
+         auto tx = ws->start_transaction();
 
          // create test tree
          std::string big_value;
@@ -670,7 +663,7 @@ TEST_CASE("subtree2")
          auto& root = tx.root_handle();
 
          // insert subtree into empty tree
-         auto empty = ws.start_transaction(-1);
+         auto empty = ws->start_transaction(-1);
 
          empty.upsert(to_key_view("subtree"), tx.get_root());
          REQUIRE(tx.root_handle().ref() == 2);  // tx, and value of subtree key
@@ -775,11 +768,11 @@ TEST_CASE("subtree2")
          REQUIRE(tx.subtree().is_valid());
 
          ARBTRIE_DEBUG("output: ", std::string(value.data(), value.size()));
-         // auto size    = ws.get( root, to_key_view("version1"), v1 );
+         // auto size    = ws->get( root, to_key_view("version1"), v1 );
 
          env.db->print_stats(std::cerr);
       }
-      REQUIRE(ws.count_ids_with_refs() == 0);
+      REQUIRE(ws->count_ids_with_refs() == 0);
    }
 }
 
@@ -814,7 +807,7 @@ TEST_CASE("random-size-updates")
    {
       auto ws = env.db->start_write_session();
       {
-         auto tx    = ws.start_transaction();
+         auto tx    = ws->start_transaction();
          auto words = load_words(tx);
 
          std::string       data;
@@ -833,9 +826,9 @@ TEST_CASE("random-size-updates")
             REQUIRE(postsize == data.size());
          }
          env.db->print_stats(std::cerr);
-         ws.count_ids_with_refs();
+         ws->count_ids_with_refs();
       }
-      REQUIRE(ws.count_ids_with_refs() == 0);
+      REQUIRE(ws->count_ids_with_refs() == 0);
    }
    // let the compactor catch up
    usleep(1000000 * 2);
@@ -852,12 +845,12 @@ TEST_CASE("recover")
    environ    env;
    {
       auto ws = env.db->start_write_session();
-      auto tx = ws.start_transaction();
-      // auto root = ws.create_root();
+      auto tx = ws->start_transaction();
+      // No need for create_root() with transaction API
       load_words(tx);
       tx.commit_and_continue();
-      //ws.set_root<sync_type::sync>(root);
-      auto stats = v1 = ws.get_node_stats(tx.get_root());
+      // get_node_stats is on the session, not the transaction
+      auto stats = v1 = ws->get_node_stats(tx.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -883,8 +876,8 @@ TEST_CASE("recover")
    ARBTRIE_WARN("AFTER RECOVER");
    {
       auto ws    = env.db->start_write_session();
-      auto tx    = ws.start_transaction();
-      auto stats = v3 = ws.get_node_stats(tx.get_root());
+      auto tx    = ws->start_transaction();
+      auto stats = v3 = ws->get_node_stats(tx.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -896,15 +889,15 @@ TEST_CASE("recover")
    {
       ARBTRIE_WARN("INSERT 1 Million Rows");
       auto ws = env.db->start_write_session();
-      auto tx = ws.start_transaction();
+      auto tx = ws->start_transaction();
       for (uint64_t i = 0; i < 1000'000; ++i)
       {
          key_view kstr((char*)&i, sizeof(i));
          tx.insert(kstr, kstr);
       }
       tx.commit_and_continue();
-      //ws.set_root<sync_type::sync>(root);
-      auto stats = v4 = ws.get_node_stats(tx.get_root());
+      // get_node_stats is on the session, not the transaction
+      auto stats = v4 = ws->get_node_stats(tx.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -916,8 +909,8 @@ TEST_CASE("recover")
    ARBTRIE_WARN("AFTER RECOVER 2");
    {
       auto ws    = env.db->start_write_session();
-      auto rt    = ws.start_transaction();
-      auto stats = v5 = ws.get_node_stats(rt.get_root());
+      auto tx    = ws->start_transaction();
+      auto stats = v5 = ws->get_node_stats(tx.get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -939,7 +932,7 @@ TEST_CASE("dense-rand-insert")
    environ env;
    auto    ws = env.db->start_write_session();
    {
-      auto r = ws.create_root();
+      auto tx = ws->start_transaction();
 
       for (int i = 0; i < 100000; i++)
       {
@@ -947,1203 +940,21 @@ TEST_CASE("dense-rand-insert")
          {
             ARBTRIE_WARN("i: ", i);
          }
-         REQUIRE(ws.count_keys(r) == i);
+         REQUIRE(tx.count_keys() == i);
 
          uint64_t val = rand64();
          key_view kstr((char*)&val, sizeof(val));
-         ws.insert(r, kstr, kstr);
-         ws.get(r, kstr,
-                [&](bool found, const value_type& r)
-                {
-                   if (not found)
-                   {
-                      ARBTRIE_WARN("unable to find key: ", val, " i:", i);
-                      assert(!"should have found key!");
-                   }
-                   REQUIRE(found);
-                });
-      }
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
+         tx.insert(kstr, kstr);
 
-std::string random_string(uint64_t seed)
-{
-   static const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-   static const int  charset_size = sizeof(charset) - 1;
-
-   std::mt19937_64                    gen(seed);
-   std::uniform_int_distribution<int> len_dist(0, 1023);  // Random length 0-1023
-   std::uniform_int_distribution<int> char_dist(0, charset_size - 1);
-
-   int         length = len_dist(gen);
-   std::string result;
-   result.reserve(length);
-
-   for (int i = 0; i < length; i++)
-   {
-      result += charset[char_dist(gen)];
-   }
-
-   return result;
-}
-
-TEST_CASE("random-string")
-{
-   // Test deterministic output for same seed
-   REQUIRE(random_string(42) == random_string(42));
-
-   // Test different seeds produce different strings
-   REQUIRE(random_string(1) != random_string(2));
-
-   // Test length constraints
-   for (int i = 0; i < 100; i++)
-   {
-      auto str = random_string(i);
-      REQUIRE(str.length() <= 1023);
-   }
-}
-
-TEST_CASE("lower-bound")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      std::map<std::string, int> reference;
-      auto to_kv = [&](uint64_t& k) { return key_view((char*)&k, sizeof(k)); };
-
-      auto tx    = ws.start_transaction();
-      auto words = load_words(tx);
-      for (size_t i = 0; i < words.size(); i++)
-      {
-         reference[words[i]] = i;
-      }
-
-      REQUIRE(reference.size() == tx.count_keys());
-
-      std::sort(words.begin(), words.end());
-
-      for (const auto& [key, _] : reference)
-      {
-         auto witr = std::lower_bound(words.begin(), words.end(), key);
-         if (witr == words.end() || *witr != key)
+         auto value = tx.get<std::string>(kstr);
+         if (!value)
          {
-            ARBTRIE_DEBUG("key '", key, "' from reference not found in words");
-            REQUIRE(false);  // Key from reference must exist in words
+            ARBTRIE_WARN("unable to find key: ", val, " i:", i);
+            assert(!"should have found key!");
          }
+         REQUIRE(value);
       }
-
-      auto& itr = tx;
-      int   i   = 0;
-      while (itr.next())
-      {
-         REQUIRE(itr.key() == words[i]);
-         i++;
-      }
-      REQUIRE(i == reference.size());
-
-      for (size_t i = 0; i < words.size(); i++)
-      {
-         auto qv = to_key_view(words[i]);
-
-         auto rritr = reference.lower_bound(std::string(to_str(qv)));
-         itr.lower_bound(qv);
-
-         if (rritr == reference.end())
-            REQUIRE(not itr.valid());
-         if (rritr != reference.end())
-         {
-            //        ARBTRIE_DEBUG("i: ", i, " q: ", qv, " ritr: ", to_key_view(rritr->first),
-            //                      " =? itr: ", itr.key());
-            assert(rritr->first == to_str(itr.key()));
-            REQUIRE(rritr->first == to_str(itr.key()));
-         }
-      }
-
-      for (int i = 0; i < 10000; ++i)
-      {
-         auto query = random_string(i);
-         auto qv    = to_key_view(query);
-
-         //     ARBTRIE_WARN(i, "]   query: '", query, "'");
-         auto rritr = reference.lower_bound(query);
-         itr.lower_bound(qv);
-
-         auto witr = std::lower_bound(words.begin(), words.end(), query);
-         if (witr != words.end())
-         {
-            // ARBTRIE_DEBUG(i, "]   word: '", *witr, "'");
-         }
-
-         if (rritr == reference.end())
-         {
-            assert(rritr->first == to_str(itr.key()));
-            REQUIRE(itr.is_end());
-         }
-         else
-         {
-            assert(rritr->first == to_str(itr.key()));
-            REQUIRE(rritr->first == to_str(itr.key()));
-         }
-      }
+      tx.abort();
    }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-TEST_CASE("upper-bound2")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   auto    r  = ws.create_root();
-
-   auto to_kv = [&](uint64_t& k) { return key_view((char*)&k, ((uint8_t*)&k)[7] % 9); };
-
-   std::map<std::string, int> reference;
-   ws.upsert(r, "hello", "world");
-   reference["hello"] = 0;
-
-   auto itr = ws.create_iterator(r);
-   for (int i = 0; i < 100000; ++i)
-   {
-      uint64_t query = uint64_t(rand64());
-      auto     qv    = to_kv(query);
-
-      auto rritr = reference.upper_bound(std::string(to_str(qv)));
-      itr.upper_bound(qv);
-
-      if (rritr == reference.end())
-         REQUIRE(itr.is_end());
-      if (rritr != reference.end())
-      {
-         REQUIRE(not itr.is_end());
-         if (rritr->first != to_str(itr.key()))
-         {
-            ARBTRIE_DEBUG("i: ", i, " q: ", to_hex(qv),
-                          " ritr: ", to_hex(to_key_view(rritr->first)),
-                          " =? itr: ", to_hex(itr.key()));
-         }
-         assert(rritr->first == to_str(itr.key()));
-         REQUIRE(rritr->first == to_str(itr.key()));
-      }
-
-      uint64_t val                         = uint64_t(rand64());
-      key_view kstr                        = to_kv(val);
-      reference[std::string(to_str(kstr))] = 0;
-      //   ARBTRIE_DEBUG("upsert: ", to_hex(kstr));
-      int result = ws.upsert(r, kstr, kstr);
-      //    ARBTRIE_DEBUG("upsert: ", to_hex(kstr));
-      itr.set_root(r);
-      REQUIRE(reference.size() == ws.count_keys(r));
-   }
-}
-
-TEST_CASE("rev-lower-bound")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   auto    r  = ws.create_root();
-
-   auto to_kv = [&](uint64_t& k) { return key_view((char*)&k, ((uint8_t*)&k)[7] % 9); };
-
-   using map_type = std::map<std::string, uint64_t>;
-   map_type reference;
-
-   auto map_rlb = [](const map_type& m, key_view k)
-   {
-      auto ub = m.upper_bound(std::string(k));  // First key > k
-      if (ub != m.begin())
-         return map_type::const_reverse_iterator(ub);
-      return m.crend();  // No key <= k
-   };
-
-   ws.upsert(r, "hello", "world");
-   reference["hello"] = 0;
-   auto itr           = ws.create_iterator(std::move(r));
-   for (int i = 0; i < 100000; ++i)
-   {
-      uint64_t query = uint64_t(rand64());
-      auto     qv    = to_kv(query);
-
-      //   ARBTRIE_WARN(i, "  query: ", to_hex(qv));
-      itr.reverse_lower_bound(qv);
-      auto rritr = map_rlb(reference, qv);
-      if (rritr != reference.crend())
-      {
-         //  ARBTRIE_DEBUG(i, "  reference: ", to_hex(rritr->first), " itr: ", to_hex(itr.key()),
-         //                " <= ", to_hex(qv));
-         assert(not itr.is_end());
-         REQUIRE(not itr.is_end());
-         assert(itr.key() <= qv);
-         assert(itr.key() == to_key_view(rritr->first));
-         REQUIRE(itr.key() == to_key_view(rritr->first));
-         REQUIRE(itr.key() <= qv);
-      }
-      else
-      {
-         REQUIRE(itr.is_rend());
-         REQUIRE(itr.is_start());
-      }
-      // add another key
-      uint64_t val                         = uint64_t(rand64());
-      key_view kstr                        = to_kv(val);
-      reference[std::string(to_str(kstr))] = val;
-      //ARBTRIE_DEBUG("upsert: ", to_hex(kstr));
-      int result = ws.upsert(itr.root_handle(), kstr, kstr);
-      //itr.set_root(r);
-      REQUIRE(reference.size() == ws.count_keys(itr.root_handle()));
-   }
-}
-
-TEST_CASE("sparse-rand-upsert")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      auto r = ws.create_root();
-
-      auto test_count = [&](auto&& n)
-      {
-         if (not n.address())
-            return;
-         auto from = std::to_string(rand64() & 0xfffffff);
-         auto to   = std::to_string(rand64() & 0xfffffff);
-         while (to == from)
-            to = std::to_string(rand64());
-         if (to < from)
-            std::swap(to, from);
-
-         //ARBTRIE_DEBUG( from , " -> ", to );
-         auto itr = ws.create_iterator(n);
-         itr.lower_bound(to_key_view(from));
-         uint32_t count = 0;
-         while (not itr.is_end())
-         {
-            assert(itr.key() >= to_key_view(from));
-            if (itr.key() < to_key_view(to))
-            {
-               ++count;
-               itr.next();
-            }
-            else
-               break;
-         }
-         //ARBTRIE_DEBUG( from , " -> ", to , " = ", count);
-         REQUIRE(ws.count_keys(n, to_key_view(from), to_key_view(to)) == count);
-      };
-
-      int total = 0;
-      for (int i = 0; i < 100000; i++)
-      {
-         REQUIRE(ws.count_keys(r) == total);
-
-         uint64_t    val  = uint32_t(rand64() & 0xfffffff);
-         std::string str  = std::to_string(val);
-         key_view    kstr = to_key_view(str);
-         total += -1 == ws.upsert(r, kstr, kstr);
-         ws.get(r, kstr,
-                [&](bool found, const value_type& r)
-                {
-                   if (not found)
-                   {
-                      ARBTRIE_WARN("unable to find key: ", val, " i:", i);
-                      assert(!"should have found key!");
-                   }
-                   REQUIRE(found);
-                });
-      }
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-TEST_CASE("dense-rand-upsert")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      auto r = ws.create_root();
-
-      std::map<std::string, int> reference;
-
-      auto to_kv = [&](uint64_t& k) { return key_view((char*)&k, sizeof(k)); };
-
-      auto test_count = [&](auto n, bool print_dbg)
-      {
-         print_dbg     = false;
-         uint64_t from = rand64();
-         uint64_t to   = rand64();
-         while (to == from)
-            to = rand64();
-         auto kfrom = to_kv(from);
-         auto kto   = to_kv(to);
-
-         if (kto < kfrom)
-            std::swap(kto, kfrom);
-
-         if (print_dbg)
-            ARBTRIE_DEBUG("test count from ", to_hex(kfrom), " -> ", to_hex(kto));
-         auto itr = ws.create_iterator(n);
-         itr.lower_bound(kfrom);
-         auto     ref_count = 0;
-         uint32_t count     = 0;
-
-         auto ref_itr = reference.lower_bound(std::string(to_str(kfrom)));
-         if (ref_itr != reference.end())
-         {
-            REQUIRE(not itr.is_end());
-            if (to_key_view(ref_itr->first) != itr.key())
-            {
-               ARBTRIE_WARN("ref: ", to_hex(to_key_view(ref_itr->first)));
-               ARBTRIE_WARN("tri: ", to_hex(itr.key()));
-
-               itr.lower_bound(kfrom);
-            }
-            REQUIRE(to_key_view(ref_itr->first) == itr.key());
-            //++count;
-         }
-
-         while (not itr.is_end())
-         {
-            REQUIRE(ref_itr != reference.end());
-            if (to_key_view(ref_itr->first) != itr.key())
-            {
-               ARBTRIE_DEBUG("count: ", count);
-            }
-            REQUIRE(to_key_view(ref_itr->first) == itr.key());
-
-            if (itr.key() < kto)
-            {
-               ++count;
-               if (print_dbg)
-                  ARBTRIE_DEBUG("\t", count, "] ", to_hex(itr.key()),
-                                "  ref: ", to_hex(ref_itr->first));
-               itr.next();
-               ++ref_itr;
-               if (ref_itr != reference.end())
-                  REQUIRE(not itr.is_end());
-            }
-            else
-            {
-               if (print_dbg and not itr.is_end())
-                  ARBTRIE_WARN("\t end] ", to_hex(itr.key()), "  ref: ", to_hex(ref_itr->first));
-               break;
-            }
-         }
-         if (print_dbg)
-         {
-            ARBTRIE_DEBUG("test count from ", to_hex(kfrom), " -> ", to_hex(kto));
-            ARBTRIE_DEBUG("count: ", count);
-         }
-         auto itr2 = ws.create_iterator(n);
-         REQUIRE(itr2.count_keys(kfrom, kto) == count);
-         //  REQUIRE(ws.count_keys(n, kfrom, kto) == count);
-      };
-
-      //auto itr2 = ws.create_iterator(n);
-      for (int i = 0; i < 100000; i++)
-      {
-         //  REQUIRE(ws.count_keys(r) == i);
-         //  REQUIRE(itr2.count_keys(kfrom, kto) == count);
-         if (i % 10 == 1)
-         {
-            test_count(r, false);
-         }
-
-         uint64_t val = rand64();
-         key_view kstr((char*)&val, sizeof(val));
-         ws.upsert(r, kstr, kstr);
-         reference[std::string(to_str(kstr))] = 0;
-         ws.get(r, kstr,
-                [&](bool found, const value_type& r)
-                {
-                   if (not found)
-                   {
-                      ARBTRIE_WARN("unable to find key: ", val, " i:", i);
-                      assert(!"should have found key!");
-                   }
-                   REQUIRE(found);
-                });
-      }
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-TEST_CASE("dense-little-seq-upsert")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      auto r = ws.create_root();
-
-      for (int i = 0; i < 100000; i++)
-      {
-         REQUIRE(ws.count_keys(r) == i);
-
-         uint64_t val = i;
-         key_view kstr((char*)&val, sizeof(val));
-         ws.upsert(r, kstr, kstr);
-         ws.get(r, kstr,
-                [&](bool found, const value_type& r)
-                {
-                   if (not found)
-                   {
-                      ARBTRIE_WARN("unable to find key: ", val, " i:", i);
-                      assert(!"should have found key!");
-                   }
-                   REQUIRE(found);
-                });
-      }
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-
-uint64_t bswap(uint64_t x)
-{
-   x = (x & 0x00000000FFFFFFFF) << 32 | (x & 0xFFFFFFFF00000000) >> 32;
-   x = (x & 0x0000FFFF0000FFFF) << 16 | (x & 0xFFFF0000FFFF0000) >> 16;
-   x = (x & 0x00FF00FF00FF00FF) << 8 | (x & 0xFF00FF00FF00FF00) >> 8;
-   return x;
-}
-
-TEST_CASE("thread-write")
-{
-   environ        env;
-   const uint64_t per_thread = 10'000'000;
-   const int      rounds     = 2;
-   auto           run_thread = [&](int num)
-   {
-      ARBTRIE_WARN("start thread ", num);
-      auto ws = env.db->start_write_session();
-      auto r  = ws.create_root();
-
-      for (int x = 0; x < rounds; ++x)
-      {
-         for (int64_t i = 0; i < per_thread; i++)
-         {
-            uint64_t val = rand64();  //bswap(i);
-            key_view kstr((char*)&val, sizeof(val));
-            ws.upsert(r, kstr, kstr);
-            ws.get(r, kstr,
-                   [&](bool found, const value_type& r)
-                   {
-                      if (not found)
-                      {
-                         ARBTRIE_WARN("unable to find key: ", val, " i:", i);
-                         assert(!"should have found key!");
-                      }
-                      REQUIRE(found);
-                   });
-         }
-         ARBTRIE_WARN("Thread ", num, " round: ", x);
-      }
-   };
-   auto        start = std::chrono::steady_clock::now();
-   std::thread t1(run_thread, 1);
-   std::thread t2(run_thread, 2);
-   /*
-   std::thread t3(run_thread,3);
-   std::thread t4(run_thread,4);
-   std::thread t5(run_thread,5);
-   std::thread t6(run_thread,6);
-   std::thread t7(run_thread,7);
-   std::thread t8(run_thread,8);
-   */
-   t1.join();
-   t2.join();
-   /*
-   t3.join();
-   t4.join();
-   t5.join();
-   t6.join();
-   t7.join();
-   t8.join();
-   */
-   auto ws    = env.db->start_write_session();
-   auto end   = std::chrono::steady_clock::now();
-   auto delta = end - start;
-
-   std::cout << "db loaded " << std::setw(12)
-             << add_comma(
-                    int64_t((per_thread * 2 * rounds) /
-                            (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
-             << " random upserts/sec  total items: " << add_comma(per_thread * 2 * rounds) << " \n";
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-
-TEST_CASE("dense-big-seq-upsert")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      auto r = ws.create_root();
-
-      for (int i = 0; i < 100000; i++)
-      {
-         REQUIRE(ws.count_keys(r) == i);
-
-         uint64_t val = bswap(i);
-         key_view kstr((char*)&val, sizeof(val));
-         ws.upsert(r, kstr, kstr);
-         ws.get(r, kstr,
-                [&](bool found, const value_type& r)
-                {
-                   if (not found)
-                   {
-                      ARBTRIE_WARN("unable to find key: ", val, " i:", i);
-                      assert(!"should have found key!");
-                   }
-                   REQUIRE(found);
-                });
-      }
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-
-/**
- *  Verify that everything continues to work even if the maximum reference count
- *  of a single node is exceeded. 
- *
- *  - exception should be thrown when reaching max ref count
- */
-TEST_CASE("many refs") {}
-
-TEST_CASE("move-frequently-read-node")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   auto    r  = ws.create_root();
-
-   // load words from system dictionary
-   std::ifstream file("/usr/share/dict/words");
-   std::string   word;
-   while (file >> word)
-   {
-      ws.upsert(r, key_view(word), value_view(word));
-   }
-
-   // start the compactor thread
-   env.db->start_compact_thread();
-
-   // repeatedly query the same word using a caching iterator
-   const std::string target_word = "mango";  // Middle word to ensure traversal
-   const int         num_queries = 1000 * 1000;
-
-   auto rs  = env.db->start_read_session();
-   auto itr = ws.create_iterator<arbtrie::caching>(r);
-   for (int i = 0; i < num_queries; i++)
-   {
-      itr.lower_bound(key_view(target_word));
-   }
-}
-
-TEST_CASE("iterator-get-methods")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-
-   // Load dictionary words and store them for verification
-   auto tx    = ws.start_transaction(0);
-   auto words = load_words(tx);
-   tx.commit();
-   //ws.set_root<sync_type::sync>(root);
-
-   // Create read session and iterator
-   auto rs = env.db->start_read_session();
-   auto it = rs.start_transaction(0);
-
-   // Test a sample of words from the dictionary
-   for (size_t i = 0; i < words.size();
-        i += 100)  // Test every 100th word to keep test duration reasonable
-   {
-      const auto& word = words[i];
-
-      // First verify get() works correctly
-      it.lower_bound(key_view(word));
-      REQUIRE(it.valid());
-      std::string current_key(it.key().data(), it.key().size());
-      REQUIRE(current_key == word);
-
-      // Now test next() followed by prev() returns to same key
-      REQUIRE(it.next());  // Move to next key
-      REQUIRE(it.prev());  // Move back
-      std::string returned_key(it.key().data(), it.key().size());
-      REQUIRE(returned_key == word);  // Should be back at original key
-
-      // The value should be the uppercase version of the word, padded to 64 bytes
-      std::string expected = word;
-      toupper(expected);
-      expected.resize(64);
-
-      auto vv = it.value<std::string>();
-      REQUIRE(vv == expected);
-
-      it.find(key_view(word));
-      REQUIRE(it.valid());
-      REQUIRE(it.key() == word);
-      REQUIRE(it.value<std::string>() == expected);
-
-      // Test iterator get
-      auto gv = it.get<std::string>(key_view(word));
-      REQUIRE(gv);
-      REQUIRE(*gv == expected);
-
-      // Verify that iterator.key() returns the original word after get2
-      REQUIRE(std::string(it.key().data(), it.key().size()) == word);
-   }
-
-   // Test non-existent key
-   std::string nonexistent = "THIS_KEY_SHOULD_NOT_EXIST_IN_DICTIONARY_12345";
-
-   auto gv = it.get<std::string>(nonexistent);
-   REQUIRE(not gv);
-}
-
-TEST_CASE("beta-iterator-dense-validation")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   auto    r  = ws.create_root();
-
-   uint64_t              sample_size = 1000 * 1000;
-   std::vector<uint64_t> keys;
-
-   for (uint64_t i = 0; i < sample_size; i++)
-   {
-      uint64_t k = XXH3_64bits(&i, sizeof(i));
-      key_view kstr((char*)&k, sizeof(k));
-      // ARBTRIE_WARN("upserting key: ", i, " = ", to_hex(kstr));
-      ws.upsert(r, kstr, kstr);
-      keys.push_back(k);
-   }
-   std::sort(keys.begin(), keys.end(),
-             [](uint64_t a, uint64_t b) { return memcmp(&a, &b, sizeof(uint64_t)) < 0; });
-
-   auto oldi = ws.create_iterator<caching>(r);
-   oldi.lower_bound(key_view());
-
-   uint64_t count = 0;
-   /*
-   std::cout << "testing old iterator\n";
-
-   while (oldi.next())
-   {
-      key_view kstr((char*)&keys[count], sizeof(keys[count]));
-      if (oldi.key() != kstr)
-         ARBTRIE_WARN(count, "]  key mismatch: ", to_hex(oldi.key()), " != ", to_hex(kstr));
-      //  REQUIRE(oldi.key() == kstr);
-      ++count;
-   }
-   if (count != sample_size)
-      ARBTRIE_WARN("old iterator count mismatch: ", count, " != ", sample_size);
-      */
-
-   std::cout << "testing beta iterator\n";
-   auto bi = ws.create_iterator<caching>(r);
-   count   = 0;
-   while (bi.next())
-   {
-      key_view kstr((char*)&keys[count], sizeof(keys[count]));
-      if (bi.key() != kstr)
-         ARBTRIE_WARN(count, "]  key mismatch: ", to_hex(bi.key()), " != ", to_hex(kstr));
-      REQUIRE(bi.key() == kstr);
-      ++count;
-   }
-   REQUIRE(count == sample_size);
-   REQUIRE(bi.is_end());
-   while (bi.prev())
-      --count;
-   REQUIRE(bi.is_start());
-   REQUIRE(count == 0);
-}
-
-TEST_CASE("beta-iterator-lower-bound-validation")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   auto    tx = ws.start_transaction();
-
-   std::vector<std::string> words = load_words(tx);
-   std::sort(words.begin(), words.end());
-
-   tx.lower_bound(key_view());
-   for (size_t i = 0; i < words.size(); ++i)
-   {
-      key_view kstr = words[i];
-      REQUIRE(tx.lower_bound(kstr));
-      REQUIRE(tx.key() == kstr);
-   }
-   std::string last_word = words.back();
-   last_word.back()++;
-   REQUIRE(not tx.lower_bound(key_view(last_word)));
-   REQUIRE(tx.is_end());
-}
-
-TEST_CASE("beta-iterator-validation")
-{
-   environ                  env;
-   auto                     ws    = env.db->start_write_session();
-   auto                     tx    = ws.start_transaction();
-   std::vector<std::string> words = load_words(tx);
-   std::sort(words.begin(), words.end());
-
-   auto& itr = tx;
-
-   // Test basic iterator state
-   std::cout << "Is begin: " << itr.is_start() << std::endl;
-   std::cout << "Is end: " << itr.is_end() << std::endl;
-   std::cout << "Is valid: " << itr.valid() << std::endl;
-
-   REQUIRE(itr.valid());
-   REQUIRE(itr.is_start());
-
-   // First validate beta iterator forward traversal
-   std::cout << "\nValidating beta iterator next() correctness..." << std::endl;
-   size_t count = 0;
-   for (const auto& word : words)
-   {
-      itr.next();
-      REQUIRE(itr.key() == word);
-      count++;
-   }
-   REQUIRE(not itr.is_end());
-   REQUIRE(not itr.next());
-   REQUIRE(itr.is_end());
-   REQUIRE(count == words.size());
-   REQUIRE(not itr.is_start());
-
-   // Now validate beta iterator reverse traversal
-   std::cout << "\nValidating beta iterator prev() functionality..." << std::endl;
-   size_t prev_count = 0;
-   for (auto it = words.rbegin(); it != words.rend(); ++it)
-   {
-      itr.prev();
-      REQUIRE(itr.key() == *it);
-      prev_count++;
-   }
-   REQUIRE(prev_count == words.size());
-   REQUIRE(not itr.prev());
-   REQUIRE(itr.is_start());
-
-   // Test alternating next() and prev()
-   for (int i = 0; i < 10 && itr.next(); ++i)
-   {
-   }
-   std::string mid_key(itr.key().data(), itr.key().size());
-   for (int i = 0; i < 5 && itr.prev(); ++i)
-   {
-   }
-   for (int i = 0; i < 5 && itr.next(); ++i)
-   {
-   }
-   REQUIRE(std::string(itr.key().data(), itr.key().size()) == mid_key);
-}
-
-TEST_CASE("iterator-validation")
-{
-   environ                  env;
-   auto                     ws    = env.db->start_write_session();
-   auto                     tx    = ws.start_transaction();
-   std::vector<std::string> words = load_words(tx);
-   std::sort(words.begin(), words.end());
-
-   auto& itr = tx;
-
-   // Test basic iterator state
-   itr.lower_bound(key_view());
-   REQUIRE(itr.valid());
-   std::cout << "Regular iterator key: " << itr.key() << std::endl;
-
-   // Validate regular iterator forward traversal
-   std::cout << "\nValidating regular iterator next() correctness..." << std::endl;
-   size_t reg_count = 0;
-   itr.start();
-   for (const auto& word : words)
-   {
-      REQUIRE(itr.next());
-      REQUIRE(not itr.is_end());
-      REQUIRE(itr.key() == word);
-      reg_count++;
-   }
-   REQUIRE(reg_count == words.size());
-   REQUIRE(not itr.next());
-
-   // Test lower_bound functionality
-   for (const auto& word : words)
-   {
-      REQUIRE(itr.lower_bound(key_view(word)));
-      REQUIRE(itr.key() == word);
-      if (not itr.find(key_view(word)))
-         ARBTRIE_WARN("find failed for: ", word);
-      REQUIRE(itr.find(key_view(word)));
-      REQUIRE(itr.key() == word);
-   }
-
-   // Test that lower_bound past last word returns false
-   std::string last_word = words.back();
-   last_word.back()++;
-   REQUIRE(not itr.lower_bound(key_view(last_word)));
-}
-
-TEST_CASE("find-vs-lower_bound")
-{
-   environ                  env;
-   auto                     ws    = env.db->start_write_session();
-   auto                     tx    = ws.start_transaction();
-   std::vector<std::string> words = load_words(tx);
-   std::sort(words.begin(), words.end());
-
-   auto& itr = tx;
-
-   // time finding the lower bound of each word
-   auto lb_start = std::chrono::steady_clock::now();
-   for (const auto& word : words)
-   {
-      itr.lower_bound(key_view(word));
-   }
-   auto lb_end = std::chrono::steady_clock::now();
-
-   // time itr.find for each word
-   auto find_start = std::chrono::steady_clock::now();
-   for (const auto& word : words)
-   {
-      itr.find(key_view(word));
-   }
-   auto find_end = std::chrono::steady_clock::now();
-
-   auto lb_duration   = std::chrono::duration<double>(lb_end - lb_start).count();
-   auto find_duration = std::chrono::duration<double>(find_end - find_start).count();
-
-   // print the results
-   std::cout << "Lower bound time: " << lb_duration << " seconds" << std::endl;
-   std::cout << "Find time: " << find_duration << " seconds" << std::endl;
-
-   // print the relative performance of find vs lower_bound
-   std::cout << "Find is " << ((lb_duration - find_duration) / lb_duration) * 100
-             << "% faster than lower_bound" << std::endl;
-
-   // find should be faster than lower_bound
-   REQUIRE(find_duration < lb_duration);
-}
-
-TEST_CASE("terator-performance")
-{
-   environ                  env;
-   auto                     ws    = env.db->start_write_session();
-   auto                     tx    = ws.start_transaction();
-   std::vector<std::string> words = load_words(tx);
-   std::sort(words.begin(), words.end());
-
-   auto& itr = tx;
-
-   // Measure iterator performance
-   std::cout << "Measuring regular iterator performance..." << std::endl;
-   size_t reg_count = 0;
-   auto   reg_start = std::chrono::steady_clock::now();
-   itr.lower_bound(key_view());
-   while (not itr.is_end())
-   {
-      reg_count++;
-      itr.next();
-   }
-   auto   reg_end          = std::chrono::steady_clock::now();
-   auto   reg_duration     = std::chrono::duration<double>(reg_end - reg_start).count();
-   double reg_keys_per_sec = reg_count / reg_duration;
-
-   // Report performance results
-   std::cout << "\nPerformance Results:" << std::endl;
-   std::cout << "Regular Iterator: " << std::fixed << std::setprecision(4) << reg_keys_per_sec
-             << " keys/sec (" << reg_count << " keys in " << reg_duration << " seconds)"
-             << std::endl;
-
-   REQUIRE(reg_count == words.size());
-}
-
-TEST_CASE("upper-bound")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      auto tx = ws.start_transaction();
-
-      // Create reference map for validation
-      std::map<std::string, int> reference;
-
-      // Function to generate random key using rand64
-      auto make_key = [](uint64_t val, size_t len)
-      {
-         std::string key;
-         key.resize(len);
-         memcpy(key.data(), &val, std::min(len, sizeof(val)));
-         return key;
-      };
-
-      // Insert 1 million unique random keys
-      size_t total_keys = 1'000'000;
-      for (size_t i = 0; i < total_keys;)
-      {
-         uint64_t    val = uint64_t(rand64());
-         size_t      len = (val % 8) + 1;  // Random length 1-8 bytes
-         std::string key = make_key(val, len);
-
-         // Only insert if key doesn't exist
-         if (reference.find(key) == reference.end())
-         {
-            reference[key] = 0;
-            key_view kstr(key.data(), key.size());
-            tx.upsert(kstr, kstr);
-            ++i;
-
-            if (i % 100000 == 0)
-            {
-               REQUIRE(reference.size() == tx.count_keys());
-            }
-         }
-      }
-      REQUIRE(reference.size() == tx.count_keys());
-
-      // Test upper_bound with 100,000 random keys
-      for (int i = 0; i < 100'000; ++i)
-      {
-         if (i == 21)
-            ARBTRIE_DEBUG("i: ", i);
-         // Generate random test key
-         uint64_t    val = uint64_t(rand64());
-         size_t      len = (val % 8) + 1;
-         std::string key = make_key(val, len);
-
-         // Get upper_bound from reference map
-         auto ref_itr = reference.upper_bound(key);
-
-         // Get upper_bound from beta iterator
-         tx.upper_bound(key_view(key.data(), key.size()));
-
-         if (ref_itr == reference.end())
-         {
-            REQUIRE(not tx.valid());
-         }
-         else
-         {
-            if (!tx.valid())
-            {
-               std::stringstream ss;
-               ss << "Iterator not valid. Key: " << to_hex(key_view(key.data(), key.size()));
-               ss << ", Index: " << i;
-               FAIL(ss.str());
-            }
-            REQUIRE(to_str(tx.key()) == ref_itr->first);
-            // Verify that the key is strictly greater than the search key
-            REQUIRE(to_str(tx.key()) > key);
-         }
-      }
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-
-struct perf_test_data
-{
-   std::vector<std::string> test_keys;
-   std::vector<std::string> inserted_keys;
-};
-
-perf_test_data populate_test_db(write_session& ws,
-                                node_handle&   root,
-                                size_t         total_keys    = 10'000'000,
-                                size_t         num_test_keys = 10'000'000)
-{
-   perf_test_data result;
-   result.inserted_keys.reserve(total_keys);
-
-   // Function to generate random key using rand64
-   auto make_key = [](uint64_t val, size_t len)
-   {
-      std::string key;
-      key.resize(len);
-      memcpy(key.data(), &val, std::min(len, sizeof(val)));
-      return key;
-   };
-
-   std::cout << "Populating database with " << total_keys << " keys..." << std::endl;
-   auto insert_start = std::chrono::steady_clock::now();
-
-   // Insert random keys
-   for (size_t i = 0; i < total_keys; ++i)
-   {
-      uint64_t    val = uint64_t(rand64());
-      size_t      len = (val % 8) + 1;  // Random length 1-8 bytes
-      std::string key = make_key(val, len);
-      result.inserted_keys.push_back(key);
-      key_view kstr(key.data(), key.size());
-      ws.upsert(root, kstr, kstr);
-
-      if (i % 1'000'000 == 0 && i > 0)
-      {
-         std::cout << "Inserted " << i << " keys..." << std::endl;
-      }
-   }
-
-   auto insert_end      = std::chrono::steady_clock::now();
-   auto insert_duration = std::chrono::duration<double>(insert_end - insert_start).count();
-   std::cout << "Database population complete in " << insert_duration << " seconds ("
-             << (total_keys / insert_duration) << " keys/sec)" << std::endl;
-
-   std::cout << "Sampling " << num_test_keys << " test keys..." << std::endl;
-   auto sample_start = std::chrono::steady_clock::now();
-
-   // Randomly sample test keys from inserted keys
-   result.test_keys.reserve(num_test_keys);
-   std::random_device              rd;
-   std::mt19937                    gen(rd());
-   std::uniform_int_distribution<> dis(0, total_keys - 1);
-
-   for (int i = 0; i < num_test_keys; ++i)
-   {
-      result.test_keys.push_back(result.inserted_keys[dis(gen)]);
-   }
-
-   auto sample_end      = std::chrono::steady_clock::now();
-   auto sample_duration = std::chrono::duration<double>(sample_end - sample_start).count();
-   std::cout << "Test key sampling complete in " << sample_duration << " seconds" << std::endl;
-
-   return result;
-}
-
-TEST_CASE("lower-bound-performance")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      auto r = ws.create_root();
-
-      // Populate database and get test data
-      auto test_data = populate_test_db(ws, r);
-
-      // Test regular iterator performance
-      auto reg_start = std::chrono::steady_clock::now();
-      {
-         auto itr = ws.create_iterator<caching>(r);
-         for (const auto& key : test_data.test_keys)
-         {
-            itr.lower_bound(key_view(key.data(), key.size()));
-         }
-      }
-      auto reg_end      = std::chrono::steady_clock::now();
-      auto reg_duration = std::chrono::duration<double>(reg_end - reg_start).count();
-
-      // Test beta iterator without caching performance
-      auto nocache_start = std::chrono::steady_clock::now();
-      {
-         auto itr = ws.create_iterator<noncaching>(r);
-         for (const auto& key : test_data.test_keys)
-         {
-            itr.lower_bound(key_view(key.data(), key.size()));
-         }
-      }
-      auto nocache_end      = std::chrono::steady_clock::now();
-      auto nocache_duration = std::chrono::duration<double>(nocache_end - nocache_start).count();
-
-      // Calculate operations per second
-      double reg_ops_per_sec     = test_data.test_keys.size() / reg_duration;
-      double nocache_ops_per_sec = test_data.test_keys.size() / nocache_duration;
-
-      // Report performance results
-      std::cout << "\nLower Bound Performance Results:" << std::endl;
-      std::cout << "Regular Iterator: " << std::fixed << std::setprecision(4) << reg_ops_per_sec
-                << " ops/sec (" << test_data.test_keys.size() << " searches in " << reg_duration
-                << " seconds)" << std::endl;
-      std::cout << "Iterator (no cache): " << std::fixed << std::setprecision(4)
-                << nocache_ops_per_sec << " ops/sec (" << test_data.test_keys.size()
-                << " searches in " << nocache_duration << " seconds)" << std::endl;
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-
-TEST_CASE("iterator-get-performance")
-{
-   environ env;
-   auto    ws = env.db->start_write_session();
-   {
-      auto r = ws.create_root();
-
-      // Populate database and get test data
-      auto test_data = populate_test_db(ws, r);
-
-      // Test regular iterator get performance
-      auto   reg_start = std::chrono::steady_clock::now();
-      size_t reg_found = 0;
-      {
-         auto itr = ws.create_iterator<caching>(r);
-         for (const auto& key : test_data.test_keys)
-         {
-            reg_found += itr.get(key_view(key.data(), key.size()),
-                                 [&](const value_type& val) { return val.is_view(); });
-         }
-      }
-      auto reg_end          = std::chrono::steady_clock::now();
-      auto reg_duration     = std::chrono::duration<double>(reg_end - reg_start).count();
-      auto reg_keys_per_sec = test_data.test_keys.size() / reg_duration;
-
-      // Test beta iterator get performance
-      auto   start = std::chrono::steady_clock::now();
-      size_t found = 0;
-      {
-         auto itr = ws.create_iterator<caching>(r);
-         for (const auto& key : test_data.test_keys)
-         {
-            found += itr.get(key_view(key.data(), key.size()),
-                             [&](const value_type& val) { return true; });
-         }
-      }
-      auto end          = std::chrono::steady_clock::now();
-      auto duration     = std::chrono::duration<double>(end - start).count();
-      auto keys_per_sec = test_data.test_keys.size() / duration;
-
-      // Report performance results
-      std::cout << "\nGet Performance Results:" << std::endl;
-      std::cout << "Beta Iterator: " << std::fixed << std::setprecision(4) << keys_per_sec
-                << " keys/sec (" << found << " found in " << duration << " seconds)" << std::endl;
-      std::cout << "Regular Iterator: " << std::fixed << std::setprecision(4) << reg_keys_per_sec
-                << " keys/sec (" << reg_found << " found in " << reg_duration << " seconds)"
-                << std::endl;
-
-      // Verify both iterators found the same number of keys
-      REQUIRE(found == reg_found);
-   }
-   REQUIRE(ws.count_ids_with_refs() == 0);
-}
-
-TEST_CASE("lower_bound_prefix_edge_case")
-{
-   environ env;
-   {
-      auto ws   = env.db->start_write_session();
-      auto root = ws.create_root();
-
-      // Create 500 random keys with "test" prefix
-      std::random_device              rd;
-      std::mt19937                    gen(rd());
-      std::uniform_int_distribution<> dist(97, 122);  // a-z ASCII
-
-      std::vector<std::string> test_keys;
-      for (int i = 0; i < 500; i++)
-      {
-         std::string key = "test";
-         // Add 6 random characters after "test"
-         for (int j = 0; j < 6; j++)
-         {
-            key += static_cast<char>(dist(gen));
-         }
-         test_keys.push_back(key);
-         ws.upsert(root, to_key_view(key), to_value_view("value" + std::to_string(i)));
-      }
-
-      // Sort keys to verify results
-      std::sort(test_keys.begin(), test_keys.end());
-
-      // Create iterator and try to find lower_bound of "texx"
-      auto rs = env.db->start_read_session();
-      auto it = rs.create_iterator(root);
-
-      // This should find the first key greater than "texx"
-      bool found = it.lower_bound(to_key_view("texx"));
-
-      REQUIRE(it.is_end());
-      // Verify that we found a valid result
-      REQUIRE(not found);
-   }
+   REQUIRE(ws->count_ids_with_refs() == 0);
 }

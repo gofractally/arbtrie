@@ -67,7 +67,7 @@ namespace arbtrie
       // all refs of reachable nodes now >= 2
       {
          auto s     = start_read_session();
-         auto state = s._segas.lock();
+         auto state = s._segas->lock();
          for (int i = 0; i < num_top_roots; ++i)
          {
             auto r = s.get_root(i);
@@ -93,7 +93,7 @@ namespace arbtrie
       // retain all reachable nodes, sending reachable refs to 2+
       {
          auto s     = start_read_session();
-         auto state = s._segas.lock();
+         auto state = s._segas->lock();
          for (int i = 0; i < num_top_roots; ++i)
          {
             auto r = s.get_root(i);

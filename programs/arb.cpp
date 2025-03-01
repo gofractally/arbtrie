@@ -434,7 +434,7 @@ int  main(int argc, char** argv)
 
          const int count = vm["count"].as<int>();
 
-         auto tx = ws.start_transaction(0);
+         auto tx = ws->start_transaction(0);
 
          auto iterate_all = [&]()
          {
@@ -800,12 +800,12 @@ int  main(int argc, char** argv)
       /*
       if (false)
       {
-         auto l = ws._segas.lock();
+         auto l = ws._segas->lock();
          print(l, r.address());
       }
       */
 
-      //      auto l = ws._segas.lock();
+      //      auto l = ws._segas->lock();
       //      print(l, r.address());
       //
       std::cout << "wait for cleanup...\n";
@@ -889,13 +889,13 @@ void test_binary_node()
    {
       auto                       ws = env.db->start_write_session();
       std::optional<node_handle> last_root;
-      auto                       cur_root = ws.create_root();
-      //     auto                       state    = ws._segas.lock();
+      auto                       cur_root = ws->create_root();
+      //     auto                       state    = ws._segas->lock();
       ARBTRIE_DEBUG("upsert hello = world");
 
-      ws.upsert(cur_root, to_key_view("hello"), to_value_view("world"));
+      ws->upsert(cur_root, to_key_view("hello"), to_value_view("world"));
       //     print(state, cur_root.address(), 1);
-      ws.upsert(
+      ws->upsert(
           cur_root, to_key_view("long"),
           to_key_view("message                                                          ends"));
 
@@ -909,8 +909,8 @@ void test_binary_node()
       //     print(state, last_root->address(), 1);
 
       std::cout << "\n ========== inserting 'update' = 'world' ==========\n";
-      ws.upsert(cur_root, to_key_view("update"),
-                to_value_view("long                                                      world"));
+      ws->upsert(cur_root, to_key_view("update"),
+                 to_value_view("long                                                      world"));
 
       std::cout << "root.........\n";
       //   print(state, cur_root.address(), 1);
@@ -921,7 +921,7 @@ void test_binary_node()
       last_root.reset();
 
       std::cout << "\n ========== inserting 'mayday' = 'help me, somebody' ==========\n";
-      ws.upsert(cur_root, to_key_view("mayday"), to_value_view("help me, somebody"));
+      ws->upsert(cur_root, to_key_view("mayday"), to_value_view("help me, somebody"));
       //    print(state, cur_root.address(), 1);
 
       std::cout << "root.........\n";
@@ -936,19 +936,19 @@ void test_refactor()
    environ env;
    env.db->start_compact_thread();
    auto ws = env.db->start_write_session();
-   //   auto state = ws._segas.lock();
+   //   auto state = ws._segas->lock();
 
    {
       std::optional<node_handle> last_root;
       {
-         auto cur_root = ws.create_root();
+         auto cur_root = ws->create_root();
 
          for (int i = 0; i < 1000000; ++i)
          {
             //     std::cout << "==================   start upsert  " << i << "=====================\n";
             std::string v            = std::to_string(rand64());
             std::string value_buffer = v + "==============123456790=======" + v;
-            ws.upsert(cur_root, to_key_view(v), to_value_view(value_buffer));
+            ws->upsert(cur_root, to_key_view(v), to_value_view(value_buffer));
             // std::cout << " after upsert and set backup\n";
             last_root = cur_root;
             if (i >= 179)

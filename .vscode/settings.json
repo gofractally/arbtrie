@@ -99,7 +99,8 @@
         "forward_list": "cpp",
         "span": "cpp",
         "shared_mutex": "cpp",
-        "coroutine": "cpp"
+        "coroutine": "cpp",
+        "memory": "cpp"
     },
     "git.ignoreLimitWarning": true
 }

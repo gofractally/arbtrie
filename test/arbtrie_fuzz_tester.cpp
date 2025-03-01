@@ -55,7 +55,7 @@ namespace
    {
       std::filesystem::path          db_path;
       database*                      db = nullptr;
-      write_session*                 ws = nullptr;
+      std::shared_ptr<write_session> ws = nullptr;
       std::vector<write_transaction> transactions;
 
       // Reference map to verify results
@@ -88,7 +88,7 @@ namespace
          // Create and open the database
          database::create(db_path, cfg);
          db = new database(db_path, cfg);
-         ws = new write_session(db->start_write_session());
+         ws = db->start_write_session();
 
          // Initialize the first transaction
          auto tx = ws->start_transaction();
@@ -100,7 +100,7 @@ namespace
       {
          // Clean up resources
          transactions.clear();
-         delete ws;
+         ws.reset();  // Use reset instead of delete for shared_ptr
          delete db;
 
          // Clean up the temporary directory
@@ -1048,17 +1048,24 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
    FuzzTestEnvironment env(42);
 
    // Create multiple write transactions
-   std::vector<write_transaction>     txs;
-   std::vector<std::set<std::string>> committed_keys;
-   const int                          num_transactions     = 3;
-   const int                          keys_per_transaction = 5;
+   std::vector<std::shared_ptr<write_session>> sessions;  // Store sessions as shared pointers
+   std::vector<write_transaction>              txs;
+   std::vector<std::set<std::string>>          committed_keys;
+   const int                                   num_transactions     = 3;
+   const int                                   keys_per_transaction = 5;
+
+   // First create and store sessions
+   for (int i = 0; i < num_transactions; i++)
+   {
+      // Use the start_write_session method
+      sessions.push_back(env.db->start_write_session());
+   }
 
    // Start multiple transactions with DIFFERENT ROOT INDICES
    for (int i = 0; i < num_transactions; i++)
    {
-      auto ws = env.db->start_write_session();
       // Use a different root index for each transaction
-      txs.push_back(ws.start_transaction(i));
+      txs.push_back(sessions[i]->start_transaction(i));
       committed_keys.push_back({});
 
       std::cout << "Started transaction " << i << " with root index " << i << std::endl;
@@ -1426,9 +1433,9 @@ TEST_CASE("Basic iterator operations test", "[fuzz][bug][basic]")
 // Test environment setup
 struct TestEnv
 {
-   std::filesystem::path db_path;
-   database*             db = nullptr;
-   write_session*        ws = nullptr;
+   std::filesystem::path          db_path;
+   database*                      db = nullptr;
+   std::shared_ptr<write_session> ws = nullptr;
 
    TestEnv()
    {
@@ -1447,12 +1454,12 @@ struct TestEnv
 
       database::create(db_path, cfg);
       db = new database(db_path, cfg);
-      ws = new write_session(db->start_write_session());
+      ws = db->start_write_session();
    }
 
    ~TestEnv()
    {
-      delete ws;
+      ws.reset();  // Use reset instead of delete for shared_ptr
       delete db;
       std::filesystem::remove_all(db_path);
    }
@@ -1592,7 +1599,7 @@ TEST_CASE("Transactions on same root index should block", "[transaction]")
 
    // Start a transaction on root index 0
    auto ws1 = env.db->start_write_session();
-   auto tx1 = ws1.start_transaction(0);
+   auto tx1 = ws1->start_transaction(0);
 
    // Insert a key
    std::string key   = "test_key";
@@ -1616,7 +1623,7 @@ TEST_CASE("Transactions on same root index should block", "[transaction]")
 
    // Now try to start a second transaction - this should work now
    std::cout << "Main thread: Starting second transaction after commit..." << std::endl;
-   auto tx2 = ws2.start_transaction(0);
+   auto tx2 = ws2->start_transaction(0);
    std::cout << "Main thread: Second transaction started successfully" << std::endl;
 
    // Insert another key in the second transaction

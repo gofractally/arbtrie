@@ -180,7 +180,7 @@ namespace arbtrie
       assert(index >= 0);
 
       // prevent other threads from modifying the root while we are
-      _db.modify_lock(index).lock();
+      _db->modify_lock(index).lock();
 
       // must take the lock to prevent a race condition around
       // retaining the current top root... otherwise we must
@@ -188,10 +188,10 @@ namespace arbtrie
       //     read / lookup the meta for the address
       //     attempt to retain the meta while making sure the top root
       //     hasn't changed, the lock is probably faster anyway
-      std::unique_lock lock(_db._root_change_mutex[index]);
+      std::unique_lock lock(_db->_root_change_mutex[index]);
 
       return node_handle(
-          *this, id_address::from_int(_db._dbm->top_root[index].load(std::memory_order_relaxed)));
+          *this, id_address::from_int(_db->_dbm->top_root[index].load(std::memory_order_relaxed)));
    }
 
    node_handle read_session::get_root(int index)
@@ -205,10 +205,10 @@ namespace arbtrie
       //     read / lookup the meta for the address
       //     attempt to retain the meta while making sure the top root
       //     hasn't changed, the lock is probably faster anyway
-      std::unique_lock lock(_db._root_change_mutex[index]);
+      std::unique_lock lock(_db->_root_change_mutex[index]);
 
       return node_handle(
-          *this, id_address::from_int(_db._dbm->top_root[index].load(std::memory_order_relaxed)));
+          *this, id_address::from_int(_db->_dbm->top_root[index].load(std::memory_order_relaxed)));
    }
 
    database::database(std::filesystem::path dir, config cfg, access_mode mode)
@@ -297,13 +297,15 @@ namespace arbtrie
       _sega.stop_compact_thread();
    }
 
-   write_session database::start_write_session()
+   std::shared_ptr<write_session> database::start_write_session()
    {
-      return write_session(*this);
+      // Use the static factory method instead of make_shared
+      return write_session::create(this);
    }
+
    read_session database::start_read_session()
    {
-      return read_session(*this);
+      return read_session(this);
    }
 
    template <typename NodeType>
@@ -327,7 +329,7 @@ namespace arbtrie
       // retain the handle here until its address is safely stored
       _new_handle = std::move(sub);
 
-      auto state = _segas.lock();
+      auto state = _segas->lock();
 
       r.give(upsert(state, r.take(), key, value_type::make_subtree(_new_handle->address())));
 
@@ -340,7 +342,7 @@ namespace arbtrie
    {
       _delta_keys     = 0;
       _old_value_size = -1;
-      auto state      = _segas.lock();
+      auto state      = _segas->lock();
 
       id_address adr = r.take();
       try
@@ -359,7 +361,7 @@ namespace arbtrie
    {
       _delta_keys     = 0;
       _old_value_size = -1;
-      auto state      = _segas.lock();
+      auto state      = _segas->lock();
 
       r.give(insert(state, r.take(), key, val));
    }
@@ -368,7 +370,7 @@ namespace arbtrie
    {
       _delta_keys     = 0;
       _old_value_size = -1;
-      auto state      = _segas.lock();
+      auto state      = _segas->lock();
       r.give(update(state, r.take(), key, val));
       return _old_value_size;
    }
@@ -377,7 +379,7 @@ namespace arbtrie
    {
       _delta_keys     = 0;
       _old_value_size = -1;
-      auto state      = _segas.lock();
+      auto state      = _segas->lock();
       r.give(remove(state, r.take(), key));
       return _old_value_size;
    }
@@ -417,428 +419,6 @@ namespace arbtrie
       if (not root) [[unlikely]]
          throw std::runtime_error("cannot remove key that doesn't exist");
       return upsert<upsert_mode::unique_remove>(state.get(root), key);
-   }
-
-   uint32_t read_session::count_keys(const node_handle& r, key_view from, key_view to)
-   {
-      if (from > to)
-         throw std::runtime_error("count_keys: 'from' key must be less than 'to' key");
-
-
-      if (not r.address()) [[unlikely]]
-      {
-         return 0;
-      }
-
-
-      auto state = _segas.lock();
-      auto root  = state.get(r.address());
-      return count_keys(root, from, to, 0);
-   }
-
-   uint32_t read_session::count_keys(object_ref& r, key_view from, key_view to) const
-   {
-      return count_keys(r, from, to, 0);
-   }
-
-   uint32_t read_session::count_keys(object_ref& r, key_view from, key_view to, int depth) const
-   {
-      return cast_and_call(r.header(),
-                           [&](const auto* n) { return this->count_keys(r, n, from, to, depth); });
-   }
-
-   uint32_t read_session::count_keys(object_ref&       r,
-                                     const value_node* v,
-                                     key_view          from,
-                                     key_view          to) const
-   {
-      return count_keys(r, v, from, to, 0);
-   }
-
-   uint32_t read_session::count_keys(object_ref&       r,
-                                     const value_node* v,
-                                     key_view          from,
-                                     key_view          to,
-                                     int               depth) const
-   {
-      assert(to == key_view() or from < to);
-      auto k = v->key();
-
-      // The key comparison logic needs to be adjusted based on whether we're at the last byte
-      // For the standard half-open range [from, to), we include k if k >= from and k < to
-      // But if we're not at the last byte of the key, we need to include keys where k == to
-      bool in_range;
-
-      if (to.size() > 0 && k.size() > 0 && k.size() < to.size())
-      {
-         // We're not at the last byte of the key, so use inclusive comparison for the endpoint
-         in_range = k >= from and (to == key_view() or k <= to);
-      }
-      else
-      {
-         // We're at the last byte or comparing complete keys, use standard half-open range
-         in_range = k >= from and (to == key_view() or k < to);
-      }
-
-      return in_range;
-   }
-
-   uint32_t read_session::count_keys(object_ref&        r,
-                                     const binary_node* n,
-                                     key_view           from,
-                                     key_view           to) const
-   {
-      return count_keys(r, n, from, to, 0);
-   }
-
-   uint32_t read_session::count_keys(object_ref&        r,
-                                     const binary_node* n,
-                                     key_view           from,
-                                     key_view           to,
-                                     int                depth) const
-   {
-
-      assert(to == key_view() or from < to);
-      auto start = n->lower_bound_idx(from);
-
-      assert(start >= 0);
-      if (start == n->num_branches())
-      {
-         return 0;
-      }
-
-      if (to == key_view())
-      {
-         uint32_t count = n->num_branches() - start;
-         return count;
-      }
-
-      uint32_t end_idx = n->lower_bound_idx(to);
-      uint32_t count   = end_idx - start;
-      return count;
-   }
-
-   uint32_t read_session::count_keys(object_ref&         r,
-                                     const setlist_node* n,
-                                     key_view            from,
-                                     key_view            to) const
-   {
-      return count_keys(r, n, from, to, 0);
-   }
-
-   uint32_t read_session::count_keys(object_ref&         r,
-                                     const setlist_node* n,
-                                     key_view            from,
-                                     key_view            to,
-                                     int                 depth) const
-   {
-      assert(to == key_view() or from < to);
-      auto pre = n->get_prefix();
-      if (to.size() and to < pre)
-      {
-         return 0;
-      }
-
-      auto slp = n->get_setlist_ptr();
-
-      auto count_range = [&](const id_index* pos, const id_index* end)
-      {
-         uint32_t count = 0;
-
-         // Check for empty range or invalid range
-         if (pos >= end)
-         {
-            return count;
-         }
-
-         // Standard C++ half-open range semantics [begin, end)
-         // We include pos and everything up to but not including end
-         while (pos <= end)
-         {
-            auto byte_value = n->get_setlist_ptr()[pos - n->get_branch_ptr()];
-
-            auto     bref         = r.rlock().get(id_address(n->branch_region(), *pos));
-            uint32_t branch_count = count_keys(bref, key_view(), key_view(), depth + 1);
-
-            count += branch_count;
-
-            ++pos;
-         }
-
-         return count;
-      };
-
-      if (from <= pre)
-      {
-         // the start is at or before before this node
-         if (to.size() <= pre.size())
-         {
-            // and the end is after all keys in this node
-            return n->descendants();
-         }
-
-         // else the end is within this node
-         auto begin = n->get_branch_ptr();
-         int  end_idx;
-
-         end_idx = n->upper_bound_idx(char_to_branch(to[pre.size()]));
-
-         uint8_t end_byte = slp[end_idx];
-         auto    end      = begin + end_idx;
-         auto    abs_end  = begin + n->num_branches();
-         auto    delta    = end - begin;
-         auto    to_tail  = to.substr(pre.size() + 1);
-
-         uint64_t count = n->has_eof_value();
-
-         if (to_tail.size() > 0 and end < abs_end)
-            count += count_range(begin, end + 1);
-         else
-            count += count_range(begin, end);
-
-
-         // Check if we need to process the endpoint branch
-         bool isLastByteOfEnd = to.size() == pre.size() + 1;
-         if (end_byte == uint8_t(to[pre.size()]))
-         {
-            // Two cases:
-            // 1. end == abs_end: We're at the end of the branches, but the end key would be in this branch if it existed
-            // 2. end < abs_end: We have a branch to process for the end key
-            if (end < abs_end && !isLastByteOfEnd)
-            {
-               auto     sref = r.rlock().get(id_address(n->branch_region(), *end));
-               uint32_t tail_count =
-                   count_keys(sref, key_view(), to.substr(pre.size() + 1), depth + 1);
-               count += tail_count;
-            }
-         }
-
-         return count;
-      }
-      else
-      {
-         // the start is in the middle of this node
-         auto begin   = n->get_branch_ptr();
-         auto abs_end = begin + n->num_branches();
-
-         auto    start_idx  = n->lower_bound_idx(char_to_branch(from[pre.size()]));
-         uint8_t start_byte = slp[start_idx];
-         auto start = begin + start_idx;
-
-         if (to.size() > pre.size())
-         {
-            // end is in the middle of this node
-            auto end_idx = n->lower_bound_idx(char_to_branch(to[pre.size()]));
-            assert(end_idx <= n->num_branches());
-
-            // we started in the middle of the node, and end in this node,
-            // but there are no branches in that range, so return 0
-            if (end_idx == n->num_branches())
-            {
-               return 0;
-            }
-
-            uint8_t end_byte = slp[end_idx];
-            auto    end      = begin + end_idx;
-
-
-            uint32_t count            = 0;
-            bool     counted_end_byte = false;
-            if (start_byte == uint8_t(from[pre.size()]))
-            {
-               counted_end_byte = start_byte == end_byte;
-               auto     sref  = r.rlock().get(id_address(n->branch_region(), *start));
-               auto     btail = from.substr(pre.size() + 1);
-               auto     etail = (end_byte == start_byte) ? to.substr(pre.size() + 1) : key_view();
-               uint32_t start_count = count_keys(sref, btail, etail, depth + 1);
-               count = start_count;
-               ++start;
-            }
-
-            uint32_t range_count = count_range(start, end);
-            count += range_count;
-
-            assert(end < abs_end);
-
-            if (!counted_end_byte && end_byte == to[pre.size()])
-            {
-               auto     sref      = r.rlock().get(id_address(n->branch_region(), *end));
-               auto     etail     = to.substr(pre.size() + 1);
-               uint32_t end_count = count_keys(sref, key_view(), etail, depth + 1);
-               count += end_count;
-            }
-
-            return count;
-         }
-         else
-         {
-
-            uint32_t count = 0;
-            if (start_byte == uint8_t(from[pre.size()]))
-            {
-               auto     sref        = r.rlock().get(id_address(n->branch_region(), *start));
-               auto     btail       = from.substr(pre.size() + 1);
-               uint32_t start_count = count_keys(sref, btail, key_view(), depth + 1);
-               count += start_count;
-               ++start;
-            }
-
-            uint32_t range_count = count_range(start, abs_end);
-            count += range_count;
-
-            return count;
-         }
-      }
-   }
-
-   uint32_t read_session::count_keys(object_ref&      r,
-                                     const full_node* n,
-                                     key_view         from,
-                                     key_view         to) const
-   {
-      return count_keys(r, n, from, to, 0);
-   }
-
-   uint32_t read_session::count_keys(object_ref&      r,
-                                     const full_node* n,
-                                     key_view         from,
-                                     key_view         to,
-                                     int              depth) const
-   {
-
-      assert(to == key_view() or from < to);
-      auto pre = n->get_prefix();
-      if (to.size() and to < pre)
-      {
-         return 0;
-      }
-
-      uint64_t count = 0;
-
-      auto count_range = [&](branch_index_type pos, branch_index_type end)
-      {
-         uint64_t c    = 0;
-         auto     opos = pos;
-
-
-         // Check for empty range or invalid range
-         if (pos >= end)
-         {
-            return 0ULL;  // Return 0 as uint64_t to match return type
-         }
-
-         // Standard C++ half-open range semantics [begin, end)
-         // We include pos and everything up to but not including end
-         while (pos < end)
-         {
-            auto adr = n->get_branch(pos);
-            if (adr)
-            {
-               auto bref = r.rlock().get(adr);
-               auto bc   = count_keys(bref, key_view(), key_view(), depth + 1);
-
-               c += bc;
-            }
-            ++pos;
-         }
-         return c;
-      };
-
-      if (from <= pre)
-      {
-         // the start is at or before this node
-         if (to.size() <= pre.size())
-         {
-            // end is after this node
-            return n->descendants();
-         }
-
-         // else the end is within this node
-         auto end_byte = char_to_branch(to[pre.size()]);
-
-         if (to.size() > pre.size() + 1)
-            ++end_byte;
-
-         auto end_idx = n->lower_bound(end_byte);
-
-
-         uint64_t count = 0;
-         if (n->has_eof_value())
-         {
-            count = 1;
-         }
-
-         count += count_range(char_to_branch(0), end_idx.first);
-
-         bool isLastByteOfEnd = to.size() == pre.size() + 1;
-
-         if (end_idx.first != max_branch_count and end_byte == end_idx.first and !isLastByteOfEnd)
-         {
-            auto     sref = r.rlock().get(end_idx.second);
-            uint32_t tail_count =
-                count_keys(sref, key_view(), to.substr(pre.size() + 1), depth + 1);
-            count += tail_count;
-         }
-
-         return count;
-      }
-      else
-      {
-         // the start is in the middle of this node
-         auto start_byte = char_to_branch(from[pre.size()]);
-         auto start_idx  = n->lower_bound(start_byte);
-
-         if (to.size() > pre.size())
-         {
-            // begin and end are in the middle of this node
-            auto end_byte = char_to_branch(to[pre.size()]);
-            auto end_idx  = n->lower_bound(end_byte);
-
-            bool counted_end_byte = false;
-            if (start_byte == start_idx.first)
-            {
-               counted_end_byte = start_byte == end_byte;
-               auto     sref  = r.rlock().get(start_idx.second);
-               auto     btail = from.substr(pre.size() + 1);
-               auto     etail = (end_byte == start_byte) ? to.substr(pre.size() + 1) : key_view();
-               uint32_t start_count = count_keys(sref, btail, etail, depth + 1);
-               count = start_count;
-               start_idx.first++;
-            }
-
-            uint32_t range_count = count_range(start_idx.first, end_idx.first);
-            count += range_count;
-
-            if (not counted_end_byte and end_byte == end_idx.first)
-            {
-               auto     sref      = r.rlock().get(end_idx.second);
-               auto     etail     = to.substr(pre.size() + 1);
-               uint32_t end_count = count_keys(sref, key_view(), etail, depth + 1);
-               count += end_count;
-            }
-
-            return count;
-         }
-         else
-         {
-            // begin in the middle and end is beyond the end of this node
-
-            uint64_t count = 0;
-            if (start_idx.first == start_byte)
-            {
-               auto     sref        = r.rlock().get(start_idx.second);
-               auto     btail       = from.substr(pre.size() + 1);
-               uint32_t start_count = count_keys(sref, btail, key_view(), depth + 1);
-               count += start_count;
-               ++start_idx.first;
-            }
-
-            uint32_t range_count = count_range(start_idx.first, max_branch_count);
-            count += range_count;
-
-            return count;
-         }
-      }
    }
 
    template <upsert_mode mode>
@@ -2569,44 +2149,34 @@ namespace arbtrie
 
    void write_session::abort_write(int index)
    {
-      _db.modify_lock(index).unlock();
+      _db->modify_lock(index).unlock();
    }
 
    write_transaction write_session::start_transaction(int top_root_node)
    {
-      // Check if we're operating on a persistent root node (top_root_node >= 0)
-      // or a temporary root node (top_root_node < 0)
-      //
-      // Persistent root nodes require locking because they're shared across sessions
-      // and need to be protected from concurrent modifications.
-      //
-      // Temporary root nodes don't need locks because they're private to this session
-      // and aren't accessible by other sessions until explicitly committed to a persistent root.
-      if (top_root_node >= 0)
-         return write_transaction(
-             *this, get_mutable_root(top_root_node),
-             [this, top_root_node](node_handle commit, bool resume)
+      // Use shared_from_this() to get a shared_ptr to this session
+      return write_transaction(
+          shared_from_this(), top_root_node >= 0 ? get_mutable_root(top_root_node) : create_root(),
+          [this, top_root_node](node_handle commit, bool resume)
+          {
+             if (top_root_node >= 0)
              {
-                if (top_root_node >= 0)
-                {
-                   set_root(std::move(commit), top_root_node);
-                   // give other writers a chance to grab the lock
-                   _db.modify_lock(top_root_node).unlock();
-                   if (resume)
-                      return get_mutable_root(top_root_node);
-                   return node_handle(*this, {});
-                }
+                set_root(std::move(commit), top_root_node);
+                // give other writers a chance to grab the lock
+                _db->modify_lock(top_root_node).unlock();
                 if (resume)
-                   return commit;
+                   return get_mutable_root(top_root_node);
                 return node_handle(*this, {});
-             },
-             [this, top_root_node]()
-             {
-                if (top_root_node >= 0)
-                   abort_write(top_root_node);
-             });
-      else
-         return write_transaction(*this, create_root(), [this](node_handle h, bool) { return h; });
+             }
+             if (resume)
+                return commit;
+             return node_handle(*this, {});
+          },
+          [this, top_root_node]()
+          {
+             if (top_root_node >= 0)
+                abort_write(top_root_node);
+          });
    }
 
 }  // namespace arbtrie

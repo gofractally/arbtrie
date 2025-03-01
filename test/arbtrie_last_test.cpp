@@ -12,9 +12,9 @@ using namespace arbtrie;
 // Test environment setup
 struct TestEnv
 {
-   std::filesystem::path db_path;
-   database*             db = nullptr;
-   write_session*        ws = nullptr;
+   std::filesystem::path          db_path;
+   database*                      db = nullptr;
+   std::shared_ptr<write_session> ws = nullptr;
 
    TestEnv()
    {
@@ -34,12 +34,12 @@ struct TestEnv
       // Create and open the database
       database::create(db_path, cfg);
       db = new database(db_path, cfg);
-      ws = new write_session(db->start_write_session());
+      ws = db->start_write_session();
    }
 
    ~TestEnv()
    {
-      delete ws;
+      ws.reset();  // Use reset instead of delete for shared_ptr
       delete db;
       std::filesystem::remove_all(db_path);
    }
