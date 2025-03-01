@@ -79,6 +79,11 @@ namespace arbtrie
       }
       */
 
+      constexpr local_index begin_index() const { return local_index(-1); }
+      constexpr local_index end_index() const
+      {
+         return local_index(num_branches() + has_eof_value());
+      }
       // Returns the index of the the branch matching k or end_index() if no match
       local_index get_index(key_view k) const
       {
@@ -148,12 +153,6 @@ namespace arbtrie
          const bool key_size = !(bool(index.to_int() == 0) and has_eof_value());
          return key_view((const char*)get_setlist_ptr() + index.to_int() - has_eof_value(),
                          key_size);
-      }
-
-      constexpr local_index begin_index() const { return local_index(-1); }
-      constexpr local_index end_index() const
-      {
-         return local_index(num_branches() + has_eof_value());
       }
 
       local_index get_branch_index(key_view k) const
@@ -524,8 +523,8 @@ namespace arbtrie
 
          assert(validate());
       }
+   } __attribute((packed));  // end setlist_node
 
-   } __attribute((packed));
    static_assert(sizeof(setlist_node) ==
                  sizeof(node_header) + sizeof(uint64_t) + sizeof(id_address));
 

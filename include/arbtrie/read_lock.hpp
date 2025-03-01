@@ -67,6 +67,8 @@ namespace arbtrie
       inline object_ref get(id_address adr);
       inline object_ref get(node_header*);
 
+      auto call_with_node(id_address adr, auto&& call);
+
       ~read_lock() { _session.release_read_lock(); }
 
       node_header* get_node_pointer(node_location);
@@ -96,3 +98,12 @@ namespace arbtrie
 }  // namespace arbtrie
 
 #include <arbtrie/object_ref.hpp>
+
+namespace arbtrie
+{
+   auto read_lock::call_with_node(id_address adr, auto&& call)
+   {
+      auto obj_ref = get(adr);
+      return cast_and_call(obj_ref.header(), std::forward<decltype(call)>(call));
+   }
+}  // namespace arbtrie

@@ -108,12 +108,12 @@ namespace arbtrie
 // ARBTRIE_WARN is always enabled, even in release builds
 #define ARBTRIE_WARN(...) arbtrie::debug(__func__, __LINE__, "\033[31m", __VA_ARGS__, "\033[0m")
 
+#define ARBTRIE_DEBUG(...) arbtrie::debug(__func__, __LINE__, __VA_ARGS__)
 // Debug-only macros
 #ifndef NDEBUG
-#define ARBTRIE_DEBUG(...) arbtrie::debug(__func__, __LINE__, __VA_ARGS__)
 #define ARBTRIE_SCOPE arbtrie::scope __sco__##__LINE__;
 #else
-#define ARBTRIE_DEBUG(...)
+   //#define ARBTRIE_DEBUG(...)
 #define ARBTRIE_SCOPE
 #endif
 

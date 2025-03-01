@@ -76,7 +76,6 @@ target_compile_options(arbtrie
     PUBLIC 
         -std=c++23
         -Wno-vla-extension
-    PRIVATE
         $<$<CONFIG:Debug>:-O0 -g -UNDEBUG -fno-omit-frame-pointer>
 )
 
@@ -207,11 +206,11 @@ endif()
 # Platform-specific optimizations
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(X86_64)|(amd64)|(AMD64)")
     if(NOT APPLE)
-        target_compile_options(arbtrie PRIVATE $<$<CONFIG:Release>:-march=haswell -flto>)
-        target_link_options(arbtrie PRIVATE $<$<CONFIG:Release>:-march=haswell -flto>)
+        target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
+        target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
     else()
-        target_compile_options(arbtrie PRIVATE $<$<CONFIG:Release>:-flto>)
-        target_link_options(arbtrie PRIVATE $<$<CONFIG:Release>:-flto>)
+        target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
+        target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
     endif()
 endif()
 

@@ -13,27 +13,21 @@
 namespace arbtrie
 {
    // Forward declaration for internal implementation
-   size_t count_keys(read_lock&                     state,
-                     const inner_node_concept auto* node,
-                     id_address                     node_addr,
-                     key_range                      range);
+   size_t count_keys(read_lock& state, const inner_node_concept auto* node, key_range range);
 
    // Specialized forward declarations for binary_node and value_node
-   size_t count_keys(read_lock&         state,
-                     const binary_node* node,
-                     id_address         node_addr,
-                     key_range          range);
+   size_t count_keys(read_lock& state, const binary_node* node, key_range range);
 
-   size_t count_keys(read_lock&        state,
-                     const value_node* node,
-                     id_address        node_addr,
-                     key_range         range);
+   size_t count_keys(read_lock& state, const value_node* node, key_range range);
 
    /**
  * Find the local index corresponding to the end of a range on a node
  */
-   local_index find_range_end_index(const inner_node_concept auto* node, const key_range& range)
+   local_index find_upper_bound_index(const inner_node_concept auto* node, const key_range& range)
    {
+      // an empty upper bound means unbounded, but node's upper_bound_index() lacks the
+      // context of the range() and therefore treates empty as a valid key less than any
+      // other key.  Therefore, we use this helper function.
       if (range.upper_bound.empty())
          return node->end_index();
 
@@ -110,187 +104,93 @@ namespace arbtrie
     */
    size_t count_by_exclusion(read_lock&                     state,
                              const inner_node_concept auto* node,
-                             id_address                     node_addr,
                              local_index                    start_idx,
                              local_index                    end_idx,
                              const key_range&               range,
-                             id_address                     boundary_branch_addr,
                              const node_header*             boundary_branch_node)
    {
-      // Start with total descendants count
-      size_t count = node->descendants();
+      // Get total descendants for this node
+      size_t total_descendants = node->descendants();
 
-      // Subtract the current node's value if it's not in range
-      if (node->has_eof_value() && !range.contains_key(node->get_prefix()))
+      // Count keys outside our target range:
+      // 1. Everything before the lower bound
+      size_t before_count = 0;
+      if (!range.lower_bound.empty())
       {
-         count--;
-      }
+         // Create a range from empty to lower_bound (exclusive)
+         key_range before_range{key_view(), range.lower_bound};
 
-      // Ensure idx is valid when we start - if begin_index returns -1, get the first valid index
-      local_index idx = node->begin_index();
-      if (idx.to_int() < 0)
-      {
-         idx = node->next_index(idx);
-      }
+         // Count keys in branches before the start_idx
+         local_index before_end_idx = node->lower_bound_index(range.lower_bound);
+         before_count +=
+             count_keys_in_branches(state, node, node->begin_index(), before_end_idx, before_range);
 
-      // Subtract all branches before start_idx
-      for (; idx < start_idx; idx = node->next_index(idx))
-      {
-         // Get the branch and its descendants
-         id_address branch_addr        = node->get_branch(idx);
-         size_t     branch_descendants = descendants(state.get(branch_addr));
-
-         count -= branch_descendants;
-      }
-
-      // there is a partial part of start_idx that we need to process
-      // it is the part that is before the first branch that is in range
-      // we need to process this partial part by counting the keys in it
-      // and subtracting the count from the total
-      // we need to do this because the branches before start_idx are not
-      // in the range and we need to subtract their descendants from the total
-
-      // Process the start_idx branch if it exists and contains the range boundary
-      if (start_idx < node->end_index() && !range.lower_bound.empty())
-      {
-         // Get branch key for comparison
-         key_view branch_key = node->get_branch_key(start_idx);
-
-         // If this branch contains the lower bound byte exactly
-         if (static_cast<unsigned char>(branch_key[0]) ==
-             static_cast<unsigned char>(range.lower_bound[0]))
+         // Count keys in the boundary branch if needed
+         if (before_end_idx < node->end_index() && !range.lower_bound.empty() &&
+             node->get_branch_key(before_end_idx)[0] == range.lower_bound[0])
          {
-            // Get the branch node
-            id_address branch_addr = node->get_branch(start_idx);
-            object_ref obj_ref     = state.get(branch_addr);
-
-            // Cast and process the branch
-            cast_and_call(obj_ref.header(),
-                          [&](const auto* typed_start_node)
-                          {
-                             // Create an advanced range with the lower bound prefix removed
-                             key_range advanced_range = range.with_advanced_from();
-
-                             // Count keys in this branch that are in range
-                             size_t keys_in_range =
-                                 count_keys(state, typed_start_node, branch_addr, advanced_range);
-
-                             // Get total keys in start boundary branch
-                             size_t all_keys_in_branch = typed_start_node->descendants();
-
-                             // Calculate how many keys are NOT in our range
-                             size_t keys_outside_range = all_keys_in_branch - keys_in_range;
-
-                             // Guard against calculation errors
-                             if (keys_in_range > all_keys_in_branch)
-                             {
-                                keys_in_range      = all_keys_in_branch;
-                                keys_outside_range = 0;
-                             }
-
-                             // If we somehow have more out-of-range keys than total, fix it
-                             if (keys_outside_range > all_keys_in_branch)
-                             {
-                                keys_outside_range = all_keys_in_branch;
-                             }
-
-                             // Subtract the out-of-range keys from our total count
-                             count -= keys_outside_range;
-                          });
+            id_address branch_addr = node->get_branch(before_end_idx);
+            before_count += state.call_with_node(
+                branch_addr,
+                [&](const auto* typed_node) -> size_t
+                {
+                   key_range child_range{key_view(), range.lower_bound.substr(1)};
+                   return count_keys(state, typed_node, child_range);
+                });
          }
       }
 
-      // Process branches after end_idx
-      // Ensure we handle the case of end_idx properly
-      if (end_idx < node->end_index())  // Only if there are branches after end_idx
+      // 2. Everything at or after the upper bound
+      size_t after_count = 0;
+      if (!range.upper_bound.empty())
       {
-         local_index after_idx = end_idx;
+         // Create a range from upper_bound (inclusive) to empty
+         key_range after_range{range.upper_bound, key_view()};
 
-         // Iterate all branches at or after end_idx
-         for (; after_idx != node->end_index(); after_idx = node->next_index(after_idx))
+         // Count keys in branches from end_idx to the end
+         local_index after_start_idx = node->lower_bound_index(after_range.lower_bound);
+         after_count +=
+             count_keys_in_branches(state, node, after_start_idx, node->end_index(), after_range);
+
+         // Count keys in the boundary branch if needed
+         if (boundary_branch_node)
          {
-            // Skip the special boundary branch if needed
-            if (after_idx == end_idx && boundary_branch_node != nullptr)
-            {
-               continue;
-            }
+            // The boundary branch requires special processing because it contains
+            // the byte matching exactly the first byte of the upper bound
+            after_count += cast_and_call(
+                boundary_branch_node,
+                [&](const auto* typed_node) -> size_t
+                {
+                   // Create a range that represents keys >= upper_bound
+                   // This correctly uses the remaining part of upper_bound after the first byte
+                   key_range boundary_range = range.with_advanced_to();
 
-            // Get the branch and its descendants
-            id_address branch_addr        = node->get_branch(after_idx);
-            size_t     branch_descendants = descendants(state.get(branch_addr));
-
-            count -= branch_descendants;
+                   // Count keys in the branch that fall in the after range
+                   return count_keys(state, typed_node, boundary_range);
+                });
          }
       }
 
-      // Process the boundary branch if it exists
-      if (boundary_branch_node)
-      {
-         // Get the branch key for logging
-         key_view branch_key = node->get_branch_key(end_idx);
+      // Subtract both from total
+      size_t in_range_count = total_descendants - before_count - after_count;
 
-         // Cast the boundary branch node once and use it for all operations
-         cast_and_call(boundary_branch_node,
-                       [&](const auto* typed_end_node)
-                       {
-                          // Prepare the advanced range for boundary branch
-                          key_range advanced_range = range.with_advanced_to();
+      // Assert that we haven't counted more keys than possible
+      assert(in_range_count <= total_descendants &&
+             "Key count calculation error: counted more keys than exist");
 
-                          // Directly count keys in this branch that are in range
-                          size_t keys_in_boundary = count_keys(
-                              state, typed_end_node, boundary_branch_addr, advanced_range);
-
-                          // Get total keys in boundary branch
-                          size_t all_keys_in_boundary = typed_end_node->descendants();
-
-                          // Calculate how many keys are NOT in our range
-                          size_t keys_outside_range = all_keys_in_boundary - keys_in_boundary;
-
-                          // Guard against boundary branch calculation errors
-                          // If we somehow have more in-range keys than total, fix it
-                          if (keys_in_boundary > all_keys_in_boundary)
-                          {
-                             keys_in_boundary   = all_keys_in_boundary;
-                             keys_outside_range = 0;
-                          }
-
-                          // If we somehow have more out-of-range keys than total, fix it
-                          if (keys_outside_range > all_keys_in_boundary)
-                          {
-                             keys_outside_range = all_keys_in_boundary;
-                          }
-
-                          // Final sanity check to ensure we're not counting in_range + out_of_range > total
-                          if (keys_in_boundary + keys_outside_range > all_keys_in_boundary)
-                          {
-                             keys_outside_range = all_keys_in_boundary - keys_in_boundary;
-                          }
-
-                          // Subtract the out-of-range keys from our total count
-                          count -= keys_outside_range;
-                       });
-      }
-
-      // Verify the count is sensible (not negative)
-      if (count > node->descendants())
-      {
-         count = node->descendants();
-      }
-
-      return count;
+      return in_range_count;
    }
 
    /**
- * Find the "end branch" that requires special processing during range traversal.
- * 
- * The "end branch" is the branch at the upper boundary of our range that may 
- * contain both in-range and out-of-range keys.
- */
-   std::pair<id_address, const node_header*> find_range_boundary_branch(
-       read_lock&                     state,
-       const inner_node_concept auto* node,
-       local_index                    end_idx,
-       const key_range&               range)
+    * Find the "end branch" that requires special processing during range traversal.
+    * 
+    * The "end branch" is the branch at the upper boundary of our range that may 
+    * contain both in-range and out-of-range keys.
+    */
+   const node_header* find_range_boundary_branch(read_lock&                     state,
+                                                 const inner_node_concept auto* node,
+                                                 local_index                    end_idx,
+                                                 const key_range&               range)
    {
       // We need special processing if:
       // 1. end_idx is valid (within node bounds)
@@ -309,22 +209,15 @@ namespace arbtrie
          {
             // Check if this is more than just a match on the last byte
             if (!range.is_last_byte_of_end())
-            {
-               // Get the branch value at this index and return it with its header
-               id_address branch_addr = node->get_branch(end_idx);
-               // We can assume branch_addr is valid based on tree invariants
-               object_ref obj_ref = state.get(branch_addr);
-               return {branch_addr, obj_ref.header()};
-            }
+               return state.get(node->get_branch(end_idx)).header();
          }
       }
-
-      return {id_address{}, nullptr};  // No special branch found
+      return nullptr;  // No special branch found
    }
 
    /**
- * Count keys in the branches that fall within the specified range
- */
+    * Count keys in the branches that fall within the specified range
+    */
    size_t count_keys_in_branches(read_lock&                     state,
                                  const inner_node_concept auto* node,
                                  local_index                    start_idx,
@@ -344,14 +237,11 @@ namespace arbtrie
 
          // Get branch key and create object reference
          key_view branch_key = node->get_branch_key(idx);
-         auto     obj_ref    = state.get(node->get_branch(idx));
 
          // Skip branches with prefix greater than upper bound
          if (!range.upper_bound.empty() && static_cast<unsigned char>(branch_key[0]) >
                                                static_cast<unsigned char>(range.upper_bound[0]))
-         {
             continue;
-         }
 
          // Create appropriate child range
          key_range child_range;
@@ -375,28 +265,18 @@ namespace arbtrie
             // Past lower bound with upper bound
             if (static_cast<unsigned char>(branch_key[0]) <
                 static_cast<unsigned char>(range.upper_bound[0]))
-            {
                child_range = {key_view(), key_view()};  // Fully unbounded for upper limit
-            }
             else if (branch_key[0] == range.upper_bound[0])
-            {
                child_range = {key_view(), range.upper_bound.substr(1)};
-            }
          }
          else
-         {
             child_range = {key_view(), key_view()};  // Fully unbounded
-         }
 
-         // Count keys in this branch
-         size_t branch_keys = cast_and_call(
-             obj_ref.header(),
-             [&](const auto* typed_node) -> size_t
-             { return count_keys(state, typed_node, node->get_branch(idx), child_range); });
-
-         branch_count += branch_keys;
+         branch_count += state.call_with_node(node->get_branch(idx),
+                                              [&](const auto* typed_node) -> size_t {
+                                                 return count_keys(state, typed_node, child_range);
+                                              });
       }
-
       return branch_count;
    }
 
@@ -410,9 +290,6 @@ namespace arbtrie
                                   local_index                    start_idx,
                                   local_index                    end_idx)
    {
-      // Temporarily disable exclusion-based counting until it's fixed
-      return false;
-
       // Count branches in the range (optimized to use the most efficient counting method)
       size_t in_range_branches     = count_branches_in_range(node, start_idx, end_idx);
       size_t total_branches        = node->num_branches();
@@ -423,13 +300,9 @@ namespace arbtrie
    }
 
    /**
-    * Count keys within a given range in the trie, using a typed node.
-    * This function handles a node that has already been retrieved and typed.
+    * Count keys within a given range in the trie, this is specialized for inner_node_concept
     */
-   size_t count_keys(read_lock&                     state,
-                     const inner_node_concept auto* node,
-                     id_address                     node_addr,
-                     key_range                      range)
+   size_t count_keys(read_lock& state, const inner_node_concept auto* node, key_range range)
    {
       // Get the node's prefix
       key_view node_prefix = node->get_prefix();
@@ -437,6 +310,8 @@ namespace arbtrie
       // Try to narrow the range by the node's prefix, removing the common prefix
       if (!range.try_narrow_with_prefix(&node_prefix))
          return 0;  // No intersection with range
+
+      // at this point node_prefix has had the common prefix removed
 
       // Check if the entire node (including its subtree) is in range
       if (range.is_unbounded())
@@ -455,30 +330,23 @@ namespace arbtrie
       if (start_idx == node->end_index())
          return count;  // No branches in range
 
-      local_index end_idx = find_range_end_index(node, range);
+      local_index end_idx = find_upper_bound_index(node, range);
 
-      // Find end branch for special processing
-      auto [end_branch_addr, end_branch_node] =
-          find_range_boundary_branch(state, node, end_idx, range);
+      const auto* end_branch_node = find_range_boundary_branch(state, node, end_idx, range);
 
       // Determine if exclusion-based counting is more efficient
-      if (should_count_by_exclusion(node, start_idx, end_idx) )
-         return count_by_exclusion(state, node, node_addr, start_idx, end_idx,
-                                                     range, end_branch_addr, end_branch_node);
+      if (should_count_by_exclusion(node, start_idx, end_idx))
+         return count_by_exclusion(state, node, start_idx, end_idx, range, end_branch_node);
 
       // Traditional approach: count keys in all in-range branches
       count += count_keys_in_branches(state, node, start_idx, end_idx, range);
 
       // Count keys in the boundary branch if needed
       if (end_branch_node)
-      {
-         size_t boundary_count = cast_and_call(
-             end_branch_node,
-             [&](const auto* typed_node) -> size_t
-             { return count_keys(state, typed_node, end_branch_addr, range.with_advanced_to()); });
-
-         count += boundary_count;
-      }
+         count += cast_and_call(end_branch_node,
+                                [&](const auto* typed_node) -> size_t {
+                                   return count_keys(state, typed_node, range.with_advanced_to());
+                                });
 
       return count;
    }
@@ -487,10 +355,7 @@ namespace arbtrie
     * Specialized implementation for binary_node
     * Binary nodes store a sorted set of complete keys with their values
     */
-   size_t count_keys(read_lock&         state,
-                     const binary_node* node,
-                     id_address         node_addr,
-                     key_range          range)
+   size_t count_keys(read_lock& state, const binary_node* node, key_range range)
    {
       // Binary nodes already have efficient methods to find the indices for range bounds
       local_index lower_idx = node->lower_bound_index(range.lower_bound);
@@ -504,28 +369,10 @@ namespace arbtrie
     * Specialized implementation for value_node
     * Value nodes represent leaf nodes with a single key-value pair
     */
-   size_t count_keys(read_lock&        state,
-                     const value_node* node,
-                     id_address        node_addr,
-                     key_range         range)
+   size_t count_keys(read_lock& state, const value_node* node, key_range range)
    {
       // Standard range check
       return size_t(range.contains_key(node->get_prefix()));
-   }
-
-   /**
-    * Count keys within a given range in the trie.
-    * Internal helper function that counts keys starting from a given node.
-    */
-   size_t count_keys_in_range(read_lock& state, id_address node_addr, const key_range& range)
-   {
-      // Get the node reference and header
-      object_ref obj_ref = state.get(node_addr);
-
-      // Dispatch to the specialized version with the correct node type
-      return cast_and_call(obj_ref.header(),
-                           [&](const auto* typed_node) -> size_t
-                           { return count_keys(state, typed_node, node_addr, range); });
    }
 
    /**
@@ -545,7 +392,11 @@ namespace arbtrie
       if (!root)
          return 0;
 
-      return count_keys_in_range(state, root, {lower_bound, upper_bound});
+      return state.call_with_node(
+          root,
+          [&](const auto* typed_node) {
+             return count_keys(state, typed_node, {lower_bound, upper_bound});
+          });
    }
 
 }  // namespace arbtrie
