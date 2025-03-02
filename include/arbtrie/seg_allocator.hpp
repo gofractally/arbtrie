@@ -266,7 +266,7 @@ namespace arbtrie
       void                  set_session_end_ptrs(uint32_t e);
 
       // Track total bytes copied during promote_rcache_data operations
-      uint64_t _total_promoted_bytes{0};
+      uint64_t _total_promoted_bytes = 0;
 
       // Difficulty threshold for read bit updates (0-4294967295)
       std::atomic<uint32_t> _cache_difficulty{uint32_t(-1) -
@@ -274,7 +274,12 @@ namespace arbtrie
 
       /**
        * Each session has its own read cache queue to track read operations
-       * for promoting data during compaction.
+       * for promoting data during compaction. This data does not need to be presisted,
+       * however, when ids are pushed to the queue the node_meta::pending_cache bit is set.
+       * When the compactor runs it will copy the data to a new segment and clear the
+       * node_meta::pending_cache bit, however, if this queue is lost the compactor will not
+       * have any easy way to know which nodes need to be moved and the cache bit will be
+       * stuck. 
        */
       std::array<std::atomic<circular_buffer<uint32_t, 1024 * 1024>*>, 64> _rcache_queues{};
 

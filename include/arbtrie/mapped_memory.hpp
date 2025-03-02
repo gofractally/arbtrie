@@ -1,9 +1,11 @@
 #pragma once
 #include <assert.h>
 #include <arbtrie/config.hpp>
+#include <arbtrie/hierarchical_bitmap.hpp>
 #include <arbtrie/padded_atomic.hpp>
 #include <arbtrie/rdtsc.hpp>
 #include <arbtrie/size_weighted_age.hpp>
+#include <arbtrie/spmc_circular_buffer.hpp>
 #include <arbtrie/util.hpp>
 
 namespace arbtrie
@@ -238,6 +240,14 @@ namespace arbtrie
 
          // Bitmap of available session slots, shared across processes
          std::atomic<uint64_t> free_sessions{-1ull};
+
+         // bitmap of segments that are free to be recycled pushed into
+         // the pending allocation queue.
+         hierarchical_bitmap<max_segment_count> free_segments;
+
+         // a background thread attempts to keep this buffer full of segments
+         // so that the allocator never has to wait on IO to get a new segment.
+         spmc_circular_buffer<small_segment_number> recycled_segments;
 
          // meta data associated with each segment, indexed by segment number
          segment_meta seg_meta[max_segment_count];

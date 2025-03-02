@@ -1,0 +1,19 @@
+PROJECT SETUP:
+- CMake build system
+- Build directories: build/debug, build/release
+- Testing: -DBUILD_TESTING=ON flag
+- Run tests: ./bin/arbtrie-tests, filter with ./bin/arbtrie-tests "[tag]"
+- Catch2 testing framework
+- NO --success flag (produces too much output)
+
+CODE STYLE:
+- No braces {} for one-line conditionals and loops
+- Use angle brackets <> for project includes (#include <arbtrie/header.hpp>)
+
+AGENT:
+- Always use full paths with rm commands
+
+WORKFLOW:
+- "propose" = describe changes only, no code edits
+- Update both prompt.txt and .cursor file when standards change
+- Propose new project standards when common errors identified 

@@ -198,10 +198,12 @@ namespace arbtrie
                id_address fma  = {region, ids_per_page * block + index};
                auto&      meta = get(fma);
                auto       mval = meta.to_int();
-               if (mval & (node_meta<>::copy_mask | node_meta<>::modify_mask))
+               if (mval & (node_meta<>::copy_mask | node_meta<>::modify_mask |
+                           node_meta<>::pending_cache_mask))
                {
                   count += bool(mval & node_meta<>::modify_mask);
-                  meta.store(mval & ~(node_meta<>::copy_mask | node_meta<>::modify_mask),
+                  meta.store(mval & ~(node_meta<>::copy_mask | node_meta<>::modify_mask |
+                                      node_meta<>::pending_cache_mask),
                              std::memory_order_relaxed);
                }
             }

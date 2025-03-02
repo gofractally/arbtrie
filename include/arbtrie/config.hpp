@@ -150,11 +150,12 @@ namespace arbtrie
 
    static_assert(binary_node_max_keys < 255);
 
-   using byte_type      = char;
-   using key_view       = std::string_view;
-   using value_view     = std::string_view;
-   using segment_offset = uint32_t;
-   using segment_number = uint64_t;
+   using byte_type            = char;
+   using key_view             = std::string_view;
+   using value_view           = std::string_view;
+   using segment_offset       = uint32_t;
+   using segment_number       = uint64_t;
+   using small_segment_number = uint32_t;
 
    struct recover_args
    {
