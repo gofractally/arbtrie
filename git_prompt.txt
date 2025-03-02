@@ -1,0 +1,38 @@
+GIT WORKFLOW INSTRUCTIONS:
+
+COMMIT PROCESS:
+1. Show changes: git diff --staged
+   - Review staged changes before committing
+   - Ensure only intended changes are included
+
+2. Draft message: Update .tmpcommit with proposed message
+   - Follow conventional commit format: type(scope): description
+   - Include detailed body with bullet points for complex changes
+   - Reference issues/tickets when applicable
+   - Note: .tmpcommit is a local file, not to be checked into the repository
+
+3. Get approval: Show draft to user for review/edits
+   - Present the draft message clearly
+   - Make requested adjustments to the message
+
+4. Commit: git commit -F .tmpcommit
+   - Use the file-based approach for proper formatting
+   - Preserves newlines and formatting in the message
+
+5. Keep .tmpcommit file for future use
+   - Persistent local file simplifies workflow
+   - Create if it doesn't exist: touch .tmpcommit
+   - Add to .gitignore to prevent accidental commits
+
+COMMIT MESSAGE STRUCTURE:
+- First line: concise summary (50 chars or less)
+- Blank line
+- Detailed description with what and why (not how)
+- Use bullet points for multiple changes
+- Reference related issues/tickets
+
+BRANCHING STRATEGY:
+- main: stable production code
+- feature branches: new features (feature/name)
+- bugfix branches: bug fixes (bugfix/name)
+- Always branch from latest main 

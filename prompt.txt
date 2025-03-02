@@ -12,6 +12,7 @@ CODE STYLE:
 
 AGENT:
 - Always use full paths with rm commands
+- For git operations, refer to git_prompt.txt
 
 WORKFLOW:
 - "propose" = describe changes only, no code edits
