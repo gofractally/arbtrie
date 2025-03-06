@@ -378,11 +378,13 @@ int  main(int argc, char** argv)
    //   test_refactor();
    //   return 0;
    //
-   bool sync_compact = false;  //argc > 1;  //true;//false;  // false = use threads
+   // This variable previously controlled explicit compaction
+   // Now it's only used for logging purposes since compaction is automatic
+   bool sync_compact = false;
 
    std::cout << "resetting database\n";
    std::filesystem::remove_all("arbtriedb");
-   arbtrie::database::create("arbtriedb", {.run_compact_thread = true});
+   arbtrie::database::create("arbtriedb");
 
    //const char* filename = "/Users/dlarimer/all_files.txt";
    auto          filename = "/usr/share/dict/words";
@@ -407,7 +409,7 @@ int  main(int argc, char** argv)
    try
    {
       ARBTRIE_WARN("starting arbtrie...");
-      database db("arbtriedb", {.run_compact_thread = not sync_compact});
+      database db("arbtriedb");
       auto     ws = db.start_write_session();
 
       do
@@ -496,8 +498,11 @@ int  main(int argc, char** argv)
 
                auto end   = std::chrono::steady_clock::now();
                auto delta = end - start;
-               while (sync_compact and db.compact_next_segment())
-                  ;
+               if (sync_compact)
+               {
+                  // NOTE: compact_next_segment() was removed from the database API
+                  // Compaction now happens automatically in the background
+               }
 
                std::cout << ro << "] " << std::setw(12)
                          << add_comma(int64_t(
@@ -794,8 +799,11 @@ int  main(int argc, char** argv)
          for (auto& r : rthreads)
             r->join();
 
-         while (sync_compact and db.compact_next_segment())
-            ;
+         if (sync_compact)
+         {
+            // NOTE: compact_next_segment() was removed from the database API
+            // Compaction now happens automatically in the background
+         }
       } while (false);
       /*
       if (false)
@@ -810,10 +818,13 @@ int  main(int argc, char** argv)
       //
       std::cout << "wait for cleanup...\n";
       usleep(1000000 * 2);
-      while (sync_compact and db.compact_next_segment())
+      if (sync_compact)
       {
+         // NOTE: compact_next_segment() was removed from the database API
+         // Compaction now happens automatically in the background
       }
-      db.stop_compact_thread();
+      // NOTE: stop_compact_thread() was removed from the database API
+      // Compaction thread lifecycle is now managed internally by the database
    }
    catch (const std::exception& e)
    {
@@ -828,8 +839,8 @@ struct environ
    {
       std::cout << "resetting database\n";
       std::filesystem::remove_all("arbtriedb");
-      arbtrie::database::create("arbtriedb", {.run_compact_thread = true});
-      db = new database("arbtriedb", {.run_compact_thread = true});
+      arbtrie::database::create("arbtriedb");
+      db = new database("arbtriedb");
    }
    ~environ() { delete db; }
    arbtrie::database* db;
@@ -934,8 +945,7 @@ void test_binary_node()
 void test_refactor()
 {
    environ env;
-   env.db->start_compact_thread();
-   auto ws = env.db->start_write_session();
+   auto    ws = env.db->start_write_session();
    //   auto state = ws._segas->lock();
 
    {
@@ -985,6 +995,7 @@ void test_refactor()
       }
    }
    std::cout << "before exit after release all roots\n";
-   //while (env.db->compact_next_segment()) { }
+   // NOTE: compact_next_segment() was removed from the database API
+   // Compaction now happens automatically in the background
    env.db->print_stats(std::cout);
 }

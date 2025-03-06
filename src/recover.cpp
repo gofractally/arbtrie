@@ -119,12 +119,17 @@ namespace arbtrie
 
       std::sort(age_index.begin(), age_index.end(),
                 [&](int a, int b) { return get_segment(a)->_age > get_segment(b)->_age; });
+
+      _mapped_state->_segment_provider.free_segments.reset();
+      _mapped_state->_segment_provider.mlock_segments.reset();
+      _mapped_state->_segment_provider.ready_segments.reset();
+
       int next_free_seg = 0;
       for (auto i : age_index)
       {
          if (get_segment(i)->_age < 0)
          {
-            _header->free_seg_buffer[next_free_seg++] = i;
+            _mapped_state->_segment_provider.free_segments.set(i);
             continue;
          }
          auto seg  = get_segment(i);
@@ -134,7 +139,6 @@ namespace arbtrie
              (const char*)seg + round_up_multiple<64>(sizeof(mapped_memory::segment_header));
          node_header* foo = (node_header*)(foc);
 
-         madvise(seg, segment_size, MADV_SEQUENTIAL);
          int free_space = 0;
          while (foo < send and foo->address())
          {
@@ -173,10 +177,8 @@ namespace arbtrie
          //   make sure _alloc_pos of each segment is in good working order
          //   make sure free space calculations are up to date for the segment
       }
-      _header->alloc_ptr.store(0);
-      _header->end_ptr.store(next_free_seg);
-      _header->clean_exit_flag.store(false);
-      _header->next_alloc_age.store(get_segment(age_index[0])->_age + 1);
+      _mapped_state->clean_exit_flag.store(false);
+      _mapped_state->next_alloc_age.store(get_segment(age_index[0])->_age + 1);
    }
 
    void seg_allocator::release_unreachable()

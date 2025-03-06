@@ -1,7 +1,7 @@
 #define CATCH_CONFIG_ABORT_AFTER_FAILURE
 #include <arbtrie/circular_buffer.hpp>
 #include <arbtrie/debug.hpp>
-#include <arbtrie/spmc_circular_buffer.hpp>
+#include <arbtrie/spmc_buffer.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <iostream>
 #include <thread>
@@ -14,7 +14,7 @@ TEST_CASE("SPMC Circular Buffer", "[spmc_circular_buffer]")
    SECTION("Basic Operations")
    {
       ARBTRIE_WARN("Basic Operations Start");
-      spmc_circular_buffer<int> buf;
+      spmc_buffer<int> buf;
 
       // Test initial state
       REQUIRE(buf.usage() == 0);
@@ -22,11 +22,11 @@ TEST_CASE("SPMC Circular Buffer", "[spmc_circular_buffer]")
       REQUIRE(buf.get_available_bitmap() == 0);
 
       // Test single push/consume
-      int value;
-      REQUIRE(buf.push(42));
+      REQUIRE(buf.push(42) >= 0);
       REQUIRE(buf.usage() == 1);
-      REQUIRE(buf.try_consume(value));
-      REQUIRE(value == 42);
+      auto result = buf.pop();
+      REQUIRE(result.has_value());
+      REQUIRE(*result == 42);
       REQUIRE(buf.usage() == 0);
       ARBTRIE_WARN("Basic Operations End");
    }
@@ -34,17 +34,17 @@ TEST_CASE("SPMC Circular Buffer", "[spmc_circular_buffer]")
    SECTION("Non-blocking Push/Pop Scenarios")
    {
       ARBTRIE_WARN("Non-blocking Push/Pop Scenarios Start");
-      spmc_circular_buffer<int> buf;
-      int                       value;
+      spmc_buffer<int> buf;
 
       // Single item push/pop
       SECTION("Single item")
       {
          ARBTRIE_WARN("Single item Start");
-         REQUIRE(buf.push(1));
+         REQUIRE(buf.push(1) >= 0);
          REQUIRE(buf.usage() == 1);
-         REQUIRE(buf.try_consume(value));
-         REQUIRE(value == 1);
+         auto result = buf.pop();
+         REQUIRE(result.has_value());
+         REQUIRE(*result == 1);
          REQUIRE(buf.usage() == 0);
          ARBTRIE_WARN("Single item End");
       }
@@ -53,14 +53,16 @@ TEST_CASE("SPMC Circular Buffer", "[spmc_circular_buffer]")
       SECTION("Two items")
       {
          ARBTRIE_WARN("Two items Start");
-         REQUIRE(buf.push(1));
-         REQUIRE(buf.push(2));
+         REQUIRE(buf.push(1) >= 0);
+         REQUIRE(buf.push(2) >= 0);
          REQUIRE(buf.usage() == 2);
-         REQUIRE(buf.try_consume(value));
-         REQUIRE(value == 1);
+         auto result1 = buf.pop();
+         REQUIRE(result1.has_value());
+         REQUIRE(*result1 == 1);
          REQUIRE(buf.usage() == 1);
-         REQUIRE(buf.try_consume(value));
-         REQUIRE(value == 2);
+         auto result2 = buf.pop();
+         REQUIRE(result2.has_value());
+         REQUIRE(*result2 == 2);
          REQUIRE(buf.usage() == 0);
          ARBTRIE_WARN("Two items End");
       }
@@ -75,7 +77,7 @@ TEST_CASE("SPMC Circular Buffer", "[spmc_circular_buffer]")
          // Push items up to high water - 1
          for (int i = 0; i < high_water - 1; ++i)
          {
-            REQUIRE(buf.push(i));
+            REQUIRE(buf.push(i) >= 0);
             values.push_back(i);
          }
          REQUIRE(buf.usage() == high_water - 1);
@@ -83,8 +85,9 @@ TEST_CASE("SPMC Circular Buffer", "[spmc_circular_buffer]")
          // Pop all items and verify values
          for (int expected : values)
          {
-            REQUIRE(buf.try_consume(value));
-            REQUIRE(value == expected);
+            auto result = buf.pop();
+            REQUIRE(result.has_value());
+            REQUIRE(*result == expected);
          }
          REQUIRE(buf.usage() == 0);
          ARBTRIE_WARN("Fill to high water - 1 End");
@@ -96,495 +99,773 @@ TEST_CASE("SPMC Circular Buffer", "[spmc_circular_buffer]")
          ARBTRIE_WARN("Push after drain Start");
          uint64_t high_water = buf.get_high_water_mark();
 
-         // Fill and drain twice to ensure no state issues
-         for (int round = 0; round < 2; ++round)
+         // Fill up to high water - 1
+         for (int i = 0; i < high_water - 1; ++i)
          {
-            // Fill to high water - 1
-            for (int i = 0; i < high_water - 1; ++i)
-            {
-               REQUIRE(buf.push(i));
-            }
-            REQUIRE(buf.usage() == high_water - 1);
-
-            // Drain completely
-            while (buf.try_consume(value))
-            {
-            }
-            REQUIRE(buf.usage() == 0);
+            REQUIRE(buf.push(i) >= 0);
          }
+
+         // Drain completely
+         for (int i = 0; i < high_water - 1; ++i)
+         {
+            auto result = buf.pop();
+            REQUIRE(result.has_value());
+            REQUIRE(*result == i);
+         }
+
+         // Verify can push again
+         REQUIRE(buf.push(100) >= 0);
+         auto result = buf.pop();
+         REQUIRE(result.has_value());
+         REQUIRE(*result == 100);
          ARBTRIE_WARN("Push after drain End");
       }
+
       ARBTRIE_WARN("Non-blocking Push/Pop Scenarios End");
    }
 
-   SECTION("Water Marks")
+   SECTION("Blocking Push/Pop Scenarios")
    {
-      ARBTRIE_WARN("Water Marks Start");
-      spmc_circular_buffer<int> buf;
+      ARBTRIE_WARN("Blocking Push/Pop Scenarios Start");
+      spmc_buffer<int> buf;
 
-      // Test initial water marks
-      REQUIRE(buf.get_high_water_mark() == 48);  // 75% of 64
-      REQUIRE(buf.get_low_water_mark() == 16);   // 25% of 64
-      REQUIRE(buf.get_min_water_gap() == 8);
+      SECTION("Basic push/pop_wait")
+      {
+         ARBTRIE_WARN("Basic push/pop_wait Start");
+         // Single push/pop_wait
+         REQUIRE(buf.can_push());
+         REQUIRE(buf.push(42) >= 0);
+         REQUIRE(buf.usage() == 1);
+         auto result = buf.pop_wait();
+         REQUIRE(result == 42);
+         REQUIRE(buf.usage() == 0);
+         ARBTRIE_WARN("Basic push/pop_wait End");
+      }
 
-      // Test setting min water gap
-      REQUIRE(buf.set_min_water_gap(12));
-      REQUIRE(buf.get_min_water_gap() == 12);
+      SECTION("Push to high water")
+      {
+         ARBTRIE_WARN("Push to high water Start");
+         uint64_t high_water = buf.get_high_water_mark();
 
-      // Test invalid gap values
+         // Fill up to high water exactly
+         for (int i = 0; i < high_water; ++i)
+         {
+            REQUIRE(buf.can_push());
+            REQUIRE(buf.push(i) >= 0);
+         }
+         REQUIRE(buf.usage() == high_water);
+
+         // Drain halfway
+         for (int i = 0; i < high_water / 2; ++i)
+         {
+            auto result = buf.pop_wait();
+            REQUIRE(result == i);
+         }
+
+         // Should be able to push more now
+         for (int i = 0; i < high_water / 2; ++i)
+         {
+            REQUIRE(buf.can_push());
+            REQUIRE(buf.push(i + 100) >= 0);
+         }
+
+         // Drain the rest
+         for (int i = high_water / 2; i < high_water; ++i)
+         {
+            auto result = buf.pop_wait();
+            REQUIRE(result == i);
+         }
+         for (int i = 0; i < high_water / 2; ++i)
+         {
+            auto result = buf.pop_wait();
+            REQUIRE(result == i + 100);
+         }
+         ARBTRIE_WARN("Push to high water End");
+      }
+
+      ARBTRIE_WARN("Blocking Push/Pop Scenarios End");
+   }
+
+   SECTION("Water Mark Adjustments")
+   {
+      ARBTRIE_WARN("Water Mark Adjustments Start");
+      spmc_buffer<int> buf;
+
+      uint64_t original_high = buf.get_high_water_mark();
+      uint64_t original_low  = buf.get_low_water_mark();
+      uint64_t original_gap  = buf.get_min_water_gap();
+
+      REQUIRE(original_high > original_low);
+      REQUIRE(original_high - original_low >= original_gap);
+
+      // Test setting min gap
+      REQUIRE(buf.set_min_water_gap(original_gap + 2));
+      REQUIRE(buf.get_min_water_gap() == original_gap + 2);
+
+      // Verify high water mark adjusts if needed
+      REQUIRE(buf.get_high_water_mark() - buf.get_low_water_mark() >= buf.get_min_water_gap());
+
+      // Test invalid gap (too large)
+      REQUIRE_FALSE(buf.set_min_water_gap(buf.capacity()));
+
+      // Test invalid gap (zero)
       REQUIRE_FALSE(buf.set_min_water_gap(0));
-      REQUIRE_FALSE(buf.set_min_water_gap(65));
-      ARBTRIE_WARN("Water Marks End");
+
+      ARBTRIE_WARN("Water Mark Adjustments End");
    }
 
-   SECTION("Buffer Full")
+   SECTION("Bitmap state tracking")
    {
-      ARBTRIE_WARN("Buffer Full Start");
-      spmc_circular_buffer<int> buf;
-      std::atomic<bool>         producer_done{false};
-      std::atomic<bool>         consumer_done{false};
+      ARBTRIE_WARN("Bitmap state tracking Start");
+      spmc_buffer<int> buf;
 
-      // Start consumer thread first
-      std::thread consumer(
-          [&]()
-          {
-             int value;
-             int items_consumed       = 0;
-             int consecutive_failures = 0;
+      // Initially all bits in bitmap should be 0
+      REQUIRE(buf.get_available_bitmap() == 0);
 
-             // Keep consuming while producer is running or there's data
-             while (!producer_done || buf.usage() > 0)
-             {
-                if (buf.try_consume(value))
-                {
-                   items_consumed++;
-                   consecutive_failures = 0;
-                }
-                else
-                {
-                   consecutive_failures++;
-                   if (consecutive_failures > 1000)
-                   {
-                      // If we've failed many times in a row, sleep to reduce contention
-                      std::this_thread::sleep_for(std::chrono::microseconds(100));
-                      consecutive_failures = 0;
-                   }
-                   else
-                   {
-                      // Otherwise just yield to let other threads run
-                      std::this_thread::yield();
-                   }
-                }
-             }
-             consumer_done = true;
-          });
+      // Set one bit
+      int64_t idx = buf.push(42);
+      REQUIRE(idx >= 0);
 
-      // Producer thread
-      std::thread producer(
-          [&]()
-          {
-             // Try to fill buffer beyond high water mark
-             int i;
-             for (i = 0; i < buf.get_high_water_mark() * 2; ++i)
-             {
-                REQUIRE(buf.push(i));
-             }
-             producer_done = true;
-          });
+      // Verify the corresponding bit is set
+      REQUIRE((buf.get_available_bitmap() & (1ULL << idx)) != 0);
 
-      // Wait for both threads to finish
-      producer.join();
-      consumer.join();
+      // Set another bit
+      int64_t idx2 = buf.push(43);
+      REQUIRE(idx2 >= 0);
+      REQUIRE(idx2 != idx);
 
-      REQUIRE(producer_done);
-      REQUIRE(consumer_done);
-      REQUIRE(buf.usage() == 0);
-      ARBTRIE_WARN("Buffer Full End");
+      // Verify both bits are set
+      REQUIRE((buf.get_available_bitmap() & (1ULL << idx)) != 0);
+      REQUIRE((buf.get_available_bitmap() & (1ULL << idx2)) != 0);
+
+      // Consume one item
+      auto result = buf.pop();
+      REQUIRE(result.has_value());
+      REQUIRE(*result == 42);
+
+      // Verify first bit is now cleared, second still set
+      REQUIRE((buf.get_available_bitmap() & (1ULL << idx)) == 0);
+      REQUIRE((buf.get_available_bitmap() & (1ULL << idx2)) != 0);
+
+      // Consume second item
+      result = buf.pop();
+      REQUIRE(result.has_value());
+      REQUIRE(*result == 43);
+
+      // Verify both bits now cleared
+      REQUIRE(buf.get_available_bitmap() == 0);
+
+      ARBTRIE_WARN("Bitmap state tracking End");
    }
 
-   SECTION("Multiple Consumers")
+   SECTION("Consumption Tracking")
    {
-      ARBTRIE_WARN("Multiple Consumers Start");
-      spmc_circular_buffer<int> buf;
-      std::atomic<int>          total_consumed{0};
-      constexpr int             items_per_consumer = 1000;
-      constexpr int             num_consumers      = 4;
+      ARBTRIE_WARN("Consumption Tracking Start");
+      spmc_buffer<int> buf;
 
-      // Producer thread
-      std::thread producer(
-          [&]()
-          {
-             for (int i = 0; i < items_per_consumer * num_consumers; ++i)
-             {
-                while (!buf.push(i))
-                {
-                   std::this_thread::yield();
-                }
-             }
-          });
+      // Push an item and check consumption
+      int64_t idx = buf.push(42);
+      REQUIRE(idx >= 0);
+      REQUIRE_FALSE(buf.check_consumption(idx));
 
-      // Consumer threads
-      std::vector<std::thread> consumers;
-      for (int i = 0; i < num_consumers; ++i)
+      // Consume and verify consumption
+      auto result = buf.pop();
+      REQUIRE(result.has_value());
+      REQUIRE(*result == 42);
+      REQUIRE(buf.check_consumption(idx));
+
+      // Push multiple items
+      std::vector<int64_t> indices;
+      for (int i = 0; i < 5; ++i)
       {
-         consumers.emplace_back(
-             [&]()
-             {
-                int consumed = 0;
-                int value;
-                while (consumed < items_per_consumer)
-                {
-                   if (buf.try_consume(value))
-                   {
-                      consumed++;
-                      total_consumed.fetch_add(1, std::memory_order_relaxed);
-                   }
-                   else
-                   {
-                      std::this_thread::yield();
-                   }
-                }
-             });
+         indices.push_back(buf.push(100 + i));
+         REQUIRE(indices.back() >= 0);
       }
 
-      producer.join();
-      for (auto& consumer : consumers)
+      // Check consumption bitmap
+      uint64_t to_check = 0;
+      for (auto index : indices)
       {
-         consumer.join();
+         to_check |= (1ULL << index);
+      }
+      REQUIRE(buf.get_consumed_bitmap(to_check) == 0);
+
+      // Consume some items
+      for (int i = 0; i < 3; ++i)
+      {
+         result = buf.pop();
+         REQUIRE(result.has_value());
+         REQUIRE(*result == 100 + i);
       }
 
-      REQUIRE(total_consumed == items_per_consumer * num_consumers);
-      REQUIRE(buf.usage() == 0);
-      ARBTRIE_WARN("Multiple Consumers End");
+      // Verify consumption bitmap shows first 3 consumed, last 2 not
+      uint64_t expected_consumed = 0;
+      for (int i = 0; i < 3; ++i)
+      {
+         expected_consumed |= (1ULL << indices[i]);
+      }
+      REQUIRE(buf.get_consumed_bitmap(to_check) == expected_consumed);
+
+      ARBTRIE_WARN("Consumption Tracking End");
    }
 
-   SECTION("Blocking Consume")
+   SECTION("push_front LIFO behavior")
    {
-      ARBTRIE_WARN("Blocking Consume Start");
-      spmc_circular_buffer<int> buf;
-      bool                      consumer_finished = false;
+      ARBTRIE_WARN("push_front LIFO behavior Start");
+      spmc_buffer<int> buf;
 
-      // Consumer thread using blocking consume
-      std::thread consumer(
+      // Push multiple items in FIFO order
+      REQUIRE(buf.push(100) >= 0);
+      REQUIRE(buf.push(200) >= 0);
+      REQUIRE(buf.push(300) >= 0);
+
+      // Push to front - this should be the next item popped
+      int64_t front_idx = buf.push_front(50);
+      REQUIRE(front_idx >= 0);
+
+      // Verify LIFO behavior for the front-pushed item
+      auto result1 = buf.pop();
+      REQUIRE(result1.has_value());
+      REQUIRE(*result1 == 50);  // Front item should come first
+
+      // Then verify remaining items come in FIFO order
+      auto result2 = buf.pop();
+      REQUIRE(result2.has_value());
+      REQUIRE(*result2 == 100);
+
+      auto result3 = buf.pop();
+      REQUIRE(result3.has_value());
+      REQUIRE(*result3 == 200);
+
+      auto result4 = buf.pop();
+      REQUIRE(result4.has_value());
+      REQUIRE(*result4 == 300);
+
+      ARBTRIE_WARN("push_front LIFO behavior End");
+   }
+
+   SECTION("try_swap functionality")
+   {
+      ARBTRIE_WARN("try_swap functionality Start");
+      spmc_buffer<int> buf;
+
+      // Push some data
+      int64_t idx = buf.push(42);
+      REQUIRE(idx >= 0);
+
+      // Verify swappable bitmap shows this slot is available for swapping
+      REQUIRE(buf.get_swappable_bitmap() & (1ULL << idx));
+
+      // Try to swap with a slot that has data
+      auto swapped = buf.try_swap(idx, 99);
+      REQUIRE(swapped.has_value());
+      REQUIRE(*swapped == 42);
+
+      // Verify the slot now contains the new value
+      auto result = buf.pop();
+      REQUIRE(result.has_value());
+      REQUIRE(*result == 99);
+
+      // After popping, the slot is not swappable (pending ack)
+      REQUIRE_FALSE(buf.get_swappable_bitmap() & (1ULL << idx));
+
+      // Acknowledge the pop
+      auto acked = buf.pop_ack();
+      REQUIRE(acked.has_value());
+
+      // After ack, the slot is no longer in use, so not swappable
+      REQUIRE_FALSE(buf.get_swappable_bitmap() & (1ULL << idx));
+
+      // But it is pushable
+      REQUIRE(buf.get_pushable_bitmap() & (1ULL << idx));
+
+      // Try to swap with an empty slot - should fail and return nullopt
+      auto empty_swap = buf.try_swap(idx, 100);
+      REQUIRE_FALSE(empty_swap.has_value());
+
+      // But the value should still have been written
+      auto new_result = buf.pop();
+      REQUIRE(new_result.has_value());
+      REQUIRE(*new_result == 100);
+
+      ARBTRIE_WARN("try_swap functionality End");
+   }
+
+   SECTION("Bitmap accessors")
+   {
+      ARBTRIE_WARN("Bitmap accessors Start");
+      spmc_buffer<int> buf;
+
+      // Initially all slots are pushable and none are swappable
+      REQUIRE(buf.get_pushable_bitmap() == 0xFFFFFFFFFFFFFFFF);
+      REQUIRE(buf.get_swappable_bitmap() == 0);
+
+      // Push to some slots
+      int64_t idx1 = buf.push(1);
+      int64_t idx2 = buf.push(2);
+      int64_t idx3 = buf.push(3);
+
+      // Slots with data are not pushable
+      REQUIRE_FALSE(buf.get_pushable_bitmap() & (1ULL << idx1));
+      REQUIRE_FALSE(buf.get_pushable_bitmap() & (1ULL << idx2));
+
+      // But they are swappable
+      REQUIRE(buf.get_swappable_bitmap() & (1ULL << idx1));
+      REQUIRE(buf.get_swappable_bitmap() & (1ULL << idx2));
+
+      // Pop an item
+      auto popped = buf.pop();
+      REQUIRE(popped.has_value());
+
+      // After pop, the slot is still not pushable (pending ack)
+      REQUIRE_FALSE(buf.get_pushable_bitmap() & (1ULL << idx1));
+
+      // And not swappable either
+      REQUIRE_FALSE(buf.get_swappable_bitmap() & (1ULL << idx1));
+
+      // Acknowledge the pop
+      auto acked = buf.pop_ack();
+      REQUIRE(acked.has_value());
+
+      // Now the slot is pushable again
+      REQUIRE(buf.get_pushable_bitmap() & (1ULL << idx1));
+
+      // But still not swappable
+      REQUIRE_FALSE(buf.get_swappable_bitmap() & (1ULL << idx1));
+
+      ARBTRIE_WARN("Bitmap accessors End");
+   }
+
+   SECTION("pending_ack_count tracking")
+   {
+      ARBTRIE_WARN("pending_ack_count tracking Start");
+      spmc_buffer<int> buf;
+
+      // Initially no pending acks
+      REQUIRE(buf.pending_ack_count() == 0);
+
+      // Push some items
+      for (int i = 0; i < 5; i++)
+      {
+         REQUIRE(buf.push(i) >= 0);
+      }
+
+      // Still no pending acks before consumption
+      REQUIRE(buf.pending_ack_count() == 0);
+
+      // Consume 3 items
+      for (int i = 0; i < 3; i++)
+      {
+         auto result = buf.pop();
+         REQUIRE(result.has_value());
+         REQUIRE(*result == i);
+      }
+
+      // Now we should have 3 pending acks
+      REQUIRE(buf.pending_ack_count() == 3);
+
+      // Verify usage reflects both available and pending ack slots
+      REQUIRE(buf.usage() == 5);  // 2 available + 3 pending ack
+
+      // Verify free space takes into account both available and pending ack slots
+      REQUIRE(buf.free_space() == buf.capacity() - 5);
+
+      // Acknowledge 2 consumed items
+      for (int i = 0; i < 2; i++)
+      {
+         auto acked = buf.pop_ack();
+         REQUIRE(acked.has_value());
+      }
+
+      // Now we should have 1 pending ack
+      REQUIRE(buf.pending_ack_count() == 1);
+
+      // Usage reflects 2 available + 1 pending ack
+      REQUIRE(buf.usage() == 3);
+
+      // Free space is now increased
+      REQUIRE(buf.free_space() == buf.capacity() - 3);
+
+      // Acknowledge the last consumed item
+      auto last_ack = buf.pop_ack();
+      REQUIRE(last_ack.has_value());
+
+      // No more pending acks
+      REQUIRE(buf.pending_ack_count() == 0);
+
+      // Usage reflects only available items
+      REQUIRE(buf.usage() == 2);
+
+      ARBTRIE_WARN("pending_ack_count tracking End");
+   }
+
+   SECTION("pop_back LIFO behavior")
+   {
+      ARBTRIE_WARN("pop_back LIFO behavior Start");
+      spmc_buffer<int> buf;
+
+      // Push multiple items with regular push (FIFO)
+      REQUIRE(buf.push(10) >= 0);
+      REQUIRE(buf.push(20) >= 0);
+      REQUIRE(buf.push(30) >= 0);
+      REQUIRE(buf.push(40) >= 0);
+
+      // Pop from the back (LIFO order from consumer perspective)
+      auto result1 = buf.pop_back();
+      REQUIRE(result1.has_value());
+      REQUIRE(*result1 == 40);  // Last pushed item comes out first
+
+      auto result2 = buf.pop_back();
+      REQUIRE(result2.has_value());
+      REQUIRE(*result2 == 30);  // Second-to-last pushed item
+
+      auto result3 = buf.pop_back();
+      REQUIRE(result3.has_value());
+      REQUIRE(*result3 == 20);
+
+      auto result4 = buf.pop_back();
+      REQUIRE(result4.has_value());
+      REQUIRE(*result4 == 10);  // First pushed item comes out last
+
+      // Buffer should now be empty
+      auto result5 = buf.pop_back();
+      REQUIRE_FALSE(result5.has_value());
+
+      ARBTRIE_WARN("pop_back LIFO behavior End");
+   }
+
+   SECTION("Mixed pop and pop_back")
+   {
+      ARBTRIE_WARN("Mixed pop and pop_back Start");
+      spmc_buffer<int> buf;
+
+      // Push 5 items
+      for (int i = 0; i < 5; i++)
+      {
+         REQUIRE(buf.push(i) >= 0);
+      }
+
+      // Alternating pop from front and back
+      auto front1 = buf.pop();       // Take from front (0)
+      auto back1  = buf.pop_back();  // Take from back (4)
+      auto front2 = buf.pop();       // Take from front (1)
+      auto back2  = buf.pop_back();  // Take from back (3)
+      auto last   = buf.pop();       // Take last item (2)
+
+      REQUIRE(front1.has_value());
+      REQUIRE(*front1 == 0);
+
+      REQUIRE(back1.has_value());
+      REQUIRE(*back1 == 4);
+
+      REQUIRE(front2.has_value());
+      REQUIRE(*front2 == 1);
+
+      REQUIRE(back2.has_value());
+      REQUIRE(*back2 == 3);
+
+      REQUIRE(last.has_value());
+      REQUIRE(*last == 2);
+
+      // Buffer should now be empty
+      REQUIRE_FALSE(buf.pop().has_value());
+      REQUIRE_FALSE(buf.pop_back().has_value());
+
+      ARBTRIE_WARN("Mixed pop and pop_back End");
+   }
+
+   SECTION("push_front with pop_back")
+   {
+      ARBTRIE_WARN("push_front with pop_back Start");
+      spmc_buffer<int> buf;
+
+      // Push items with push_front (LIFO on producer side)
+      for (int i = 0; i < 5; i++)
+      {
+         REQUIRE(buf.push_front(i) >= 0);
+      }
+
+      // Pop from back (LIFO on consumer side)
+      // Since we pushed with push_front, this should give us the original order
+      for (int i = 0; i < 5; i++)
+      {
+         auto result = buf.pop_back();
+         REQUIRE(result.has_value());
+         REQUIRE(*result == i);
+      }
+
+      ARBTRIE_WARN("push_front with pop_back End");
+   }
+
+   SECTION("pop_back_wait behavior")
+   {
+      ARBTRIE_WARN("pop_back_wait behavior Start");
+      spmc_buffer<int> buf;
+
+      // Push some data
+      REQUIRE(buf.push(42) >= 0);
+
+      // Test pop_back_wait
+      auto val = buf.pop_back_wait();
+      REQUIRE(val == 42);
+
+      // Test with multiple values
+      REQUIRE(buf.push(10) >= 0);
+      REQUIRE(buf.push(20) >= 0);
+      REQUIRE(buf.push(30) >= 0);
+
+      // pop_back_wait should return values in reverse order
+      REQUIRE(buf.pop_back_wait() == 30);
+      REQUIRE(buf.pop_back_wait() == 20);
+      REQUIRE(buf.pop_back_wait() == 10);
+
+      // Test concurrent push/pop_back_wait with a thread
+      std::atomic<bool> thread_done{false};
+      std::thread       consumer(
           [&]()
           {
-             int value;
-             buf.consume(value);  // This should block until data is available
-             REQUIRE(value == 42);
-             consumer_finished = true;
+             auto val1 = buf.pop_back_wait();
+             auto val2 = buf.pop_back_wait();
+             REQUIRE(val1 == 100);
+             REQUIRE(val2 == 200);
+             thread_done.store(true);
           });
 
-      // Give consumer time to start waiting
+      // Sleep briefly to ensure consumer is waiting
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-      // Producer pushes data
-      REQUIRE(buf.push(42));
+      // Push values that the consumer is waiting for
+      REQUIRE(buf.push(100) >= 0);
+      REQUIRE(buf.push(200) >= 0);
 
+      // Wait for consumer thread to complete
       consumer.join();
-      REQUIRE(consumer_finished);
-      ARBTRIE_WARN("Blocking Consume End");
+      REQUIRE(thread_done.load());
+
+      ARBTRIE_WARN("pop_back_wait behavior End");
    }
 
-   /*
-   SECTION("Adaptive Water Marks")
+   SECTION("pop with skip_ack feature")
    {
-      ARBTRIE_WARN("Adaptive Water Marks Start");
-      spmc_circular_buffer<int> buf;
-      const uint64_t            initial_high = buf.get_high_water_mark();
+      ARBTRIE_WARN("pop with skip_ack feature Start");
+      spmc_buffer<int> buf;
 
-      // Fill buffer to force producer waiting
-      for (int i = 0; i < 64; ++i)
+      // Push some items
+      for (int i = 0; i < 8; i++)
       {
-         buf.push(i);
+         REQUIRE(buf.push(i) >= 0);
       }
 
-      // Consumer thread that waits before consuming
-      std::thread consumer(
-          [&]()
-          {
-             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-             int value;
-             for (int i = 0; i < 32; ++i)
-             {
-                REQUIRE(buf.try_consume(value));
-             }
-          });
+      // Normal pop (with acknowledgment) - using default template parameter
+      auto result1 = buf.pop();  // Default is ack_mode::require_ack
+      REQUIRE(result1.has_value());
+      REQUIRE(*result1 == 0);
 
-      // Producer thread that should experience waiting
-      std::thread producer(
-          [&]()
-          {
-             for (int i = 0; i < 16; ++i)
-             {
-                buf.push(i);  // This should trigger water mark adjustment
-             }
-          });
+      // There should be one pending acknowledgment
+      REQUIRE(buf.pending_ack_count() == 1);
 
-      producer.join();
-      consumer.join();
+      // Different ways to specify skipping acknowledgment:
 
-      // High water mark should have been adjusted down due to producer waiting
-      REQUIRE(buf.get_high_water_mark() < initial_high);
-      ARBTRIE_WARN("Adaptive Water Marks End");
+      // 1. Using the full enum path
+      auto result2 = buf.pop<spmc_buffer<int>::ack_mode::skip_ack>();
+      REQUIRE(result2.has_value());
+      REQUIRE(*result2 == 1);
+
+      // 2. Using the convenient static constant
+      auto result3 = buf.pop<spmc_buffer<int>::skip_ack>();
+      REQUIRE(result3.has_value());
+      REQUIRE(*result3 == 2);
+
+      // 3. Using the most readable helper method
+      auto result4 = buf.pop_without_ack();
+      REQUIRE(result4.has_value());
+      REQUIRE(*result4 == 3);
+
+      // Still only one pending acknowledgment (from the first pop)
+      REQUIRE(buf.pending_ack_count() == 1);
+
+      // Different pop variants without acknowledgment
+      auto result5 = buf.pop_back_without_ack();  // LIFO pop without ack
+      REQUIRE(result5.has_value());
+      REQUIRE(*result5 == 7);
+
+      auto result6 = buf.pop_wait_without_ack();  // Blocking FIFO pop without ack
+      REQUIRE(result6 == 4);
+
+      auto result7 = buf.pop_back_wait_without_ack();  // Blocking LIFO pop without ack
+      REQUIRE(result7 == 6);
+
+      // Still only one pending acknowledgment
+      REQUIRE(buf.pending_ack_count() == 1);
+
+      // The producer acknowledges the first pop
+      auto ack_result = buf.pop_ack();
+      REQUIRE(ack_result.has_value());
+      REQUIRE(*ack_result == 0);
+
+      // No more pending acknowledgments
+      REQUIRE(buf.pending_ack_count() == 0);
+
+      // Only item 5 remains
+      auto result8 = buf.pop();
+      REQUIRE(result8.has_value());
+      REQUIRE(*result8 == 5);
+      REQUIRE(buf.pending_ack_count() == 1);
+
+      ARBTRIE_WARN("pop with skip_ack feature End");
    }
 
-   SECTION("Min Water Gap Adjustment")
+   SECTION("Priority Handling")
    {
-      ARBTRIE_WARN("Min Water Gap Adjustment Start");
-      spmc_circular_buffer<int> buf;
-      const uint64_t            initial_high = buf.get_high_water_mark();
-      const uint64_t            initial_low  = buf.get_low_water_mark();
+      ARBTRIE_WARN("Priority Handling Start");
+      spmc_buffer<int> buf;
 
-      // Set a larger minimum gap
-      REQUIRE(buf.set_min_water_gap(20));
+      // Low priority (push)
+      REQUIRE(buf.push(100) >= 0);
+      REQUIRE(buf.push(101) >= 0);
+      REQUIRE(buf.push(102) >= 0);
 
-      // High water mark should have increased to maintain the gap
-      REQUIRE(buf.get_high_water_mark() - buf.get_low_water_mark() >= 20);
+      // High priority (push_front)
+      REQUIRE(buf.push_front(10) >= 0);
+      REQUIRE(buf.push_front(11) >= 0);
 
-      // Fill buffer to test the new water marks
-      std::atomic<bool> producer_waiting{false};
-      std::thread       producer(
-          [&]()
-          {
-             for (int i = 0; i < 64; ++i)
-             {
-                if (!buf.push(i))
-                {
-                   producer_waiting = true;
-                   break;
-                }
-             }
-          });
+      // More low priority
+      REQUIRE(buf.push(103) >= 0);
+      REQUIRE(buf.push(104) >= 0);
 
-      // Wait for producer to potentially block
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      // Another high priority
+      REQUIRE(buf.push_front(12) >= 0);
 
-      // Verify producer is waiting at the new high water mark
-      if (producer_waiting)
-      {
-         REQUIRE(buf.usage() >= buf.get_high_water_mark());
-      }
+      // Test pop (which prefers high priority)
+      auto high1 = buf.pop();
+      REQUIRE(high1.has_value());
+      REQUIRE(*high1 == 12);  // Should get newest high priority item (LIFO for high)
 
-      // Cleanup
-      producer.join();
+      auto high2 = buf.pop();
+      REQUIRE(high2.has_value());
+      REQUIRE(*high2 == 11);
 
-      // Consume all items
-      int value;
-      while (buf.try_consume(value))
-      {
-      }
-      ARBTRIE_WARN("Min Water Gap Adjustment End");
+      auto high3 = buf.pop();
+      REQUIRE(high3.has_value());
+      REQUIRE(*high3 == 10);
+
+      // No more high priority items
+      auto high4 = buf.pop();
+      REQUIRE(high4.has_value());
+      REQUIRE(*high4 == 100);  // Now gets low priority items
+
+      // Test pop_back (which gets low priority)
+      auto low1 = buf.pop_back();
+      REQUIRE(low1.has_value());
+      REQUIRE(*low1 == 101);  // Should get next low priority item (FIFO for low)
+
+      auto low2 = buf.pop_back();
+      REQUIRE(low2.has_value());
+      REQUIRE(*low2 == 102);
+
+      // Test pop when no high priority items left
+      auto prefer_high = buf.pop();
+      REQUIRE(prefer_high.has_value());
+      REQUIRE(*prefer_high == 103);  // Gets next low priority item
+
+      // Reset buffer for more tests
+      buf.reset();  // Reset the buffer to its initial state
+
+      // Push mix of priorities
+      REQUIRE(buf.push(200) >= 0);       // Low
+      REQUIRE(buf.push_front(20) >= 0);  // High
+      REQUIRE(buf.push(201) >= 0);       // Low
+      REQUIRE(buf.push_front(21) >= 0);  // High
+
+      // Test pop (gets high priority)
+      auto prefer_high1 = buf.pop();
+      REQUIRE(prefer_high1.has_value());
+      REQUIRE(*prefer_high1 == 21);  // Should get high priority
+
+      // Test pop_back (gets low priority)
+      auto prefer_low1 = buf.pop_back();
+      REQUIRE(prefer_low1.has_value());
+      REQUIRE(*prefer_low1 == 200);  // Should get low priority
+
+      // Test with skip_ack feature
+      auto high_no_ack = buf.pop_without_ack();
+      REQUIRE(high_no_ack.has_value());
+      REQUIRE(*high_no_ack == 20);
+      REQUIRE(buf.pending_ack_count() == 0);  // No pending ack
+
+      auto low_no_ack = buf.pop_back_without_ack();
+      REQUIRE(low_no_ack.has_value());
+      REQUIRE(*low_no_ack == 201);
+      REQUIRE(buf.pending_ack_count() == 0);  // No pending ack
+
+      ARBTRIE_WARN("Priority Handling End");
    }
-   */
+}
 
-   SECTION("Bit Operations")
+TEST_CASE("SPMC Circular Buffer Concurrent", "[spmc_circular_buffer][concurrent]")
+{
+   SECTION("Single Producer Multiple Consumers")
    {
-      ARBTRIE_WARN("Bit Operations Start");
-      spmc_circular_buffer<int> buf;
+      constexpr int     NUM_ITEMS     = 10000;
+      constexpr int     NUM_CONSUMERS = 4;
+      spmc_buffer<int>  buf;
+      std::atomic<int>  consumed{0};
+      std::atomic<bool> stop_consumers{false};
+      std::vector<int>  items_to_push;
 
-      // Test bitmap operations
-      REQUIRE(buf.push(1));
-      uint64_t bitmap = buf.get_available_bitmap();
-      REQUIRE(bitmap != 0);
-      REQUIRE(__builtin_popcountll(bitmap) == 1);  // Should have exactly one bit set
-
-      int value;
-      REQUIRE(buf.try_consume(value));
-      REQUIRE(buf.get_available_bitmap() == 0);  // All bits should be cleared
-      ARBTRIE_WARN("Bit Operations End");
-   }
-
-   SECTION("Producer Consumer Synchronization")
-   {
-      ARBTRIE_WARN("Producer Consumer Synchronization Start");
-      spmc_circular_buffer<int> buf;
-      std::atomic<bool>         first_producer_done{false};
-      std::atomic<bool>         second_producer_done{false};
-      std::atomic<bool>         consumer_done{false};
-      std::atomic<int>          items_produced{0};
-      std::atomic<int>          items_consumed{0};
-
-      // Start producer thread - it will push until blocked
-      std::thread producer(
-          [&]()
-          {
-             int count = 0;
-             while (count < buf.get_high_water_mark())
-             {
-                if (!buf.push(count))
-                {
-                   break;  // Buffer full
-                }
-                items_produced.fetch_add(1, std::memory_order_relaxed);
-                count++;
-             }
-             ARBTRIE_WARN("First producer done, produced=", items_produced.load());
-             first_producer_done = true;
-          });
-
-      // Wait for buffer to fill to high water mark
-      auto start = std::chrono::steady_clock::now();
-      while (buf.usage() < buf.get_high_water_mark())
+      // Prepare items to push
+      for (int i = 0; i < NUM_ITEMS; ++i)
       {
-         if (std::chrono::steady_clock::now() - start > std::chrono::seconds(1))
-         {
-            FAIL("Timeout waiting for buffer to fill to high water mark");
-         }
-         std::this_thread::yield();
+         items_to_push.push_back(i);
       }
 
-      // Verify producer is blocked
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      REQUIRE(buf.usage() >= buf.get_high_water_mark());
-      REQUIRE_FALSE(first_producer_done);
-
-      // Start consumer thread
-      std::thread consumer(
-          [&]()
-          {
-             int  value;
-             bool keep_running = true;
-             while (keep_running)
-             {
-                if (buf.try_consume(value))
-                {
-                   items_consumed.fetch_add(1, std::memory_order_relaxed);
-                }
-                else if (first_producer_done && second_producer_done &&
-                         items_consumed.load() == items_produced.load())
-                {
-                   // Only exit if both producers are done AND we've consumed everything
-                   keep_running = false;
-                }
-                else
-                {
-                   std::this_thread::yield();
-                }
-             }
-             consumer_done = true;
-          });
-
-      // Wait for buffer to drain to low water mark
-      start = std::chrono::steady_clock::now();
-      while (buf.usage() > buf.get_low_water_mark())
-      {
-         if (std::chrono::steady_clock::now() - start > std::chrono::seconds(1))
-         {
-            ARBTRIE_WARN("Timeout waiting for buffer to drain to low water mark\n",
-                         "usage=", buf.usage(), " low_water=", buf.get_low_water_mark());
-            FAIL("Timeout waiting for buffer to drain to low water mark");
-         }
-         std::this_thread::yield();
-      }
-      ARBTRIE_WARN("Consumer drained to low water mark");
-
-      // Wait for first producer to complete
-      start = std::chrono::steady_clock::now();
-      while (!first_producer_done)
-      {
-         if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5))
-         {
-            FAIL("Timeout waiting for first producer to complete");
-         }
-         std::this_thread::yield();
-      }
-      producer.join();
-
-      // Start a new producer thread that should push once without blocking
-      std::thread second_producer(
-          [&]()
-          {
-             REQUIRE(buf.push(999));  // Should succeed without blocking
-             items_produced.fetch_add(1, std::memory_order_relaxed);
-             ARBTRIE_WARN("Second producer done, total produced=", items_produced.load());
-             second_producer_done = true;
-          });
-
-      // Wait for consumer to complete and verify final state
-      start = std::chrono::steady_clock::now();
-      while (!consumer_done || items_consumed.load() != items_produced.load())
-      {
-         if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5))
-         {
-            ARBTRIE_WARN("Timeout waiting for consumer to complete\n",
-                         "consumer_done=", consumer_done.load(),
-                         " items_consumed=", items_consumed.load(),
-                         " items_produced=", items_produced.load());
-            FAIL("Timeout waiting for consumer to complete");
-         }
-         std::this_thread::yield();
-      }
-
-      second_producer.join();
-      consumer.join();
-
-      // Verify final state
-      REQUIRE(buf.usage() == 0);
-      REQUIRE(items_consumed.load() == items_produced.load());
-      ARBTRIE_WARN("Producer Consumer Synchronization End");
-   }
-   SECTION("Producer Consumer Pattern")
-   {
-      ARBTRIE_WARN("Producer Consumer Pattern Start");
-      spmc_circular_buffer<int> buf;
-      std::atomic<bool>         stop{false};
-      std::atomic<int>          produced{0};
-      std::atomic<int>          consumed{0};
-
-      // Producer thread
-      std::thread producer(
-          [&]()
-          {
-             int count = 0;
-             while (!stop && count < 10000)
-             {
-                if (buf.push(count))
-                {
-                   produced.fetch_add(1, std::memory_order_relaxed);
-                   count++;
-                }
-                else
-                {
-                   std::this_thread::yield();
-                }
-             }
-          });
-
-      // Multiple consumer threads
-      constexpr int            num_consumers = 3;
+      // Start consumer threads
       std::vector<std::thread> consumers;
-      for (int i = 0; i < num_consumers; ++i)
+      for (int c = 0; c < NUM_CONSUMERS; ++c)
       {
          consumers.emplace_back(
-             [&]()
+             [&buf, &consumed, &stop_consumers]()
              {
-                int value;
-                while (!stop || buf.usage() > 0)
+                while (!stop_consumers.load())
                 {
-                   if (buf.try_consume(value))
+                   auto item = buf.pop();
+                   if (item.has_value())
                    {
                       consumed.fetch_add(1, std::memory_order_relaxed);
                    }
                    else
                    {
+                      // Give producer a chance
                       std::this_thread::yield();
                    }
                 }
              });
       }
 
-      // Let the test run for a short time
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      stop = true;
+      // Producer pushes all items
+      for (int value : items_to_push)
+      {
+         while (buf.push(value) < 0)
+         {
+            // Buffer full, wait a bit
+            std::this_thread::yield();
+         }
+      }
 
-      producer.join();
+      // Wait for all items to be consumed
+      while (consumed.load() < NUM_ITEMS)
+      {
+         std::this_thread::yield();
+      }
+
+      // Stop consumers and join threads
+      stop_consumers.store(true);
       for (auto& consumer : consumers)
       {
          consumer.join();
       }
 
-      REQUIRE(produced.load() == consumed.load());
-      REQUIRE(buf.usage() == 0);
-      ARBTRIE_WARN("Producer Consumer Pattern End");
+      // Verify all items were consumed
+      REQUIRE(consumed.load() == NUM_ITEMS);
    }
 }

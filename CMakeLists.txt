@@ -8,6 +8,24 @@ if(POLICY CMP0167)
     cmake_policy(SET CMP0167 NEW)
 endif()
 
+# Enforce build type if not specified - place before project()
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build" FORCE)
+endif()
+
+# Valid build types
+set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+    "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+
+# Print build type for debugging
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
+# Set debug flags explicitly - must be before project()
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -UNDEBUG -fno-omit-frame-pointer" CACHE STRING "Flags used by the compiler in Debug builds" FORCE)
+    message(STATUS "Setting Debug flags: ${CMAKE_CXX_FLAGS_DEBUG}")
+endif()
+
 # Set the C++ compiler to LLVM from Homebrew on macOS
 if(APPLE)
     set(CMAKE_CXX_COMPILER "/opt/homebrew/opt/llvm/bin/clang++")
@@ -28,7 +46,7 @@ project(arbtrie VERSION 0.1.0 LANGUAGES CXX)
 # Define build options
 option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
-option(BUILD_TESTING "Build tests" OFF)
+option(BUILD_TESTS "Build tests" ON)
 option(BUILD_VISUALIZER "Build segment visualizer" )
 
 # Find required packages
@@ -39,7 +57,7 @@ set(Boost_NO_WARN_NEW_VERSIONS ON)
 find_package(Boost REQUIRED COMPONENTS program_options)
 
 # Only find Catch2 if we're building tests
-if(BUILD_TESTING)
+if(BUILD_TESTS)
     find_package(Catch2 3 REQUIRED)
     enable_testing()
 endif()
@@ -59,6 +77,8 @@ add_library(arbtrie
     src/id_alloc.cpp
     src/recover.cpp
     src/iterator_count_keys.cpp
+    src/segment_thread.cpp
+    src/block_allocator.cpp
 )
 
 # Library configuration
@@ -71,13 +91,16 @@ target_include_directories(arbtrie
 target_link_libraries(arbtrie PUBLIC Threads::Threads)
 target_compile_features(arbtrie PUBLIC cxx_std_23)
 
-# Compiler options
-target_compile_options(arbtrie 
-    PUBLIC 
-        -std=c++23
-        -Wno-vla-extension
-        $<$<CONFIG:Debug>:-O0 -g -UNDEBUG -fno-omit-frame-pointer>
-)
+# Set up explicit compile definitions
+add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
+
+# Common compiler flags
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension")
+
+# Debug specific settings at the global level
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-O0 -g -fno-omit-frame-pointer)
+endif()
 
 # Sanitizer configuration
 if(ENABLE_SANITIZER)
@@ -218,7 +241,7 @@ endif()
 add_subdirectory(programs)
 
 # Only add test directory if testing is enabled
-if(BUILD_TESTING)
+if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 

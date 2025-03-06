@@ -253,9 +253,6 @@ namespace arbtrie
          }
       }
       _dbm->clean_shutdown = false;
-
-      if (cfg.run_compact_thread)
-         _sega.start_compact_thread();
    }
 
    database::~database()
@@ -283,18 +280,6 @@ namespace arbtrie
    void database::print_stats(std::ostream& os, bool detail)
    {
       _sega.dump();
-   }
-   bool database::compact_next_segment()
-   {
-      return _sega.compact_next_segment();
-   }
-   void database::start_compact_thread()
-   {
-      _sega.start_compact_thread();
-   }
-   void database::stop_compact_thread()
-   {
-      _sega.stop_compact_thread();
    }
 
    std::shared_ptr<write_session> database::start_write_session()

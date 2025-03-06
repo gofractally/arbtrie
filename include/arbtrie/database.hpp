@@ -80,12 +80,6 @@ namespace arbtrie
       bool cache_on_read = false;
 
       /**
-          * By default triedent starts a background thread which
-          * will compact data ones a segment 
-          */
-      bool run_compact_thread = true;
-
-      /**
           * The max amount of a segment that is allowed to be empty
           * before the compactor thread will move the remaining contents
           * to a new segment. 
@@ -522,10 +516,6 @@ namespace arbtrie
       std::shared_ptr<write_session> start_write_session();
 
       read_session start_read_session();
-
-      void start_compact_thread();
-      void stop_compact_thread();
-      bool compact_next_segment();
 
       void print_stats(std::ostream& os, bool detail = false);
       void print_region_stats();

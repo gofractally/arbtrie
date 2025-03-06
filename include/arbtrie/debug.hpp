@@ -105,10 +105,20 @@ namespace arbtrie
 #endif
    }
 
-// ARBTRIE_WARN is always enabled, even in release builds
-#define ARBTRIE_WARN(...) arbtrie::debug(__func__, __LINE__, "\033[31m", __VA_ARGS__, "\033[0m")
+// Log Levels with Distinct Colors
+// --------------------------------
+// ARBTRIE_WARN - Orange text (33m) - For warnings that require attention but aren't fatal
+#define ARBTRIE_WARN(...) arbtrie::debug(__func__, __LINE__, "\033[33m", __VA_ARGS__, "\033[0m")
 
+// ARBTRIE_ERROR - Bold Red text (1;31m) - For errors and exceptions
+#define ARBTRIE_ERROR(...) arbtrie::debug(__func__, __LINE__, "\033[1;31m", __VA_ARGS__, "\033[0m")
+
+// ARBTRIE_INFO - Cyan text (36m) - For informational messages about normal operation
+#define ARBTRIE_INFO(...) arbtrie::debug(__func__, __LINE__, "\033[36m", __VA_ARGS__, "\033[0m")
+
+// ARBTRIE_DEBUG - No color - For detailed debugging information (only in debug builds)
 #define ARBTRIE_DEBUG(...) arbtrie::debug(__func__, __LINE__, __VA_ARGS__)
+
 // Debug-only macros
 #ifndef NDEBUG
 #define ARBTRIE_SCOPE arbtrie::scope __sco__##__LINE__;

@@ -184,31 +184,30 @@ void print_stat(auto& ws)
 int main(int argc, char** argv)
 {
    arbtrie::thread_name("main");
-   std::string db_dir = "benchdb";
    uint32_t    rounds;
    uint32_t    batch;
    uint32_t    items;
    uint32_t    value_size;
-   bool        run_cthread;
-   bool        dense_rand;
-   bool        dense_little;
-   bool        dense_big;
-   bool        sparse_rand;
-   bool        sparse_seq;
+   uint32_t    range_n = 0;
+   uint32_t    range_e = 1;
+   bool        reset   = false;
+   bool        stat    = false;
+   std::string db_dir  = "./arbtriedb";
+   std::string bench   = "all";
 
    po::options_description desc("Allowed options");
    auto                    opt = desc.add_options();
    opt("help,h", "print this message");
-   opt("rounds", po::value<uint32_t>(&rounds)->default_value(10), "the number of times to run");
-   opt("batch", po::value<uint32_t>(&batch)->default_value(10),
-       "the number of items to insert per transaction");
-   opt("items", po::value<uint32_t>(&items)->default_value(1000000),
-       "the total number of items to insert per round");
-   opt("value-size,v", po::value<uint32_t>(&value_size)->default_value(8),
-       "the total number of items to insert per round");
-   opt("run-compact-thread", po::value<bool>(&run_cthread)->default_value(true));
-   opt("reset", "reset the database");
-   opt("stat", "prints statistics about the database");
+   opt("round,r", po::value<uint32_t>(&rounds)->default_value(3), "number of rounds");
+   opt("batch,b", po::value<uint32_t>(&batch)->default_value(512), "batch size");
+   opt("items,i", po::value<uint32_t>(&items)->default_value(1000000), "number of items");
+   opt("range-n", po::value<uint32_t>(&range_n)->default_value(0), "range start");
+   opt("range-e", po::value<uint32_t>(&range_e)->default_value(1), "range end");
+   opt("value-size,s", po::value<uint32_t>(&value_size)->default_value(8), "value size");
+   opt("db-dir,d", po::value<std::string>(&db_dir)->default_value("./arbtriedb"), "database dir");
+   opt("bench", po::value<std::string>(&bench)->default_value("all"), "benchmark to run");
+   opt("reset", po::bool_switch(&reset), "reset database");
+   opt("stat", po::bool_switch(&stat), "print database stats");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -223,17 +222,17 @@ int main(int argc, char** argv)
    {
       ARBTRIE_WARN("resetting database");
       std::filesystem::remove_all(db_dir);
-      arbtrie::database::create(db_dir, {.run_compact_thread = false});
+      arbtrie::database::create(db_dir);
    }
    if (vm.count("stat"))
    {
-      database db(db_dir, {.run_compact_thread = run_cthread});
+      database db(db_dir);
       auto     ws = db.start_write_session();
       print_stat(ws);
       return 0;
    }
 
-   database db(db_dir, {.run_compact_thread = run_cthread});
+   database db(db_dir);
    auto     ws = db.start_write_session();
 
    benchmark_config cfg = {rounds, items, batch, value_size};

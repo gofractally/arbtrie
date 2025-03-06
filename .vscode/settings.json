@@ -5,6 +5,37 @@
         "editor.formatOnSave": true,
         "editor.formatOnSaveMode": "file",
     },
+    "cmake.configureSettings": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "ON"
+    },
+    "cmake.buildDirectory": "${workspaceFolder}/build/${buildType}",
+    "cmake.buildEnvironment": {
+        "VERBOSE": "1"
+    },
+    "cmake.defaultVariants": {
+        "buildType": {
+            "default": "debug",
+            "description": "The build type.",
+            "choices": {
+                "debug": {
+                    "short": "Debug",
+                    "long": "Debug build",
+                    "buildType": "Debug"
+                },
+                "release": {
+                    "short": "Release",
+                    "long": "Release build",
+                    "buildType": "Release"
+                }
+            }
+        }
+    },
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/${command:cmake.buildType}/compile_commands.json",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "C_Cpp.autoAddFileAssociations": false,
+    "cmake.configureOnOpen": true,
+    "cmake.copyCompileCommands": "${workspaceFolder}/compile_commands.json",
     "vim.leader":"<space>",
     "vim.normalModeKeyBindingsNonRecursive": [
         {

@@ -14,7 +14,7 @@ namespace arbtrie
       auto seg     = l.segment();
       auto obj_ptr = (node_header*)((char*)_session._sega._block_alloc.get(seg) + l.abs_index());
 
-      _session._sega._header->seg_meta[seg].free_object(obj_ptr->object_capacity());
+      _session.free_object(seg, obj_ptr->object_capacity());
 
       //   std::cerr << "realloc " << id <<" size: " << size <<" \n";
       // TODO: mark the free space associated with the current location of id
@@ -81,9 +81,7 @@ namespace arbtrie
 
    inline bool read_lock::is_synced(node_location loc)
    {
-      int64_t seg = loc.segment();
-      return _session._sega._header->seg_meta[seg].get_last_sync_pos() >
-             loc.abs_index();  // - seg * segment_size;
+      return _session.is_synced(loc);
    }
 
    inline sync_lock& read_lock::get_sync_lock(int seg)
@@ -205,12 +203,12 @@ namespace arbtrie
 
    inline uint64_t read_lock::cache_difficulty() const
    {
-      return _session._sega._cache_difficulty.load(std::memory_order_relaxed);
+      return _session.get_cache_difficulty();
    }
 
    inline void read_lock::free_object(node_location loc, uint32_t size)
    {
-      _session._sega._header->seg_meta[loc.segment()].free_object(size);
+      _session.free_object(loc.segment(), size);
    }
 
 }  // namespace arbtrie

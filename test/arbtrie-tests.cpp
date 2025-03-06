@@ -42,8 +42,8 @@ struct environ
    {
       std::cerr << "resetting database\n";
       std::filesystem::remove_all("arbtriedb");
-      arbtrie::database::create("arbtriedb", {.run_compact_thread = false});
-      db = new database("arbtriedb", {.run_compact_thread = false});
+      arbtrie::database::create("arbtriedb");
+      db = new database("arbtriedb");
    }
    ~environ() { delete db; }
    arbtrie::database* db;
@@ -859,7 +859,7 @@ TEST_CASE("recover")
 
    ARBTRIE_WARN("RELOADING");
    delete env.db;
-   env.db = new database("arbtriedb", {.run_compact_thread = false});
+   env.db = new database("arbtriedb");
    {
       auto ws    = env.db->start_read_session();
       auto rt    = ws.start_transaction();
@@ -904,7 +904,7 @@ TEST_CASE("recover")
       ARBTRIE_DEBUG("total_size: ", stats.total_size() / double(MB), " MB");
    }
    delete env.db;
-   env.db = new database("arbtriedb", {.run_compact_thread = false});
+   env.db = new database("arbtriedb");
    env.db->recover();
    ARBTRIE_WARN("AFTER RECOVER 2");
    {

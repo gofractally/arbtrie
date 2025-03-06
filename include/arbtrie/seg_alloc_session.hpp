@@ -28,6 +28,7 @@ namespace arbtrie
 
       ~seg_alloc_session();
       seg_alloc_session(seg_alloc_session&& mv);
+      seg_alloc_session& operator=(seg_alloc_session&& mv);
 
       uint64_t count_ids_with_refs();
 
@@ -41,25 +42,43 @@ namespace arbtrie
       void release_read_lock();
 
       seg_alloc_session(seg_allocator& a, uint32_t ses_num);
-      seg_alloc_session()                         = delete;
-      seg_alloc_session(const seg_alloc_session&) = delete;
+      seg_alloc_session()                                    = delete;
+      seg_alloc_session(const seg_alloc_session&)            = delete;
+      seg_alloc_session& operator=(const seg_alloc_session&) = delete;
+
+      inline void free_object(segment_number segment, uint32_t object_size);
+
+      inline size_t get_last_sync_position(segment_number segment) const;
+
+      /**
+       * Check if a node location has been synced to disk.
+       */
+      inline bool is_synced(node_location loc) const;
+
+      /**
+       * Get the cache difficulty value which is used for determining read bit updates
+       */
+      inline uint32_t get_cache_difficulty() const;
 
       void                                   unalloc(uint32_t size);
       std::pair<node_location, node_header*> alloc_data(uint32_t   size,
                                                         id_address adr,
-                                                        uint64_t   time = size_weighted_age::now());
+                                                        uint64_t   time = 0);
 
-      uint32_t _session_num;  // index into _sega's active sessions list
+     private:
+      seg_allocator& _sega;
+      uint32_t       _session_num;  // index into _sega's active sessions list
 
-      segment_number                 _alloc_seg_num = -1ull;
-      mapped_memory::segment_header* _alloc_seg_ptr = nullptr;
-      bool                           _in_alloc      = false;
+      segment_number                 _alloc_seg_num  = -1ull;
+      mapped_memory::segment_header* _alloc_seg_ptr  = nullptr;
+      mapped_memory::segment_meta*   _alloc_seg_meta = nullptr;
+      bool                           _in_alloc       = false;
 
-      std::atomic<uint64_t>& _session_lock_ptr;
-      seg_allocator&         _sega;
-      int                    _nested_read_lock = 0;
+      // Reference to the session read lock from read_lock_queue
+      mapped_memory::session_rlock& _session_rlock;
+      int                           _nested_read_lock = 0;
 
       // Reference to the read cache queue from seg_allocator
-      circular_buffer<uint32_t, 1024 * 1024>* _rcache_queue;
+      rcache_queue_type& _rcache_queue;
    };
 }  // namespace arbtrie

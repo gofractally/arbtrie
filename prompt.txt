@@ -1,20 +1,24 @@
 PROJECT SETUP:
 - CMake build system
-- Build directories: build/debug, build/release
+- Build directories: build/debug, build/release (assume these exist, don't try to create them)
 - Testing: -DBUILD_TESTING=ON flag
 - Run tests: ./bin/arbtrie-tests, filter with ./bin/arbtrie-tests "[tag]"
 - Catch2 testing framework
 - NO --success flag (produces too much output)
+- C++20 standard is used throughout the project
 
 CODE STYLE:
+- See style_prompt.txt for detailed code style guidelines
 - No braces {} for one-line conditionals and loops
 - Use angle brackets <> for project includes (#include <arbtrie/header.hpp>)
+- Comments: align * with first * in /** (not indented)
+- Use ARBTRIE_WARN("message: ", variable, ...) for critical errors instead of std::cerr/std::cout
 
 AGENT:
 - Always use full paths with rm commands
 - For git operations, refer to git_prompt.txt
+- Check all code edits against style_prompt.txt before submitting
 
 WORKFLOW:
 - "propose" = describe changes only, no code edits
-- Update both prompt.txt and .cursor file when standards change
 - Propose new project standards when common errors identified 

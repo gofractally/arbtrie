@@ -1,12 +1,15 @@
 #pragma once
 #include <assert.h>
+#include <arbtrie/address.hpp>
+#include <arbtrie/circular_buffer.hpp>
 #include <arbtrie/config.hpp>
 #include <arbtrie/hierarchical_bitmap.hpp>
 #include <arbtrie/padded_atomic.hpp>
 #include <arbtrie/rdtsc.hpp>
 #include <arbtrie/size_weighted_age.hpp>
-#include <arbtrie/spmc_circular_buffer.hpp>
+#include <arbtrie/spmc_buffer.hpp>
 #include <arbtrie/util.hpp>
+#include <bit>
 
 namespace arbtrie
 {
@@ -14,198 +17,151 @@ namespace arbtrie
    /// index into meta[free_segment_index]._free_segment_number
    using free_segment_index = uint64_t;
 
+   using rcache_queue_type = circular_buffer<id_address, 1024 * 256>;
+
    // types that are memory mapped
    namespace mapped_memory
    {
 
       static constexpr segment_number invalid_segment_num = segment_number(-1);
 
+      /**
+       * Encapsulates the read locking behavior for a session
+       */
+      class session_rlock
+      {
+        public:
+         session_rlock() = default;
+
+         /**
+          * Lock the session by copying the last broadcasted end pointer to
+          * the session's lock pointer (copy high bits to low bits)
+          */
+         void lock()
+         {
+            uint32_t high_bits = _lock_ptr.load(std::memory_order_relaxed) >> 32;
+            _lock_ptr.set_low_bits(high_bits);
+         }
+
+         /**
+          * Unlock the session by setting the low bits to maximum value
+          */
+         void unlock() { _lock_ptr.set_low_bits(uint32_t(-1)); }
+
+         /**
+          * Update the high bits with the new end pointer value
+          */
+         void update(uint32_t end) { _lock_ptr.set_high_bits(end); }
+
+         /**
+          * Get the current value of the lock pointer
+          */
+         uint64_t load(std::memory_order order = std::memory_order_relaxed) const
+         {
+            return _lock_ptr.load(order);
+         }
+
+        private:
+         padded_atomic<uint64_t> _lock_ptr{uint64_t(-1)};
+      };
+
+      /**
+       * Shared state for segment threads that is stored in mapped memory
+       * for inter-process coordination
+       * 
+       * used by @ref segment_thread to track thread state
+       */
+      struct segment_thread_state
+      {
+         // Flag indicating if the thread is currently running
+         // Used to prevent multiple processes from running duplicate threads
+         // and to detect unclean shutdowns
+         std::atomic<bool> running{false};
+
+         // Process ID of the process running the thread
+         // Helps with debugging and determining if the process crashed
+         std::atomic<int> pid{0};
+
+         // When the thread was started
+         std::atomic<int64_t> start_time_ms{0};
+
+         // Last time the thread reported being alive (heartbeat)
+         std::atomic<int64_t> last_alive_time_ms{0};
+      };
+
       // meta data about each segment,
-      // stored in an array in allocator_header indexed by segment number
+      // stored in an array in allocator_state indexed by segment number
       // data is reconstructed on crash recovery and not synced
       struct segment_meta
       {
+         /**
+          *  When the database is synced, the last_sync_page is advanced and everything from
+          * the start of the segment up to the last_sync_page is mprotected as read only. The
+          * segment_header::alloc_pos is then moved to the end of the last_sync_page and any 
+          * left over space on the last_sync_page is marked as free. This is because the OS
+          * can only sync and write protect at the page boundary
+          * 
+          * rel_virtual_age is a 20bit floating point number that represents the virtual age
+          * relative to a base virtual age. The base virtual age is updated from time to time
+          * so that the floating point number has greatest precision near the current time and
+          * least precision near the oldest segments.
+          * 
+          * 1. virtual age changes during allocation (when compaction ignores it)
+          * 2. virtual age is then used to prioritize unlocking and compaction
+          */
          struct state_data
          {
-            uint64_t free_space : 26;      // Max 128 MB in bytes
-            uint64_t free_objects : 21;    // 128MB / 64 byte cacheline
-            uint64_t last_sync_page : 15;  // 128MB / 4096 byte pages
-            uint64_t is_alloc : 1  = 0;
-            uint64_t is_pinned : 1 = 0;
+            uint64_t free_space : 26;       // able to store segment_size
+            uint64_t rel_virtual_age : 20;  // store the relative virtual age
+            uint64_t last_sync_page : 14;   //  segment_size / 4096 byte pages
+            uint64_t is_alloc : 1     = 0;  // the segment is a session's private alloc area
+            uint64_t is_pinned : 1    = 0;  // indicates that the segment is mlocked
+            uint64_t is_read_only : 1 = 0;  // indicates that the segment is write protected
 
             static_assert((1 << 26) > segment_size);
-            static_assert((1 << 21) > segment_size / cacheline_size);
-            static_assert((1 << 15) > segment_size / os_page_size);
+            static_assert((1 << 20) >= segment_size / cacheline_size);
+            static_assert((1 << 14) > segment_size / os_page_size);
 
             uint64_t to_int() const { return std::bit_cast<uint64_t>(*this); }
             explicit state_data(uint64_t x) { *this = std::bit_cast<state_data>(x); }
 
-            state_data& set_last_sync_page(uint32_t page)
-            {
-               assert(page <= segment_size / os_page_size);
-               last_sync_page = page;
-               return *this;
-            }
-
-            state_data& free(uint32_t size)
-            {
-               assert(size > 0);
-               assert(free_space + size <= segment_size);
-               free_space += size;
-               return *this;
-            }
-            state_data& free_object(uint32_t size)
-            {
-               assert(size > 0);
-               assert(free_space + size <= segment_size);
-
-               free_space += size;
-               ++free_objects;
-               return *this;
-            }
-            state_data& set_alloc(bool s)
-            {
-               is_alloc = s;
-               return *this;
-            }
-            state_data& set_pinned(bool s)
-            {
-               is_pinned = s;
-               return *this;
-            }
+            state_data& set_last_sync_page(uint32_t page);
+            state_data& free(uint32_t size);
+            state_data& free_object(uint32_t size);
+            state_data& set_alloc(bool s);
+            state_data& set_pinned(bool s);
+            state_data& set_read_only(bool s);
          };
          static_assert(sizeof(state_data) == sizeof(uint64_t));
          static_assert(std::is_trivially_copyable_v<state_data>);
 
-         auto get_free_state() const
-         {
-            return state_data(_state_data.load(std::memory_order_relaxed));
-         }
-
-         // returns the free space in bytes, and number of objects freed
-         auto get_free_space_and_objs() const
-         {
-            return get_free_state();
-            //  uint64_t v = _free_space_and_obj.load(std::memory_order_relaxed);
-            //  return std::make_pair(v >> 32, v & 0xffffffff);
-         }
-
-         // notes that an object of size was freed
-         void free_object(uint32_t size)
-         {
-            auto expected = _state_data.load(std::memory_order_relaxed);
-            auto updated  = state_data(expected).free_object(size).to_int();
-            while (
-                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-               updated = state_data(expected).free_object(size).to_int();
-         }
-
-         // doesn't increment object count
-         void free(uint32_t size)
-         {
-            auto expected = _state_data.load(std::memory_order_relaxed);
-            auto updated  = state_data(expected).free(size).to_int();
-            while (
-                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-               updated = state_data(expected).free(size).to_int();
-         }
-
-         // after allocating
-         void finalize_segment(uint32_t size)
-         {
-            auto expected = _state_data.load(std::memory_order_relaxed);
-
-            assert(state_data(expected).is_alloc);
-
-            auto updated = state_data(expected).free(size).set_alloc(false).to_int();
-            while (
-                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-               updated = state_data(expected).free(size).set_alloc(false).to_int();
-         }
-
-         void clear()
-         {
-            _state_data.store(0, std::memory_order_relaxed);
-            //_last_sync_pos.store(segment_size, std::memory_order_relaxed);
-            _base_time = size_weighted_age();
-         }
-
-         bool is_alloc() { return get_free_state().is_alloc; }
-         void set_alloc_state(bool a)
-         {
-            auto expected = _state_data.load(std::memory_order_relaxed);
-            auto updated  = state_data(expected).set_alloc(a).to_int();
-            while (
-                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-               updated = state_data(expected).set_alloc(a).to_int();
-         }
-
-         uint64_t get_last_sync_pos() const
-         {
-            return state_data(_state_data.load(std::memory_order_relaxed)).last_sync_page *
-                   os_page_size;
-         }
-
-         void start_alloc_segment()
-         {
-            auto expected = _state_data.load(std::memory_order_relaxed);
-            assert(not state_data(expected).is_alloc);
-            auto updated = state_data(expected).set_last_sync_page(0).set_alloc(true).to_int();
-            assert(state_data(updated).is_alloc);
-
-            while (
-                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-               updated = state_data(expected).set_last_sync_page(0).set_alloc(true).to_int();
-            assert(state_data(updated).is_alloc);
-         }
-
-         void set_last_sync_pos(uint64_t pos)
-         {
-            auto page_num = round_down_multiple<4096>(pos) / 4096;
-            auto expected = _state_data.load(std::memory_order_relaxed);
-            auto updated  = state_data(expected).set_last_sync_page(page_num).to_int();
-            while (
-                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-               updated = state_data(expected).set_last_sync_page(page_num).to_int();
-         }
-
-         // std::atomic<uint64_t> _last_sync_pos;
-         //  position of alloc pointer when last synced
-
-         /**
-          *   As data is written, this tracks the data-weighted
-          *   average of time since data without read-bit set
-          *   was written. By default this is the average allocation
-          *   time, but when compacting data the incoming data may
-          *   provide an alternative time to be averaged int.
-          *
-          *   - written by allocator thread
-          *   - read by compactor after allocator thread is done with segment
-          *
-          *   - sharing cacheline with _free_space_and_obj which is
-          *     written when data is freed which could be any number of
-          *     threads.
-          *
-          *   - not stored on the segment_header because compactor
-          *   iterates over all segment meta and we don't want to
-          *   page in from disk segments just to read this time.
-          *
-          *   TODO: must this be atomic?
-          */
-         size_weighted_age _base_time;
+         state_data get_free_state() const;
+         state_data data() const { return get_free_state(); }
+         void       free_object(uint32_t size);
+         void       free(uint32_t size);
+         void       finalize_segment(uint32_t size);
+         void       clear() { _state_data.store(0, std::memory_order_relaxed); }
+         bool       is_alloc() { return get_free_state().is_alloc; }
+         void       set_alloc_state(bool a);
+         uint64_t   get_last_sync_pos() const;
+         void       start_alloc_segment();
+         void       set_last_sync_pos(uint64_t pos);
 
          /// the total number of bytes freed by swap
          /// or by being moved to other segments.
          std::atomic<uint64_t> _state_data;
-
-         // the avg time in ms between reads
-         uint64_t read_frequency(uint64_t now = size_weighted_age::now())
-         {
-            return now - _base_time.time_ms;
-         }
       };
 
-      /// should align on a page boundary
+      /**
+       *  The segment header is actually stored in the last 64 bytes of the segment,
+       *  and is used to track data about the segment that changes as it is being allocated.
+       * 
+       *  Segments are designed to be marked as read only as data is committed; therefore,
+       *  the header is the last part to be marked as read only.
+       * 
+       *  TODO: add a char[] buffer to the header to make it the size of a segment with
+       * the last 64 bytes containing the header information. 
+       */
       struct segment_header
       {
          uint32_t get_alloc_pos() const { return _alloc_pos.load(std::memory_order_relaxed); }
@@ -228,284 +184,502 @@ namespace arbtrie
       static_assert(sizeof(segment_header) <= 64);
 
       /**
-       * The data stored in the alloc header is not written to disk on sync
+       * The data stored in the allocator_state is not written to disk on sync
        * and may be in a corrupt state after a hard crash. All values contained
-       * within the allocator_header must be reconstructed from the segments
+       * within the allocator_state must be reconstructed from the segments
        */
-      struct allocator_header
+      struct allocator_state
       {
          // set to 0 just before exit, set to 1 when opening database
          std::atomic<bool>     clean_exit_flag;
          std::atomic<uint32_t> next_alloc_age = 0;
 
-         // Bitmap of available session slots, shared across processes
-         std::atomic<uint64_t> free_sessions{-1ull};
+         // Duration for cache frequency window (default 1 minute)
+         std::chrono::milliseconds _cache_frequency_window{60000};
 
-         // bitmap of segments that are free to be recycled pushed into
-         // the pending allocation queue.
-         hierarchical_bitmap<max_segment_count> free_segments;
+         // Difficulty threshold for read bit updates (0-4294967295)
+         std::atomic<uint32_t> _cache_difficulty{uint32_t(-1) -
+                                                 (uint32_t(-1) / 16)};  // 1 in 16 probability
 
-         // a background thread attempts to keep this buffer full of segments
-         // so that the allocator never has to wait on IO to get a new segment.
-         spmc_circular_buffer<small_segment_number> recycled_segments;
+         // Thread state for the read bit decay thread
+         segment_thread_state  read_bit_decay_thread_state;
+         std::atomic<uint16_t> next_clear_read_bit_region{0};
+
+         // Thread state for the segment provider thread
+         segment_thread_state segment_provider_thread_state;
+
+         // Thread state for the compactor thread
+         segment_thread_state  compact_thread_state;
+         std::atomic<uint64_t> total_promoted_bytes{0};
+
+         /**
+          * Data that belongs to the Segment Provider Thread
+          */
+         struct segment_provider
+         {
+            uint32_t max_mlocked_segments = 32;
+
+            /** 
+             * Segment Provider thread attempts to keep this buffer full of segments
+             * so that the allocator never has to wait on IO to get a new segment.
+             *
+             * Segment Provider attempts to keep this buffer full of segments,
+             * while Session Threads take prepared segments when they need to
+             * write to the database.
+             */
+            spmc_buffer<small_segment_number> ready_segments;
+
+            /** 
+             * bitmap of segments that are free to be recycled pushed into
+             * the ready_segments queue, only the Segment Provider thread
+             * reads and writes from this queue. It pops from the read_lock_queue,
+             * and sets the bits in the free_segments bitmap so that it can
+             * quickly find free segments by position in the file.
+             * 
+             * The alternative to this data structure is a fixed size array
+             * that uses insertion sort to keep the segments in order. This
+             * data structure is about 30kb and an array able to hold a free
+             * list of max_segment_count would be 1 MB. A free list of 8k
+             * segments would be of equal size. This data structure is more
+             * effecient to insert into and read from.  
+             * 
+             * 0 means segment is unavailable for recycling
+             * 1 means segment is available for recycling
+             */
+            hierarchical_bitmap<max_segment_count> free_segments;
+
+            /**
+             * When a segment is popped from the read_segments queue,
+             * the Segment Provider notices and then calls mlock on the
+             * segment.
+             * 
+             * When the total number of mlocked segments is greater than
+             * the runtime configured limit, the Segment Provider will 
+             * look for the mlocked segment with the oldest virtual age 
+             * within the set of mlocked segments.
+             * 
+             * On startup the database will mlock the segments in this
+             * list for faster warm-up speed.
+             * 
+             * 0 means segment is not mlocked
+             * 1 means segment is mlocked
+             */
+            hierarchical_bitmap<max_segment_count> mlock_segments;
+         };
+         segment_provider _segment_provider;
+
+         /**
+          * Segment metadata is organized by column rather than row to make
+          * more effecient scanning when we only care about a single column of
+          * data.  
+          * 
+          * @group segment_metadata Segment Meta Data 
+          */
+         struct segment_data
+         {
+            segment_meta meta[max_segment_count];
+
+            /// the virtual age of each segment, is initially 100x the segment_header::_age of the segment
+            /// when allocating data moved from another segment the virtual age becomes
+            /// a weighted average of the age of data in this segment, this is then used by the
+            /// provider thread to determine which segments to munlock, choosing the oldest virtual age
+            /// of the current mlock_segments.
+            size_weighted_age virtual_age[max_segment_count];
+
+            /**
+             * Get the last synced position for a segment
+             */
+            inline uint64_t get_last_sync_pos(segment_number segment) const;
+         };
+         segment_data _segment_data;
+
+         struct session_data
+         {
+            uint32_t alloc_session_num();
+            void     release_session_num(uint32_t num);
+            auto&    rcache_queue(uint32_t session_num) { return _rcache_queue[session_num]; }
+            uint32_t max_session_num() const
+            {
+               return std::countr_zero(free_sessions.load(std::memory_order_relaxed));
+            }
+            constexpr uint32_t session_capacity() const
+            {
+               return sizeof(_rcache_queue) / sizeof(_rcache_queue[0]);
+            }
+            uint32_t active_session_count() const
+            {
+               return std::popcount(free_sessions.load(std::memory_order_relaxed));
+            }
+
+            uint64_t free_session_bitmap() const
+            {
+               return free_sessions.load(std::memory_order_relaxed);
+            }
+
+           private:
+            // 1 bits mean free, 0 bits mean in use
+            std::atomic<uint64_t> free_sessions{-1ull};
+
+            // uses the 1/8th the space as tracking 1 bit per potential object id
+            // but avoids the contention of using an atomic_hierarchical_bitmap
+            // and allows the compactor to group data that is accessed together
+            // next to each other in memory. (64 MB), session threads push to
+            // their thread-local circular buffer and the compactor pops from
+            // them and moves the referenced address to a pinned segment with
+            // recent age.
+            rcache_queue_type _rcache_queue[64];
+         };
+         session_data _session_data;
 
          // meta data associated with each segment, indexed by segment number
-         segment_meta seg_meta[max_segment_count];
-
-         // circular buffer described, big enough to hold every
-         // potentially allocated segment which is subseuently freed.
-         //
-         // |-------A----R1--R2---E-------------| max_segment_count
-         //
-         // A = alloc_ptr where recycled segments are used
-         // R* = session_ptrs last known recycled segment by each session
-         // E = end_ptr where the next freed segment is posted to be recycled
-         // Initial condition A = R* = E = 0
-         // Invariant A <= R* <= E unless R* == -1
-         //
-         // If A == min(R*) then we must ask block_alloc to create a new segment
-         //
-         // A, R*, and E are 64 bit numbers that count to infinity, the
-         // index in the buffer is A % max_segment_count which should be
-         // a simple bitwise & operation if max_segment_count is a power of 2.
-         // The values between [A-E) point to recyclable segments assuming no R*
-         // is present. Values before A or E and after point to no valid segments
-         segment_number free_seg_buffer[max_segment_count];
-
-         /**
-          *  Lower 32 bits represent R* above (session's view of recycling queue)
-          *  Upper 32 bits represent what compactor has pushed to the session, aka E
-          *
-          *  Allocator takes the min of the lower 32 bits to determine the lock position.
-          *  These need to be in shared memory for inter-process coordination.
-          * 
-          * The idea is that we need to ensure consistency between the compactor,
-          * the allocator, and the sessions locking data. Each session knows the
-          * synchronizes with the compactor's end pointer and the find_min algorithm
-          * to determine the correct lock position.
-          */
-         padded_atomic<uint64_t> session_lock_ptrs[64];
-
-         // these methods ensure proper wrapping of the free segment index when
-         // addressing into the free_seg_buffer
-         segment_number&       get_free_seg_slot(free_segment_index index);
-         const segment_number& get_free_seg_slot(free_segment_index index) const;
-
-         void                          push_recycled_segment(segment_number seg_num);
-         void                          broadcast_end_ptr(uint32_t new_end_ptr);
-         std::optional<segment_number> pop_recycled_segment(uint32_t min_rstar);
-
-         /**
-          * These functions are used to manage the free segment queue and ensure
-          * that to the fullest extent possible data is allocated toward the
-          * beginning of the database file and that we can reclaim unused space
-          * on exit.
-          */
-         ///@{
-         std::pair<segment_number, segment_number> sort_queue(segment_number end_segment);
-         std::vector<segment_number> collect_segments(free_segment_index start_idx, size_t count);
-         void push_and_broadcast_batch(const segment_number* segments, size_t count);
-         std::pair<free_segment_index, size_t> claim_all();
          ///@}
 
          /**
-          *  Flag to indicate that the compactor is sorting the free segment queue.
-          *  When set, the allocator will wait for the compactor to finish sorting
-          *  before attempting to recycle a segment.
+          *  Read-locked segments
+          * 
+          *  After the compactor has emptied a segment, the segment cannot
+          * be recycled until all read-locked sessions have finished reading
+          * from the segment. Before any reads start the session read_lock 
+          * records the push_pos() of the segment and when they are done reading
+          * they set their recorded position to infinity(something greater than queue size)
+          * 
+          *  |-------A----R1--R2---E-------------| queue.size()
+          *  
+          *  A, R1, R2, E are all 64 bit numbers that count to infinity, but
+          *  their index wraps % queue.size()
+          * 
+          *  E = push_pos() 
+          *  A = pop_pos() 
+          *  r = min(R1,R2,...)
+          *  Read Locked = range [r, E)
+          *  Reusable = range [A,r) 
+          * 
+          *  Compactor will stop compacting when E-A = queue.size()
           */
-         std::atomic<bool> _queue_sort_flag;
+         struct read_lock_queue
+         {
+            /// @group compactor Compactor Methods
+            /// compactor compacts segments when available_to_push() > 0
+            /// and pushes segments after their contents are no longer needed
+            ///@{
+            uint32_t available_to_push() const;
+            void     push_recycled_segment(segment_number seg_num);
+            ///@}
 
-         // when no segments are available for reuse, advance by segment_size
-         padded_atomic<segment_offset>     alloc_ptr;  // A below
-         padded_atomic<free_segment_index> end_ptr;    // E below
+            /// @group segment_provider Segment Provider Methods
+            /// segment provider thread pops in batches and
+            /// moves the segments into the hierarchical bitmap of free segments
+            ///@{
+            uint32_t available_to_pop() const;
+            uint32_t pop_recycled_segments(segment_number* seg_nums, int size_seg_num);
+            ///@}
+
+            /// @group session_thread Session Thread Methods
+            /// session threads lock/unlock when the start and stop reading
+            ///@{
+            void           read_lock_session(uint32_t session_idx);
+            void           read_unlock_session(uint32_t session_idx);
+            session_rlock& get_session_lock(uint32_t session_idx);
+            ///@}
+
+            read_lock_queue();
+
+           private:
+            void broadcast_end_ptr(uint32_t ep);
+
+            // big enough for 32 GB of read-locked segments, nothing should
+            // ever hold the read lock long enough to fill this buffer,
+            // pushed by Compactor popped by Segment Provider
+            circular_buffer<segment_number, 1024> recycled_segments;
+
+            /**
+             *  Each session_rlock contains a padded_atomic<int64_t> where:
+             *  - Lower 32 bits represent R* above (session's view of recycling queue)
+             *  - Upper 32 bits represent what compactor has pushed to the session, aka E
+             *
+             *  Allocator takes the min of the lower 32 bits to determine the lock position.
+             *  These need to be in shared memory for inter-process coordination.
+             * 
+             * The idea is that we need to ensure consistency between the compactor,
+             * the allocator, and the sessions locking data. Each session knows the
+             * synchronizes with the compactor's end pointer and the find_min algorithm
+             * to determine the correct lock position.
+             */
+            session_rlock _session_locks[64];
+         };
+         read_lock_queue _read_lock_queue;
       };
 
-      /// crash recovery:
-      /// 1. scan all segments to find those that were mid-allocation:
-      ///    if a lot of free space, then swap them and push to free seg buffer
-      /// 2. Update reference counts on all objects in database
-      /// 3. ? pray ?
-
-      // Inline implementations
-      inline segment_number& allocator_header::get_free_seg_slot(free_segment_index index)
+      inline void allocator_state::read_lock_queue::push_recycled_segment(segment_number seg_num)
       {
-         return free_seg_buffer[index & (max_segment_count - 1)];
-      }
-
-      inline const segment_number& allocator_header::get_free_seg_slot(
-          free_segment_index index) const
-      {
-         return free_seg_buffer[index & (max_segment_count - 1)];
-      }
-
-      inline void allocator_header::push_recycled_segment(segment_number seg_num)
-      {
-         assert(seg_num != invalid_segment_num && "Cannot recycle invalid segment");
-         auto  ep   = end_ptr.load(std::memory_order_relaxed);
-         auto& slot = get_free_seg_slot(ep);
-         //         assert(slot == invalid_segment_num && "Slot must be empty before recycling");
-         slot = seg_num;
-
-         uint32_t new_end_ptr = end_ptr.fetch_add(1, std::memory_order_relaxed);
-
-         // Update session_lock_ptrs for each active session
-         broadcast_end_ptr(new_end_ptr);
-      }
-
-      inline void allocator_header::broadcast_end_ptr(uint32_t new_end_ptr)
-      {
-         auto fs = ~free_sessions.load(std::memory_order_relaxed);
-         while (fs)
-         {
-            auto session_idx = std::countr_zero(fs);
-
-            uint64_t cur         = session_lock_ptrs[session_idx].load(std::memory_order_relaxed);
-            uint32_t cur_end_ptr = cur >> 32;
-            int64_t  diff = static_cast<int64_t>(new_end_ptr) - static_cast<int64_t>(cur_end_ptr);
-            uint64_t adjustment = static_cast<uint64_t>(diff) << 32;
-
-            // because the adjustment has 0's in the lower 32 bits,
-            // the fetch_add will not overwrite the lower 32 bits managed by the session thread
-            session_lock_ptrs[session_idx].fetch_add(adjustment, std::memory_order_relaxed);
-
-            fs &= fs - 1;  // Clear lowest set bit
-         }
-      }
-
-      inline std::optional<segment_number> allocator_header::pop_recycled_segment(
-          uint32_t min_rstar)
-      {
-         do
-         {
-            auto ap = alloc_ptr.load(std::memory_order_relaxed);
-            while (min_rstar - ap > 1)
-            {
-               if (alloc_ptr.compare_exchange_weak(ap, ap + 1))
-               {
-                  auto& slot    = get_free_seg_slot(ap);
-                  auto  seg_num = slot;
-
-                  assert(seg_num != invalid_segment_num && "Found invalid segment in free buffer");
-
-                  slot = invalid_segment_num;
-                  return seg_num;
-               }
-            }
-            // wait for the compactor to finish sorting the queue
-            if (_queue_sort_flag.load(std::memory_order_relaxed))
-            {
-               _queue_sort_flag.wait(true, std::memory_order_relaxed);
-               continue;
-            }
-            return std::nullopt;
-         } while (true);
-      }
-
-      inline std::vector<segment_number> allocator_header::collect_segments(
-          free_segment_index start_idx,
-          size_t             count)
-      {
-         std::vector<segment_number> result;
-         result.reserve(count);
-         for (size_t i = 0; i < count; i++)
-         {
-            auto& slot = get_free_seg_slot(start_idx + i);
-            if (slot != invalid_segment_num)
-            {
-               assert(slot != invalid_segment_num && "Found invalid segment in free buffer");
-               result.push_back(slot);
-               slot = invalid_segment_num;
-            }
-         }
-         return result;
-      }
-
-      inline void allocator_header::push_and_broadcast_batch(const segment_number* segments,
-                                                             size_t                count)
-      {
-         auto ep = end_ptr.load(std::memory_order_relaxed);
-         // Push segments back
-         for (size_t i = 0; i < count; i++)
-         {
-            auto& slot = get_free_seg_slot(ep + i);
-            assert(slot == invalid_segment_num && "Slot must be empty before recycling");
-            slot = segments[i];
-            assert(slot != invalid_segment_num && "Cannot store invalid segment");
-         }
-
-         // Update end_ptr and broadcast
-         uint32_t new_end_ptr = end_ptr.fetch_add(count, std::memory_order_relaxed);
-         broadcast_end_ptr(new_end_ptr);
+         broadcast_end_ptr(recycled_segments.push(seg_num));
       }
 
       /**
-       * Atomically claims all segments between alloc_ptr and end_ptr.
-       * 
-       * @return A pair containing:
-       *         - first: The starting index where segments were claimed (old alloc_ptr)
-       *         - second: Number of segments claimed (end_ptr - old alloc_ptr), or 0 if no segments available
+       *  Broadcast the end pointer to all sessions.
+       *  Aka, set the high bits of each session's lock pointer to the new end pointer
        */
-      inline std::pair<free_segment_index, size_t> allocator_header::claim_all()
+      inline void allocator_state::read_lock_queue::broadcast_end_ptr(uint32_t new_end_ptr)
       {
-         do
-         {
-            auto ap = alloc_ptr.load(std::memory_order_relaxed);
-            auto ep = end_ptr.load(std::memory_order_relaxed);
-
-            if (ep <= ap)
-               return {ap, 0};
-
-            size_t claim_size = ep - ap;
-            auto   old_ap     = ap;
-
-            if (alloc_ptr.compare_exchange_weak(ap, ep, std::memory_order_relaxed))
-               return {old_ap, claim_size};
-
-         } while (true);
+         for (auto& lock_ptr : _session_locks)
+            lock_ptr.update(new_end_ptr);
       }
 
-      inline std::pair<segment_number, segment_number> allocator_header::sort_queue(
-          segment_number end_segment)
+      /**
+       *  Lock the read session by copying the last broadcasted end pointer to
+       *  the session's lock pointer.  Aka, copy the high bits to the low bits.
+      inline void allocator_state::read_lock_queue::read_lock_session(uint32_t session_idx)
       {
-         // Set flag and ensure it's cleared on exit
-         _queue_sort_flag.store(true, std::memory_order_release);
-         auto guard = scoped_exit(
-             [this]
-             {
-                _queue_sort_flag.store(false, std::memory_order_release);
-                _queue_sort_flag.notify_all();
-             });
+         _session_locks[session_idx].lock();
+      }
+       */
 
-         // Try to claim all segments in the queue
-         auto [start_idx, count] = claim_all();
-         if (count == 0)
-            return {invalid_segment_num, end_segment};
+      /**
+       * Unlocks a session by setting the sessions's lock pointer to the maximum value (uint32_t(-1)).
+       * 
+       * This effectively removes the session from consideration when calculating the minimum
+       * read position across all sessions. When a session is unlocked, it no longer prevents
+       * segments from being recycled or compacted, as its lock position is set to the maximum
+       * value, which won't be the minimum in any calculation.
+       * 
+       * The method preserves the lower 32 bits of the lock_ptr (which represent the session's
+       * view of the recycling queue) while only modifying the upper 32 bits (the end pointer).
+       * 
+       * It uses a fetch_add with a delta from the current value because on x86 fetch_add is
+       * a single atomic operation that can be faster than a compare_exchange which is what
+       * fetch_or is implemented as.
+       * 
+       * @param session_idx The index of the session to unlock
+      inline void allocator_state::read_lock_queue::read_unlock_session(uint32_t session_idx)
+      {
+         _session_locks[session_idx].unlock();
+      }
+       */
 
-         // Collect and sort segments
-         auto batch = collect_segments(start_idx, count);
-         std::sort(batch.begin(), batch.end());
+      /**
+       * Get a reference to the session_rlock for a specific session.
+       * This allows the session to directly interact with its lock.
+       * 
+       * @param session_idx The index of the session
+       * @return A reference to the session_rlock object for this session
+       */
+      inline session_rlock& allocator_state::read_lock_queue::get_session_lock(uint32_t session_idx)
+      {
+         return _session_locks[session_idx];
+      }
 
-         // Find segments contiguous with end_segment
-         segment_number first_contiguous = invalid_segment_num;
-         segment_number last_contiguous  = end_segment;
+      inline uint32_t allocator_state::read_lock_queue::available_to_push() const
+      {
+         return recycled_segments.free_space();
+      }
 
-         // Search backwards through batch
-         for (size_t i = batch.size(); i > 0; --i)
+      /**
+       *  The number of segments between the pop_pos and the minimum session read pointer
+       * 
+       *  @return The number of segments that can be popped from the read_lock_queue
+       */
+      inline uint32_t allocator_state::read_lock_queue::available_to_pop() const
+      {
+         // start with the maximuum possible value
+         uint32_t min_read_pos = recycled_segments.get_push_pos();
+         // go until the minimum possible value
+         uint32_t pop_pos = recycled_segments.get_read_pos();
+
+         // there is nothing possible
+         if (min_read_pos == pop_pos)
+            return 0;
+
+         // something may be possible if all read pointers are greater than pop_pos
+         for (auto& lock_ptr : _session_locks)
          {
-            auto seg = batch[i - 1];
-            if (seg != segment_number(last_contiguous - 1))
-            {
-               // Push non-contiguous segments back
-               push_and_broadcast_batch(batch.data(), i);
-               return {first_contiguous, end_segment};
-            }
-
-            if (first_contiguous == invalid_segment_num)
-               first_contiguous = seg;
-            last_contiguous = seg;
+            // read the low bits by casting to uint32_t
+            uint32_t cur_read_pos = lock_ptr.load(std::memory_order_relaxed);
+            min_read_pos          = std::min(min_read_pos, cur_read_pos);
+            if (min_read_pos == uint32_t(-1))
+               break;
          }
+         // this works even when it wraps around because the maximum difference
+         // between the two positions is max_segment_count which is less than
+         // 2^31
+         return min_read_pos - uint32_t(recycled_segments.get_read_pos());
+         static_assert(max_segment_count < (1 << 31));
+      }
 
-         return {first_contiguous, end_segment};
+      // State data implementations
+      inline segment_meta::state_data& segment_meta::state_data::set_last_sync_page(uint32_t page)
+      {
+         assert(page <= segment_size / os_page_size);
+         last_sync_page = page;
+         return *this;
+      }
+
+      inline segment_meta::state_data& segment_meta::state_data::free(uint32_t size)
+      {
+         assert(size > 0);
+         assert(free_space + size <= segment_size);
+         free_space += size;
+         return *this;
+      }
+
+      inline segment_meta::state_data& segment_meta::state_data::free_object(uint32_t size)
+      {
+         assert(size > 0);
+         assert(free_space + size <= segment_size);
+
+         free_space += size;
+         // ++free_objects;
+         return *this;
+      }
+
+      inline segment_meta::state_data& segment_meta::state_data::set_alloc(bool s)
+      {
+         is_alloc = s;
+         return *this;
+      }
+
+      inline segment_meta::state_data& segment_meta::state_data::set_pinned(bool s)
+      {
+         is_pinned = s;
+         return *this;
+      }
+
+      inline segment_meta::state_data& segment_meta::state_data::set_read_only(bool s)
+      {
+         is_read_only = s;
+         return *this;
+      }
+
+      // Segment meta implementations
+      inline segment_meta::state_data segment_meta::get_free_state() const
+      {
+         return state_data(_state_data.load(std::memory_order_relaxed));
+      }
+
+      inline void segment_meta::free_object(uint32_t size)
+      {
+         auto expected = _state_data.load(std::memory_order_relaxed);
+         auto updated  = state_data(expected).free_object(size).to_int();
+         while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+            updated = state_data(expected).free_object(size).to_int();
+      }
+
+      inline void segment_meta::free(uint32_t size)
+      {
+         auto expected = _state_data.load(std::memory_order_relaxed);
+         auto updated  = state_data(expected).free(size).to_int();
+         while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+            updated = state_data(expected).free(size).to_int();
+      }
+
+      inline void segment_meta::finalize_segment(uint32_t size)
+      {
+         auto expected = _state_data.load(std::memory_order_relaxed);
+
+         assert(state_data(expected).is_alloc);
+
+         auto updated = state_data(expected).free(size).set_alloc(false).to_int();
+         while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+            updated = state_data(expected).free(size).set_alloc(false).to_int();
+      }
+
+      inline void segment_meta::set_alloc_state(bool a)
+      {
+         auto expected = _state_data.load(std::memory_order_relaxed);
+         auto updated  = state_data(expected).set_alloc(a).to_int();
+         while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+            updated = state_data(expected).set_alloc(a).to_int();
+      }
+
+      inline uint64_t segment_meta::get_last_sync_pos() const
+      {
+         return state_data(_state_data.load(std::memory_order_relaxed)).last_sync_page *
+                os_page_size;
+      }
+
+      inline void segment_meta::start_alloc_segment()
+      {
+         auto expected = _state_data.load(std::memory_order_relaxed);
+         assert(not state_data(expected).is_alloc);
+         auto updated = state_data(expected).set_last_sync_page(0).set_alloc(true).to_int();
+         assert(state_data(updated).is_alloc);
+
+         while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+            updated = state_data(expected).set_last_sync_page(0).set_alloc(true).to_int();
+         assert(state_data(updated).is_alloc);
+      }
+
+      inline void segment_meta::set_last_sync_pos(uint64_t pos)
+      {
+         auto page_num = round_down_multiple<4096>(pos) / 4096;
+         auto expected = _state_data.load(std::memory_order_relaxed);
+         auto updated  = state_data(expected).set_last_sync_page(page_num).to_int();
+         while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+            updated = state_data(expected).set_last_sync_page(page_num).to_int();
+      }
+
+      // Session data implementations
+      inline uint32_t allocator_state::session_data::alloc_session_num()
+      {
+         auto     fs_bits = free_sessions.load(std::memory_order_relaxed);
+         uint64_t new_fs_bits;
+         uint32_t session_num;
+
+         do
+         {
+            if (fs_bits == 0)
+               throw std::runtime_error("max of 64 sessions can be in use");
+
+            session_num = std::countr_zero(fs_bits);
+            new_fs_bits = fs_bits & ~(1 << session_num);
+            fs_bits     = free_sessions.load(std::memory_order_relaxed);
+         } while (not free_sessions.compare_exchange_weak(fs_bits, new_fs_bits,
+                                                          std::memory_order_relaxed));
+
+         // Debug output - shows session allocation details
+         ARBTRIE_DEBUG("allocating session ", session_num, " - previous free_sessions=", std::hex,
+                       fs_bits, " new free_sessions=", new_fs_bits, std::dec);
+
+         return session_num;
+      }
+
+      inline void allocator_state::session_data::release_session_num(uint32_t num)
+      {
+         // Bit should be 0 (in use) when we attempt to release it
+         uint64_t current_bits = free_sessions.load(std::memory_order_relaxed);
+         bool     bit_is_set   = (current_bits & (1 << num)) != 0;
+
+         // Debug output - shows session release details and potential issues
+         ARBTRIE_DEBUG("releasing session ", num, " - current free_sessions=", std::hex,
+                       current_bits, " bit value=", bit_is_set ? "1 (ALREADY FREE!)" : "0 (in use)",
+                       std::dec);
+
+         assert(!(free_sessions.load(std::memory_order_relaxed) & (1 << num)));
+
+         // Set the bit to 1 to mark it as free
+         free_sessions.fetch_add(uint64_t(1) << num, std::memory_order_relaxed);
+
+         // Show the new state after release
+         ARBTRIE_DEBUG("after release of session ", num, " - free_sessions=", std::hex,
+                       free_sessions.load(std::memory_order_relaxed), std::dec);
+      }
+
+      // pop_recycled_segments implementation
+      inline uint32_t allocator_state::read_lock_queue::pop_recycled_segments(
+          segment_number* seg_nums,
+          int             size_seg_num)
+      {
+         return recycled_segments.pop(seg_nums, size_seg_num);
+      }
+
+      /**
+       * Get the last synced position for a segment
+       * 
+       * @param segment The segment number
+       * @return The last synced position in the segment
+       */
+      inline uint64_t allocator_state::segment_data::get_last_sync_pos(segment_number segment) const
+      {
+         return meta[segment].get_last_sync_pos();
       }
 
    }  // namespace mapped_memory

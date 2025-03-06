@@ -1,3 +1,0 @@
-{
-  "systemPrompt": "PROJECT SETUP:\n- CMake build system\n- Build directories: build/debug, build/release\n- Testing: -DBUILD_TESTING=ON flag\n- Run tests: ./bin/arbtrie-tests, filter with ./bin/arbtrie-tests \"[tag]\"\n- Catch2 testing framework\n- NO --success flag (produces too much output)\n\nCODE STYLE:\n- No braces {} for one-line conditionals and loops\n- Use angle brackets <> for project includes (#include <arbtrie/header.hpp>)\n\nAGENT:\n- Always use full paths with rm commands\n- For git operations, refer to git_prompt.txt\n\nWORKFLOW:\n- \"propose\" = describe changes only, no code edits\n- Update both prompt.txt and .cursor file when standards change\n- Propose new project standards when common errors identified"
-} 

@@ -28,8 +28,8 @@ struct TestEnv
 
       // Configure and open the database
       config cfg;
-      cfg.run_compact_thread = false;  // Disable compaction for tests
-      cfg.cache_on_read      = true;   // Enable cache
+      // Compaction is now managed internally by the database
+      cfg.cache_on_read = true;  // Enable cache
 
       // Create and open the database
       database::create(db_path, cfg);
