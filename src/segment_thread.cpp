@@ -107,8 +107,13 @@ namespace arbtrie
           {
              try
              {
-                // Set thread name for debugging
-                set_current_thread_name(_thread_name.c_str());
+                // Set OS-level thread name (truncated for OS compatibility)
+                char truncated_name[16] = {0};
+                strncpy(truncated_name, _thread_name.c_str(), sizeof(truncated_name) - 1);
+                thread_name(truncated_name);
+
+                // Set thread-local name for debug macros (using full name)
+                arbtrie::thread_name(_thread_name.c_str());
 
                 try
                 {
@@ -127,6 +132,7 @@ namespace arbtrie
              catch (...)
              {
                 // Ensure we handle any errors in setup
+                ARBTRIE_ERROR("Unknown exception in thread setup: ", _thread_name);
              }
 
              // Clear thread state on exit, regardless of how we exited
@@ -264,6 +270,10 @@ namespace arbtrie
       // Truncate name if needed as most platforms have a 16 character limit
       char truncated_name[16] = {0};
       strncpy(truncated_name, name, sizeof(truncated_name) - 1);
+
+      // Only set the OS-level thread name - this does NOT set the thread_name
+      // used by debug macros. For that, call arbtrie::thread_name() directly
+      // from within the thread.
       thread_name(truncated_name);
    }
 }  // namespace arbtrie

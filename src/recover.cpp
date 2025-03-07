@@ -29,7 +29,7 @@ namespace arbtrie
  *  has the address/object id associated with it which can
  *  be used to re-establish the meta_node.
  *
- *  Start with the newest segment and work to the oldest segment,
+ *  Start with the newest segment (highest age) and work to the oldest segment,
  *  as you come across objects, set their location in the node meta
  *  database and increment their reference count to 1. If a location
  *  has already been set then skip it because there is clearly a
@@ -61,6 +61,10 @@ namespace arbtrie
    void database::recover(recover_args args)
    {
       ARBTRIE_WARN("Recovering... reset meta nodes!");
+
+      // Stop all background threads before recovery
+      bool threads_were_running = _sega.stop_background_threads();
+
       // all recovered nodes have a ref of 1
       _sega.reset_meta_nodes(args);
 
@@ -79,6 +83,10 @@ namespace arbtrie
       // all refs that are > 0 go down by 1
       // if a ref was 1 it is added to free list
       _sega.release_unreachable();
+
+      // Restart threads that were running before recovery
+      if (threads_were_running)
+         _sega.start_background_threads();
    }
    void seg_allocator::reset_reference_counts()
    {
@@ -132,8 +140,11 @@ namespace arbtrie
             _mapped_state->_segment_provider.free_segments.set(i);
             continue;
          }
-         auto seg  = get_segment(i);
-         auto send = (node_header*)((char*)seg + segment_size);
+         auto seg = get_segment(i);
+         auto send =
+             (node_header*)((char*)seg +
+                            std::min<uint32_t>(segment_size,
+                                               seg->_alloc_pos.load(std::memory_order_relaxed)));
 
          const char* foc =
              (const char*)seg + round_up_multiple<64>(sizeof(mapped_memory::segment_header));

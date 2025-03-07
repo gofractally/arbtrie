@@ -177,9 +177,8 @@ namespace arbtrie
       static constexpr uint64_t mask        = buffer_size - 1;  // Mask for slot indices
 
       // Default thresholds are adjusted for 32 slots
-      static constexpr uint64_t default_high_water = buffer_size * 3 / 4;  // 75% full (24 slots)
-      static constexpr uint64_t default_low_water  = buffer_size / 4;      // 25% full (8 slots)
-
+      static constexpr uint64_t default_high_water = 4;
+      static constexpr uint64_t default_low_water  = 2;
       // Constants for bit manipulation in combined bitmap
       static constexpr uint64_t avail_shift = 32;                     // High 32 bits for available
       static constexpr uint64_t avail_mask  = 0xFFFFFFFF00000000ULL;  // Mask for available bits

@@ -855,6 +855,8 @@ TEST_CASE("recover")
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
       ARBTRIE_DEBUG("total_size: ", stats.total_size() / double(MB), " MB");
+      for (int i = 0; i < num_types; ++i)
+         ARBTRIE_DEBUG(node_type_names[i], " = ", stats.node_counts[i]);
    }
 
    ARBTRIE_WARN("RELOADING");
@@ -872,6 +874,7 @@ TEST_CASE("recover")
       for (int i = 0; i < num_types; ++i)
          ARBTRIE_DEBUG(node_type_names[i], " = ", stats.node_counts[i]);
    }
+   ARBTRIE_WARN("START RECOVER");
    env.db->recover();
    ARBTRIE_WARN("AFTER RECOVER");
    {

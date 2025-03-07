@@ -423,7 +423,7 @@ namespace arbtrie
 
    void seg_allocator::compact_segment(seg_alloc_session& ses, uint64_t seg_num)
    {
-      ARBTRIE_DEBUG("compact_segment: ", seg_num);
+      ARBTRIE_WARN("compact_segment: ", seg_num);
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
       //  if( not s->_write_lock.try_lock() ) {
@@ -438,11 +438,16 @@ namespace arbtrie
 
       if (debug_memory)
       {
-         auto alloc_pos = ses._alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed);
-         ARBTRIE_DEBUG("compacting segment: ", seg_num, " into ", ses._alloc_seg_num, " ",
-                       _mapped_state->_segment_data.meta[seg_num].data().free_space);
-         ARBTRIE_DEBUG("calloc: ", alloc_pos,
-                       " cfree: ", _mapped_state->_segment_data.meta[seg_num].data().free_space);
+         if (not ses._alloc_seg_ptr)
+            ARBTRIE_WARN("compact_segment: no destination segment allocated yet");
+         else
+         {
+            auto alloc_pos = ses._alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed);
+            ARBTRIE_DEBUG("compacting segment: ", seg_num, " into ", ses._alloc_seg_num, " ",
+                          _mapped_state->_segment_data.meta[seg_num].data().free_space);
+            ARBTRIE_DEBUG("calloc: ", alloc_pos,
+                          " cfree: ", _mapped_state->_segment_data.meta[seg_num].data().free_space);
+         }
       }
 
       assert(s->_alloc_pos == segment_offset(-1));
@@ -496,6 +501,17 @@ namespace arbtrie
 
          auto obj_size   = foo->size();
          auto [loc, ptr] = ses.alloc_data(obj_size, foo_address, src_vage);
+         if constexpr (debug_memory)
+         {
+            if (start_seg_num != ses._alloc_seg_num)
+            {
+               auto alloc_pos = ses._alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed);
+               ARBTRIE_DEBUG("compacting segment: ", seg_num, " into ", ses._alloc_seg_num, " ",
+                             _mapped_state->_segment_data.meta[seg_num].data().free_space);
+               ARBTRIE_DEBUG("calloc: ", alloc_pos, " cfree: ",
+                             _mapped_state->_segment_data.meta[seg_num].data().free_space);
+            }
+         }
 
          if (obj_ref.try_start_move(obj_ref.loc())) [[likely]]
          {
@@ -849,8 +865,7 @@ namespace arbtrie
 
    void seg_allocator::provider_loop(segment_thread& thread)
    {
-      thread_name("provider");
-      set_current_thread_name("provider");
+      // Thread name should already be set by segment_thread
 
       auto& provider_state = _mapped_state->_segment_provider;
 
@@ -945,6 +960,7 @@ namespace arbtrie
       auto sp   = _block_alloc.get(seg_num);
       auto shp  = new (sp) mapped_memory::segment_header();
       shp->_age = _mapped_state->next_alloc_age.fetch_add(1, std::memory_order_relaxed);
+      ARBTRIE_WARN("provider_prepare_segment: ", seg_num, " age: ", shp->_age);
 
       // utilized by compactor to propagate the relative age of data in a segment
       // for the purposes of munlock the oldest data first and avoiding promoting data
@@ -1034,4 +1050,62 @@ namespace arbtrie
          }
       }
    }
-};  // namespace arbtrie
+
+   bool seg_allocator::stop_background_threads()
+   {
+      bool any_stopped = false;
+
+      if (_read_bit_decay_thread && _read_bit_decay_thread->is_running())
+      {
+         _read_bit_decay_thread->stop();
+         any_stopped = true;
+      }
+
+      if (_compactor_thread && _compactor_thread->is_running())
+      {
+         _compactor_thread->stop();
+         any_stopped = true;
+      }
+
+      if (_segment_provider_thread && _segment_provider_thread->is_running())
+      {
+         // Wake up any threads that might be waiting in the ready_segments buffer
+         _mapped_state->_segment_provider.ready_segments.wake_blocked();
+         _segment_provider_thread->stop();
+         any_stopped = true;
+      }
+
+      return any_stopped;
+   }
+
+   bool seg_allocator::start_background_threads(bool force_start)
+   {
+      bool any_started = false;
+
+      // Only start threads if force_start is true or threads were running before
+      if (!force_start && !_compactor_thread && !_read_bit_decay_thread &&
+          !_segment_provider_thread)
+         return false;
+
+      // Start all background threads that were created
+      if (_read_bit_decay_thread)
+      {
+         if (_read_bit_decay_thread->start())
+            any_started = true;
+      }
+
+      if (_compactor_thread)
+      {
+         if (_compactor_thread->start())
+            any_started = true;
+      }
+
+      if (_segment_provider_thread)
+      {
+         if (_segment_provider_thread->start())
+            any_started = true;
+      }
+
+      return any_started;
+   }
+}  // namespace arbtrie

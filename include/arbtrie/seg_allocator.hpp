@@ -63,6 +63,19 @@ namespace arbtrie
 
       seg_alloc_session start_session() { return seg_alloc_session(*this, alloc_session_num()); }
 
+      /**
+       * Stops all background threads (compactor, read_bit_decay, segment_provider)
+       * @return true if any threads were running and stopped
+       */
+      bool stop_background_threads();
+
+      /**
+       * Starts all background threads that were previously running
+       * @param force_start if true, starts all threads regardless of previous state
+       * @return true if any threads were started
+       */
+      bool start_background_threads(bool force_start = false);
+
      private:
       friend class database;
       void    release_unreachable();
@@ -215,6 +228,8 @@ namespace arbtrie
       std::mutex             _dirty_segs_mutex;
       uint64_t               _next_dirt_seg_index = 0;
       uint64_t               _last_synced_index   = 0;
+
+      // Thread state tracking for stop/start_background_threads is handled in mapped_memory
 
       /**
         * Free an object in a segment

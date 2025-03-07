@@ -38,6 +38,10 @@ namespace arbtrie
       {
          return a.loc_div_align != b.loc_div_align;
       }
+      friend std::ostream& operator<<(std::ostream& os, node_location loc)
+      {
+         return os << "node_location(" << loc.segment() << ", " << loc.aligned_index() << ")";
+      }
    };
 #ifdef __clang__
 #pragma clang diagnostic push

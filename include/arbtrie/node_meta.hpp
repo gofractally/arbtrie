@@ -450,17 +450,17 @@ namespace arbtrie
             // Try to set the copy bit
             if (not _meta.compare_exchange_weak(prior, prior | copy_mask,
                                                 std::memory_order_acquire))
-            {
                continue;
-            }
 
             // If we got here, we successfully set the copy bit
             if (not temp_type(prior).is_changing())
                return meta.loc();
 
             // If the node is being modified, clear the copy bit and try again
-            _meta.fetch_and(~copy_mask, std::memory_order_release);
-            _meta.wait(prior, std::memory_order_relaxed);
+            auto new_prior = _meta.fetch_and(~copy_mask, std::memory_order_release);
+            if (new_prior == prior)
+               _meta.wait(prior, std::memory_order_relaxed);
+            prior = _meta.load(std::memory_order_relaxed);
          } while (true);
       }
 

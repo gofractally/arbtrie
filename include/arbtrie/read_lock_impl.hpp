@@ -105,8 +105,8 @@ namespace arbtrie
          auto ap = segment->_alloc_pos.load(std::memory_order_relaxed);
          if (not(ap == 0 or ap > loc.abs_index()))
          {
-            ARBTRIE_WARN("ap: ", ap, "  loc: ", loc.aligned_index(), " abs: ", loc.abs_index(),
-                         "loc.segment: ", loc.segment());
+            ARBTRIE_WARN("segment: ", loc.segment(), " ap: ", ap, "  loc: ", loc.aligned_index(),
+                         " abs: ", loc.abs_index());
             abort();
          }
       }
