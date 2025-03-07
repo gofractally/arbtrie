@@ -163,7 +163,7 @@ namespace arbtrie
          return round_up_multiple<64>(sizeof(value_node) + k.size() + v.size());
       }
 
-      value_node(uint32_t asize, id_address nid, key_view k, value_view v)
+      value_node(uint32_t asize, id_address_seq nid, key_view k, value_view v)
           : node_header(asize, nid, type)
       {
          assert(asize >= alloc_size(k, v));
@@ -172,7 +172,7 @@ namespace arbtrie
          set_value(v);
       }
 
-      value_node(uint32_t asize, id_address nid, key_view k, const value_type& v)
+      value_node(uint32_t asize, id_address_seq nid, key_view k, const value_type& v)
           : node_header(asize, nid, type)
       {
          assert(asize >= alloc_size(k, v));
@@ -181,13 +181,14 @@ namespace arbtrie
          set_value(v);
       }
 
-      value_node(uint32_t asize, id_address nid, value_view v)
+      value_node(uint32_t asize, id_address_seq nid, value_view v)
           : node_header(asize, nid, type), _ksize(0)
       {
          assert(asize >= sizeof(value_node) + v.size());
          set_value(v);
       }
-      value_node(uint32_t asize, id_address nid, const value_type& v)
+
+      value_node(uint32_t asize, id_address_seq nid, const value_type& v)
           : node_header(asize, nid, type), _ksize(0)
       {
          assert(asize >= sizeof(value_node) + v.size());
@@ -261,9 +262,11 @@ namespace arbtrie
          return to_value(data(), value_size());
       }
 
-      uint32_t calculate_checksum() const
+      uint8_t calculate_checksum() const
       {
-         return XXH3_64bits(((const char*)this) + sizeof(checksum), _nsize - sizeof(checksum));
+         // Skip only the first byte which contains the checksum
+         auto hash = XXH3_64bits(((const char*)this) + checksum_size, _nsize - checksum_size);
+         return uint8_t(hash);  // Take lowest byte as 8-bit checksum
       }
       void visit_branches(auto&& cb) const
       {

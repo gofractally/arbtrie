@@ -21,7 +21,8 @@ namespace arbtrie
       assert(size >= sizeof(node_header));
       assert(type != node_type::undefined);
 
-      auto [loc, node_ptr] = _session.alloc_data(size, adr);
+      assert(obj_ptr->address() == adr);
+      auto [loc, node_ptr] = _session.alloc_data(size, obj_ptr->address_seq());
 
       init(node_ptr);
       if constexpr (update_checksum_on_modify)
@@ -37,7 +38,7 @@ namespace arbtrie
       return oref;
    }
 
-   inline std::pair<node_meta_type&, id_address> read_lock::get_new_meta_node(id_region reg)
+   inline id_allocation read_lock::get_new_meta_node(id_region reg)
    {
       return _session._sega._id_alloc.get_new_id(reg);
    }
@@ -53,8 +54,9 @@ namespace arbtrie
       assert(size >= sizeof(node_header));
       assert(type != node_type::undefined);
 
-      auto [atom, id]      = _session._sega._id_alloc.get_new_id(reg);
-      auto [loc, node_ptr] = _session.alloc_data(size, id);
+      auto allocation = _session._sega._id_alloc.get_new_id(reg);
+      auto [loc, node_ptr] =
+          _session.alloc_data(size, id_address_seq(allocation.address, allocation.sequence));
       //ARBTRIE_WARN( "alloc id: ", id, " type: " , node_type_names[type], " loc: ", loc._offset, " size: ", size);
 
       init(node_ptr);
@@ -63,20 +65,20 @@ namespace arbtrie
 
       assert(type == node_type::value or bool(node_ptr->_branch_id_region));
 
-      atom.store(temp_meta_type().set_type(type).set_location(loc).set_ref(1),
-                 std::memory_order_release);
+      allocation.meta.store(temp_meta_type().set_type(type).set_location(loc).set_ref(1),
+                            std::memory_order_release);
 
       assert(node_ptr->_nsize == size);
       assert(node_ptr->_ntype == type);
-      assert(node_ptr->_node_id == id);
-      assert(object_ref(*this, id, atom).type() != node_type::undefined);
+      assert(node_ptr->_node_id == allocation.address);
+      assert(object_ref(*this, allocation.address, allocation.meta).type() != node_type::undefined);
 
       if constexpr (debug_memory)
       {
          _session._in_alloc = false;
       }
 
-      return object_ref(*this, id, atom);
+      return object_ref(*this, allocation.address, allocation.meta);
    }
 
    inline bool read_lock::is_synced(node_location loc)

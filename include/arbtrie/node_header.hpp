@@ -38,30 +38,33 @@ namespace arbtrie
     */
    struct node_header
    {
-      uint32_t   checksum;
-      id_address _node_id;  // the ID of this node
+      static constexpr uint32_t checksum_size = 1;  // Size in bytes of the checksum field
+      uint32_t                  checksum : 8;       // Leading byte for checksum
+      uint32_t   sequence : 24;  // 24-bit sequence number, set only during construction
+      id_address _node_id;       // the ID of this node
 
       uint32_t _ntype : 3;    // node_type
-      uint32_t _nsize : 27;   // bytes allocated for this node
-      uint32_t _unused2 : 2;  // unused bits
+      uint32_t _nsize : 25;   // bytes allocated for this node
+      uint32_t _unused2 : 4;  // truly unused bits, should never be written to
 
       id_region _branch_id_region;  // the ID region branches from this node are allocated to
 
       uint16_t _num_branches : 9;  // number of branches that are set
       uint16_t _unused : 7;        // unused bits
 
-      inline node_header(uint32_t   size,
-                         id_address nid,
-                         node_type  type       = node_type::freelist,
-                         uint16_t   num_branch = 0)
+      inline node_header(uint32_t       size,
+                         id_address_seq nid,
+                         node_type      type       = node_type::freelist,
+                         uint16_t       num_branch = 0)
           : checksum(0),
+            sequence(nid.sequence),
+            _node_id(nid.address),
             _ntype(type),
             _nsize(size),
             _num_branches(num_branch),
-            _branch_id_region(0),
-            _node_id(nid)
+            _branch_id_region(0)
       {
-         assert(_node_id == nid);
+         assert(_node_id == nid.address);
          assert(intptr_t(this) % 64 == 0);
       }
 
@@ -98,16 +101,20 @@ namespace arbtrie
       inline uint32_t     object_capacity() const { return (_nsize + 15) & -16; }
       inline node_header* next() const { return (node_header*)(((char*)this) + object_capacity()); }
 
-      uint32_t calculate_checksum() const;
+      uint8_t calculate_checksum() const;
 
       void update_checksum() { checksum = calculate_checksum(); }
-      bool has_checksum() const { return checksum; }
+      bool has_checksum() const { return checksum != 0; }
       bool validate_checksum() const
       {
          if (checksum)
             return (checksum == calculate_checksum());
          return true;
       }
+
+      uint32_t get_sequence() const { return sequence; }
+
+      id_address_seq address_seq() const { return id_address_seq(_node_id, sequence); }
    } __attribute((packed));
    static_assert(sizeof(node_header) == 16);
 

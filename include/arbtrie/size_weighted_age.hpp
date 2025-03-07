@@ -20,12 +20,13 @@ namespace arbtrie
       uint64_t to_int() const { return std::bit_cast<uint64_t>(*this); }
 
       /**
-       * @param clines the number of cachelines to accumulate, with the vage
-       * associated with the cachelines. 
-       * @param vage the virtual age of the cachelines being added to the average
+       * @param bytes the number of bytes to accumulate, with the vage
+       * associated with the bytes.
+       * @param vage the virtual age of the bytes being added to the average
        */
-      size_weighted_age& add(uint32_t clines, uint64_t vage)
+      size_weighted_age& add(uint32_t bytes, uint64_t vage)
       {
+         auto clines = round_up_multiple<64>(bytes) / 64;
          // data-weighted average age
          auto tmp = (age * read_cl + vage * clines) / (read_cl + clines);
 
@@ -48,7 +49,7 @@ namespace arbtrie
       auto operator<=>(const size_weighted_age& other) const { return age <=> other.age; }
 
       uint64_t read_cl : 21;  // read cachelines, 21 bits supports up to 128MB segments
-      uint64_t age : 43;      // 1000x the age of the segment
+      uint64_t age : 43;      // 1024x the age of the segment
    };
 
 }  // namespace arbtrie

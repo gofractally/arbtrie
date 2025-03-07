@@ -1,4 +1,5 @@
 #include <arbtrie/database.hpp>
+#include <arbtrie/interprocess_mutex.hpp>
 
 namespace arbtrie
 {
@@ -235,9 +236,10 @@ namespace arbtrie
       {
          _state->regions[region].use_count.store(0, std::memory_order_relaxed);
          _state->regions[region].next_alloc.store(0, std::memory_order_relaxed);
+         _state->regions[region].alloc_seq.store(0, std::memory_order_relaxed);
          _state->regions[region].first_free.store(
              temp_meta_type().set_location(end_of_freelist).to_int(), std::memory_order_relaxed);
-         new (&_state->regions[region].alloc_mutex) std::mutex();
+         new (&_state->regions[region].alloc_mutex) interprocess_mutex();
       }
    }
 

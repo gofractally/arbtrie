@@ -70,7 +70,7 @@ namespace arbtrie
    struct inner_node : node_header
    {
       inline inner_node(uint32_t            size,
-                        id_address          nid,
+                        id_address_seq      nid,
                         const clone_config& cfg,
                         uint16_t            num_branch = 0)
           : node_header(size, nid, Derived::type, num_branch)
@@ -80,7 +80,10 @@ namespace arbtrie
             set_prefix(*cfg.set_prefix);
       }
 
-      inline inner_node(uint32_t size, id_address nid, const Derived* src, const clone_config& cfg)
+      inline inner_node(uint32_t            size,
+                        id_address_seq      nid,
+                        const Derived*      src,
+                        const clone_config& cfg)
           : node_header(size, nid, Derived::type, src->_num_branches),
             _descendants(src->_descendants),
             _eof_value(src->_eof_value)

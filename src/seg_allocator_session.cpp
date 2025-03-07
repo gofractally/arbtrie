@@ -102,9 +102,9 @@ namespace arbtrie
       _session_num = -1;
    }
 
-   std::pair<node_location, node_header*> seg_alloc_session::alloc_data(uint32_t   size,
-                                                                        id_address adr,
-                                                                        uint64_t   time)
+   std::pair<node_location, node_header*> seg_alloc_session::alloc_data(uint32_t       size,
+                                                                        id_address_seq adr_seq,
+                                                                        uint64_t       vage)
    {
       assert(size < segment_size - round_up_multiple<64>(sizeof(mapped_memory::segment_header)));
       // A - if no segment get a new segment
@@ -116,7 +116,18 @@ namespace arbtrie
          _alloc_seg_ptr  = ptr;
          _alloc_seg_meta = &_sega.get_segment_meta(_alloc_seg_num);
          _alloc_seg_meta->start_alloc_segment();
+
+         // Initialize segment header with session information
+         _alloc_seg_ptr->_session_id = _session_num;
+         _alloc_seg_ptr->_seg_sequence =
+             _sega._mapped_state->_session_data.next_session_segment_seq(_session_num);
+         _alloc_seg_ptr->_open_time_usec = std::chrono::duration_cast<std::chrono::microseconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count();
+         _alloc_seg_ptr->_close_time_usec = 0;  // Will be set when segment is closed
       }
+      if (not vage)
+         vage = _alloc_seg_ptr->_age * 1024;
 
       auto* sh           = _alloc_seg_ptr;
       auto  rounded_size = round_up_multiple<64>(size);
@@ -134,19 +145,29 @@ namespace arbtrie
             assert(cur_apos + sizeof(uint64_t) <= segment_size);
             memset(((char*)sh) + cur_apos, 0, sizeof(node_header));
          }
-         _alloc_seg_meta->finalize_segment(segment_size - sh->_alloc_pos);  // not alloc
+
+         // Set the segment close time before finalization
+         sh->_close_time_usec = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+
+         _alloc_seg_meta->finalize_segment(segment_size - sh->_alloc_pos,
+                                           sh->_vage_accumulator.age);  // not alloc
          sh->_alloc_pos.store(uint32_t(-1), std::memory_order_release);
          _sega.push_dirty_segment(_alloc_seg_num);
          _alloc_seg_ptr  = nullptr;
          _alloc_seg_num  = -1ull;
          _alloc_seg_meta = nullptr;
 
-         return alloc_data(size, adr, time);  // recurse
+         return alloc_data(size, adr_seq, vage);  // recurse
       }
+      // Update the vage_accumulator with the current allocation
+      _alloc_seg_ptr->_vage_accumulator.add(size, vage);
 
       auto obj  = ((char*)sh) + sh->_alloc_pos.load(std::memory_order_relaxed);
       auto head = (node_header*)obj;
-      head      = new (head) node_header(size, adr);
+      // Create node_header with sequence number passed to constructor
+      head = new (head) node_header(size, adr_seq, node_type::freelist);
 
       auto new_alloc_pos =
           rounded_size + sh->_alloc_pos.fetch_add(rounded_size, std::memory_order_relaxed);
@@ -155,6 +176,7 @@ namespace arbtrie
 
       return {node_location::from_absolute(loc), head};
    }
+
    void seg_alloc_session::unalloc(uint32_t size)
    {
       auto rounded_size = round_up_multiple<64>(size);

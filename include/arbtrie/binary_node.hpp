@@ -215,7 +215,7 @@ namespace arbtrie
                                    key_index::value_type t2);
 
       binary_node(int_fast16_t          asize,
-                  id_address            nid,
+                  id_address_seq        nid,
                   const clone_config&   cfg,
                   id_region             branch_reg,
                   key_view              k1,
@@ -226,34 +226,32 @@ namespace arbtrie
                   key_index::value_type t2);
 
       // make empty
-      binary_node(int_fast16_t asize, id_address nid, const clone_config& cfg);
+      binary_node(int_fast16_t asize, id_address_seq nid, const clone_config& cfg);
+
       // clone
       binary_node(int_fast16_t        asize,
-                  id_address          nid,
+                  id_address_seq      nid,
                   const binary_node*  src,
                   const clone_config& cfg);
+
       // clone + insert
       binary_node(int_fast16_t        asize,
-                  id_address          nid,
+                  id_address_seq      nid,
                   const binary_node*  src,
                   const clone_config& cfg,
                   const clone_insert& ins);
 
       binary_node(int_fast16_t        asize,
-                  id_address          nid,
+                  id_address_seq      nid,
                   const binary_node*  src,
                   const clone_config& cfg,
                   const clone_update& upv);
 
       binary_node(int_fast16_t        asize,
-                  id_address          nid,
+                  id_address_seq      nid,
                   const binary_node*  src,
                   const clone_config& cfg,
                   const clone_remove& upv);
-
-      //            int lb_idx,
-      //            key_view           key,
-      //            is_value_type auto val);
 
       static inline uint64_t key_hash(key_view k) { return XXH3_64bits(k.data(), k.size()); }
       static inline uint64_t value_hash(id_address k) { return XXH3_64bits(&k, sizeof(k)); }
@@ -591,15 +589,17 @@ namespace arbtrie
       /**
        * Performs a checksum over just the index/key/value hashes
        * and not over the bulk of the object and skips the reserve 
-       * spaces in the index
+       * spaces in the index. Returns an 8-bit checksum value.
+       * Includes the sequence number in the calculation.
        */
-      uint32_t calculate_checksum() const
+      uint8_t calculate_checksum() const
       {
-         auto start = XXH3_64bits(((const char*)this) + sizeof(checksum),
-                                  sizeof(binary_node) - sizeof(checksum) + num_branches());
+         // Skip only the first byte which contains the checksum
+         auto start = XXH3_64bits(((const char*)this) + checksum_size,
+                                  sizeof(binary_node) - checksum_size + num_branches());
          auto idx   = XXH3_64bits(key_offsets(), sizeof(key_index) * num_branches());
          auto vhash = XXH3_64bits(value_hashes(), num_branches());
-         return start ^ idx ^ vhash;
+         return uint8_t(start ^ idx ^ vhash);  // Take lowest byte as 8-bit checksum
       }
 
       // return the nth key value pair

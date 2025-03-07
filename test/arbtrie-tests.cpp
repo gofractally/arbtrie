@@ -126,7 +126,8 @@ void validate_refcount(session_rlock& state, id_address i, int c)
 TEST_CASE("binary-node")
 {
    alignas(64) char node_buffer[64 * 16];
-   auto bn = new (node_buffer) binary_node(sizeof(node_buffer), id_address{}, clone_config{});
+   auto             bn = new (node_buffer)
+       binary_node(sizeof(node_buffer), id_address_seq(id_address{}, 0), clone_config{});
    ARBTRIE_DEBUG("capacity: ", bn->data_capacity());
    ARBTRIE_DEBUG("spare capacity: ", bn->spare_capacity());
    ARBTRIE_DEBUG("branch capacity: ", bn->_branch_cap);

@@ -19,7 +19,7 @@ namespace arbtrie
       auto make_init = [&](node_header* cl)
       {
          assert(cl->_nsize == asize);
-         uinit(new (cl) NodeType(cl->_nsize, cl->address(), cargs...));
+         uinit(new (cl) NodeType(cl->_nsize, cl->address_seq(), cargs...));
       };
       return state.alloc(reg, asize, NodeType::type, make_init);
    }
@@ -35,7 +35,7 @@ namespace arbtrie
    {
       auto asize     = NodeType::alloc_size(cargs...);
       auto make_init = [&](node_header* cl)
-      { uinit(new (cl) NodeType(asize, cl->address(), cargs...)); };
+      { uinit(new (cl) NodeType(asize, cl->address_seq(), cargs...)); };
 
       auto modlock = r.modify();
       return r.rlock().realloc(r, asize, NodeType::type, make_init);
@@ -54,7 +54,7 @@ namespace arbtrie
       auto make_init = [&](node_header* cl)
       {
          assert(cl->_nsize == asize);
-         uinit(new (cl) NodeType(cl->_nsize, cl->address(), cfg));
+         uinit(new (cl) NodeType(cl->_nsize, cl->address_seq(), cfg));
       };
       return state.alloc(reg, asize, NodeType::type, make_init);
    }
@@ -95,8 +95,10 @@ namespace arbtrie
 
       auto asize = NodeType::alloc_size(src, cfg, cargs...);
 
-      auto copy_init = [&](node_header* cl)
-      { uinit(new (cl) NodeType(asize, cl->address(), src, cfg, std::forward<CArgs>(cargs)...)); };
+      auto copy_init = [&](node_header* cl) {
+         uinit(new (cl)
+                   NodeType(asize, cl->address_seq(), src, cfg, std::forward<CArgs>(cargs)...));
+      };
 
       if constexpr (mode.is_unique() and mode.is_same_region())
       {
@@ -169,7 +171,7 @@ namespace arbtrie
           reg, r, src, cfg, [](auto) {}, std::forward<CArgs>(cargs)...);
    }
 
-   uint32_t node_header::calculate_checksum() const
+   uint8_t node_header::calculate_checksum() const
    {
       return cast_and_call(this, [&](const auto* t) { return t->calculate_checksum(); });
    }
@@ -981,19 +983,21 @@ namespace arbtrie
       // this path
       if constexpr (false and mode.is_unique())
       {
+#if 0
          // because the new setlist root must have a different branch region,
          // we need to reassign the meta_address for the current root, this is
          // safe because ref count is 1
-         auto [meta, new_addr] = state.get_new_meta_node(new_reg);
+         auto allocation = state.get_new_meta_node(new_reg);
          r.modify().as<NodeType>(
              [&](auto* n)
              {
-                meta.store(r.meta_data(), std::memory_order_relaxed);
+                allocation.meta.store(r.meta_data(), std::memory_order_release);
                 n->set_prefix(rootpre.substr(cpre.size() + 1));
-                n->set_address(new_addr);
+                n->set_address(allocation.address);
              });
          state.free_meta_node(r.address());
-         child_id = new_addr;
+         child_id = allocation.address;
+#endif
       }
       else  // shared state
       {

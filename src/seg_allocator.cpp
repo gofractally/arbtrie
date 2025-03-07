@@ -330,7 +330,7 @@ namespace arbtrie
             auto obj_ref = state.get(addr);
             if (auto [header, loc] = obj_ref.try_move_header(); header)
             {
-               auto [new_loc, new_header] = ses.alloc_data(header->size(), addr);
+               auto [new_loc, new_header] = ses.alloc_data(header->size(), header->address_seq());
                memcpy(new_header, header, header->size());
 
                if constexpr (update_checksum_on_compact)
@@ -375,7 +375,7 @@ namespace arbtrie
          if (sm.rel_virtual_age > max_virtual_age)
          {
             min_qualifying_seg = i;
-            max_virtual_age    = _mapped_state->_segment_data.virtual_age[i].to_int();
+            max_virtual_age    = _mapped_state->_segment_data.meta[i].vage;
          }
       }
       if (min_qualifying_seg == -1)
@@ -390,7 +390,7 @@ namespace arbtrie
       //ARBTRIE_DEBUG("compact_unpinned_segment");
       auto           total_segs         = _block_alloc.num_blocks();
       segment_number min_qualifying_seg = -1;
-      uint64_t       max_virtual_age    = 0;
+      int64_t        max_virtual_age    = -1;
       for (int i = 0; i < total_segs; ++i)
       {
          auto sm = _mapped_state->_segment_data.meta[i].data();
@@ -400,19 +400,14 @@ namespace arbtrie
             //                   100.0 * sm.free_space / segment_size);
             continue;
          }
-         ARBTRIE_WARN("compact_unpinned_segment: not skipping: ", i, " free space ",
-                      100.0 * sm.free_space / segment_size);
+         //   ARBTRIE_WARN("compact_unpinned_segment: not skipping: ", i, " free space ",
+         //                100.0 * sm.free_space / segment_size);
 
          if (sm.rel_virtual_age >= max_virtual_age)
          {
-            ARBTRIE_WARN("compact_unpinned_segment: new max virtual age: ",
-                         _mapped_state->_segment_data.virtual_age[i].to_int());
             min_qualifying_seg = i;
-            max_virtual_age    = _mapped_state->_segment_data.virtual_age[i].to_int();
+            max_virtual_age    = _mapped_state->_segment_data.meta[i].vage;
          }
-         else
-            ARBTRIE_DEBUG("compact_unpinned_segment: ignored virtual age: ", max_virtual_age, " < ",
-                          sm.rel_virtual_age);
       }
       if (min_qualifying_seg == -1)
          return false;
@@ -435,6 +430,19 @@ namespace arbtrie
       const char* foc =
           (const char*)s + round_up_multiple<64>(sizeof(mapped_memory::segment_header));
       const node_header* foo = (const node_header*)(foc);
+
+      auto& smeta    = _mapped_state->_segment_data.meta[seg_num];
+      auto  src_vage = smeta.vage;
+
+      // Track destination segment info for logging
+      uint32_t       dest_initial_vage = 0;
+      segment_number current_dest_seg  = -1ull;
+
+      if (ses._alloc_seg_ptr)
+      {
+         dest_initial_vage = ses._alloc_seg_ptr->_vage_accumulator.age;
+         current_dest_seg  = ses._alloc_seg_num;
+      }
 
       if (debug_memory)
       {
@@ -461,9 +469,6 @@ namespace arbtrie
       std::vector<std::pair<const node_header*, temp_meta_type>> skipped;
       std::vector<const node_header*>                            skipped_ref;
       std::vector<const node_header*>                            skipped_try_start;
-
-      auto& smeta    = _mapped_state->_segment_data.meta[seg_num];
-      auto  src_vage = _mapped_state->_segment_data.virtual_age[seg_num].to_int();
 
       while (foo < send and foo->address())
       {
@@ -499,8 +504,8 @@ namespace arbtrie
             continue;
          }
 
-         auto obj_size   = foo->size();
-         auto [loc, ptr] = ses.alloc_data(obj_size, foo_address, src_vage);
+         auto obj_size    = foo->size();
+         auto [loc, head] = ses.alloc_data(obj_size, foo->address_seq(), src_vage);
          if constexpr (debug_memory)
          {
             if (start_seg_num != ses._alloc_seg_num)
@@ -517,30 +522,30 @@ namespace arbtrie
          {
             if (obj_ref.type() == node_type::binary)
             {
-               copy_binary_node((binary_node*)ptr, (const binary_node*)foo);
+               copy_binary_node((binary_node*)head, (const binary_node*)foo);
             }
             else
             {
-               memcpy(ptr, foo, obj_size);
+               memcpy(head, foo, obj_size);
             }
             if constexpr (update_checksum_on_compact)
             {
-               if (not ptr->has_checksum())
-                  ptr->update_checksum();
+               if (not head->has_checksum())
+                  head->update_checksum();
             }
             if constexpr (validate_checksum_on_compact)
             {
                if constexpr (update_checksum_on_modify)
                {
-                  if (not ptr->has_checksum())
+                  if (not head->has_checksum())
                      ARBTRIE_WARN("missing checksum detected: ", foo_address,
-                                  " type: ", node_type_names[ptr->_ntype]);
+                                  " type: ", node_type_names[head->_ntype]);
                }
-               if (not ptr->validate_checksum())
+               if (not head->validate_checksum())
                {
                   ARBTRIE_WARN("invalid checksum detected: ", foo_address,
                                " checksum: ", foo->checksum, " != ", foo->calculate_checksum(),
-                               " type: ", node_type_names[ptr->_ntype]);
+                               " type: ", node_type_names[head->_ntype]);
                }
             }
             if (node_meta_type::success != obj_ref.try_move(obj_ref.loc(), loc))
@@ -561,9 +566,20 @@ namespace arbtrie
          }
          else if (start_seg_ptr != ses._alloc_seg_ptr)
          {
+            // Log summary when write segment fills up
+            uint32_t dest_final_vage = start_seg_ptr->_vage_accumulator.age;
+            int32_t  vage_delta      = dest_final_vage - src_vage;
+            ARBTRIE_INFO("Compaction segment filled: src=", seg_num, " src_vage=", src_vage,
+                         " dest=", start_seg_num, " dest_initial_vage=", dest_initial_vage,
+                         " dest_final_vage=", dest_final_vage, " delta=", vage_delta);
+
             sync_segment(start_seg_num, sync_type::sync);
             start_seg_ptr = ses._alloc_seg_ptr;
             start_seg_num = ses._alloc_seg_num;
+
+            // Update tracking for new destination segment
+            dest_initial_vage = start_seg_ptr->_vage_accumulator.age;
+            current_dest_seg  = start_seg_num;
          }
          foo = foo->next();
       }  // segment object iteration loop
@@ -631,6 +647,13 @@ namespace arbtrie
       // disk.
       if (start_seg_ptr)
       {
+         // Log summary when segment finishes compacting
+         uint32_t dest_final_vage = start_seg_ptr->_vage_accumulator.age;
+         int32_t  vage_delta      = dest_final_vage - src_vage;
+         ARBTRIE_INFO("Compaction complete: src=", seg_num, " src_vage=", src_vage,
+                      " dest=", start_seg_num, " dest_initial_vage=", dest_initial_vage,
+                      " dest_final_vage=", dest_final_vage, " delta=", vage_delta);
+
          // TODO: don't hardcode MS_SYNC here, this will cause unnessary SSD wear on
          //       systems that opt not to flush
          //
@@ -965,8 +988,8 @@ namespace arbtrie
       // utilized by compactor to propagate the relative age of data in a segment
       // for the purposes of munlock the oldest data first and avoiding promoting data
       // just because we compacted a segment to save space.
-      _mapped_state->_segment_data.virtual_age[seg_num].reset();
-      // TODO: configure virtual age for t
+      shp->_vage_accumulator.reset();
+
       disable_segment_write_protection(seg_num);
    }
 
@@ -987,7 +1010,7 @@ namespace arbtrie
       segment_number oldest_seg = -1;
       for (auto seg : provider_state.mlock_segments)
       {
-         auto vage = _mapped_state->_segment_data.virtual_age[seg].to_int();
+         auto vage = _mapped_state->_segment_data.meta[seg].vage;
          if (vage < oldest_age)
          {
             oldest_age = vage;

@@ -10,6 +10,7 @@
 #include <arbtrie/spmc_buffer.hpp>
 #include <arbtrie/util.hpp>
 #include <bit>
+#include <cstdint>
 
 namespace arbtrie
 {
@@ -139,7 +140,7 @@ namespace arbtrie
          state_data data() const { return get_free_state(); }
          void       free_object(uint32_t size);
          void       free(uint32_t size);
-         void       finalize_segment(uint32_t size);
+         void       finalize_segment(uint32_t size, uint32_t vage_value);
          void       clear() { _state_data.store(0, std::memory_order_relaxed); }
          bool       is_alloc() { return get_free_state().is_alloc; }
          void       set_alloc_state(bool a);
@@ -150,6 +151,10 @@ namespace arbtrie
          /// the total number of bytes freed by swap
          /// or by being moved to other segments.
          std::atomic<uint64_t> _state_data;
+
+         /// virtual age of the segment, initialized as 1024x the segment_header::_age
+         /// and updated with weighted average as data is allocated
+         uint32_t vage = 0;
       };
 
       /**
@@ -172,17 +177,37 @@ namespace arbtrie
          // to be marked read only to the seg_allocator
          std::atomic<uint32_t> _alloc_pos = 64;  // aka sizeof(segment_header)
 
+         uint32_t _session_id;       ///< the session id that allocated this segment
+         uint32_t _seg_sequence;     ///< the sequence number of this sessions segment alloc
+         uint64_t _open_time_usec;   ///< unix time in microseconds this segment started writing
+         uint64_t _close_time_usec;  ///< unix time in microseconds this segment was closed
+
          // every time a segment is allocated it is assigned an age
-         // which aids in reconstruction, newer values take priority over older ones
+         // which aids in reconstruction, newer values take priority over older values
          uint32_t _age;
 
          // used to calculate object density of segment header,
          // to establish madvise
-         // uint32_t _num_objects = 0;  // inc on alloc
          uint32_t _checksum = 0;
-      };
-      static_assert(sizeof(segment_header) <= 64);
+         uint64_t unused[2];
 
+         // Tracks accumulated virtual age during allocation
+         size_weighted_age _vage_accumulator;
+      };
+      static_assert(sizeof(segment_header) == 64);
+
+      /**
+       * A full segment is a segment that contains the segment header and the data
+       * that is allocated in the segment. The "header" is moved to the last 64 bytes
+       * so that the segment can be marked read-only as sync() is called while still
+       * being able to modify the header data until the segment is finalized.
+       */
+      struct full_segment
+      {
+         char           data[segment_size - sizeof(segment_header)];
+         segment_header header;
+      };
+      static_assert(sizeof(full_segment) == segment_size);
       /**
        * The data stored in the allocator_state is not written to disk on sync
        * and may be in a corrupt state after a hard crash. All values contained
@@ -279,13 +304,6 @@ namespace arbtrie
          {
             segment_meta meta[max_segment_count];
 
-            /// the virtual age of each segment, is initially 100x the segment_header::_age of the segment
-            /// when allocating data moved from another segment the virtual age becomes
-            /// a weighted average of the age of data in this segment, this is then used by the
-            /// provider thread to determine which segments to munlock, choosing the oldest virtual age
-            /// of the current mlock_segments.
-            size_weighted_age virtual_age[max_segment_count];
-
             /**
              * Get the last synced position for a segment
              */
@@ -316,6 +334,15 @@ namespace arbtrie
                return free_sessions.load(std::memory_order_relaxed);
             }
 
+            uint32_t session_segment_seq(uint32_t session_num) const
+            {
+               return _session_seg_seq[session_num];
+            }
+            uint32_t next_session_segment_seq(uint32_t session_num)
+            {
+               return _session_seg_seq[session_num] += 1;
+            }
+
            private:
             // 1 bits mean free, 0 bits mean in use
             std::atomic<uint64_t> free_sessions{-1ull};
@@ -328,6 +355,7 @@ namespace arbtrie
             // them and moves the referenced address to a pinned segment with
             // recent age.
             rcache_queue_type _rcache_queue[64];
+            uint32_t          _session_seg_seq[64];
          };
          session_data _session_data;
 
@@ -571,11 +599,12 @@ namespace arbtrie
             updated = state_data(expected).free(size).to_int();
       }
 
-      inline void segment_meta::finalize_segment(uint32_t size)
+      inline void segment_meta::finalize_segment(uint32_t size, uint32_t vage_value)
       {
          auto expected = _state_data.load(std::memory_order_relaxed);
 
          assert(state_data(expected).is_alloc);
+         vage = vage_value;
 
          auto updated = state_data(expected).free(size).set_alloc(false).to_int();
          while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))

@@ -90,4 +90,21 @@ namespace arbtrie
    using object_id  = id_address;
    using id_address = id_address;
 
+   /**
+    * When id_address are allocated they are assigned a sequence number
+    * which is used to track the order of allocation across threads and
+    * facilitate recovery when multiple segments have the same node with
+    * the same address. 
+    */
+   struct id_address_seq
+   {
+      id_address address;
+      uint32_t   sequence;
+
+      constexpr id_address_seq(id_address addr, uint32_t seq) : address(addr), sequence(seq) {}
+
+      constexpr      operator id_address() const { return address; }
+      constexpr bool operator==(const id_address_seq& other) const = default;
+   };
+
 }  // namespace arbtrie

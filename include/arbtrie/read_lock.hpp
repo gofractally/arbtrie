@@ -59,9 +59,9 @@ namespace arbtrie
              * @defgroup Region Alloc Helpers
              */
       /// @{
-      id_region                              get_new_region();
-      void                                   free_meta_node(id_address);
-      std::pair<node_meta_type&, id_address> get_new_meta_node(id_region);
+      id_region     get_new_region();
+      void          free_meta_node(id_address);
+      id_allocation get_new_meta_node(id_region);
       /// @}
 
       inline object_ref get(id_address adr);

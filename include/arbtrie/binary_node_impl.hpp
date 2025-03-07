@@ -103,14 +103,14 @@ namespace arbtrie
       return alloc_size(bcap, dcap);
    }
 
-   inline binary_node::binary_node(int_fast16_t asize, id_address nid, const clone_config& cfg)
+   inline binary_node::binary_node(int_fast16_t asize, id_address_seq nid, const clone_config& cfg)
        : node_header(asize, nid, node_type::binary), _alloc_pos(0)
    {
       assert(asize <= binary_node_max_size);
       _branch_cap = cfg.branch_cap;
    }
    inline binary_node::binary_node(int_fast16_t                       asize,
-                                   id_address                         nid,
+                                   id_address_seq                     nid,
                                    const clone_config&                cfg,
                                    id_region                          branch_reg,
                                    key_view                           k1,
@@ -137,7 +137,7 @@ namespace arbtrie
    }
 
    inline binary_node::binary_node(int_fast16_t        asize,
-                                   id_address          nid,
+                                   id_address_seq      nid,
                                    const binary_node*  src,
                                    const clone_config& cfg)
        : node_header(asize, nid, node_type::binary, src->num_branches()),
@@ -172,7 +172,7 @@ namespace arbtrie
     *  a new compact node that has the updated value in the right spot.
     */
    inline binary_node::binary_node(int_fast16_t        asize,
-                                   id_address          nid,
+                                   id_address_seq      nid,
                                    const binary_node*  src,
                                    const clone_config& cfg,
                                    const clone_update& up)
@@ -237,7 +237,7 @@ namespace arbtrie
     *  a new compact node that has the updated value in the right spot.
     */
    inline binary_node::binary_node(int_fast16_t        asize,
-                                   id_address          nid,
+                                   id_address_seq      nid,
                                    const binary_node*  src,
                                    const clone_config& cfg,
                                    const clone_remove& rem)
@@ -336,7 +336,7 @@ namespace arbtrie
     *  an new key/value pair and removing any dead space
     */
    inline binary_node::binary_node(int_fast16_t        asize,
-                                   id_address          nid,
+                                   id_address_seq      nid,
                                    const binary_node*  src,
                                    const clone_config& cfg,
                                    const clone_insert& ins)

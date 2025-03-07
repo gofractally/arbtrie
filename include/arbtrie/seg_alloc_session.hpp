@@ -61,9 +61,9 @@ namespace arbtrie
       inline uint32_t get_cache_difficulty() const;
 
       void                                   unalloc(uint32_t size);
-      std::pair<node_location, node_header*> alloc_data(uint32_t   size,
-                                                        id_address adr,
-                                                        uint64_t   time = 0);
+      std::pair<node_location, node_header*> alloc_data(uint32_t       size,
+                                                        id_address_seq adr_seq,
+                                                        uint64_t       vage = 0);
 
      private:
       seg_allocator& _sega;

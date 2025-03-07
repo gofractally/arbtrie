@@ -4,12 +4,24 @@
 #include <arbtrie/config.hpp>
 #include <arbtrie/debug.hpp>
 #include <arbtrie/file_fwd.hpp>
+#include <arbtrie/interprocess_mutex.hpp>
 #include <arbtrie/mapping.hpp>
 #include <arbtrie/node_meta.hpp>
 #include <arbtrie/util.hpp>
 
 namespace arbtrie
 {
+   /**
+    * Represents the result of allocating a new ID, containing the metadata,
+    * address, and sequence number.
+    */
+   struct id_allocation
+   {
+      node_meta_type& meta;
+      id_address      address;
+      uint32_t        sequence;
+   };
+
    /**
     * The ID file will grow by 256mb (assuming id_page_size is 4096) 
     */
@@ -33,11 +45,13 @@ namespace arbtrie
 
       node_meta_type& get(id_address nid);
 
-      id_region                              get_new_region();
-      std::pair<node_meta_type&, id_address> get_new_id(id_region r);
-      void                                   free_id(id_address id);
-      int64_t                                free_release_count() const
+      id_region     get_new_region();
+      id_allocation get_new_id(id_region r);
+      void          free_id(id_address id);
+      int64_t       free_release_count() const
       {
+         if constexpr (not debug_memory)
+            return -1;
          return _state->free_release_count.load(std::memory_order_relaxed);
       }
 
@@ -75,7 +89,20 @@ namespace arbtrie
       struct region_header
       {
          /** Mutex protecting allocation operations within this region */
-         std::mutex alloc_mutex;
+         interprocess_mutex alloc_mutex;
+
+         /** Used to track order of id allocations in this region.
+          * This counter is used during recovery to determine which copy of a node 
+          * with the same ID is the most recent when multiple copies exist across segments.
+          * 
+          * Memory ordering: memory_order_relaxed is sufficient because:
+          * 1. The sequence number is only used for recovery purposes
+          * 2. We only need to ensure the counter increments monotonically within each region
+          * 3. The sequence number is independent of other memory operations
+          * 4. No other operations depend on observing this sequence number during normal operation
+          * 5. During recovery, all threads are stopped so there are no concurrent accesses
+          */
+         std::atomic<uint32_t> alloc_seq;
 
          /** Number of IDs currently in use in this region */
          std::atomic<uint32_t> use_count;
@@ -173,7 +200,7 @@ namespace arbtrie
     *  the free list with a bit-per-slot to optimize placement and eliminate
     *  locks. (free lists thrash locality)
     */
-   inline std::pair<node_meta_type&, id_address> id_alloc::get_new_id(id_region r)
+   inline id_allocation id_alloc::get_new_id(id_region r)
    {
       if constexpr (debug_memory)
          _state->free_release_count.fetch_add(1, std::memory_order_relaxed);
@@ -190,6 +217,11 @@ namespace arbtrie
       auto  num_pages = _block_alloc.num_blocks();
       auto& rhead     = _state->regions[r.to_int()];
 
+      // Increment the allocation sequence counter
+      // memory_order_relaxed is sufficient since this sequence number is only used
+      // during recovery to determine the most recent copy of a node
+      uint32_t seq = rhead.alloc_seq.fetch_add(1, std::memory_order_relaxed);
+
       auto prior_ucount = rhead.use_count.fetch_add(1, std::memory_order_acquire);
       if (prior_ucount >= num_pages * ids_per_page)
       {
@@ -198,8 +230,8 @@ namespace arbtrie
          if (num_pages > 3)
          {
             ARBTRIE_WARN("growing all id regions because use count(", prior_ucount, ") of region(",
-                          r.to_int(), ") exceeded cap: numpages: ", num_pages, " -> ",
-                          num_pages + 1);
+                         r.to_int(), ") exceeded cap: numpages: ", num_pages, " -> ",
+                         num_pages + 1);
             // TODO: calculate a load factor before warning
          }
          num_pages = _block_alloc.reserve(num_pages + 1, true);
@@ -219,15 +251,14 @@ namespace arbtrie
             auto nadr = r + id_index(nid);
             assert(get(nadr).ref() == 0 and get(nadr).loc().aligned_index() == 0);
             //     ARBTRIE_WARN( "alloc: ", nadr );
-            return {get(nadr), nadr};
+            return {get(nadr), nadr, seq};
          }
          else
          {
             // race condition caused attempt to allocate beyond end of page,
             // must undo the add to restore balance... then consult free list
             rhead.next_alloc.fetch_sub(1, std::memory_order_relaxed);
-            ARBTRIE_WARN(
-                "id alloc race condition detected, should be fine, just letting you know");
+            ARBTRIE_WARN("id alloc race condition detected, should be fine, just letting you know");
          }
       }
       // there must be something in the free list because if use count implied no
@@ -244,7 +275,7 @@ namespace arbtrie
       {  // lock scope, must lock to alloc because of race between
          // reading last free and storing, conviently there are
          // 65k different regions so should be little contention
-         std::unique_lock<std::mutex> l{rhead.alloc_mutex};
+         std::unique_lock<interprocess_mutex> l{rhead.alloc_mutex};
          ff_index = rhead.first_free.load(std::memory_order_seq_cst);
 
          //     ARBTRIE_DEBUG("reg: ", r.to_int(), " alloc from ff_index: ", ff_index, " idx: ", (ff_index >> 18),
@@ -280,7 +311,7 @@ namespace arbtrie
       //     std::cerr << "   post alloc free list: ";
       //    print_free_list();
       //      ARBTRIE_WARN( "fl alloc: ", alloced_id);
-      return {*ffa, alloced_id};
+      return {*ffa, alloced_id, seq};
    }
 
    inline void id_alloc::free_id(id_address adr)
@@ -298,15 +329,13 @@ namespace arbtrie
                           .to_int();
 
       {
+         std::unique_lock<interprocess_mutex> l{rhead.alloc_mutex};
+         uint64_t cur_head = rhead.first_free.load();  //std::memory_order_relaxed);
+         //      uint64_t  cur_head = rhead.first_free.load(std::memory_order_relaxed);
+         do
          {
-            std::unique_lock<std::mutex> l{rhead.alloc_mutex};
-            uint64_t cur_head = rhead.first_free.load();  //std::memory_order_relaxed);
-            //      uint64_t  cur_head = rhead.first_free.load(std::memory_order_relaxed);
-            do
-            {
-               next_free.store(cur_head);  //, std::memory_order_release);
-            } while (not rhead.first_free.compare_exchange_weak(cur_head, new_head));
-         }
+            next_free.store(cur_head);  //, std::memory_order_release);
+         } while (not rhead.first_free.compare_exchange_weak(cur_head, new_head));
       }
       rhead.use_count.fetch_sub(1, std::memory_order_release);
    }

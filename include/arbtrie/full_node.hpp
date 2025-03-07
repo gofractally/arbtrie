@@ -142,7 +142,10 @@ namespace arbtrie
          return round_up_multiple<64>(min_size);
       }
 
-      full_node(int_fast16_t asize, id_address nid, const full_node* src, const clone_config& cfg)
+      full_node(int_fast16_t        asize,
+                id_address_seq      nid,
+                const full_node*    src,
+                const clone_config& cfg)
           : inner_node<full_node>(asize, nid, src, cfg)
       {
          _prefix_capacity = asize - sizeof(inner_node<full_node>) - branch_count * sizeof(id_index);
@@ -150,7 +153,7 @@ namespace arbtrie
          memcpy(branches(), src->branches(), branch_count * sizeof(id_index));
       }
 
-      full_node(int_fast16_t asize, id_address nid, const clone_config& cfg)
+      full_node(int_fast16_t asize, id_address_seq nid, const clone_config& cfg)
           : inner_node<full_node>(asize, nid, cfg, 0)
       {
          _prefix_capacity = asize - sizeof(inner_node<full_node>) - branch_count * sizeof(id_index);
@@ -287,9 +290,10 @@ namespace arbtrie
          }
       }
 
-      uint32_t calculate_checksum() const
+      uint8_t calculate_checksum() const
       {
-         return XXH3_64bits(((const char*)this) + sizeof(checksum), _nsize - sizeof(checksum));
+         // Skip only the first byte which contains the checksum
+         return XXH3_64bits(((const char*)this) + checksum_size, _nsize - checksum_size);
       }
 
       /**

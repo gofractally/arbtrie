@@ -236,9 +236,11 @@ namespace arbtrie
       // id_index            branches[num_branches()-1]
       // id_index            branches[branch_capacity() - num_branches() - 1 ]
 
-      uint32_t calculate_checksum() const
+      uint8_t calculate_checksum() const
       {
-         return XXH3_64bits(((const char*)this) + sizeof(checksum), _nsize - sizeof(checksum));
+         // Skip only the first byte which contains the checksum
+         auto hash = XXH3_64bits(((const char*)this) + checksum_size, _nsize - checksum_size);
+         return uint8_t(hash);  // Take lowest byte as 8-bit checksum
       }
 
       bool          can_add_branch() const { return num_branches() < branch_capacity(); }
@@ -503,13 +505,13 @@ namespace arbtrie
          return asize;
       }
 
-      setlist_node(int_fast16_t asize, id_address nid, const clone_config& cfg)
+      setlist_node(int_fast16_t asize, id_address_seq nid, const clone_config& cfg)
           : inner_node(asize, nid, cfg, 0)
       {
       }
 
       setlist_node(int_fast16_t        asize,
-                   id_address          nid,
+                   id_address_seq      nid,
                    const setlist_node* src,
                    const clone_config& cfg)
           : inner_node(asize, nid, src, cfg)
