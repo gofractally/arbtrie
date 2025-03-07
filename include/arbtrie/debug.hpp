@@ -1,10 +1,13 @@
 #pragma once
+#include <array>  // For std::array
 #include <atomic>
 #include <cstdlib>  // For getenv
+#include <format>   // C++20 formatting library
 #include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <string_view>  // C++20 string_view
 #include <thread>
 
 //#include <syncstream>
@@ -68,7 +71,7 @@ namespace arbtrie
          }
 
          // Check for string values
-         std::string level_str(env_level);
+         std::string_view level_str(env_level);
          if (level_str == "TRACE" || level_str == "trace")
             return log_level::trace;
          if (level_str == "DEBUG" || level_str == "debug")
@@ -158,9 +161,12 @@ namespace arbtrie
       }
    };
 
+   // Global default thread name for efficient pointer comparison
+   static inline const char* const DEFAULT_THREAD_NAME = "unset-thread-name";
+
    inline const char* thread_name(const char* n = nullptr)
    {
-      static thread_local const char* thread_name = "unset-thread-name";
+      static thread_local const char* thread_name = DEFAULT_THREAD_NAME;
       if (n)
       {
          // Set thread name without truncation
@@ -176,6 +182,34 @@ namespace arbtrie
          static std::mutex m;
          return m;
       }
+
+      // Helper to extract filename from path
+      inline std::string_view extract_filename(const char* path)
+      {
+         const char* slash = strrchr(path, '/');
+         return slash ? std::string_view(slash + 1) : std::string_view(path);
+      }
+
+      // Helper to create truncated string_view
+      inline std::string_view truncate(std::string_view str, size_t max_len)
+      {
+         return str.length() > max_len ? str.substr(0, max_len) : str;
+      }
+
+      // Pre-computed spaces for indentation (avoids allocations)
+      constexpr int MAX_INDENT = 32;  // Max reasonable indentation level
+      static const std::array<std::string_view, MAX_INDENT> SPACES = []()
+      {
+         std::array<std::string_view, MAX_INDENT> result = {};
+         static const char                        spaces[MAX_INDENT * 4 + 1] =
+             "                                                                                     "
+             "                                           ";
+         for (int i = 0; i < MAX_INDENT; i++)
+         {
+            result[i] = std::string_view(spaces, i * 4);
+         }
+         return result;
+      }();
    }  // namespace detail
 
    template <typename... Ts>
@@ -187,45 +221,37 @@ namespace arbtrie
          return;
       }
 
-      // Do all string preparation outside the lock
+      // Extract filename as string_view (no allocation)
+      std::string_view filename = detail::extract_filename(file);
 
-      // Extract filename from path
-      const char* filename = file;
-      const char* slash    = strrchr(file, '/');
-      if (slash)
+      // Format location directly without allocation
+      char             location_buf[64];  // Large enough for any reasonable filename:line
+      int              location_len = std::snprintf(location_buf, sizeof(location_buf), "%.*s:%d",
+                                                    static_cast<int>(filename.length()), filename.data(), line);
+      std::string_view location(location_buf, location_len);
+
+      // Get thread name as string_view (no allocation)
+      const char*      tname = thread_name();
+      std::string_view thread_str;
+      if (tname != DEFAULT_THREAD_NAME)  // Fast pointer comparison
       {
-         filename = slash + 1;
+         thread_str = detail::truncate(std::string_view(tname), 8);
       }
 
-      // Format as filename:line
-      std::string location = std::string(filename) + ":" + std::to_string(line);
+      // Get function name as string_view (no allocation)
+      std::string_view func_str = detail::truncate(std::string_view(func), 20);
 
-      // Get thread name - print nothing if it's the default "unset-thread-name"
-      const char* tname = thread_name();
-      std::string thread_str;
-      if (strcmp(tname, "unset-thread-name") != 0)
-      {
-         // Truncate thread name to 8 chars only for display purposes
-         thread_str = std::string(tname).substr(0, 8);
-      }
+      // Get indentation using pre-computed spaces
+      int              indent_level = scope::indent();
+      std::string_view indent = detail::SPACES[std::min(indent_level, detail::MAX_INDENT - 1)];
 
-      // Truncate function name to 20 chars if longer
-      std::string func_str = std::string(func);
-      if (func_str.length() > 20)
-      {
-         func_str = func_str.substr(0, 20);
-      }
+      // Format the header (back to std::format, which is still efficient)
+      std::string header =
+          std::format("{:<25}  {:<9}  {:<20}  {}", location, thread_str, func_str, indent);
 
-      // Calculate indentation
-      int         indent_spaces = 4 * scope::indent();
-      std::string indent_str(indent_spaces, ' ');
-
-      // Build output stream outside the lock
+      // Append the message using ostringstream for compatibility with existing code
       std::ostringstream output;
-      output << std::setw(25) << std::left << location << "  "   // Add 2 spaces after location
-             << std::setw(9) << std::left << thread_str << "  "  // Add 2 spaces after thread name
-             << std::setw(20) << std::left << func_str << "  "   // Add 2 spaces after function name
-             << indent_str;
+      output << header;
 
       // Append the actual message
       ((output << std::forward<Ts>(args)), ...);
