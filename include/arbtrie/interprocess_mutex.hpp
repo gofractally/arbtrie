@@ -1,5 +1,6 @@
 #pragma once
 
+#include <arbtrie/debug.hpp>
 #include <atomic>
 #include <cassert>
 #include <cstdint>
@@ -14,10 +15,9 @@ namespace arbtrie
     * Uses atomic operations and kernel-assisted waiting to provide
     * efficient synchronization between processes in shared memory.
     * 
-    * This mutex will make the first waiter wait until all other
-    * subsequent waiters have also waited and completed their wait,
-    * it is not a "fair" mutex, but is suitable for quickly protecting
-    * small operations where the expectation is minimal contention.
+    * This implementation uses a FIFO (First-In-First-Out) ticket approach
+    * with a bitmask to track waiting threads, ensuring fairness even
+    * under high contention.
     * 
     * (on linux std::atomic<>::wait is implemented using futexes),
     * other platforms may or may not work interprocess, but this is
@@ -26,14 +26,12 @@ namespace arbtrie
    class interprocess_mutex
    {
      private:
-      // State representation:
-      // If _state == 0: Unlocked
-      // If _state == 1: Locked with no waiters
-      // If _state > 1: Locked with (_state - 1) waiters
-      std::atomic<uint32_t> _state{0};
+      static constexpr uint64_t MAX_WAITERS = 64;
+      static constexpr uint64_t TICKET_MASK = MAX_WAITERS - 1;
 
-      static constexpr uint32_t unlocked = 0;
-      static constexpr uint32_t locked   = 1;
+      std::atomic<uint32_t> _ticket_counter{0};   // Next ticket to assign
+      std::atomic<uint32_t> _serving{0};          // Current ticket being served
+      std::atomic<uint64_t> _waiters_bitmask{0};  // Bitmask of waiting threads
 
      public:
       interprocess_mutex()  = default;
@@ -45,42 +43,62 @@ namespace arbtrie
 
       void lock()
       {
-         // Get ticket and increment counter in one atomic operation
-         uint32_t ticket = _state.fetch_add(1, std::memory_order_acquire);
+         // Get a unique ticket
+         uint32_t my_ticket = _ticket_counter.fetch_add(1, std::memory_order_relaxed);
+         uint32_t my_slot   = my_ticket & TICKET_MASK;
 
-         // If ticket was 0, we got the lock immediately (was unlocked)
-         if (ticket == unlocked)
-            return;
-
-         const uint32_t wait_on = ticket + 1;
-
-         // Otherwise wait until the count drops to our ticket value
          while (true)
          {
-            _state.wait(wait_on, std::memory_order_relaxed);
+            uint32_t current_serving = _serving.load(std::memory_order_acquire);
+            if (current_serving == my_ticket)
+               break;  // Lock acquired
 
-            // Check if it's our turn
-            if (_state.load(std::memory_order_acquire) == ticket)
-               break;
+            // Mark myself as waiting
+            _waiters_bitmask.fetch_add(1ULL << my_slot, std::memory_order_acquire);
+
+            // Wait for my turn
+            _serving.wait(current_serving, std::memory_order_relaxed);
+
+            if (current_serving != _serving.load(std::memory_order_acquire))
+            {
+               // A change happened
+               current_serving = _serving.load(std::memory_order_acquire);
+               if (current_serving == my_ticket)
+                  break;  // Lock acquired
+            }
          }
-         // Now we hold the lock
       }
 
       bool try_lock()
       {
-         // Must use compare_exchange to ensure atomic check and update
-         uint32_t expected = unlocked;
-         return _state.compare_exchange_strong(expected, locked, std::memory_order_acquire);
+         uint32_t current_serving = _serving.load(std::memory_order_acquire);
+         uint32_t next_ticket     = _ticket_counter.load(std::memory_order_relaxed);
+
+         if (current_serving == next_ticket)
+         {
+            bool success = _ticket_counter.compare_exchange_strong(next_ticket, next_ticket + 1,
+                                                                   std::memory_order_acquire);
+
+            return success;
+         }
+
+         return false;
       }
 
       void unlock()
       {
-         // Simply decrement the count by 1
-         uint32_t prev = _state.fetch_sub(1, std::memory_order_release);
+         uint32_t current_serving = _serving.fetch_add(1, std::memory_order_release);
+         uint32_t next_serving    = current_serving + 1;
 
-         // Wake up waiters if there were any
-         if (prev > 1)
-            _state.notify_all();
+         // Clear the bit for the next ticket
+         uint32_t next_slot = next_serving & TICKET_MASK;
+         // Use fetch_sub to atomically clear the bit
+         uint32_t old_mask =
+             _waiters_bitmask.fetch_sub(1ULL << next_slot, std::memory_order_release);
+
+         // Check if there are waiters in the bitmask
+         if (old_mask != 0)
+            _serving.notify_all();
       }
    };
 
