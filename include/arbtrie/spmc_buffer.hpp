@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>  // for std::min
+#include <arbtrie/debug.hpp>
 #include <arbtrie/padded_atomic.hpp>
 #include <array>
 #include <atomic>

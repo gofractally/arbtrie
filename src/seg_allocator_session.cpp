@@ -121,13 +121,13 @@ namespace arbtrie
          _alloc_seg_ptr->_session_id = _session_num;
          _alloc_seg_ptr->_seg_sequence =
              _sega._mapped_state->_session_data.next_session_segment_seq(_session_num);
-         _alloc_seg_ptr->_open_time_usec = std::chrono::duration_cast<std::chrono::microseconds>(
-                                               std::chrono::system_clock::now().time_since_epoch())
-                                               .count();
+         _alloc_seg_ptr->_open_time_usec  = arbtrie::get_current_time_ms();
          _alloc_seg_ptr->_close_time_usec = 0;  // Will be set when segment is closed
       }
       if (not vage)
-         vage = _alloc_seg_ptr->_age * 1024;
+      {
+         vage = arbtrie::get_current_time_ms();
+      }
 
       auto* sh           = _alloc_seg_ptr;
       auto  rounded_size = round_up_multiple<64>(size);
@@ -147,12 +147,10 @@ namespace arbtrie
          }
 
          // Set the segment close time before finalization
-         sh->_close_time_usec = std::chrono::duration_cast<std::chrono::microseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch())
-                                    .count();
+         sh->_close_time_usec = arbtrie::get_current_time_ms();
 
          _alloc_seg_meta->finalize_segment(segment_size - sh->_alloc_pos,
-                                           sh->_vage_accumulator.age);  // not alloc
+                                           sh->_vage_accumulator.average_age());  // not alloc
          sh->_alloc_pos.store(uint32_t(-1), std::memory_order_release);
          _sega.push_dirty_segment(_alloc_seg_num);
          _alloc_seg_ptr  = nullptr;

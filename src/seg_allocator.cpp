@@ -1,7 +1,5 @@
-#include <errno.h>   // For errno and ESRCH
-#include <signal.h>  // For kill()
+#include <errno.h>  // For errno and ESRCH
 #include <sys/mman.h>
-#include <unistd.h>  // For getpid()
 #include <arbtrie/binary_node.hpp>
 #include <arbtrie/file_fwd.hpp>
 #include <arbtrie/seg_alloc_dump.hpp>
@@ -76,7 +74,20 @@ namespace arbtrie
          if (mlock(segment_ptr, segment_size) != 0)
          {
             ARBTRIE_WARN("mlock failed for segment: ", seg, " error: ", strerror(errno));
-            _mapped_state->_segment_provider.mlock_segments.reset(seg);
+
+            // Clear both the bitmap and the meta bit using the helper
+            update_segment_pinned_state(seg, false);
+         }
+         else
+         {
+            // Ensure the meta bit is set correctly
+            auto& meta  = _mapped_state->_segment_data.meta[seg];
+            auto  state = meta.get_free_state();
+            if (!state.is_pinned)
+            {
+               // Update only the meta bit since the bitmap already has this segment
+               meta._state_data.store(state.set_pinned(true).to_int(), std::memory_order_relaxed);
+            }
          }
       }
    }
@@ -362,38 +373,41 @@ namespace arbtrie
     */
    bool seg_allocator::compact_pinned_segment(seg_alloc_session& ses)
    {
-      //ARBTRIE_DEBUG("compact_pinned_segment");
       auto           total_segs         = _block_alloc.num_blocks();
       segment_number min_qualifying_seg = -1;
       uint64_t       max_virtual_age    = 0;
       for (int i = 0; i < total_segs; ++i)
       {
-         auto sm = _mapped_state->_segment_data.meta[i].data();
-         if (not sm.is_pinned or sm.is_alloc or sm.free_space < segment_size / 8)
+         auto& sd = _mapped_state->_segment_data.meta[i];
+         auto  sm = sd.data();
+         if (not sm.is_pinned or sm.is_alloc)
+            continue;
+         if (sm.free_space < segment_size / 8)
             continue;
 
-         if (sm.rel_virtual_age > max_virtual_age)
+         if (sd.get_vage() > max_virtual_age)
          {
             min_qualifying_seg = i;
-            max_virtual_age    = _mapped_state->_segment_data.meta[i].vage;
+            max_virtual_age    = sd.get_vage();
          }
       }
       if (min_qualifying_seg == -1)
          return false;
 
+      ARBTRIE_ERROR("compact_pinned_segment");
       compact_segment(ses, min_qualifying_seg);
       return true;
    }
 
    bool seg_allocator::compact_unpinned_segment(seg_alloc_session& ses)
    {
-      //ARBTRIE_DEBUG("compact_unpinned_segment");
       auto           total_segs         = _block_alloc.num_blocks();
       segment_number min_qualifying_seg = -1;
       int64_t        max_virtual_age    = -1;
       for (int i = 0; i < total_segs; ++i)
       {
-         auto sm = _mapped_state->_segment_data.meta[i].data();
+         auto& sd = _mapped_state->_segment_data.meta[i];
+         auto  sm = sd.data();
          if (sm.is_pinned or sm.is_alloc or sm.free_space < segment_size / 2)
          {
             //      ARBTRIE_DEBUG("compact_unpinned_segment: skipping: ", i, " free space ",
@@ -403,22 +417,23 @@ namespace arbtrie
          //   ARBTRIE_WARN("compact_unpinned_segment: not skipping: ", i, " free space ",
          //                100.0 * sm.free_space / segment_size);
 
-         if (sm.rel_virtual_age >= max_virtual_age)
+         if (int64_t(sd.get_vage()) >= max_virtual_age)
          {
             min_qualifying_seg = i;
-            max_virtual_age    = _mapped_state->_segment_data.meta[i].vage;
+            max_virtual_age    = sd.get_vage();
          }
       }
       if (min_qualifying_seg == -1)
          return false;
 
+      ARBTRIE_WARN("compact_unpinned_segment");
       compact_segment(ses, min_qualifying_seg);
       return true;
    }
 
    void seg_allocator::compact_segment(seg_alloc_session& ses, uint64_t seg_num)
    {
-      ARBTRIE_WARN("compact_segment: ", seg_num);
+      //      ARBTRIE_WARN("compact_segment: ", seg_num);
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
       //  if( not s->_write_lock.try_lock() ) {
@@ -432,15 +447,15 @@ namespace arbtrie
       const object_header* foo = (const object_header*)(foc);
 
       auto& smeta    = _mapped_state->_segment_data.meta[seg_num];
-      auto  src_vage = smeta.vage;
+      auto  src_vage = smeta.get_vage();
 
       // Track destination segment info for logging
-      uint32_t       dest_initial_vage = 0;
+      uint64_t       dest_initial_vage = 0;
       segment_number current_dest_seg  = -1ull;
 
       if (ses._alloc_seg_ptr)
       {
-         dest_initial_vage = ses._alloc_seg_ptr->_vage_accumulator.age;
+         dest_initial_vage = ses._alloc_seg_ptr->_vage_accumulator.average_age();
          current_dest_seg  = ses._alloc_seg_num;
       }
 
@@ -567,7 +582,7 @@ namespace arbtrie
          else if (start_seg_ptr != ses._alloc_seg_ptr)
          {
             // Log summary when write segment fills up
-            uint32_t dest_final_vage = start_seg_ptr->_vage_accumulator.age;
+            uint64_t dest_final_vage = start_seg_ptr->_vage_accumulator.average_age();
             int32_t  vage_delta      = dest_final_vage - src_vage;
             ARBTRIE_INFO("Compaction segment filled: src=", seg_num, " src_vage=", src_vage,
                          " dest=", start_seg_num, " dest_initial_vage=", dest_initial_vage,
@@ -578,7 +593,7 @@ namespace arbtrie
             start_seg_num = ses._alloc_seg_num;
 
             // Update tracking for new destination segment
-            dest_initial_vage = start_seg_ptr->_vage_accumulator.age;
+            dest_initial_vage = start_seg_ptr->_vage_accumulator.average_age();
             current_dest_seg  = start_seg_num;
          }
          foo = foo->next();
@@ -648,7 +663,7 @@ namespace arbtrie
       if (start_seg_ptr)
       {
          // Log summary when segment finishes compacting
-         uint32_t dest_final_vage = start_seg_ptr->_vage_accumulator.age;
+         uint64_t dest_final_vage = start_seg_ptr->_vage_accumulator.average_age();
          int32_t  vage_delta      = dest_final_vage - src_vage;
          ARBTRIE_INFO("Compaction complete: src=", seg_num, " src_vage=", src_vage,
                       " dest=", start_seg_num, " dest_initial_vage=", dest_initial_vage,
@@ -684,13 +699,15 @@ namespace arbtrie
       // the segment we just cleared, so its free space and objects get reset to 0
       // and its last_sync pos gets put to the end because there is no need to sync it
       // because its data has already been synced by the compactor
-      _mapped_state->_segment_data.meta[seg_num].clear();
+
+      // Reset appropriate state fields while preserving pinned state and other flags
+      _mapped_state->_segment_data.meta[seg_num].finalize_compaction();
 
       // only one thread can move the end_ptr or this will break
       // std::cerr<<"done freeing end_ptr: " << _mapped_state->end_ptr.load() <<" <== " << seg_num <<"\n";
 
       assert(seg_num != segment_number(-1));
-      ARBTRIE_DEBUG("pushing recycled segment: ", seg_num);
+      //   ARBTRIE_DEBUG("pushing recycled segment: ", seg_num);
       _mapped_state->_read_lock_queue.push_recycled_segment(seg_num);
    }
 
@@ -757,6 +774,9 @@ namespace arbtrie
       auto total_segs       = _block_alloc.num_blocks();
       result.total_segments = total_segs;
 
+      // Get count of segments in the mlock_segments bitmap
+      result.mlocked_segments_count = _mapped_state->_segment_provider.mlock_segments.count();
+
       // Gather segment information
       for (uint32_t i = 0; i < total_segs; ++i)
       {
@@ -772,9 +792,11 @@ namespace arbtrie
          seg_info.alloc_pos     = (seg->_alloc_pos == -1 ? -1 : seg->get_alloc_pos());
          seg_info.is_alloc      = space_objs.is_alloc;
          seg_info.is_pinned     = space_objs.is_pinned;
+         seg_info.bitmap_pinned = _mapped_state->_segment_provider.mlock_segments.test(i);
          seg_info.age           = seg->_age;
          seg_info.read_nodes    = read_nodes;
          seg_info.read_bytes    = read_bytes;
+         seg_info.vage          = meta.vage;
 
          result.segments.push_back(seg_info);
          result.total_free_space += space_objs.free_space;
@@ -886,6 +908,17 @@ namespace arbtrie
       }
    }
 
+   std::optional<segment_number> seg_allocator::find_first_free_and_pinned_segment()
+   {
+      auto& provider_state = _mapped_state->_segment_provider;
+      for (auto seg : provider_state.free_segments)
+      {
+         if (provider_state.mlock_segments.test(seg))
+            return seg;
+      }
+      return std::nullopt;
+   }
+
    void seg_allocator::provider_loop(segment_thread& thread)
    {
       // Thread name should already be set by segment_thread
@@ -918,12 +951,20 @@ namespace arbtrie
 
          // If we can't push, sleep briefly and continue to next iteration
          if (!provider_state.ready_segments.can_push())
-         {
             continue;
-         }
 
+         // prioritize segments that are free and pinned
+         std::optional<segment_number> free_pinned_seg = find_first_free_and_pinned_segment();
+
+         segment_number seg_num;
          // Get a segment ready
-         segment_number seg_num = provider_state.free_segments.unset_first_set();
+         if (not free_pinned_seg)
+            seg_num = provider_state.free_segments.unset_first_set();
+         else
+         {
+            seg_num = *free_pinned_seg;
+            provider_state.free_segments.reset(seg_num);
+         }
 
          // Handle segment source appropriately
          if (seg_num == provider_state.free_segments.invalid_index)
@@ -940,7 +981,11 @@ namespace arbtrie
          provider_prepare_segment(seg_num);
 
          // Push the segment to the ready queue (this will always succeed)
-         int64_t result = provider_state.ready_segments.push(seg_num);
+         int64_t result;
+         if (free_pinned_seg)
+            result = provider_state.ready_segments.push_front(seg_num);
+         else
+            result = provider_state.ready_segments.push(seg_num);
 
          ARBTRIE_DEBUG("segment_provider: Pushed segment ", seg_num,
                        " to ready_segments, result: ", result,
@@ -987,7 +1032,11 @@ namespace arbtrie
       // utilized by compactor to propagate the relative age of data in a segment
       // for the purposes of munlock the oldest data first and avoiding promoting data
       // just because we compacted a segment to save space.
-      shp->_vage_accumulator.reset();
+      uint64_t now_ms = arbtrie::get_current_time_ms();
+      shp->_vage_accumulator.reset(now_ms);
+
+      // Update the virtual age in segment metadata to match the segment header's initial value
+      _mapped_state->_segment_data.meta[seg_num].set_vage(now_ms);
 
       disable_segment_write_protection(seg_num);
    }
@@ -1005,13 +1054,19 @@ namespace arbtrie
       if (mlocked_count <= max_count)
          return;
 
+      // most recent are higher numbers, so we want the lowest number
+      // as it will be the oldest segment
       uint64_t       oldest_age = -1;
       segment_number oldest_seg = -1;
       for (auto seg : provider_state.mlock_segments)
       {
-         auto vage = _mapped_state->_segment_data.meta[seg].vage;
+         uint64_t vage = _mapped_state->_segment_data.meta[seg].get_vage();
+         auto     now  = arbtrie::get_current_time_ms();
+
+         ARBTRIE_INFO("segment: ", seg, " vage: ", vage, " now: ", now, "  age ms: ", now - vage);
          if (vage < oldest_age)
          {
+            ARBTRIE_WARN("segment: ", seg, " is the oldest yet ", oldest_age, " vage: ", vage);
             oldest_age = vage;
             oldest_seg = seg;
          }
@@ -1029,7 +1084,13 @@ namespace arbtrie
       }
       else
       {
-         provider_state.mlock_segments.reset(oldest_seg);
+         // Clear both the bitmap and the meta bit using the helper
+         update_segment_pinned_state(oldest_seg, false);
+         ARBTRIE_WARN(
+             "munlocked segment: ", oldest_seg, " count: ", provider_state.mlock_segments.count(),
+             " vage abs: ", _mapped_state->_segment_data.meta[oldest_seg].get_vage(), " age ms: ",
+             arbtrie::get_current_time_ms() -
+                 _mapped_state->_segment_data.meta[oldest_seg].get_vage());
       }
 
       // now that is it is no longer pinned, we are unlikely to
@@ -1056,10 +1117,18 @@ namespace arbtrie
       {
          processed_count++;
 
+         ARBTRIE_INFO("mlock segment: ", *seg_ack,
+                      " current mlock state: ", provider_state.mlock_segments.test(*seg_ack));
+         if (provider_state.mlock_segments.test(*seg_ack))
+         {
+            ARBTRIE_ERROR("segment already mlocked, why did we ack it?");
+            continue;
+         }
          void* seg_ptr = get_segment(*seg_ack);
          if (mlock(seg_ptr, segment_size) == 0)
          {
-            provider_state.mlock_segments.set(*seg_ack);
+            // Set both the bitmap and the meta bit using the helper
+            update_segment_pinned_state(*seg_ack, true);
 
             // munlock the oldest mlocked segment(s) if needed
             provider_munlock_excess_segments();
@@ -1068,9 +1137,13 @@ namespace arbtrie
          {
             ARBTRIE_WARN("mlock error(", errno, ") ", strerror(errno));
             if (madvise(seg_ptr, segment_size, MADV_RANDOM) != 0)
-               ARBTRIE_WARN("madvise error(", errno, ") ", strerror(errno));
+            {
+               ARBTRIE_WARN("madvice error(", errno, ") ", strerror(errno));
+            }
          }
       }
+      // if (processed_count > 0)
+      //    ARBTRIE_WARN("processed ", processed_count, " acknowledged segments");
    }
 
    bool seg_allocator::stop_background_threads()
@@ -1129,5 +1202,26 @@ namespace arbtrie
       }
 
       return any_started;
+   }
+
+   /**
+    * Helper function to update the pinned state of a segment, ensuring both
+    * the bitmap and the metadata are synchronized.
+    *
+    * @param seg_num The segment number to update
+    * @param is_pinned Whether to set (true) or clear (false) the pinned state
+    */
+   void seg_allocator::update_segment_pinned_state(segment_number seg_num, bool is_pinned)
+   {
+      auto& provider_state = _mapped_state->_segment_provider;
+
+      // Update the bitmap
+      if (is_pinned)
+         provider_state.mlock_segments.set(seg_num);
+      else
+         provider_state.mlock_segments.reset(seg_num);
+
+      // Update the segment metadata
+      _mapped_state->_segment_data.meta[seg_num].set_pinned(is_pinned);
    }
 }  // namespace arbtrie

@@ -764,7 +764,7 @@ int  main(int argc, char** argv)
          }
 
          std::cout << "insert dense rand while reading " << rthreads.size() << " threads\n";
-         for (int ro = 0; ro < 20; ++ro)
+         for (int ro = 0; ro < 10; ++ro)
          {
             auto start = std::chrono::steady_clock::now();
             for (int i = 0; i < count; ++i)

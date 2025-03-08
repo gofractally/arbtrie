@@ -1,8 +1,17 @@
 #pragma once
 #include <algorithm>
+#include <chrono>
 #include <format>
+
 namespace arbtrie
 {
+   inline uint64_t get_current_time_ms()
+   {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+   }
+
    template <class Src, class Dst>
    using transcribe_const_t = std::conditional_t<std::is_const<Src>{}, const Dst, Dst>;
    template <class Src, class Dst>

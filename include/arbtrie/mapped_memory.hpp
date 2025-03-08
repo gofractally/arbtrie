@@ -113,7 +113,7 @@ namespace arbtrie
          struct state_data
          {
             uint64_t free_space : 26;       // able to store segment_size
-            uint64_t rel_virtual_age : 20;  // store the relative virtual age
+            uint64_t unused : 20;           // store the relative virtual age
             uint64_t last_sync_page : 14;   //  segment_size / 4096 byte pages
             uint64_t is_alloc : 1     = 0;  // the segment is a session's private alloc area
             uint64_t is_pinned : 1    = 0;  // indicates that the segment is mlocked
@@ -132,6 +132,13 @@ namespace arbtrie
             state_data& set_alloc(bool s);
             state_data& set_pinned(bool s);
             state_data& set_read_only(bool s);
+
+            // Set free_space to a specific value
+            state_data& set_free_space(uint32_t size)
+            {
+               free_space = size;
+               return *this;
+            }
          };
          static_assert(sizeof(state_data) == sizeof(uint64_t));
          static_assert(std::is_trivially_copyable_v<state_data>);
@@ -140,21 +147,46 @@ namespace arbtrie
          state_data data() const { return get_free_state(); }
          void       free_object(uint32_t size);
          void       free(uint32_t size);
-         void       finalize_segment(uint32_t size, uint32_t vage_value);
+         void       finalize_segment(uint32_t size, uint64_t vage_value);
          void       clear() { _state_data.store(0, std::memory_order_relaxed); }
          bool       is_alloc() { return get_free_state().is_alloc; }
-         void       set_alloc_state(bool a);
-         uint64_t   get_last_sync_pos() const;
-         void       start_alloc_segment();
-         void       set_last_sync_pos(uint64_t pos);
+         bool       is_pinned() { return get_free_state().is_pinned; }
+         void       set_pinned(bool s)
+         {
+            auto expected = _state_data.load(std::memory_order_relaxed);
+            auto updated  = state_data(expected).set_pinned(s).to_int();
+            while (
+                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+               updated = state_data(expected).set_pinned(s).to_int();
+         }
+         void finalize_compaction()
+         {
+            auto expected = _state_data.load(std::memory_order_relaxed);
 
+            // Safety check: is_alloc should be false when finalizing compaction
+            assert(not state_data(expected).is_alloc);
+
+            // Create updated state with reset free_space and rel_virtual_age
+            // but preserve other flags like is_pinned, is_read_only, and last_sync_page
+            auto updated = state_data(expected).set_free_space(0).to_int();
+
+            while (!_state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+               updated = state_data(expected).set_free_space(0).to_int();
+            vage.store(0, std::memory_order_relaxed);
+         }
+         void     set_alloc_state(bool a);
+         uint64_t get_last_sync_pos() const;
+         void     start_alloc_segment();
+         void     set_last_sync_pos(uint64_t pos);
+         uint64_t get_vage() const { return vage.load(std::memory_order_relaxed); }
+         void     set_vage(uint64_t vage) { this->vage.store(vage, std::memory_order_relaxed); }
          /// the total number of bytes freed by swap
          /// or by being moved to other segments.
          std::atomic<uint64_t> _state_data;
 
          /// virtual age of the segment, initialized as 1024x the segment_header::_age
          /// and updated with weighted average as data is allocated
-         uint32_t vage = 0;
+         std::atomic<uint64_t> vage;
       };
 
       /**
@@ -189,7 +221,7 @@ namespace arbtrie
          // used to calculate object density of segment header,
          // to establish madvise
          uint32_t _checksum = 0;
-         uint64_t unused[2];
+         uint64_t unused[1];
 
          // Tracks accumulated virtual age during allocation
          size_weighted_age _vage_accumulator;
@@ -599,7 +631,7 @@ namespace arbtrie
             updated = state_data(expected).free(size).to_int();
       }
 
-      inline void segment_meta::finalize_segment(uint32_t size, uint32_t vage_value)
+      inline void segment_meta::finalize_segment(uint32_t size, uint64_t vage_value)
       {
          auto expected = _state_data.load(std::memory_order_relaxed);
 

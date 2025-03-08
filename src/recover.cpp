@@ -130,7 +130,22 @@ namespace arbtrie
                 [&](int a, int b) { return get_segment(a)->_age > get_segment(b)->_age; });
 
       _mapped_state->_segment_provider.free_segments.reset();
+
+      // Reset mlock_segments bitmap
       _mapped_state->_segment_provider.mlock_segments.reset();
+
+      // Clear all segment meta is_pinned bits to ensure consistency with the bitmap
+      for (size_t i = 0; i < _block_alloc.num_blocks(); ++i)
+      {
+         auto& meta  = _mapped_state->_segment_data.meta[i];
+         auto  state = meta.get_free_state();
+         if (state.is_pinned)
+         {
+            // During recovery we only need to update the metadata since bitmap is already reset
+            meta._state_data.store(state.set_pinned(false).to_int(), std::memory_order_relaxed);
+         }
+      }
+
       _mapped_state->_segment_provider.ready_segments.reset();
 
       int next_free_seg = 0;

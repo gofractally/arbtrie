@@ -156,11 +156,12 @@ namespace arbtrie
        * @group segment_provider_thread Segment Provider Thread Methods
        */
       ///@{
-      void           provider_munlock_excess_segments();
-      void           provider_process_acknowledged_segments();
-      void           provider_prepare_segment(segment_number seg_num);
-      void           provider_process_recycled_segments();
-      segment_number provider_allocate_new_segment();
+      void                          provider_munlock_excess_segments();
+      void                          provider_process_acknowledged_segments();
+      void                          provider_prepare_segment(segment_number seg_num);
+      void                          provider_process_recycled_segments();
+      std::optional<segment_number> find_first_free_and_pinned_segment();
+      segment_number                provider_allocate_new_segment();
 
       /**
        * Main loop for the segment provider thread
@@ -321,6 +322,9 @@ namespace arbtrie
          auto segnum = _mapped_state->_segment_provider.ready_segments.pop_wait();
          return {segnum, get_segment(segnum)};
       }
+
+      // Helper to synchronize segment pinned state between bitmap and metadata
+      void update_segment_pinned_state(segment_number seg_num, bool is_pinned);
    };  // seg_allocator
 
 }  // namespace arbtrie

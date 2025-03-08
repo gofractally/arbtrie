@@ -282,7 +282,7 @@ namespace arbtrie
    }
    void database::print_stats(std::ostream& os, bool detail)
    {
-      _sega.dump();
+      os << _sega.dump();
    }
 
    std::shared_ptr<write_session> database::start_write_session()
