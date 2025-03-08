@@ -5,6 +5,7 @@ add_executable(arbtrie-tests
 #spmc_circular_buffer.cpp
     padded_atomic_tests.cpp
     node_meta_tests.cpp
+    interprocess_mutex_tests.cpp
 )
 
 target_link_libraries(arbtrie-tests 

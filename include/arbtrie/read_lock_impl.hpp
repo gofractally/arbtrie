@@ -10,8 +10,10 @@ namespace arbtrie
       auto adr = oref.address();
       assert(oref.meta().is_changing());
 
-      auto l       = oref.loc();
-      auto seg     = l.segment();
+      auto l   = oref.loc();
+      auto seg = l.segment();
+
+      /// TODO: why are we directly getting it this way instesad of oref.get_node_pointer()?
       auto obj_ptr = (node_header*)((char*)_session._sega._block_alloc.get(seg) + l.abs_index());
 
       _session.free_object(seg, obj_ptr->object_capacity());

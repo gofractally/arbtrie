@@ -171,9 +171,10 @@ namespace arbtrie
           reg, r, src, cfg, [](auto) {}, std::forward<CArgs>(cargs)...);
    }
 
-   uint8_t node_header::calculate_checksum() const
+   uint8_t object_header::calculate_checksum() const
    {
-      return cast_and_call(this, [&](const auto* t) { return t->calculate_checksum(); });
+      return cast_and_call((const node_header*)this,
+                           [&](const auto* t) { return t->calculate_checksum(); });
    }
 
    node_handle write_session::get_mutable_root(int index)

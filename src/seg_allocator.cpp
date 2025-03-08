@@ -429,7 +429,7 @@ namespace arbtrie
       const auto* send  = (const node_header*)((char*)s + segment_size);
       const char* foc =
           (const char*)s + round_up_multiple<64>(sizeof(mapped_memory::segment_header));
-      const node_header* foo = (const node_header*)(foc);
+      const object_header* foo = (const object_header*)(foc);
 
       auto& smeta    = _mapped_state->_segment_data.meta[seg_num];
       auto  src_vage = smeta.vage;
@@ -466,9 +466,9 @@ namespace arbtrie
       auto start_seg_ptr = ses._alloc_seg_ptr;
       auto start_seg_num = ses._alloc_seg_num;
 
-      std::vector<std::pair<const node_header*, temp_meta_type>> skipped;
-      std::vector<const node_header*>                            skipped_ref;
-      std::vector<const node_header*>                            skipped_try_start;
+      std::vector<std::pair<const object_header*, temp_meta_type>> skipped;
+      std::vector<const object_header*>                            skipped_ref;
+      std::vector<const object_header*>                            skipped_try_start;
 
       while (foo < send and foo->address())
       {
@@ -832,7 +832,7 @@ namespace arbtrie
 
       const char* foc =
           (const char*)seg + round_up_multiple<64>(sizeof(mapped_memory::segment_header));
-      node_header* foo = (node_header*)(foc);
+      const node_header* foo = (const node_header*)(foc);
 
       while (foo < send && foo->address())
       {
@@ -983,7 +983,6 @@ namespace arbtrie
       auto sp   = _block_alloc.get(seg_num);
       auto shp  = new (sp) mapped_memory::segment_header();
       shp->_age = _mapped_state->next_alloc_age.fetch_add(1, std::memory_order_relaxed);
-      ARBTRIE_WARN("provider_prepare_segment: ", seg_num, " age: ", shp->_age);
 
       // utilized by compactor to propagate the relative age of data in a segment
       // for the purposes of munlock the oldest data first and avoiding promoting data

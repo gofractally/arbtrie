@@ -25,6 +25,78 @@ namespace arbtrie
    }
 
    /**
+    * Base class for all objects that can be addressed and stored in the database.
+    * Contains the core identity and type information, but doesn't include branch
+    * region or number of branches which are specific to node types.
+    */
+   struct object_header
+   {
+      static constexpr uint32_t checksum_size = 1;  // Size in bytes of the checksum field
+      uint32_t                  checksum : 8;       // Leading byte for checksum
+      uint32_t   sequence : 24;  // 24-bit sequence number, set only during construction
+      id_address _node_id;       // the ID of this object
+
+      uint32_t _ntype : 3;    // node_type
+      uint32_t _nsize : 25;   // bytes allocated for this object
+      uint32_t _unused2 : 4;  // truly unused bits, should never be written to
+
+      // Constructor
+      inline object_header(uint32_t size, id_address_seq nid, node_type type = node_type::freelist)
+          : checksum(0), sequence(nid.sequence), _node_id(nid.address), _ntype(type), _nsize(size)
+      {
+         assert(_node_id == nid.address);
+      }
+
+      void set_address(id_address a) { _node_id = a; }
+      void set_type(node_type t) { _ntype = (int)t; }
+      void set_id(id_address i) { _node_id = i; }
+
+      uint32_t   size() const { return _nsize; }
+      id_address address() const { return _node_id; }
+      node_type  get_type() const { return (node_type)_ntype; }
+
+      // size rounded up to the nearest 16 bytes
+      inline uint32_t object_capacity() const { return (_nsize + 15) & -16; }
+
+      uint32_t       get_sequence() const { return sequence; }
+      id_address_seq address_seq() const { return id_address_seq(_node_id, sequence); }
+
+      template <typename T>
+      T* as()
+      {
+         assert(T::type == (node_type)_ntype);
+         return static_cast<T*>(this);
+      }
+
+      template <typename T>
+      const T* as() const
+      {
+         assert(T::type == (node_type)_ntype);
+         return static_cast<const T*>(this);
+      }
+
+      char*          body() { return (char*)(this + 1); }
+      const char*    body() const { return (const char*)(this + 1); }
+      char*          tail() { return ((char*)this) + _nsize; }
+      const uint8_t* tail() const { return ((const uint8_t*)this) + _nsize; }
+
+      // Checksum calculation and validation methods
+      // These are defined in node_header but accessible from object_header
+      uint8_t calculate_checksum() const;
+      void    update_checksum() { checksum = calculate_checksum(); }
+      bool    has_checksum() const { return checksum != 0; }
+      bool    validate_checksum() const
+      {
+         if (checksum)
+            return (checksum == calculate_checksum());
+         return true;
+      }
+
+      // Return next object in memory
+      inline node_header* next() const { return (node_header*)(((char*)this) + object_capacity()); }
+   } __attribute((packed));
+
+   /**
     *  keysize limit of 1024 requires 10 bits, longer keys would 
     *  require either:
     *    1. less inlining values into binary_node
@@ -36,17 +108,8 @@ namespace arbtrie
     *  RocksDB keysize limit = 8MB
     *  LMDB keysize limit    = 512b
     */
-   struct node_header
+   struct node_header : public object_header
    {
-      static constexpr uint32_t checksum_size = 1;  // Size in bytes of the checksum field
-      uint32_t                  checksum : 8;       // Leading byte for checksum
-      uint32_t   sequence : 24;  // 24-bit sequence number, set only during construction
-      id_address _node_id;       // the ID of this node
-
-      uint32_t _ntype : 3;    // node_type
-      uint32_t _nsize : 25;   // bytes allocated for this node
-      uint32_t _unused2 : 4;  // truly unused bits, should never be written to
-
       id_region _branch_id_region;  // the ID region branches from this node are allocated to
 
       uint16_t _num_branches : 9;  // number of branches that are set
@@ -56,65 +119,15 @@ namespace arbtrie
                          id_address_seq nid,
                          node_type      type       = node_type::freelist,
                          uint16_t       num_branch = 0)
-          : checksum(0),
-            sequence(nid.sequence),
-            _node_id(nid.address),
-            _ntype(type),
-            _nsize(size),
-            _num_branches(num_branch),
-            _branch_id_region(0)
+          : object_header(size, nid, type), _num_branches(num_branch), _branch_id_region(0)
       {
-         assert(_node_id == nid.address);
          assert(intptr_t(this) % 64 == 0);
       }
 
-      void      set_address(id_address a) { _node_id = a; }
       id_region branch_region() const { return id_region(_branch_id_region); }
+      void      set_branch_region(id_region r) { _branch_id_region = r.to_int(); }
 
-      template <typename T>
-      T* as()
-      {
-         assert(T::type == (node_type)_ntype);
-         return static_cast<T*>(this);
-      }
-      template <typename T>
-      const T* as() const
-      {
-         assert(T::type == (node_type)_ntype);
-         return static_cast<const T*>(this);
-      }
-
-      void set_type(node_type t) { _ntype = (int)t; }
-      void set_id(id_address i) { _node_id = i; }
-      void set_branch_region(id_region r) { _branch_id_region = r.to_int(); }
-
-      uint32_t       size() const { return _nsize; }
-      id_address     address() const { return _node_id; }
-      node_type      get_type() const { return (node_type)_ntype; }
-      uint16_t       num_branches() const { return _num_branches; }
-      char*          body() { return (char*)(this + 1); }
-      const char*    body() const { return (const char*)(this + 1); }
-      char*          tail() { return ((char*)this) + _nsize; }
-      const uint8_t* tail() const { return ((const uint8_t*)this) + _nsize; }
-
-      // size rounded up to the nearest 16 bytes
-      inline uint32_t     object_capacity() const { return (_nsize + 15) & -16; }
-      inline node_header* next() const { return (node_header*)(((char*)this) + object_capacity()); }
-
-      uint8_t calculate_checksum() const;
-
-      void update_checksum() { checksum = calculate_checksum(); }
-      bool has_checksum() const { return checksum != 0; }
-      bool validate_checksum() const
-      {
-         if (checksum)
-            return (checksum == calculate_checksum());
-         return true;
-      }
-
-      uint32_t get_sequence() const { return sequence; }
-
-      id_address_seq address_seq() const { return id_address_seq(_node_id, sequence); }
+      uint16_t num_branches() const { return _num_branches; }
    } __attribute((packed));
    static_assert(sizeof(node_header) == 16);
 
