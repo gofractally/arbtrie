@@ -351,8 +351,11 @@ namespace arbtrie
                }
 
                if (node_meta_type::success == obj_ref.try_move(loc, new_loc))
+               {
                   _mapped_state->total_promoted_bytes.fetch_add(header->size(),
                                                                 std::memory_order_relaxed);
+                  _mapped_state->_segment_data.meta[loc.segment()].free_object(header->size());
+               }
             }
             obj_ref.meta().end_pending_cache();
          }
@@ -394,7 +397,7 @@ namespace arbtrie
       if (min_qualifying_seg == -1)
          return false;
 
-      ARBTRIE_ERROR("compact_pinned_segment");
+      // ARBTRIE_ERROR("compact_pinned_segment");
       compact_segment(ses, min_qualifying_seg);
       return true;
    }
@@ -471,9 +474,14 @@ namespace arbtrie
             ARBTRIE_DEBUG("calloc: ", alloc_pos,
                           " cfree: ", _mapped_state->_segment_data.meta[seg_num].data().free_space);
          }
+         if (s->_alloc_pos != segment_offset(-1))
+         {
+            ARBTRIE_WARN("compact_segment: segment ", seg_num,
+                         " has alloc_pos: ", s->_alloc_pos.load());
+         }
+         assert(s->_alloc_pos == segment_offset(-1));
       }
 
-      assert(s->_alloc_pos == segment_offset(-1));
       //   std::cerr << "seg " << seg_num <<" alloc pos: " << s->_alloc_pos <<"\n";
 
       auto seg_state = seg_num * segment_size;
@@ -559,7 +567,8 @@ namespace arbtrie
                if (not head->validate_checksum())
                {
                   ARBTRIE_WARN("invalid checksum detected: ", foo_address,
-                               " checksum: ", foo->checksum, " != ", foo->calculate_checksum(),
+                               " checksum: ", to_hex(foo->checksum),
+                               " != ", to_hex(foo->calculate_checksum()),
                                " type: ", node_type_names[head->_ntype]);
                }
             }
@@ -780,28 +789,32 @@ namespace arbtrie
       // Gather segment information
       for (uint32_t i = 0; i < total_segs; ++i)
       {
-         auto  seg                     = get_segment(i);
-         auto& meta                    = _mapped_state->_segment_data.meta[i];
-         auto  space_objs              = meta.data();
-         auto [read_nodes, read_bytes] = calculate_segment_read_stats(i);
+         auto  seg        = get_segment(i);
+         auto& meta       = _mapped_state->_segment_data.meta[i];
+         auto  space_objs = meta.data();
+
+         // Get stats directly as a stats_result struct
+         auto stats = calculate_segment_read_stats(i);
 
          seg_alloc_dump::segment_info seg_info;
          seg_info.segment_num   = i;
          seg_info.freed_percent = int(100 * double(space_objs.free_space) / segment_size);
          seg_info.freed_bytes   = space_objs.free_space;
+         seg_info.freed_objects = 0;
          seg_info.alloc_pos     = (seg->_alloc_pos == -1 ? -1 : seg->get_alloc_pos());
          seg_info.is_alloc      = space_objs.is_alloc;
          seg_info.is_pinned     = space_objs.is_pinned;
          seg_info.bitmap_pinned = _mapped_state->_segment_provider.mlock_segments.test(i);
          seg_info.age           = seg->_age;
-         seg_info.read_nodes    = read_nodes;
-         seg_info.read_bytes    = read_bytes;
+         seg_info.read_nodes    = stats.nodes_with_read_bit;
+         seg_info.read_bytes    = stats.total_bytes;
          seg_info.vage          = meta.vage;
+         seg_info.total_objects = stats.total_objects;
 
          result.segments.push_back(seg_info);
          result.total_free_space += space_objs.free_space;
-         result.total_read_nodes += read_nodes;
-         result.total_read_bytes += read_bytes;
+         result.total_read_nodes += stats.nodes_with_read_bit;
+         result.total_read_bytes += stats.total_bytes;
       }
 
       // Gather session information
@@ -841,10 +854,11 @@ namespace arbtrie
       return result;
    }
 
-   std::pair<uint32_t, uint64_t> seg_allocator::calculate_segment_read_stats(segment_number seg_num)
+   seg_allocator::stats_result seg_allocator::calculate_segment_read_stats(segment_number seg_num)
    {
       uint32_t nodes_with_read_bit = 0;
       uint64_t total_bytes         = 0;
+      uint32_t total_objects       = 0;  // Added counter for all objects
 
       auto seg  = get_segment(seg_num);
       auto send = (const node_header*)((char*)seg + segment_size);
@@ -861,25 +875,29 @@ namespace arbtrie
          // Get the object reference for this node
          auto  foo_address = foo->address();
          auto& obj_ref     = _id_alloc.get(foo_address);
+         auto  current_loc = obj_ref.loc();
+         auto  foo_idx     = (char*)foo - (char*)seg;
+
+         // Only count if the object reference is pointing to this exact node
+         if (current_loc.to_abs() != seg_num * segment_size + foo_idx)
+         {
+            foo = foo->next();
+            continue;
+         }
+         // Count all objects
+         total_objects++;
 
          // Check if the read bit is set and if the location matches
          if (obj_ref.is_read())
          {
-            auto foo_idx     = (char*)foo - (char*)seg;
-            auto current_loc = obj_ref.loc();
-
-            // Only count if the object reference is pointing to this exact node
-            if (current_loc.to_abs() == seg_num * segment_size + foo_idx)
-            {
-               nodes_with_read_bit++;
-               total_bytes += foo->size();
-            }
+            nodes_with_read_bit++;
+            total_bytes += foo->size();
          }
 
          foo = foo->next();
       }
 
-      return {nodes_with_read_bit, total_bytes};
+      return {nodes_with_read_bit, total_bytes, total_objects};
    }
 
    //-----------------------------------------------------------------------------
@@ -1061,21 +1079,15 @@ namespace arbtrie
       for (auto seg : provider_state.mlock_segments)
       {
          uint64_t vage = _mapped_state->_segment_data.meta[seg].get_vage();
-         auto     now  = arbtrie::get_current_time_ms();
-
-         ARBTRIE_INFO("segment: ", seg, " vage: ", vage, " now: ", now, "  age ms: ", now - vage);
          if (vage < oldest_age)
          {
-            ARBTRIE_WARN("segment: ", seg, " is the oldest yet ", oldest_age, " vage: ", vage);
             oldest_age = vage;
             oldest_seg = seg;
          }
       }
 
       if (oldest_age == -1)
-      {
          return;
-      }
 
       void* seg_ptr = get_segment(oldest_seg);
       if (munlock(seg_ptr, segment_size) != 0) [[unlikely]]
@@ -1121,7 +1133,6 @@ namespace arbtrie
                       " current mlock state: ", provider_state.mlock_segments.test(*seg_ack));
          if (provider_state.mlock_segments.test(*seg_ack))
          {
-            ARBTRIE_ERROR("segment already mlocked, why did we ack it?");
             continue;
          }
          void* seg_ptr = get_segment(*seg_ack);

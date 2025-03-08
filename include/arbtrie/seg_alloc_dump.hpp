@@ -25,9 +25,10 @@ namespace arbtrie
          bool     is_pinned     = false;  // From segment metadata
          bool     bitmap_pinned = false;  // From mlock_segments bitmap
          int64_t  age           = 0;
-         uint32_t read_nodes    = 0;
-         uint64_t read_bytes    = 0;
+         uint32_t read_nodes    = 0;  // Count of valid objects in segment
+         uint64_t read_bytes    = 0;  // Total size of valid objects
          uint64_t vage          = 0;  // Virtual age of the segment
+         uint32_t total_objects = 0;  // Total count of all objects in segment
       };
 
       struct session_info
@@ -47,8 +48,8 @@ namespace arbtrie
       uint64_t total_segments         = 0;
       uint64_t total_retained         = 0;
       uint64_t total_free_space       = 0;
-      uint64_t total_read_bytes       = 0;
-      uint32_t total_read_nodes       = 0;
+      uint64_t total_read_bytes       = 0;  // Total bytes of valid objects across all segments
+      uint32_t total_read_nodes       = 0;  // Total count of valid objects across all segments
       uint32_t mlocked_segments_count = 0;  // Count of segments in the mlock_segments bitmap
 
       // Segment queue state
@@ -209,6 +210,20 @@ namespace arbtrie
          return result;
       }
 
+      /**
+       * REMOVED: object statistics collection methods
+       * This functionality should be implemented in seg_allocator::dump()
+       * using the compactor's session object to get the read lock.
+       * 
+       * The implementation should:
+       * 1. Use compactor session's read_lock to access segments
+       * 2. For each segment, iterate through all objects as in compact_segment
+       * 3. For each object, get obj_ref using read_lock::get(obj->id())
+       * 4. Check if object is valid and read (obj_ref.valid() && obj_ref.is_read())
+       * 5. If valid, increment read_nodes and read_bytes for that segment
+       * 6. Accumulate the total counts across all segments
+       */
+
       // Print to any ostream (defaults to cout if called without arguments)
       void print(std::ostream& os = std::cout) const
       {
@@ -226,13 +241,13 @@ namespace arbtrie
             << std::setw(2)  << "P" << " "      // Pin column with space
             << std::setw(10) << "% Alloc" << " " // Percentage allocation column
             << std::setw(8)  << "Age" << " "
-            << std::setw(10) << "VAge" << " "
-            << std::setw(10) << "Seconds" << " " // New column for seconds since vage
-            << std::setw(12) << "Read Nodes" << " "
-            << std::setw(12) << "Read Bytes" << " "
-            << std::setw(10) << "% Free" << " "    // Free percentage column
-            << std::setw(12) << "Alloc Pos" << " " // Raw alloc_pos value
-            << std::setw(10) << "% Used" << "\n";  // New calculated used percentage column
+            << std::setw(10) << "Seconds" << " " // Time since vage column
+            << std::setw(12) << "Read Nodes" << " " // Valid objects count
+            << std::setw(8) << "Total Obj" << " " // Total objects count
+            << std::setw(12) << "Read Bytes" << " " // Valid objects total size
+            << std::setw(10) << "% Free" << " "     // Free percentage column
+            << std::setw(12) << "Alloc Pos" << " "  // Raw alloc_pos value
+            << std::setw(10) << "% Used" << "\n";   // New calculated used percentage column
          // clang-format on
 
          // Count segments pinned according to different sources
@@ -417,13 +432,18 @@ namespace arbtrie
             os << status_text_color << std::setw(10) << status_text << COLOR_RESET << " ";
 
             // Print the rest of the row
-            os << std::setw(8) << seg.age << " " << std::setw(10) << seg.vage << " "
-               << std::setw(10) << time_diff_str.str() << " "  // New time difference column
-               << std::setw(12) << seg.read_nodes << " " << std::setw(12) << seg.read_bytes << " "
-               << std::setw(10) << seg.freed_percent << "%"
+            os << std::setw(8) << (seg.age == 4294967295 ? "NONE" : std::to_string(seg.age)) << " "
+               << std::setw(10) << time_diff_str.str() << " "  // Time difference column
+               << std::setw(12) << seg.read_nodes << " " << std::setw(8) << seg.total_objects
+               << " "  // Total objects count
+               << std::setw(12) << seg.read_bytes << " " << std::setw(10) << seg.freed_percent
+               << "%"
                << " "  // Add freed percentage column
-               << std::setw(12) << seg.alloc_pos << " " << std::setw(10) << used_percent
-               << "%";  // Add calculated used percentage
+               << std::setw(12)
+               << (seg.alloc_pos == 4294967295 || seg.alloc_pos == (uint64_t)-1
+                       ? "END"
+                       : std::to_string(seg.alloc_pos))
+               << " " << std::setw(10) << used_percent << "%";  // Add calculated used percentage
 
             os << "\n";
          }
@@ -448,6 +468,13 @@ namespace arbtrie
          uint64_t pinned_unused_space = pinned_total_space - pinned_used_space;
          double   pinned_used_percent =
              pinned_total_space > 0 ? (pinned_used_space * 100.0) / pinned_total_space : 0.0;
+
+         // Calculate unpinned space usage
+         uint64_t unpinned_total_space  = total_space - pinned_total_space;
+         uint64_t unpinned_used_space   = total_used_space - pinned_used_space;
+         uint64_t unpinned_unused_space = unpinned_total_space - unpinned_used_space;
+         double   unpinned_used_percent =
+             unpinned_total_space > 0 ? (unpinned_used_space * 100.0) / unpinned_total_space : 0.0;
 
          // Calculate average age for pinned and unpinned segments
          double avg_pinned_age_seconds =
@@ -475,12 +502,27 @@ namespace arbtrie
          os << "Pinned unused:   " << pinned_unused_space / 1024 / 1024. << " MB (" << std::fixed
             << std::setprecision(2) << (100.0 - pinned_used_percent) << "% of pinned)\n";
 
+         // Add unpinned segment usage information
+         os << "\nUnpinned space:  " << unpinned_total_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2)
+            << (unpinned_total_space > 0 ? (unpinned_total_space * 100.0) / total_space : 0.0)
+            << "% of total)\n";
+         os << "Unpinned used:   " << unpinned_used_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << unpinned_used_percent << "% of unpinned)\n";
+         os << "Unpinned unused: " << unpinned_unused_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << (100.0 - unpinned_used_percent) << "% of unpinned)\n";
+
          // Add average age information
          os << "\nAvg age pinned:   " << std::fixed << std::setprecision(2)
             << avg_pinned_age_seconds << " seconds (" << pinned_segments_count << " segments)\n";
          os << "Avg age unpinned: " << std::fixed << std::setprecision(2)
             << avg_unpinned_age_seconds << " seconds (" << unpinned_segments_count
             << " segments)\n";
+
+         // Add valid object statistics
+         os << "\nValid objects:   " << total_read_nodes << " objects ("
+            << total_read_bytes / 1024 / 1024. << " MB, " << std::fixed << std::setprecision(2)
+            << (total_read_bytes * 100.0) / total_space << "% of total space)\n";
 
          os << "----------------------------------------------------------------\n\n";
 

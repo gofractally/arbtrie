@@ -76,6 +76,14 @@ namespace arbtrie
        */
       bool start_background_threads(bool force_start = false);
 
+      // Return struct for segment read statistics
+      struct stats_result
+      {
+         uint32_t nodes_with_read_bit;
+         uint64_t total_bytes;
+         uint32_t total_objects;
+      };
+
      private:
       friend class database;
       void    release_unreachable();
@@ -185,7 +193,7 @@ namespace arbtrie
         * @param seg_num The segment number to analyze
         * @return A pair containing {number of node headers with read bit set, total bytes of those nodes}
         */
-      std::pair<uint32_t, uint64_t> calculate_segment_read_stats(segment_number seg_num);
+      stats_result calculate_segment_read_stats(segment_number seg_num);
 
       /**
         *  After all writes are complete, and there is not enough space
