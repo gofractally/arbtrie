@@ -12,7 +12,8 @@ namespace arbtrie
          _session_rlock(mv._session_rlock),
          _sega(mv._sega),
          _nested_read_lock(mv._nested_read_lock),
-         _rcache_queue(mv._rcache_queue)
+         _rcache_queue(mv._rcache_queue),
+         _session_rng(mv._session_rng)
    {
       mv._alloc_seg_ptr  = nullptr;
       mv._alloc_seg_num  = -1ull;
@@ -54,7 +55,7 @@ namespace arbtrie
          _alloc_seg_meta   = mv._alloc_seg_meta;
          _in_alloc         = mv._in_alloc;
          _nested_read_lock = mv._nested_read_lock;
-
+         _session_rng      = mv._session_rng;
          // Reference members can't be reassigned, so just making sure we're
          // consistent with expectations, but not moving them
          // (_session_rlock and _rcache_queue remain unchanged)
@@ -75,6 +76,7 @@ namespace arbtrie
          _alloc_seg_ptr(nullptr),
          _alloc_seg_meta(nullptr),
          _in_alloc(false),
+         _session_rng(0xABBA7777 ^ ses_num),
          _session_rlock(a.get_session_rlock(ses_num)),
          _sega(a),
          _nested_read_lock(0),

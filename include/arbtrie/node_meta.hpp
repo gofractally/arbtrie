@@ -263,6 +263,37 @@ namespace arbtrie
                                                std::memory_order_relaxed);
          }
       }
+      /** 
+       * The first time through the read bit gets set, if the
+       * read bit is already set then the pending read bit gets set and
+       * this returns true... promote the item to the cache. 
+       * 
+       * The read bit may be cleared at any time (by decay) but the
+       * pending cache bit will be cleared when compactor proceses it.
+       * 
+       * We do not want to set the read bit again until after the compactor
+       * has processed the pending cache bit, and we cannot set the pending
+       * cache bit unless the read bit is already set.
+       * 
+       * @return true if the node should be promoted to the cache
+      */
+      bool try_set_read_or_pending_cache()
+      {
+         auto e = _meta.load(std::memory_order_relaxed);
+         if (e & pending_cache_mask)
+            return false;
+         if (e & read_mask)
+         {
+            // try to set the pending cache bit one time
+            auto next = e | pending_cache_mask;
+            return _meta.compare_exchange_weak(e, next, std::memory_order_relaxed,
+                                               std::memory_order_relaxed);
+         }
+         // try to set the pending cache bit
+         _meta.compare_exchange_weak(e, e | read_mask, std::memory_order_relaxed,
+                                     std::memory_order_relaxed);
+         return false;  // set read bit, but didn't set pending cache bit
+      }
 
       auto& set_ref(uint16_t ref)
       {

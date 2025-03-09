@@ -306,7 +306,7 @@ namespace arbtrie
         */
       inline uint32_t get_cache_difficulty() const
       {
-         return _mapped_state->_cache_difficulty.load(std::memory_order_relaxed);
+         return _mapped_state->_cache_difficulty_state.get_cache_difficulty();
       }
 
       /**

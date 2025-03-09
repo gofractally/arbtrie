@@ -93,4 +93,25 @@ namespace arbtrie
    {
       return _sega.get_cache_difficulty();
    }
+
+   /**
+    * Check if an object should be cached based on its size and difficulty threshold
+    * 
+    * @param size The size of the object in bytes
+    * @return true if the object should be cached, false otherwise
+    */
+   inline bool seg_alloc_session::should_cache(uint32_t size)
+   {
+      return _sega._mapped_state->_cache_difficulty_state.should_cache(get_random(), size);
+   }
+
+   /**
+    * Generate a random number for cache decisions
+    * 
+    * @return A random 32-bit number
+    */
+   inline uint32_t seg_alloc_session::get_random()
+   {
+      return _session_rng.next();
+   }
 }  // namespace arbtrie

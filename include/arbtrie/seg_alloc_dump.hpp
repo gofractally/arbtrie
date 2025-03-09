@@ -54,6 +54,10 @@ namespace arbtrie
       uint32_t total_read_nodes       = 0;  // Total count of valid objects across all segments
       uint32_t mlocked_segments_count = 0;  // Count of segments in the mlock_segments bitmap
 
+      // Cache related stats
+      uint32_t cache_difficulty     = 0;  // Current cache difficulty setting
+      uint64_t total_promoted_bytes = 0;  // Total bytes promoted through the cache
+
       // Segment queue state
       uint64_t alloc_ptr       = 0;
       uint64_t end_ptr         = 0;
@@ -689,6 +693,25 @@ namespace arbtrie
             << std::setw(value_width) << total_read_nodes << " objects ("
             << total_read_bytes / 1024 / 1024. << " MB, " << std::fixed << std::setprecision(2)
             << (total_read_bytes * 100.0) / total_space << "% of total space)\n";
+
+         // Add cache stats
+         if (cache_difficulty > 0)
+         {
+            // Calculate cache probability as "1 in N attempts"
+            uint64_t max_uint32  = 0xFFFFFFFFULL;
+            double   probability = 1.0 - (static_cast<double>(cache_difficulty) / max_uint32);
+            uint64_t attempts_per_hit =
+                probability > 0 ? std::round(1.0 / probability) : max_uint32;
+
+            os << "\n"
+               << std::left << std::setw(label_width) << "Cache difficulty:" << std::right
+               << std::setw(value_width) << cache_difficulty << " (1 in " << attempts_per_hit
+               << " attempts)\n";
+
+            os << std::left << std::setw(label_width) << "Promoted bytes:" << std::right
+               << std::setw(value_width) << total_promoted_bytes / 1024 / 1024.
+               << " MB (total since startup)\n";
+         }
 
          os << "----------------------------------------------------------------\n\n";
 

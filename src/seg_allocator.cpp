@@ -222,7 +222,8 @@ namespace arbtrie
          // Dynamically calculate sleep time based on window size
          // Formula: window_time / total_iterations_needed = time_per_iteration
          auto time_per_iteration = std::chrono::duration_cast<std::chrono::milliseconds>(
-             _mapped_state->_cache_frequency_window / total_iterations_needed);
+             _mapped_state->_cache_difficulty_state._cache_frequency_window /
+             total_iterations_needed);
 
          // Ensure a minimum time_per_iteration of 10ms to prevent excessive CPU usage
          time_per_iteration = std::max(time_per_iteration, 10ms);
@@ -408,8 +409,7 @@ namespace arbtrie
 
                if (node_meta_type::success == obj_ref.try_move(loc, new_loc))
                {
-                  _mapped_state->total_promoted_bytes.fetch_add(header->size(),
-                                                                std::memory_order_relaxed);
+                  _mapped_state->_cache_difficulty_state.compactor_promote_bytes(header->size());
                   _mapped_state->_segment_data.meta[loc.segment()].free_object(header->size());
                }
             }
@@ -853,6 +853,12 @@ namespace arbtrie
 
       // Get count of segments in the mlock_segments bitmap
       result.mlocked_segments_count = _mapped_state->_segment_provider.mlock_segments.count();
+
+      // Get cache difficulty and total promoted bytes
+      result.cache_difficulty = _mapped_state->_cache_difficulty_state.get_cache_difficulty();
+      result.total_promoted_bytes =
+          _mapped_state->_cache_difficulty_state.total_promoted_bytes.load(
+              std::memory_order_relaxed);
 
       // Gather segment information
       for (uint32_t i = 0; i < total_segs; ++i)

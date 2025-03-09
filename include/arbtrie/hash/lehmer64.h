@@ -1,5 +1,5 @@
-#ifndef LEHMER64_H
-#define LEHMER64_H
+#pragma once
+#include <cstdint>
 
 // https://lemire.me/blog/2019/03/19/the-fastest-conventional-random-number-generator-that-can-pass-big-crush/
 
@@ -85,5 +85,3 @@ static inline uint64_t lehmer64()
    return g_lehmer64_state >> 64;
 }
 */
-
-#endif

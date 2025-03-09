@@ -61,6 +61,19 @@ namespace arbtrie
        */
       inline uint32_t get_cache_difficulty() const;
 
+      /**
+       * Check if an object should be cached based on its size and difficulty threshold
+       * @param size The size of the object in bytes
+       * @return true if the object should be cached, false otherwise
+       */
+      inline bool should_cache(uint32_t size);
+
+      /**
+       * Generate a random number for cache decisions
+       * @return A random 32-bit number
+       */
+      inline uint32_t get_random();
+
       void                                   unalloc(uint32_t size);
       std::pair<node_location, node_header*> alloc_data(uint32_t       size,
                                                         id_address_seq adr_seq,
@@ -82,6 +95,9 @@ namespace arbtrie
       mapped_memory::segment_header* _alloc_seg_ptr  = nullptr;
       mapped_memory::segment_meta*   _alloc_seg_meta = nullptr;
       bool                           _in_alloc       = false;
+
+      // RNG for cache decisions - initialized with session number for reproducibility
+      lehmer64_rng _session_rng;
 
       // Reference to the session read lock from read_lock_queue
       mapped_memory::session_rlock& _session_rlock;

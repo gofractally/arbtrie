@@ -55,6 +55,7 @@ namespace arbtrie
      public:
       circular_buffer()              = default;
       static constexpr uint64_t npos = uint64_t(-1);
+      bool                      is_full() const { return usage() >= buffer_size; }
 
       // Push data into the buffer, only one thread can push at a time
       // @return the virtual index after the push, or throw if the buffer is full

@@ -79,6 +79,13 @@ namespace arbtrie
 
       void free_object(node_location loc, uint32_t size);
 
+      /**
+       * Check if an object should be cached based on its size and difficulty threshold
+       * @param size The size of the object in bytes
+       * @return true if the object should be cached, false otherwise
+       */
+      bool should_cache(uint32_t size) const;
+
      private:
       friend class seg_alloc_session;
       friend class object_ref;

@@ -210,6 +210,11 @@ namespace arbtrie
       return _session.get_cache_difficulty();
    }
 
+   inline bool read_lock::should_cache(uint32_t size) const
+   {
+      return _session.should_cache(size);
+   }
+
    inline void read_lock::free_object(node_location loc, uint32_t size)
    {
       _session.free_object(loc.segment(), size);

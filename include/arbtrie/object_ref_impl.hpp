@@ -81,34 +81,13 @@ namespace arbtrie
 
    inline void object_ref::maybe_update_read_stats(uint32_t size) const
    {
-      if (size > max_cacheable_object_size)
-         return;  // don't track large objects
-
-      // Generate random number using rdtsc hashed with XXHash for better distribution
-      uint64_t tsc    = rdtsc();
-      uint32_t random = XXH32(&tsc, sizeof(uint64_t), 0);
-
-      /**
-       * Assuming the difficulty of 1 cacheline is 50/50 (aka 1/2),
-       * the expected number of passes through this function to fill
-       * 2 cachelines 2x the number of times to fill 1 cacheline.
-       */
-
-      // Check if random number exceeds difficulty threshold, where the difficulty
-      // is multiplied by the number of cachelines required to fill the object.
-      uint32_t size_in_cachelines = round_up_multiple<64>(size) / 64;
-
-      if (random > _rlock.cache_difficulty() * size_in_cachelines)
+      if (_rlock._session._rcache_queue.is_full())
       {
-         // Try to set read bit
-         auto m = _meta.load(std::memory_order_relaxed);
-         if (_meta.try_set_read())
-         {
-            // try_set_read() returns true if read bit was already set
-            _meta.start_pending_cache();
-            _rlock._session._rcache_queue.push(address());
-         }
+         ARBTRIE_WARN("rcache_queue is full, skipping cache");
+         return;
       }
+      if (_rlock.should_cache(size) and _meta.try_set_read_or_pending_cache())
+         _rlock._session._rcache_queue.push(address());
    }
 
    inline const node_header* object_ref::release()
