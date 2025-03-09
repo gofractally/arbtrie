@@ -325,9 +325,22 @@ namespace arbtrie
        * 
        * @return A pair containing the segment number and the segment header
        */
-      std::pair<segment_number, mapped_memory::segment_header*> get_new_segment()
+      std::pair<segment_number, mapped_memory::segment_header*> get_new_segment(
+          bool alloc_to_pinned = true)
       {
-         auto segnum = _mapped_state->_segment_provider.ready_segments.pop_wait();
+         segment_number segnum;
+         if (alloc_to_pinned)
+         {
+            // takes the highest priority pinned segment available, and if not pinned
+            // then it will ack the segment provider who will get it pinned right-quick
+            segnum = _mapped_state->_segment_provider.ready_segments.pop_wait();
+         }
+         else
+         {
+            // back takes the lowest priority segment, without ack means it will
+            // not send a signal to the provider to mlock the segment
+            segnum = _mapped_state->_segment_provider.ready_segments.pop_back_wait_without_ack();
+         }
          return {segnum, get_segment(segnum)};
       }
 

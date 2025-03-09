@@ -1,21 +1,79 @@
 #include <errno.h>  // For errno and ESRCH
 #include <sys/mman.h>
+#include <algorithm>
 #include <arbtrie/binary_node.hpp>
 #include <arbtrie/file_fwd.hpp>
 #include <arbtrie/seg_alloc_dump.hpp>
 #include <arbtrie/seg_allocator.hpp>
+#include <array>
 #include <bit>
 #include <cassert>
+#include <cstring>
 #include <new>
+#include <string>
 #include <thread>  // For std::this_thread::sleep_for
 
 static const uint64_t page_size      = getpagesize();
 static const uint64_t page_size_mask = ~(page_size - 1);
+static const uint64_t segment_size   = 1ull << 30;  // 1GB
+static const bool     debug_segments = false;
 
 namespace arbtrie
 {
+   /** 
+    * Insert a new element into a sorted array of pairs, maintaining sort order.
+    * Uses binary search to find insertion point and rotation for efficient insertion.
+    * 
+    * @tparam N Size of the array
+    * @tparam T Type of the first element in pair (segment number type)
+    * @param arr The array to insert into
+    * @param current_size Current number of elements in the array
+    * @param new_value Pair to be inserted
+    * @return Updated size after insertion
+    */
+   template <size_t N, typename T>
+   int insert_sorted_pair(std::array<std::pair<T, int64_t>, N>& arr,
+                          size_t                                current_size,
+                          std::pair<T, int64_t>                 new_value)
+   {
+      // Check if this value should be included
+      if (current_size < N ||
+          new_value.second > arr[std::min<size_t>(N - 1, current_size - 1)].second)
+      {
+         // Determine the range to search within
+         auto begin = arr.begin();
+         auto end   = arr.begin() + std::min(N, static_cast<size_t>(current_size));
+
+         // Find insertion position using binary search (for descending order by age)
+         auto insertion_point =
+             std::upper_bound(begin, end, new_value,
+                              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+         // If we're at capacity, rotate out the lowest element
+         if (current_size >= N)
+         {
+            std::rotate(insertion_point, arr.end() - 1, arr.end());
+         }
+         else
+         {
+            // We're still adding new elements
+            std::rotate(insertion_point, arr.begin() + current_size,
+                        arr.begin() + current_size + 1);
+            current_size++;
+         }
+
+         // Set the value at the insertion point
+         *insertion_point = new_value;
+      }
+
+      return current_size;
+   }
+
    namespace mapped_memory
    {
+      // Forward declarations
+      class segment_header;
+
       // read_lock_queue constructor implementation
       allocator_state::read_lock_queue::read_lock_queue()
       {
@@ -207,12 +265,10 @@ namespace arbtrie
        */
       while (thread.yield())
       {
-         if (compactor_promote_rcache_data(ses))
-            continue;
-         if (compact_pinned_segment(ses))
-            continue;
-         if (compact_unpinned_segment(ses))
-            continue;
+         compactor_promote_rcache_data(ses);
+         compact_pinned_segment(ses);
+         compactor_promote_rcache_data(ses);
+         compact_unpinned_segment(ses);
       }
 
       // prioritize compacting pinned segments that are not being used by any session
@@ -376,9 +432,13 @@ namespace arbtrie
     */
    bool seg_allocator::compact_pinned_segment(seg_alloc_session& ses)
    {
-      auto           total_segs         = _block_alloc.num_blocks();
-      segment_number min_qualifying_seg = -1;
-      uint64_t       max_virtual_age    = 0;
+      auto total_segs = _block_alloc.num_blocks();
+
+      int total_qualifying = 0;
+      // Define N as the maximum number of top segments to track
+      constexpr int                                     N = 16;  // Number of top segments to track
+      std::array<std::pair<segment_number, int64_t>, N> qualifying_segments;
+
       for (int i = 0; i < total_segs; ++i)
       {
          auto& sd = _mapped_state->_segment_data.meta[i];
@@ -388,50 +448,58 @@ namespace arbtrie
          if (sm.free_space < segment_size / 8)
             continue;
 
-         if (sd.get_vage() > max_virtual_age)
-         {
-            min_qualifying_seg = i;
-            max_virtual_age    = sd.get_vage();
-         }
+         int64_t vage = sd.get_vage();
+
+         // Check if this segment should be included (if array isn't full yet or if the vage is
+         // higher than the lowest one we have)
+         total_qualifying = insert_sorted_pair(qualifying_segments, total_qualifying, {i, vage});
       }
-      if (min_qualifying_seg == -1)
+      if (total_qualifying < 8)
          return false;
 
-      // ARBTRIE_ERROR("compact_pinned_segment");
-      compact_segment(ses, min_qualifying_seg);
-      return true;
+      //      ARBTRIE_ERROR("compact_pinned_segments: ", total_qualifying);
+      for (int i = 0; i < total_qualifying; ++i)
+         compact_segment(ses, qualifying_segments[i].first);
+      return total_qualifying != N;
    }
 
    bool seg_allocator::compact_unpinned_segment(seg_alloc_session& ses)
    {
-      auto           total_segs         = _block_alloc.num_blocks();
-      segment_number min_qualifying_seg = -1;
-      int64_t        max_virtual_age    = -1;
+      auto total_segs       = _block_alloc.num_blocks();
+      int  total_qualifying = 0;
+
+      // Define N as the maximum number of top segments to track
+      constexpr int                                     N = 4;  // Number of top segments to track
+      std::array<std::pair<segment_number, int64_t>, N> qualifying_segments;
+
       for (int i = 0; i < total_segs; ++i)
       {
          auto& sd = _mapped_state->_segment_data.meta[i];
          auto  sm = sd.data();
          if (sm.is_pinned or sm.is_alloc or sm.free_space < segment_size / 2)
-         {
-            //      ARBTRIE_DEBUG("compact_unpinned_segment: skipping: ", i, " free space ",
-            //                   100.0 * sm.free_space / segment_size);
             continue;
-         }
-         //   ARBTRIE_WARN("compact_unpinned_segment: not skipping: ", i, " free space ",
-         //                100.0 * sm.free_space / segment_size);
 
-         if (int64_t(sd.get_vage()) >= max_virtual_age)
-         {
-            min_qualifying_seg = i;
-            max_virtual_age    = sd.get_vage();
-         }
+         int64_t vage = sd.get_vage();
+
+         // Check if this segment should be included (if array isn't full yet or if the vage is
+         // higher than the lowest one we have)
+         total_qualifying = insert_sorted_pair(qualifying_segments, total_qualifying, {i, vage});
       }
-      if (min_qualifying_seg == -1)
+
+      if (total_qualifying < 2)
          return false;
 
-      ARBTRIE_WARN("compact_unpinned_segment");
-      compact_segment(ses, min_qualifying_seg);
-      return true;
+      ARBTRIE_WARN("compact_unpinned_segments: ", total_qualifying);
+
+      // compact them in order into a new session
+      auto unpinned_session = start_session();
+      unpinned_session.set_alloc_to_pinned(false);
+
+      // configure the session to not allocate from the pinned segments
+      for (int i = 0; i < total_qualifying; ++i)
+         compact_segment(ses, qualifying_segments[i].first);
+
+      return total_qualifying != N;
    }
 
    void seg_allocator::compact_segment(seg_alloc_session& ses, uint64_t seg_num)
@@ -1079,7 +1147,7 @@ namespace arbtrie
       for (auto seg : provider_state.mlock_segments)
       {
          uint64_t vage = _mapped_state->_segment_data.meta[seg].get_vage();
-         if (vage < oldest_age)
+         if (vage < oldest_age and vage != 0)
          {
             oldest_age = vage;
             oldest_seg = seg;
@@ -1092,17 +1160,18 @@ namespace arbtrie
       void* seg_ptr = get_segment(oldest_seg);
       if (munlock(seg_ptr, segment_size) != 0) [[unlikely]]
       {
-         ARBTRIE_WARN("munlock error(", errno, ") ", strerror(errno));
+         ARBTRIE_ERROR("munlock error(", errno, ") ", strerror(errno));
       }
       else
       {
          // Clear both the bitmap and the meta bit using the helper
          update_segment_pinned_state(oldest_seg, false);
-         ARBTRIE_WARN(
-             "munlocked segment: ", oldest_seg, " count: ", provider_state.mlock_segments.count(),
-             " vage abs: ", _mapped_state->_segment_data.meta[oldest_seg].get_vage(), " age ms: ",
-             arbtrie::get_current_time_ms() -
-                 _mapped_state->_segment_data.meta[oldest_seg].get_vage());
+         ARBTRIE_WARN("munlocked segment: ", oldest_seg,
+                      " count: ", provider_state.mlock_segments.count(),
+                      " vage abs: ", _mapped_state->_segment_data.meta[oldest_seg].get_vage(),
+                      "     rel age ms: ",
+                      arbtrie::get_current_time_ms() -
+                          _mapped_state->_segment_data.meta[oldest_seg].get_vage());
       }
 
       // now that is it is no longer pinned, we are unlikely to
@@ -1138,6 +1207,12 @@ namespace arbtrie
          void* seg_ptr = get_segment(*seg_ack);
          if (mlock(seg_ptr, segment_size) == 0)
          {
+            ARBTRIE_WARN("mlocked segment: ", *seg_ack,
+                         " count: ", provider_state.mlock_segments.count(),
+                         " vage abs: ", _mapped_state->_segment_data.meta[*seg_ack].get_vage(),
+                         "     rel age ms: ",
+                         arbtrie::get_current_time_ms() -
+                             _mapped_state->_segment_data.meta[*seg_ack].get_vage());
             // Set both the bitmap and the meta bit using the helper
             update_segment_pinned_state(*seg_ack, true);
 

@@ -7,6 +7,7 @@ add_executable(arbtrie-tests
     node_meta_tests.cpp
     segment_meta_tests.cpp
     interprocess_mutex_tests.cpp
+    seg_alloc_dump_tests.cpp
 )
 
 target_link_libraries(arbtrie-tests 

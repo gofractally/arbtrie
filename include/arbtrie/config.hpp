@@ -1,10 +1,10 @@
 #pragma once
 #include <arbtrie/hash/xxh32.hpp>
+#include <bit>
 #include <string_view>
 
 namespace arbtrie
 {
-
    // designed to fit within 4096 bytes with other header information
    // so msync the page doesn't waste data.
    static constexpr const uint32_t num_top_roots = 510;
@@ -107,8 +107,6 @@ namespace arbtrie
 
    static_assert(segment_size < 4 * GB, "size must be less than 4GB");
    static_assert(std::popcount(segment_size) == 1, "size must be power of 2");
-
-   // the number of empty bytes allowed in a segment before it gets
    // compacted
    static constexpr const uint64_t segment_empty_threshold = segment_size / 2;
    static_assert(segment_empty_threshold < segment_size);

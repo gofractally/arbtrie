@@ -1,10 +1,12 @@
 #pragma once
 #include <arbtrie/config.hpp>  // Include for segment_size constant
-#include <cassert>             // Add include for assert
-#include <chrono>              // Add include for std::chrono
+#include <arbtrie/util.hpp>
+#include <cassert>  // Add include for assert
+#include <chrono>   // Add include for std::chrono
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>   // Add include for std::numeric_limits
 #include <sstream>  // Add include for std::ostringstream
 #include <string>
 #include <vector>
@@ -86,6 +88,36 @@ namespace arbtrie
       static constexpr const char* COLOR_BOLD_YELLOW   = "\033[33;1m";
       static constexpr const char* COLOR_BRIGHT_GREEN  = "\033[92m";
       static constexpr const char* COLOR_BRIGHT_YELLOW = "\033[93m";
+
+      // Helper function to format time with appropriate units (s, m, h, d)
+      static std::string format_time_with_units(double seconds)
+      {
+         std::ostringstream result;
+         result << std::fixed << std::setprecision(1);
+
+         if (seconds < 60.0)
+         {
+            // Display as seconds
+            result << seconds << " s";
+         }
+         else if (seconds < 3600.0)
+         {
+            // Display as minutes
+            result << (seconds / 60.0) << " m";
+         }
+         else if (seconds < 86400.0)
+         {
+            // Display as hours
+            result << (seconds / 3600.0) << " h";
+         }
+         else
+         {
+            // Display as days
+            result << (seconds / 86400.0) << " d";
+         }
+
+         return result.str();
+      }
 
       // Helper method to create a colored progress bar with Unicode block characters
       static std::string create_colored_progress_bar(uint32_t           freed_percent,
@@ -232,22 +264,49 @@ namespace arbtrie
 
          os << "\n--- segment allocator state ---\n";
 
-         // Print header
+         // Define column widths for consistency
          // clang-format off
+         const int seg_width = 5;        // Segment number (5 digits)
+         const int pin_width = 3;        // Pin emoji
+         const int prog_width = 15;      // Progress bar
+         const int dot_width = 3;        // Status dot
+         const int used_pct_width = 4;   // Used % - narrowed to 4 chars
+         const int free_pct_width = 4;   // Free % - narrowed to 4 chars
+         const int unalloc_pct_width = 4; // Unallocated % (TBA) - narrowed to 4 chars
+         const int seconds_width = 7;    // Age in seconds - now 7 chars wide to fit "999.9 h"
+         const int age_width = 8;        // Seq number (formerly age)
+         const int total_obj_width = 10; // #Nodes
+         const int read_nodes_width = 10; // Read nodes
+         const int read_bytes_width = 12; // Read bytes
+
+         // Function to create a separator row with the specified column widths
+         auto create_separator = [&]() {
+            return std::string(
+               seg_width + 4 + prog_width + dot_width + // 4 spaces for pin column instead of pin_width 
+               used_pct_width + free_pct_width + unalloc_pct_width + // Percentage columns
+               seconds_width + age_width + total_obj_width + read_nodes_width + read_bytes_width + 
+               // Add spaces between columns (12 columns = 11 spaces)
+               11, '-');
+         };
+         
+         // Two-row header
          os << std::left
-            << std::setw(5)  << "Seg#" << " "   // Add space after segment number
-            << std::setw(12) << "% Used" << " " // Add space after progress bar
-            << std::setw(2)  << "S" << " "      // Status dot column with space
-            << std::setw(2)  << "P" << " "      // Pin column with space
-            << std::setw(10) << "% Alloc" << " " // Percentage allocation column
-            << std::setw(8)  << "Age" << " "
-            << std::setw(10) << "Seconds" << " " // Time since vage column
-            << std::setw(12) << "Read Nodes" << " " // Valid objects count
-            << std::setw(8) << "Total Obj" << " " // Total objects count
-            << std::setw(12) << "Read Bytes" << " " // Valid objects total size
-            << std::setw(10) << "% Free" << " "     // Free percentage column
-            << std::setw(12) << "Alloc Pos" << " "  // Raw alloc_pos value
-            << std::setw(10) << "% Used" << "\n";   // New calculated used percentage column
+            << std::setw(seg_width) << "Seg#"
+            << "    " // Match the 4 spaces used for pin column
+            << std::setw(prog_width) << "Segment" << " "
+            << std::setw(dot_width) << "S" << " "
+            << std::right
+            << std::setw(used_pct_width) << "Used" << " " // Renamed from Used%
+            << std::setw(free_pct_width) << "Free" << " " // Renamed from Free%
+            << std::setw(unalloc_pct_width) << "TBA" << " " // Renamed from Unall%
+            << std::setw(seconds_width) << "Age" << " " // Renamed from Seconds
+            << std::setw(age_width) << "Seq" << " " // Renamed from Age
+            << std::setw(total_obj_width) << "#Nodes" << " " // Renamed from NumNodes
+            << std::setw(read_nodes_width) << "ReadNodes" << " "
+            << std::setw(read_bytes_width) << "ReadBytes" << "\n";
+
+         // Add horizontal rule between header and data
+         os << create_separator() << "\n";
          // clang-format on
 
          // Count segments pinned according to different sources
@@ -266,101 +325,108 @@ namespace arbtrie
          uint64_t unpinned_segments_count    = 0;
          double   pinned_total_age_seconds   = 0.0;
          double   unpinned_total_age_seconds = 0.0;
+         double   pinned_min_age_seconds =
+             std::numeric_limits<double>::max();  // Initialize to max value
+         double pinned_max_age_seconds = 0.0;
+         double unpinned_min_age_seconds =
+             std::numeric_limits<double>::max();  // Initialize to max value
+         double unpinned_max_age_seconds = 0.0;
+
+         // Track max sequence number (age)
+         uint64_t max_seq = 0;
 
          // Print segment info
          for (const auto& seg : segments)
          {
-            std::string status_text        = "";   // Status text (percentage)
             std::string status_dot         = " ";  // Status indicator dot
-            std::string pin_emoji          = " ";  // For the thin pin column
+            std::string pin_emoji          = " ";  // For the pin column
             std::string progress_bar_color = "";
-            std::string status_text_color  = "";
-            std::string status_dot_color   = "";
 
-            // Determine status and color
+            // Calculate percentages as requested
+            int used_percent    = 0;  // (alloc_pos - freed_bytes) / segment_size
+            int free_percent    = 0;  // freed_bytes / segment_size
+            int unalloc_percent = 0;  // (segment_size - alloc_pos) / segment_size
+
+            // Calculate the values based on alloc_pos
+            uint64_t actual_used = 0;
             if (seg.alloc_pos == 0)
             {
-               status_text = "EMPTY";  // Text for empty/unused segments
-               // No colored dot for this special case
+               // Empty segment
+               used_percent    = 0;
+               free_percent    = 0;
+               unalloc_percent = 100;
             }
             else if (seg.alloc_pos == 4294967295 || seg.alloc_pos == (uint64_t)-1)
             {
-               // Calculate the actual used percentage
-               uint64_t actual_used  = segment_size - seg.freed_bytes;
-               int      used_percent = static_cast<int>((actual_used * 100) / segment_size);
-
-               // Show actual used percentage instead of static "FULL" text
-               status_text       = std::to_string(used_percent) + "%";
-               status_text_color = COLOR_GREEN;
-               // No colored dot for this special case
+               // Full allocation, used = segment_size - freed_bytes
+               actual_used     = segment_size - seg.freed_bytes;
+               used_percent    = static_cast<int>((actual_used * 100) / segment_size);
+               free_percent    = static_cast<int>((seg.freed_bytes * 100) / segment_size);
+               unalloc_percent = 0;
             }
             else if (seg.alloc_pos == 64)
             {
-               status_text       = "PEND";  // Text for pending/recycled
-               status_text_color = COLOR_YELLOW;
-               status_dot        = "🟡";  // Yellow dot for pending/recycled
-               status_dot_color  = COLOR_YELLOW;
-            }
-            else if (seg.is_alloc && seg.alloc_pos < segment_size)
-            {
-               // Calculate percentage of segment used (alloc_pos relative to segment size)
-               int used_percent  = static_cast<int>((seg.alloc_pos * 100) / segment_size);
-               status_text       = std::to_string(used_percent) + "%";  // Just percentage
-               status_text_color = COLOR_GREEN;  // Green text for active allocations
-               status_dot        = "🟢";         // Green dot for active
-               status_dot_color  = COLOR_GREEN;
-            }
-
-            // Check for age 4294967295 - this takes precedence for status color
-            if (seg.age == 4294967295)
-            {
-               status_text       = "FREE";  // Text for free/inactive segments
-               status_text_color = COLOR_RED;
-               status_dot        = "🔴";  // Red dot for freed
-               status_dot_color  = COLOR_RED;
-            }
-
-            // Add pin emoji to dedicated pin column if segment is pinned (in bitmap)
-            if (seg.bitmap_pinned)
-            {
-               pin_emoji = "📌";  // Pin emoji in dedicated column
-               bitmap_pinned_count++;
-
-               // Use blue as marker that this is a pinned segment (will be translated to bright colors)
-               progress_bar_color = COLOR_BLUE;
-            }
-
-            // Calculate correct used space and percentage
-            uint64_t actual_used;
-            int      used_percent;
-
-            if (seg.alloc_pos == 0)
-            {
-               actual_used  = 0;
-               used_percent = 0;
-            }
-            else if (seg.alloc_pos == 4294967295 || seg.alloc_pos == (uint64_t)-1)
-            {
-               // For completed allocation, used = segment_size - freed_bytes
-               actual_used  = segment_size - seg.freed_bytes;
-               used_percent = static_cast<int>((actual_used * 100) / segment_size);
-            }
-            else if (seg.alloc_pos == 64)
-            {
-               actual_used  = 0;
-               used_percent = 0;
+               // PEND status (64 is the size of the segment header)
+               used_percent    = 0;
+               free_percent    = 0;
+               unalloc_percent = 100;
             }
             else
             {
-               // Calculate used space as: alloc_pos - freed_bytes (avoiding underflow)
-               uint64_t unused =
+               // Normal case
+               // Calculate used space
+               actual_used =
                    (seg.alloc_pos > seg.freed_bytes) ? (seg.alloc_pos - seg.freed_bytes) : 0;
-               actual_used  = segment_size - unused;
                used_percent = static_cast<int>((actual_used * 100) / segment_size);
+
+               // Calculate free space (allocated but freed)
+               free_percent = static_cast<int>((seg.freed_bytes * 100) / segment_size);
+
+               // Calculate unallocated space
+               uint64_t alloc_percent = (seg.alloc_pos * 100) / segment_size;
+               unalloc_percent        = 100 - alloc_percent;
+            }
+
+            // Determine status dot based on segment state
+            if (seg.alloc_pos == 0)
+            {
+               // Empty segment
+               status_dot = " ";
+            }
+            else if (seg.age == 4294967295)
+            {
+               // Free segment - always use red dot
+               status_dot = "🔴";  // Red dot for freed
+            }
+            else if (seg.alloc_pos == 64)
+            {
+               // PEND segment (already set above)
+               status_dot = "🟡";  // Yellow dot for pending/recycled
+            }
+            else if (seg.is_alloc && seg.alloc_pos < segment_size)
+            {
+               // Active allocation
+               status_dot = "🟢";  // Green dot for active
+            }
+
+            // Special case: handle FREE age for any segment that has this specific age,
+            // even if it doesn't meet the other criteria
+            if (seg.age == 4294967295)
+            {
+               status_dot = "🔴";  // Always use red dot for FREE age
             }
 
             // Add to total used space for summary
             total_used_space += actual_used;
+
+            // Add pin emoji if segment is pinned
+            if (seg.bitmap_pinned)
+            {
+               pin_emoji = "📌";  // Pin emoji
+               bitmap_pinned_count++;
+               // Use blue to indicate a pinned segment
+               progress_bar_color = COLOR_BLUE;
+            }
 
             // Update pinned segment statistics if applicable
             if (seg.bitmap_pinned || seg.is_pinned)
@@ -374,6 +440,10 @@ namespace arbtrie
                   double age_seconds = (current_time_ms - seg.vage) / 1000.0;
                   pinned_total_age_seconds += age_seconds;
                   pinned_segments_count++;
+
+                  // Track min/max age for pinned segments
+                  pinned_min_age_seconds = std::min(pinned_min_age_seconds, age_seconds);
+                  pinned_max_age_seconds = std::max(pinned_max_age_seconds, age_seconds);
                }
             }
             else
@@ -384,6 +454,10 @@ namespace arbtrie
                   double age_seconds = (current_time_ms - seg.vage) / 1000.0;
                   unpinned_total_age_seconds += age_seconds;
                   unpinned_segments_count++;
+
+                  // Track min/max age for unpinned segments
+                  unpinned_min_age_seconds = std::min(unpinned_min_age_seconds, age_seconds);
+                  unpinned_max_age_seconds = std::max(unpinned_max_age_seconds, age_seconds);
                }
             }
 
@@ -396,16 +470,16 @@ namespace arbtrie
             {
                meta_pinned_count++;
             }
-            else if (seg.bitmap_pinned)
-            {
-               // Only count in bitmap_pinned_count
-            }
 
-            // Create progress bar with color applied only to the used portion, using the USED percentage for display
+            // Track max sequence number (excluding FREE age which is the max uint value)
+            if (seg.age != 4294967295 && seg.age > max_seq)
+               max_seq = seg.age;
+
+            // Create progress bar with proper coloring (using the original function unchanged)
             std::string progress_bar = create_colored_progress_bar(
                 seg.freed_percent, seg.alloc_pos, seg.freed_bytes, progress_bar_color);
 
-            // Calculate time difference in seconds with 1 decimal place precision
+            // Calculate time difference in seconds with 1 decimal place
             double time_diff_seconds = 0.0;
             if (seg.vage > 0)
             {
@@ -416,39 +490,64 @@ namespace arbtrie
             std::ostringstream time_diff_str;
             time_diff_str << std::fixed << std::setprecision(1) << time_diff_seconds;
 
-            // Print segment number
-            os << std::left << std::setw(5) << seg.segment_num << " ";
+            // Format time with appropriate units for display
+            std::string formatted_time = format_time_with_units(time_diff_seconds);
 
-            // Print progress bar (already colored)
-            os << std::setw(12) << progress_bar << " ";
+            // 1. Print segment number (left-justified)
+            os << std::left << std::setw(seg_width) << seg.segment_num;
 
-            // Print status dot with color
-            os << status_dot_color << std::setw(2) << status_dot << COLOR_RESET << " ";
+            // 2. Print pin column (left-aligned fixed width)
+            // Unicode emojis can cause alignment issues - use a fixed column width
+            // and ensure proper padding with spaces
+            if (seg.bitmap_pinned)
+            {
+               os << " 📌 ";  // Add extra space after for proper spacing
+            }
+            else
+            {
+               os << "    ";  // 4 spaces to match the width of the emoji plus spaces
+            }
 
-            // Print pin emoji in thin column
-            os << std::setw(2) << pin_emoji << " ";
+            // 3. Print progress bar (already colored with fixed width)
+            os << std::setw(prog_width) << progress_bar << " ";
 
-            // Print percentage/status with color
-            os << status_text_color << std::setw(10) << status_text << COLOR_RESET << " ";
+            // 4. Print status dot with consistent spacing
+            // Unicode emojis often take up more space than expected visually
+            if (status_dot == " ")
+            {
+               // No dot - use plain spaces
+               os << "   ";  // 3 spaces for no dot
+            }
+            else
+            {
+               // Has a dot - add the dot and ensure proper alignment with extra space
+               os << status_dot << " ";  // Extra space after the dot to ensure alignment
+            }
+            os << " ";  // Always add one space after dot position for all rows
 
-            // Print the rest of the row
-            os << std::setw(8) << (seg.age == 4294967295 ? "NONE" : std::to_string(seg.age)) << " "
-               << std::setw(10) << time_diff_str.str() << " "  // Time difference column
-               << std::setw(12) << seg.read_nodes << " " << std::setw(8) << seg.total_objects
-               << " "  // Total objects count
-               << std::setw(12) << seg.read_bytes << " " << std::setw(10) << seg.freed_percent
-               << "%"
-               << " "  // Add freed percentage column
-               << std::setw(12)
-               << (seg.alloc_pos == 4294967295 || seg.alloc_pos == (uint64_t)-1
-                       ? "END"
-                       : std::to_string(seg.alloc_pos))
-               << " " << std::setw(10) << used_percent << "%";  // Add calculated used percentage
+            // Switch to right-justified for numeric columns
+            os << std::right;
+
+            // Print the percentage columns with appropriate colors
+            os << COLOR_GREEN << std::setw(used_pct_width) << used_percent << COLOR_RESET << " "
+               << COLOR_YELLOW << std::setw(free_pct_width) << free_percent << COLOR_RESET << " "
+               << COLOR_DARK_RED << std::setw(unalloc_pct_width) << unalloc_percent << COLOR_RESET
+               << " "
+
+               // Skip printing alloc_percent since it's been removed
+
+               // Print the remaining columns with updated widths
+               << std::setw(seconds_width) << formatted_time << " " << std::setw(age_width)
+               << (seg.age == 4294967295 ? "NONE" : std::to_string(seg.age)) << " "
+               << std::setw(total_obj_width) << seg.total_objects << " "
+               << std::setw(read_nodes_width) << seg.read_nodes << " "
+               << std::setw(read_bytes_width) << seg.read_bytes;
 
             os << "\n";
          }
 
-         // Print totals
+         // Print totals section with right justification for numbers
+         os << std::right;
          os << "\ntotal free: " << total_free_space / 1024 / 1024. << "Mb  "
             << (100 * total_free_space / double(total_segments * (1ull << 30))) << "%\n";
          os << "total retained: " << total_retained << " objects\n";
@@ -483,44 +582,111 @@ namespace arbtrie
              unpinned_segments_count > 0 ? unpinned_total_age_seconds / unpinned_segments_count
                                          : 0.0;
 
-         // Print space usage summary
+         // Print space usage summary with right justification for numbers
          os << "---------------------- SPACE USAGE SUMMARY ----------------------\n";
-         os << "Total space:     " << total_space / 1024 / 1024. << " MB (" << total_segments
+
+         // Use consistent column widths for better alignment
+         const int label_width = 17;  // Width for labels
+         const int value_width = 10;  // Width for numeric values
+         const int pct_width   = 7;   // Width for percentage values
+
+         os << std::left << std::setw(label_width) << "Total space:" << std::right
+            << std::setw(value_width) << total_space / 1024 / 1024. << " MB (" << total_segments
             << " segments × " << segment_size / 1024 / 1024. << " MB)\n";
-         os << "Total used:      " << total_used_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2) << used_percent << "% of total)\n";
-         os << "Total unused:    " << unused_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2) << (100.0 - used_percent) << "% of total)\n";
+
+         os << std::left << std::setw(label_width) << "Total used:" << std::right
+            << std::setw(value_width) << total_used_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << std::setw(pct_width) << used_percent << "% of total)\n";
+
+         os << std::left << std::setw(label_width) << "Total unused:" << std::right
+            << std::setw(value_width) << unused_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << std::setw(pct_width) << (100.0 - used_percent)
+            << "% of total)\n";
 
          // Add pinned segment usage information
-         os << "\nPinned space:    " << pinned_total_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2)
+         os << "\n"
+            << std::left << std::setw(label_width) << "Pinned space:" << std::right
+            << std::setw(value_width) << pinned_total_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << std::setw(pct_width)
             << (pinned_total_space > 0 ? (pinned_total_space * 100.0) / total_space : 0.0)
             << "% of total)\n";
-         os << "Pinned used:     " << pinned_used_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2) << pinned_used_percent << "% of pinned)\n";
-         os << "Pinned unused:   " << pinned_unused_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2) << (100.0 - pinned_used_percent) << "% of pinned)\n";
+
+         os << std::left << std::setw(label_width) << "Pinned used:" << std::right
+            << std::setw(value_width) << pinned_used_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << std::setw(pct_width) << pinned_used_percent
+            << "% of pinned)\n";
+
+         os << std::left << std::setw(label_width) << "Pinned unused:" << std::right
+            << std::setw(value_width) << pinned_unused_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << std::setw(pct_width) << (100.0 - pinned_used_percent)
+            << "% of pinned)\n";
 
          // Add unpinned segment usage information
-         os << "\nUnpinned space:  " << unpinned_total_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2)
+         os << "\n"
+            << std::left << std::setw(label_width) << "Unpinned space:" << std::right
+            << std::setw(value_width) << unpinned_total_space / 1024 / 1024. << " MB ("
+            << std::fixed << std::setprecision(2) << std::setw(pct_width)
             << (unpinned_total_space > 0 ? (unpinned_total_space * 100.0) / total_space : 0.0)
             << "% of total)\n";
-         os << "Unpinned used:   " << unpinned_used_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2) << unpinned_used_percent << "% of unpinned)\n";
-         os << "Unpinned unused: " << unpinned_unused_space / 1024 / 1024. << " MB (" << std::fixed
-            << std::setprecision(2) << (100.0 - unpinned_used_percent) << "% of unpinned)\n";
+
+         os << std::left << std::setw(label_width) << "Unpinned used:" << std::right
+            << std::setw(value_width) << unpinned_used_space / 1024 / 1024. << " MB (" << std::fixed
+            << std::setprecision(2) << std::setw(pct_width) << unpinned_used_percent
+            << "% of unpinned)\n";
+
+         os << std::left << std::setw(label_width) << "Unpinned unused:" << std::right
+            << std::setw(value_width) << unpinned_unused_space / 1024 / 1024. << " MB ("
+            << std::fixed << std::setprecision(2) << std::setw(pct_width)
+            << (100.0 - unpinned_used_percent) << "% of unpinned)\n";
 
          // Add average age information
-         os << "\nAvg age pinned:   " << std::fixed << std::setprecision(2)
-            << avg_pinned_age_seconds << " seconds (" << pinned_segments_count << " segments)\n";
-         os << "Avg age unpinned: " << std::fixed << std::setprecision(2)
+         os << "\n"
+            << std::left << std::setw(label_width) << "Avg age pinned:" << std::right << std::fixed
+            << std::setprecision(2) << std::setw(value_width) << avg_pinned_age_seconds
+            << " seconds (" << pinned_segments_count << " segments)\n";
+
+         os << std::left << std::setw(label_width) << "Avg age unpinned:" << std::right
+            << std::fixed << std::setprecision(2) << std::setw(value_width)
             << avg_unpinned_age_seconds << " seconds (" << unpinned_segments_count
             << " segments)\n";
 
+         // Add min/max age information for pinned segments (only if there are any)
+         if (pinned_segments_count > 0)
+         {
+            os << std::left << std::setw(label_width) << "Min age pinned:" << std::right
+               << std::fixed << std::setprecision(2) << std::setw(value_width)
+               << pinned_min_age_seconds << " seconds ("
+               << format_time_with_units(pinned_min_age_seconds) << ")\n";
+
+            os << std::left << std::setw(label_width) << "Max age pinned:" << std::right
+               << std::fixed << std::setprecision(2) << std::setw(value_width)
+               << pinned_max_age_seconds << " seconds ("
+               << format_time_with_units(pinned_max_age_seconds) << ")\n";
+         }
+
+         // Add min/max age information for unpinned segments (only if there are any)
+         if (unpinned_segments_count > 0)
+         {
+            os << std::left << std::setw(label_width) << "Min age unpinned:" << std::right
+               << std::fixed << std::setprecision(2) << std::setw(value_width)
+               << unpinned_min_age_seconds << " seconds ("
+               << format_time_with_units(unpinned_min_age_seconds) << ")\n";
+
+            os << std::left << std::setw(label_width) << "Max age unpinned:" << std::right
+               << std::fixed << std::setprecision(2) << std::setw(value_width)
+               << unpinned_max_age_seconds << " seconds ("
+               << format_time_with_units(unpinned_max_age_seconds) << ")\n";
+         }
+
+         // After printing average age information, add the maximum Seq info:
+         os << std::left << std::setw(label_width) << "Max Seq:" << std::right << std::fixed
+            << std::setprecision(0) << std::setw(value_width) << max_seq
+            << " (highest sequence number)\n";
+
          // Add valid object statistics
-         os << "\nValid objects:   " << total_read_nodes << " objects ("
+         os << "\n"
+            << std::left << std::setw(label_width) << "Valid objects:" << std::right
+            << std::setw(value_width) << total_read_nodes << " objects ("
             << total_read_bytes / 1024 / 1024. << " MB, " << std::fixed << std::setprecision(2)
             << (total_read_bytes * 100.0) / total_space << "% of total space)\n";
 

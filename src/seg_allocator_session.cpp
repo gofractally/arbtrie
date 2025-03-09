@@ -86,20 +86,37 @@ namespace arbtrie
    {
       if (_session_num == -1)
          return;
-      if (_alloc_seg_ptr)  // not moved
-      {
-         if (segment_size - _alloc_seg_ptr->_alloc_pos >= sizeof(node_header))
-         {
-            memset(((char*)_alloc_seg_ptr) + _alloc_seg_ptr->_alloc_pos, 0,
-                   sizeof(node_header));  // mark last object
-         }
-         if (_alloc_seg_meta)
-            _alloc_seg_meta->free(segment_size - _alloc_seg_ptr->_alloc_pos);
-         _alloc_seg_ptr->_alloc_pos = uint32_t(-1);
-         _alloc_seg_num             = -1ull;
-      }
+      finalize_active_segment();
       _sega.release_session_num(_session_num);
       _session_num = -1;
+   }
+
+   void seg_alloc_session::finalize_active_segment()
+   {
+      if (_alloc_seg_ptr)
+      {
+         auto cur_apos   = _alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed);
+         auto free_space = segment_size - cur_apos;
+
+         if (free_space >= sizeof(node_header))
+         {
+            assert(cur_apos + sizeof(uint64_t) <= segment_size);
+            memset(((char*)_alloc_seg_ptr) + cur_apos, 0, sizeof(node_header));
+         }
+
+         // Set the segment close time before finalization
+         _alloc_seg_ptr->_close_time_usec = arbtrie::get_current_time_ms();
+
+         _alloc_seg_meta->finalize_segment(
+             segment_size - _alloc_seg_ptr->_alloc_pos,
+             _alloc_seg_ptr->_vage_accumulator.average_age());  // not alloc
+
+         _alloc_seg_ptr->_alloc_pos.store(uint32_t(-1), std::memory_order_release);
+         _sega.push_dirty_segment(_alloc_seg_num);
+         _alloc_seg_ptr  = nullptr;
+         _alloc_seg_num  = -1ull;
+         _alloc_seg_meta = nullptr;
+      }
    }
 
    std::pair<node_location, node_header*> seg_alloc_session::alloc_data(uint32_t       size,
@@ -111,7 +128,7 @@ namespace arbtrie
       if (not _alloc_seg_ptr or
           _alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed) > segment_size) [[unlikely]]
       {
-         auto [num, ptr] = _sega.get_new_segment();
+         auto [num, ptr] = _sega.get_new_segment(_alloc_to_pinned);
          _alloc_seg_num  = num;
          _alloc_seg_ptr  = ptr;
          _alloc_seg_meta = &_sega.get_segment_meta(_alloc_seg_num);
@@ -140,25 +157,10 @@ namespace arbtrie
       // B - if there isn't enough space, notify compactor go to A
       if (spec_pos > (segment_size - sizeof(node_header))) [[unlikely]]
       {
-         if (free_space >= sizeof(node_header))
-         {
-            assert(cur_apos + sizeof(uint64_t) <= segment_size);
-            memset(((char*)sh) + cur_apos, 0, sizeof(node_header));
-         }
-
-         // Set the segment close time before finalization
-         sh->_close_time_usec = arbtrie::get_current_time_ms();
-
-         _alloc_seg_meta->finalize_segment(segment_size - sh->_alloc_pos,
-                                           sh->_vage_accumulator.average_age());  // not alloc
-         sh->_alloc_pos.store(uint32_t(-1), std::memory_order_release);
-         _sega.push_dirty_segment(_alloc_seg_num);
-         _alloc_seg_ptr  = nullptr;
-         _alloc_seg_num  = -1ull;
-         _alloc_seg_meta = nullptr;
-
+         finalize_active_segment();
          return alloc_data(size, adr_seq, vage);  // recurse
       }
+
       // Update the vage_accumulator with the current allocation
       _alloc_seg_ptr->_vage_accumulator.add(size, vage);
 

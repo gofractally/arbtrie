@@ -40,6 +40,7 @@ namespace arbtrie
 
       void retain_read_lock();
       void release_read_lock();
+      void finalize_active_segment();
 
       seg_alloc_session(seg_allocator& a, uint32_t ses_num);
       seg_alloc_session()                                    = delete;
@@ -65,9 +66,17 @@ namespace arbtrie
                                                         id_address_seq adr_seq,
                                                         uint64_t       vage = 0);
 
+      /**
+       * Set the allocation policy for the session
+       * 
+       * @param alloc_to_pinned true if the session should allocate to pinned segments, false otherwise
+       */
+      void set_alloc_to_pinned(bool alloc_to_pinned) { _alloc_to_pinned = alloc_to_pinned; }
+
      private:
       seg_allocator& _sega;
       uint32_t       _session_num;  // index into _sega's active sessions list
+      bool           _alloc_to_pinned = true;
 
       segment_number                 _alloc_seg_num  = -1ull;
       mapped_memory::segment_header* _alloc_seg_ptr  = nullptr;
