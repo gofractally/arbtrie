@@ -39,6 +39,13 @@ namespace arbtrie
    // if you need the real cacheline size, we assume 64 for most x86 architectures
    static constexpr const uint32_t cacheline_size = 64;
 
+   // the largest object that will attempt to be promoted to pinned cache,
+   // the goal of the cache is to avoid disk cache misses. This would ideally
+   // be the largest node size (full binary node) which really contains up to
+   // 256 keys. Larger user values represent a single key/value pair and result
+   // in at most 1 cache miss for the large object followed by sequential reads.
+   static constexpr const uint32_t max_cacheable_object_size = 4096;
+
    /**
     *  Certain parameters depend upon reserving space for eventual growth
     *  of the database. 

@@ -1,5 +1,6 @@
 #pragma once
 #include <assert.h>
+#include <arbtrie/config.hpp>
 #include <arbtrie/node_header.hpp>
 #include <arbtrie/object_ref.hpp>
 #include <arbtrie/read_lock.hpp>
@@ -64,7 +65,7 @@ namespace arbtrie
          assert(r->validate_checksum());
       }
       if constexpr (SetReadBit)
-         maybe_update_read_stats();
+         maybe_update_read_stats(r->size());
       return r;
    }
 
@@ -78,14 +79,26 @@ namespace arbtrie
       return {nullptr, node_location::from_absolute(0)};
    }
 
-   inline void object_ref::maybe_update_read_stats() const
+   inline void object_ref::maybe_update_read_stats(uint32_t size) const
    {
+      if (size > max_cacheable_object_size)
+         return;  // don't track large objects
+
       // Generate random number using rdtsc hashed with XXHash for better distribution
       uint64_t tsc    = rdtsc();
       uint32_t random = XXH32(&tsc, sizeof(uint64_t), 0);
 
-      // Check if random number exceeds difficulty threshold
-      if (random > _rlock.cache_difficulty())
+      /**
+       * Assuming the difficulty of 1 cacheline is 50/50 (aka 1/2),
+       * the expected number of passes through this function to fill
+       * 2 cachelines 2x the number of times to fill 1 cacheline.
+       */
+
+      // Check if random number exceeds difficulty threshold, where the difficulty
+      // is multiplied by the number of cachelines required to fill the object.
+      uint32_t size_in_cachelines = round_up_multiple<64>(size) / 64;
+
+      if (random > _rlock.cache_difficulty() * size_in_cachelines)
       {
          // Try to set read bit
          auto m = _meta.load(std::memory_order_relaxed);

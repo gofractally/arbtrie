@@ -256,7 +256,7 @@ namespace arbtrie
 
          // Difficulty threshold for read bit updates (0-4294967295)
          std::atomic<uint32_t> _cache_difficulty{uint32_t(-1) -
-                                                 (uint32_t(-1) / 16)};  // 1 in 16 probability
+                                                 (uint32_t(-1) / 64)};  // 1 in 64 probability
 
          // Thread state for the read bit decay thread
          segment_thread_state  read_bit_decay_thread_state;

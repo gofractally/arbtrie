@@ -51,7 +51,7 @@ namespace arbtrie
       void            prefetch() { __builtin_prefetch(&_meta, 1, 1); }
       node_meta_type& meta() { return _meta; }
 
-      void maybe_update_read_stats() const;
+      void maybe_update_read_stats(uint32_t size) const;
 
      protected:
       friend class seg_allocator;
