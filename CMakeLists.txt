@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.16)
 
 # Set CMake policies
 if(POLICY CMP0144)
@@ -43,11 +43,17 @@ endif()
 
 project(arbtrie VERSION 0.1.0 LANGUAGES CXX)
 
+# Set global properties
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # Define build options
 option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_VISUALIZER "Build segment visualizer" )
+option(BUILD_SAL "Build SAL (Storage Abstraction Library)" ON)
 
 # Find required packages
 find_package(Threads REQUIRED)
@@ -65,6 +71,18 @@ endif()
 # Only find Qt if building visualizer
 if(BUILD_VISUALIZER)
     add_subdirectory(visualizer)
+endif()
+
+# SAL library setup
+if(BUILD_SAL)
+    # Forward relevant options to SAL
+    option(SAL_DEBUG "Enable debug logging for SAL library" ON)
+    option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
+    
+    # Add the SAL library
+    add_subdirectory(libraries/sal)
+    
+    message(STATUS "SAL library added to build")
 endif()
 
 # Main library
@@ -89,7 +107,11 @@ target_include_directories(arbtrie
         ${Boost_INCLUDE_DIRS}
 )
 
-target_link_libraries(arbtrie PUBLIC Threads::Threads)
+target_link_libraries(arbtrie 
+    PUBLIC 
+        Threads::Threads
+        $<$<BOOL:${BUILD_SAL}>:sal>
+)
 target_compile_features(arbtrie PUBLIC cxx_std_23)
 
 # Set up explicit compile definitions
@@ -246,7 +268,7 @@ if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
-# Install rules (optional)
+# Installation rules (optional)
 install(TARGETS arbtrie
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -256,3 +278,5 @@ install(TARGETS arbtrie
 install(DIRECTORY include/
     DESTINATION include
 )
+
+# End of file - removing duplicate SAL options and includes
