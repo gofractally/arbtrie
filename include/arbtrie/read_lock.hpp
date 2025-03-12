@@ -1,4 +1,5 @@
 #pragma once
+#include <arbtrie/id_alloc.hpp>
 #include <arbtrie/node_meta.hpp>
 
 namespace arbtrie
@@ -29,14 +30,15 @@ namespace arbtrie
       void release();
 
      private:
-      void unlock();
+      void         unlock();
+      node_header* copy_on_write(node_meta_type::temp_type meta);
 
-      bool            _released = false;
-      temp_meta_type  _locked_val;
+      // it starts out true because lock isn't acquired unless as() is called
+      // and exposes the protected memory to the caller
+      bool            _released = true;
       node_meta_type& _meta;
       read_lock&      _rlock;
       node_header*    _observed_ptr = nullptr;
-      sync_lock*      _sync_lock    = nullptr;
    };
 
    class object_ref;
@@ -45,7 +47,10 @@ namespace arbtrie
      * Ensures the read-lock is released so segments can be recycled
      * and ensures that all data access flows through a read_lock.
      *
-     * note: no mutexes are involved with this lock
+     * note: this is a wait-free lock that prevents segments from
+     * being reused until all reads are complete. It is cheap to
+     * acquire and release, but holding it a long time will increase
+     * memory usage and reduce cache performance.
      */
    class read_lock
    {
@@ -77,6 +82,7 @@ namespace arbtrie
       bool       is_synced(node_location);
       sync_lock& get_sync_lock(int seg);
 
+      bool is_read_only(node_location loc) const;
       void free_object(node_location loc, uint32_t size);
 
       /**
@@ -89,6 +95,9 @@ namespace arbtrie
      private:
       friend class seg_alloc_session;
       friend class object_ref;
+      friend class modify_lock;
+      bool try_modify_segment(segment_number segment_num);
+      void end_modify();
 
       read_lock(seg_alloc_session& s) : _session(s) { _session.retain_read_lock(); }
       read_lock(const seg_alloc_session&) = delete;

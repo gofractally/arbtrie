@@ -40,7 +40,12 @@ namespace arbtrie
 
       void retain_read_lock();
       void release_read_lock();
+
+      void init_active_segment();
       void finalize_active_segment();
+
+      void end_modify();
+      bool try_modify_segment(segment_number segment_num);
 
       seg_alloc_session(seg_allocator& a, uint32_t ses_num);
       seg_alloc_session()                                    = delete;
@@ -55,6 +60,7 @@ namespace arbtrie
        * Check if a node location has been synced to disk.
        */
       inline bool is_synced(node_location loc) const;
+      inline bool is_read_only(node_location loc) const;
 
       /**
        * Get the cache difficulty value which is used for determining read bit updates
@@ -91,10 +97,13 @@ namespace arbtrie
       uint32_t       _session_num;  // index into _sega's active sessions list
       bool           _alloc_to_pinned = true;
 
-      segment_number                 _alloc_seg_num  = -1ull;
-      mapped_memory::segment_header* _alloc_seg_ptr  = nullptr;
-      mapped_memory::segment_meta*   _alloc_seg_meta = nullptr;
-      bool                           _in_alloc       = false;
+      void lock_alloc_segment();
+      void assert_modify_segment(segment_number segment_num);
+
+      segment_number               _alloc_seg_num  = -1ull;
+      mapped_memory::segment*      _alloc_seg_ptr  = nullptr;
+      mapped_memory::segment_meta* _alloc_seg_meta = nullptr;
+      bool                         _in_alloc       = false;
 
       // RNG for cache decisions - initialized with session number for reproducibility
       lehmer64_rng _session_rng;
@@ -106,4 +115,5 @@ namespace arbtrie
       // Reference to the read cache queue from seg_allocator
       rcache_queue_type& _rcache_queue;
    };
+
 }  // namespace arbtrie

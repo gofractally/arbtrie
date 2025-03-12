@@ -79,6 +79,7 @@ add_library(arbtrie
     src/iterator_count_keys.cpp
     src/segment_thread.cpp
     src/block_allocator.cpp
+    src/mapped_memory/session_data.cpp
 )
 
 # Library configuration

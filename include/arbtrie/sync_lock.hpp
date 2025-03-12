@@ -10,16 +10,11 @@ namespace arbtrie
     *
     *  However, only one thread may sync data at a time and that thread cannot
     *  sync data while there are any modifications in progress on the segment
-    *  that is being synced. 
+    *  that is being synced (because it is marking the memory read only)
     *
     *  Fortunately, modify threads need not wait until a sync is finished because
     *  they can choose to "assume" the data has been synced and copy it to their
     *  thread-local alloc segment and then modify it. 
-    *       - this assumes nothing in this thread's alloc segment
-    *       has been changed by the syncing thread, to maintain this invariant 
-    *       any modification must check whether the mod is to an object in
-    *       another thread's alloc buffer and copy it to their own session-local
-    *       alloc buffer before modifying.
     *
     *  So modify threads only need to "try to modify" in an effort to avoid a memcpy.
     *
@@ -27,13 +22,27 @@ namespace arbtrie
     *  to avoid redundant syncs and they must wait on modify to complete.
     *
     *  On sync
-    *     - only sync your own alloc segment
-    *         * your thread did not modify data in other alloc segments
     *     - sync all segments in the sync queue,
     *         the sync queue is filled with segments when a session's
     *         alloc segment is filled and there is unsynced data
     *     - the sync lock can be on a per-segment basis, meaning modifications
     *       can occur on other unsynced segments while one segment is syncing.
+    * 
+    * 
+    *  Each session can only be modifying one node/segment at a time; therefore,
+    *  each session publishes the segment it is modifying to a session-local
+    *  cacheline deconflicted memory location. 
+    * 
+    *  The sync lock is a per-segment atomic bit that gets set by the syncing
+    * thread when it wants to stop all modifications so that it can advance the
+    * read-only portion of the segment. 
+    * 
+    *  Before doing any modifications to a segment, threads check this bit and
+    *  if the bit is set they choose to COW rather than modify in place. The
+    *  syncing thread must wait until all sessions have cleared their broadcast
+    *  modification segment. After clearing finishing their modifications, if 
+    *  they see the sync bit is set, they notify_all() to wake up the syncing
+    *  thread.
     */
    struct sync_lock
    {
@@ -70,8 +79,11 @@ namespace arbtrie
       {
          _sync_lock.lock();
          // acquire the memory written before end_modify() was called
-         auto prior = _state.fetch_or(sync_mask, std::memory_order_acquire);
-         prior |= sync_mask;
+         auto prior = _state.fetch_add(sync_mask, std::memory_order_acquire);
+         prior += sync_mask;
+
+         // wait until all modifying threads have finished and the
+         // count returns to 0
          while (prior != sync_mask)
          {
             ARBTRIE_WARN("prior: ", prior, " vs sync mask: ", sync_mask);

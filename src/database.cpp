@@ -1564,10 +1564,11 @@ namespace arbtrie
                root.modify().as<binary_node>()->insert(kvi, key, _cur_val);
             }
             else  // definite obj_id (aka value node)
-               root.modify().as<binary_node>()->insert(
-                   kv_index(lb_idx, kv_type::obj_id), key,
-                   value_type::make_value_node(
-                       make_value(bn->branch_region(), root.rlock(), _cur_val)));
+            {
+               auto val = make_value(bn->branch_region(), root.rlock(), _cur_val);
+               root.modify().as<binary_node>()->insert(kv_index(lb_idx, kv_type::obj_id), key,
+                                                       value_type::make_value_node(val));
+            }
             return root.address();
          }
          // else we have to refactor...

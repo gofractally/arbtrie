@@ -2,13 +2,12 @@
 add_executable(arbtrie-tests
     arbtrie-tests.cpp
     hierarchical_bitmap_tests.cpp
-#spmc_circular_buffer.cpp
     padded_atomic_tests.cpp
-    node_meta_tests.cpp
     segment_meta_tests.cpp
     interprocess_mutex_tests.cpp
     seg_alloc_dump_tests.cpp
     cache_difficulty_state_tests.cpp
+    mapped_memory_tests.cpp
 )
 
 target_link_libraries(arbtrie-tests 

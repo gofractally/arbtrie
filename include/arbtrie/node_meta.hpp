@@ -45,59 +45,22 @@ namespace arbtrie
     * This class is the core of the arbtrie memory managment algorithm
     * and is responsible for a majority of the lock-free properties. It
     * manages 8 bytes of "meta" information on every node in the trie
-    * including its current location, reference count, copy locks,
-    * and type. 
+    * including its current location, reference count, and type. 
     *
     * Because node_meta is an atomic type and we desire to minimize 
     * the number of atomic accesses, @ref node_meta is templated on
     * the storage type so the majority of the API can be used on the
     * temporary read from the atomic. See node_meta<>::temp_type
-    *
-    *  ## Modify / Copy Locking Protocol
-    *
-    *  For any given object it can be modified by exactly one writer thread or
-    *  moved by exactly one compactor thread. The compactor thread needs to prove
-    *  that the data was not modified while being copied and the modify thread 
-    *  doesn't want to ever wait on the compactor to move an object. 
-    *
-    *  The compactor sets the copy flag to 1 when it starts the copy and only
-    *  updates the location at the end of the copy if the bit is still 1.
-    *
-    *  The modify thread will clear the copy flag when it starts to modify and
-    *  also set the modify_flag to 1. If anything other than the reference count
-    *  has changed (provided ref count is still greater than 0) then the compactor
-    *  thread will invalidate its copy and try again (assuming location hasn't changed).
-    *  
-    *  Cases:
-    *     Idle case: modify flag = 1, aka m1 while copy flag = 0, aka c0,
-    *     the modify flag is "inverted" so that 1 means not modifying and 0 means 
-    *     modifying so that flags can be set/cleared in one atomic operation without
-    *     compare and exchange.
-    *
-    *
-    *     A)                                    B)                  
-    *     start modify (m0,c0) acquire         start copy  (c1)       acquire
-    *     end modify (m1) release              start modify (m0,c0)   acquire
-    *     start copy (c1) acquire              end modify (m1)        release 
-    *     end copy (c0) c&e success_release    end copy               c&e fail_relaxed 
-    *     success                              try copy again        
-    *                                    
-    *                                    
-    *     C)                                      D)
-    *     start copy   (c1)                       start modify (m0,c0)
-    *     start modify (m0,c0)                    compactor waits (c1)
-    *     end copy & wait (c1) c&e fail_relaxed   end modify & notify (m1)
-    *     end modify & notify (m1)                compactor try again
-    *     try again                                        
-    *
-    *  The modify thread only wants to notify if the copy thread is waiting,
-    *  the modify thread knows the copy thread is waiting because the copy thread
-    *  set both bits and the modify thread saw the "prior value" when it reset those
-    *  bits and knows something changed.
-    *
-    *  The copy thread waits with memory_order_acquire and the modify thread ends
-    *  with memory_order_release.
-    *
+    * 
+    * Primary Operations:
+    *     retain() / release() - reference counting
+    *     read/pending flags for cache signalling
+    *     compare_exchange_location() - move the node to a new location
+    * 
+    * Assumptions:
+    *     Only unique owners are able to modify the data
+    *     pointed at by the current location, assuming that location
+    *     hasn't been made write protected yet.
     */
    template <typename Storage = std::atomic<uint64_t>>
    class node_meta
@@ -108,11 +71,11 @@ namespace arbtrie
        */
       struct bitfield
       {
-         uint64_t ref : 14      = 0;
-         uint64_t type : 3      = 0;
-         uint64_t read : 1      = 0;  // indicates someone read this node since last cleared
-         uint64_t copy_flag : 1 = 0;  // set this bit on start of copy, clear it on start of modify
-         uint64_t modify_flag : 1   = 0;  // 0 when modifying, 1 when not
+         uint64_t ref : 14          = 0;
+         uint64_t type : 3          = 0;
+         uint64_t read : 1          = 0;  // indicates someone read this node since last cleared
+         uint64_t copy_flag : 1     = 0;
+         uint64_t unused_flag : 1   = 0;  // 0 when modifying, 1 when not
          uint64_t pending_cache : 1 = 0;  // indicates this node is pending cache update
          // gives 512 TB addressable cachelines
          uint64_t location : 43 = 0;
@@ -186,9 +149,6 @@ namespace arbtrie
             return _meta.load(order);
       }
 
-      bool          is_changing() const { return to_int() & modify_mask; }
-      bool          is_const() const { return not is_changing(); }
-      bool          is_copying() const { return to_int() & copy_mask; }
       bool          is_read() const { return to_int() & read_mask; }
       bool          is_pending_cache() const { return to_int() & pending_cache_mask; }
       uint16_t      ref() const { return bitfield(to_int()).ref; }
@@ -207,7 +167,15 @@ namespace arbtrie
       auto& set_read()
       {
          if constexpr (std::is_same_v<Storage, std::atomic<uint64_t>>)
-            _meta.fetch_or(read_mask, std::memory_order_relaxed);
+         {
+            auto expected = _meta.load(std::memory_order_relaxed);
+            while (!(expected & read_mask))
+            {
+               if (_meta.compare_exchange_weak(expected, expected | read_mask,
+                                               std::memory_order_relaxed))
+                  break;
+            }
+         }
          else
             _meta |= read_mask;
          return *this;
@@ -216,7 +184,15 @@ namespace arbtrie
       auto& clear_read_bit(std::memory_order order = std::memory_order_relaxed)
       {
          if constexpr (std::is_same_v<Storage, std::atomic<uint64_t>>)
-            _meta.fetch_and(~read_mask, order);
+         {
+            auto expected = _meta.load(order);
+            while (expected & read_mask)
+            {
+               if (_meta.compare_exchange_weak(expected, expected & ~read_mask,
+                                               std::memory_order_relaxed))
+                  break;
+            }
+         }
          else
             _meta &= ~read_mask;
          return *this;
@@ -386,167 +362,32 @@ namespace arbtrie
       }
       ///@}
 
+      /**
       std::mutex& mut()
       {
          static std::mutex m;
          return m;
       }
+      */
 
       /**
-       * @defgroup Atomic Synchronization 
-       *  These methods only work on the default Storage=std::atomic
+       * This method updates the location of the node to @param new_loc iff 
+       * the prior location is the expected location and the reference count
+       * has not dropped to 0.
        */
-      ///@{
-      // returns the state prior to start modify
-      temp_type start_modify()
-      {
-         do
-         {
-            uint64_t prior = _meta.fetch_or(modify_mask, std::memory_order_acquire);
-            if (not(prior & copy_mask))
-               return temp_type(prior);
-
-            _meta.wait(prior | modify_mask);
-         } while (true);
-      }
-
-      temp_type end_modify()
-      {
-         // set the const flag to 1 to signal that modification is complete
-         // mem order release synchronizies with readers of the modification
-         temp_type prior(_meta.fetch_and(~modify_mask, std::memory_order_release));
-
-         // if a copy was started between start_modify() and end_modify() then
-         // the copy bit would be set and the other thread will be waiting
-         if (prior.is_copying())
-            _meta.notify_all();
-
-         return prior;
-      }
-
-      bool end_move()
-      {
-         auto prior = _meta.fetch_and(~copy_mask, std::memory_order_release);
-         if (prior & modify_mask)
-            _meta.notify_all();
-         return false;
-      }
-
-      /**
-       *  Sets the copy flag to true, 
-       */
-      bool try_start_move(node_location expected)
-      {
-         do
-         {
-            uint64_t prior = _meta.load(std::memory_order_relaxed);
-            do
-            {
-               temp_type meta(prior);
-
-               if (not meta.ref() or meta.loc() != expected) [[unlikely]]
-                  return end_move();
-
-            } while (not _meta.compare_exchange_weak(prior, prior | copy_mask,
-                                                     std::memory_order_acquire));
-
-            if (not temp_type(prior).is_changing())
-               return true;
-
-            _meta.wait(prior, std::memory_order_relaxed);
-         } while (true);
-      }
-
-      /**
-       * Attempts to set the copy bit and returns the current location if successful.
-       * Returns std::nullopt if the reference count is 0 or if unable to set the copy bit.
-       */
-      std::optional<node_location> try_move_location()
-      {
-         uint64_t prior = _meta.load(std::memory_order_relaxed);
-         do
-         {
-            temp_type meta(prior);
-            if (not meta.ref()) [[unlikely]]
-            {
-               //   ARBTRIE_DEBUG("try_move_location: ref count is 0");
-               return std::nullopt;
-            }
-            if (not meta.is_pending_cache()) [[unlikely]]
-            {
-               //  ARBTRIE_DEBUG("try_move_location: pending_cache bit is not set");
-               return std::nullopt;
-            }
-
-            // Try to set the copy bit
-            if (not _meta.compare_exchange_weak(prior, prior | copy_mask,
-                                                std::memory_order_acquire))
-               continue;
-
-            // If we got here, we successfully set the copy bit
-            if (not temp_type(prior).is_changing())
-               return meta.loc();
-
-            // If the node is being modified, clear the copy bit and try again
-            auto new_prior = _meta.fetch_and(~copy_mask, std::memory_order_release);
-            if (new_prior == prior)
-               _meta.wait(prior, std::memory_order_relaxed);
-            prior = _meta.load(std::memory_order_relaxed);
-         } while (true);
-      }
-
-      enum move_result : int_fast8_t
-      {
-         moved   = -1,
-         freed   = -2,
-         success = 0,
-         dirty   = 1,
-      };
-
-      /**
-       *  Move is only successful if the expected location hasn't changed 
-       *  from when try_start_move() was called. If everything is in order
-       *  then new_loc is stored.  move_result > 1 is dirty, move_result < 0
-       *  means the object is no longer there.  Success is 0.
-       */
-      move_result try_move(node_location expect_loc, node_location new_loc)
+      bool compare_exchange_location(node_location expect_loc, node_location new_loc)
       {
          uint64_t  expected = _meta.load(std::memory_order_relaxed);
          temp_type ex;
          do
          {
             ex = temp_type(expected);
-            if (ex.loc() != expect_loc) [[unlikely]]
-            {
-               end_move();
-               return move_result::moved;
-            }
-            if (ex.ref() == 0) [[unlikely]]
-            {
-               end_move();
-               return move_result::freed;
-            }
-            ex.set_location(new_loc).clear_copy_flag();
+            if (ex.loc() != expect_loc or ex.ref() == 0) [[unlikely]]
+               return false;
+            ex.set_location(new_loc);
          } while (
              not _meta.compare_exchange_weak(expected, ex.to_int(), std::memory_order_release));
-
-         if (expected & modify_mask) [[unlikely]]
-            _meta.notify_all();
-
-         //mut().unlock();
-         return move_result::success;
-      }
-
-      /**
-       *  A thread that doesn't own this object and wants to own it must
-       *  ensure that nothing changes if it cannot increment the reference count; therefore,
-       *  it cannot use fetch_add() like retain() does and must use compare/exchange loop
-       */
-      bool try_retain()
-      {
-         // load, inc, compare and exchange
-         throw std::runtime_error("try_retain not impl yet");
-         abort();
+         return true;
       }
 
       /**
@@ -602,14 +443,6 @@ namespace arbtrie
       node_meta(const node_meta<uint64_t>& cpy) : _meta(cpy._meta) {}
 
       constexpr node_meta(uint64_t v = 0) : _meta(v) {}
-
-      /*
-      node_meta& operator=(auto&& m)
-      {
-         _meta = std::forward<decltype(m)>(m);
-         return *this;
-      }
-      */
 
      private:
       Storage _meta;

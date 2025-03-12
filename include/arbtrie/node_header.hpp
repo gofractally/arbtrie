@@ -24,10 +24,115 @@ namespace arbtrie
       return uint8_t(b - 1);
    }
 
+   enum class header_type : uint32_t
+   {
+      node      = 0,
+      allocator = 1
+   };
+
+   /**
+    *  Designed to overlap with the object_header data structure and enable
+    *  discriminating between node_header and allocator_header types at 
+    *  runtime using the _header_type flag.
+    * 
+    *  From time to time the seg_allocator will write to the header to record
+    *  information about the segment and mark the ending and beginning of 
+    *  transactions, compactions, etc.
+    *  
+    *  Because the allocator works on 64 byte cachelines, the allocator_header
+    *  is allowed to be the same size with little penalty. Therefore it is used
+    *  track useful statistics and error recovery information. Furthermore, when
+    *  protecting or msyncing data the OS requires page aligned addresses which
+    *  means that in most cases the allocator_header will occupy the free space
+    *  in the left over bytes at the end of the last writable page. 
+    * 
+    *  A segment is a sequence of allocator_headers and node_headers.
+    * 
+    * [ n n n n a n n a...]
+    * 
+    * The allocation_header stores the checksum of all data from the
+    * end of the last allocator_header to the start of this allocation header.
+    * 
+    * In most cases this is synced at the same time as the other node headers, 
+    * unless the allocator_header is the first data in the start of a new
+    * page. In that case it won't get protected or synced until the next page is 
+    * protected or synced.
+    * 
+    * The last record in a segment is always an allocator_header.
+    */
+   struct allocator_header
+   {
+      enum types : uint8_t
+      {
+         end_of_segment   = 0,
+         start_of_segment = 1,
+         free_zone        = 2
+      };
+      bool is_allocator_header() const
+      {
+         return header_type(_header_type) == header_type::allocator;
+      }
+      bool is_end_of_segment() const { return _ntype == end_of_segment; }
+      /**
+       *  The checksum of the region [this-_start_checksum_offset, _start_checksum_offset + _checksum_bytes)
+       * 
+       *  Typically this would align with the start of the prior allocator_header, but there is not always
+       *  a prior allocator_header.
+       */
+      uint64_t _checksum;
+      uint32_t _ntype : 3;   ///< deepnds on _header_type
+      uint32_t _nsize : 25;  ///< bytes allocated for this object
+      uint32_t _unused : 3;  ///< truly unused bits, should never be written to
+      /// used by segment allocator for bookkeeping, changes the meaning of _ntype
+      uint32_t _header_type : 1 = 1;
+
+      /// time this header was written, implies everything before this record
+      /// was written before this time.
+      uint64_t _time_stamp_ms;
+
+      /// the position in the current segment where the checksumed data starts
+      uint32_t _start_checksum_pos;
+      /// the number of bytes in the checksumed data after _start_checksum_pos,
+      uint32_t _checksum_bytes;
+
+      /// the previous allocator_header in the current segment, used to
+      /// form a linked list of allocator_headers.
+      uint32_t _prev_aheader_pos;
+
+      /**
+       * When compacting data from another segment, this field tells us the original
+       * age of the source data, the compactor will use this age for all nodes it compacts
+       * until it comes across an updated age.
+       */
+      uint64_t _source_age_ms;
+
+      /**
+       * Documents the source of the segment the data came from, which can facilitate establishing
+       * a total ordering of nodes during recovery, may not be needed, but we have 64 bytes to
+       * play with
+       */
+      uint32_t _source_seg;
+
+      /// regardless of what _nsize is, the allocations should always be 64 byte cacheline aligned
+      uint32_t          capacity() const { return (_nsize + 63) & -64; }
+      allocator_header* next() const { return (allocator_header*)(((char*)this) + capacity()); }
+      allocator_header* prev(char* segment_base) const
+      {
+         return (allocator_header*)(segment_base + _prev_aheader_pos);
+      }
+   };
+   static_assert(sizeof(allocator_header) <= 64);
+
    /**
     * Base class for all objects that can be addressed and stored in the database.
     * Contains the core identity and type information, but doesn't include branch
     * region or number of branches which are specific to node types.
+    * 
+    * @note the object_header must align with the mapped_memory::allocation_header such that
+    * _header_type bit is in the same position in both types. It cannot be the
+    * first byte of the object because of checksum requirements and we cannot
+    * use other types of inheritance to enforce this alignment due to the use of
+    * bitfields. This invariant is checked in the unit tests.
     */
    struct object_header
    {
@@ -36,9 +141,12 @@ namespace arbtrie
       uint32_t   sequence : 24;  // 24-bit sequence number, set only during construction
       id_address _node_id;       // the ID of this object
 
-      uint32_t _ntype : 3;    // node_type
-      uint32_t _nsize : 25;   // bytes allocated for this object
-      uint32_t _unused2 : 4;  // truly unused bits, should never be written to
+      uint32_t _ntype : 3;   ///< node_type
+      uint32_t _nsize : 25;  ///< bytes allocated for this object
+      uint32_t _unused : 3;  ///< truly unused bits, should never be written to
+
+      /// used by segment allocator for bookkeeping, changes the meaning of _ntype
+      uint32_t _header_type : 1 = 0;  /// = 0 for node_header, = 1 for allocator_header
 
       // Constructor
       inline object_header(uint32_t size, id_address_seq nid, node_type type = node_type::freelist)
@@ -90,6 +198,11 @@ namespace arbtrie
          if (checksum)
             return (checksum == calculate_checksum());
          return true;
+      }
+      void assert_checksum() const
+      {
+         if (not validate_checksum())
+            throw std::runtime_error("checksum validation failed");
       }
 
       // Return next object in memory

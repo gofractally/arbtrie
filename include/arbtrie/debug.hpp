@@ -147,7 +147,7 @@ namespace arbtrie
     * This is a critical debugging flag for catching memory-related issues and 
     * ensuring proper memory management throughout the system.
     */
-   static constexpr bool debug_memory = false;
+   static constexpr bool debug_memory = true;
 
    struct scope
    {

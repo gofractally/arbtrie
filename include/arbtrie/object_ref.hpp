@@ -27,8 +27,11 @@ namespace arbtrie
       const node_header* release();
 
       modify_lock modify() { return modify_lock(_meta, _rlock); }
-      bool        try_start_move(node_location loc) { return _meta.try_start_move(loc); }
-      auto        try_move(node_location expected_prior_loc, node_location move_to_loc);
+
+      bool compare_exchange_location(node_location expect_loc, node_location new_loc)
+      {
+         return _meta.compare_exchange_location(expect_loc, new_loc);
+      }
 
       template <typename T = node_header, bool SetReadBit = false>
       const T* header() const;

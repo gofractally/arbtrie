@@ -10,7 +10,7 @@ namespace arbtrie::test
 
    TEST_CASE("cache_difficulty_state construction and initial values", "[cache_difficulty]")
    {
-      allocator_state::cache_difficulty_state state;
+      cache_difficulty_state state;
 
       // Verify initial values (1 in 1024 probability)
       REQUIRE(state._cache_difficulty.load() == (uint32_t(-1) - (uint32_t(-1) / 1024)));
@@ -21,7 +21,7 @@ namespace arbtrie::test
 
    TEST_CASE("should_cache basic functionality", "[cache_difficulty]")
    {
-      allocator_state::cache_difficulty_state state;
+      cache_difficulty_state state;
 
       // For default difficulty, test the basic functionality
       // Test with a range of values to ensure correct behavior
@@ -61,7 +61,7 @@ namespace arbtrie::test
 
    TEST_CASE("compactor_promote_bytes basic functionality", "[cache_difficulty]")
    {
-      allocator_state::cache_difficulty_state state;
+      cache_difficulty_state state;
 
       // Verify total_promoted_bytes starts at 0
       REQUIRE(state.total_promoted_bytes.load() == 0);
@@ -92,7 +92,7 @@ namespace arbtrie::test
 
    TEST_CASE("total promoted bytes tracking", "[cache_difficulty]")
    {
-      allocator_state::cache_difficulty_state state;
+      cache_difficulty_state state;
 
       // Initial value should be 0
       REQUIRE(state.total_promoted_bytes.load() == 0);
@@ -107,7 +107,7 @@ namespace arbtrie::test
 
    TEST_CASE("cache difficulty ranges are maintained", "[cache_difficulty]")
    {
-      allocator_state::cache_difficulty_state state;
+      cache_difficulty_state state;
 
       // Use shorter window for testing
       state._cache_frequency_window = std::chrono::milliseconds(1000);
@@ -135,7 +135,7 @@ namespace arbtrie::test
 
    TEST_CASE("cache difficulty adjustment with gap-based logic", "[cache_difficulty]")
    {
-      allocator_state::cache_difficulty_state state;
+      cache_difficulty_state state;
 
       // Use shorter window for testing
       state._cache_frequency_window = std::chrono::milliseconds(1000);

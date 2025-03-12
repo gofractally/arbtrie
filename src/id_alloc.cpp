@@ -29,25 +29,7 @@ namespace arbtrie
       if (not _state->clean_shutdown)
       {
          ARBTRIE_WARN("checking node_meta index state...");
-
-         // TODO: this could be multi-threaded for faster startup
-         const auto nb = _block_alloc.num_blocks();
-         for (int b = 0; b < nb; ++b)
-         {
-            auto       start = (temp_meta_type*)_block_alloc.get(b);
-            auto       nm    = start;
-            const auto end   = nm + id_block_size / sizeof(temp_meta_type);
-            while (nm != end)
-            {
-               if (nm->ref() and nm->is_changing())
-               {
-                  ARBTRIE_WARN(
-                      "detected partial write in node, data may be corrupted: ",
-                      id_address(id_region((nm - start) / ids_per_page),
-                                 id_index((b * ids_per_page) + ((nm - start) % ids_per_page))));
-               }
-            }
-         }
+         /// TODO: validate the tree
       }
    }
 

@@ -59,6 +59,15 @@ namespace arbtrie
       seg_alloc_dump dump();
       ///@}
 
+      /**
+       * @group Configuration Methods
+       */
+      ///@{
+      bool config_validate_checksum_on_compact() const;
+      bool config_update_checksum_on_compact() const;
+      bool config_update_checksum_on_modify() const;
+      ///@}
+
       void sync(sync_type st = sync_type::sync);
 
       seg_alloc_session start_session() { return seg_alloc_session(*this, alloc_session_num()); }
@@ -98,15 +107,28 @@ namespace arbtrie
       friend class object_ref;
 
       void mlock_pinned_segments();
+      void write_protect_segment(segment_number seg_num);
+      void prepare_for_write_protect(segment_number          seg_num,
+                                     mapped_memory::segment* seg,
+                                     uint32_t                post_alloc_pos,
+                                     uint32_t                old_first_writable_pos,
+                                     uint32_t                new_first_writable_pos);
+      void start_sync_segment(segment_number seg_num);
+      void end_sync_segment();
 
       /**
        * Utilized by seg_alloc_session 
        */
       /// @{
-      mapped_memory::segment_header* get_segment(segment_number seg) noexcept
+      mapped_memory::segment* get_segment(segment_number seg) noexcept
       {
-         return static_cast<mapped_memory::segment_header*>(_block_alloc.get(seg));
+         return static_cast<mapped_memory::segment*>(_block_alloc.get(seg));
       }
+      const mapped_memory::segment* get_segment(segment_number seg) const noexcept
+      {
+         return static_cast<const mapped_memory::segment*>(_block_alloc.get(seg));
+      }
+
       uint32_t alloc_session_num();
       void     release_session_num(uint32_t sn);
       /**
@@ -276,6 +298,18 @@ namespace arbtrie
          assert(seg < max_segment_count && "invalid segment passed to is_synced");
          return _mapped_state->_segment_data.get_last_sync_pos(seg) > loc.abs_index();
       }
+      /**
+        * Check if a node location has been synced to disk.
+        * 
+        * @param loc The node location to check
+        * @return true if the location is synced, false otherwise
+        */
+      inline bool is_read_only(node_location loc) const
+      {
+         int64_t seg = loc.segment();
+         assert(seg < max_segment_count && "invalid segment passed to is_read_only");
+         return get_segment(seg)->get_first_write_pos() > loc.abs_index();
+      }
 
       /**
        * Get a reference to the session_rlock for a given session number
@@ -325,7 +359,7 @@ namespace arbtrie
        * 
        * @return A pair containing the segment number and the segment header
        */
-      std::pair<segment_number, mapped_memory::segment_header*> get_new_segment(
+      std::pair<segment_number, mapped_memory::segment*> get_new_segment(
           bool alloc_to_pinned = true)
       {
          segment_number segnum;
@@ -347,6 +381,21 @@ namespace arbtrie
       // Helper to synchronize segment pinned state between bitmap and metadata
       void update_segment_pinned_state(segment_number seg_num, bool is_pinned);
    };  // seg_allocator
+
+   inline bool seg_allocator::config_validate_checksum_on_compact() const
+   {
+      return _mapped_state->_config.validate_checksum_on_compact;
+   }
+
+   inline bool seg_allocator::config_update_checksum_on_compact() const
+   {
+      return _mapped_state->_config.update_checksum_on_compact;
+   }
+
+   inline bool seg_allocator::config_update_checksum_on_modify() const
+   {
+      return _mapped_state->_config.update_checksum_on_modify;
+   }
 
 }  // namespace arbtrie
 #include <arbtrie/read_lock_impl.hpp>

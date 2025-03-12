@@ -374,6 +374,11 @@ TEST_CASE("insert-words")
          REQUIRE(tx.count_keys() == i);
          tx.upsert(to_key_view(keys[i]), to_value_view(values[i]));
          auto buf = tx.get<std::string>(to_key_view(keys[i]));
+         if (not buf)
+         {
+            ARBTRIE_WARN("failed to get key: ", keys[i], " i: ", i);
+            abort();
+         }
          REQUIRE(buf);
          REQUIRE(*buf == values[i]);
       }

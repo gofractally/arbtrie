@@ -51,6 +51,11 @@ namespace arbtrie
          assert(i < _num_blocks.load(std::memory_order_relaxed));
          return _block_mapping[i];
       }
+      inline const void* get(block_number i) const noexcept
+      {
+         assert(i < _num_blocks.load(std::memory_order_relaxed));
+         return _block_mapping[i];
+      }
 
       // ensures that at least the desired number of blocks are present
       uint32_t reserve(uint32_t desired_num_blocks, bool memlock = false);

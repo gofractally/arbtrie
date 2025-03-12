@@ -44,11 +44,6 @@ namespace arbtrie
       return reinterpret_cast<const Type*>(header());
    }
 
-   inline auto object_ref::try_move(node_location expected_prior_loc, node_location move_to_loc)
-   {
-      return _meta.try_move(expected_prior_loc, move_to_loc);
-   }
-
    template <typename T, bool SetReadBit>
    inline const T* object_ref::header() const
    {
@@ -69,6 +64,7 @@ namespace arbtrie
       return r;
    }
 
+   /*
    template <typename T>
    std::pair<const T*, node_location> object_ref::try_move_header()
    {
@@ -78,6 +74,7 @@ namespace arbtrie
       }
       return {nullptr, node_location::from_absolute(0)};
    }
+   */
 
    inline void object_ref::maybe_update_read_stats(uint32_t size) const
    {
@@ -87,7 +84,10 @@ namespace arbtrie
          return;
       }
       if (_rlock.should_cache(size) and _meta.try_set_read_or_pending_cache())
+      {
+         ARBTRIE_INFO("maybe_update_read_stats: pushing to rcache_queue size=", size);
          _rlock._session._rcache_queue.push(address());
+      }
    }
 
    inline const node_header* object_ref::release()
