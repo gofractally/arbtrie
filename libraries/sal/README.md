@@ -1,6 +1,106 @@
-# SAL - Storage Abstraction Library
+# SAL (Systems Abstraction Layer) Library
 
-SAL provides a modern C++20 interface for low-level storage operations such as memory mapping and block management. 
+The SAL library provides a collection of low-level system utilities for memory management, file operations, and performance-critical operations used by the arbtrie project.
+
+## Key Components
+
+### Block Allocator
+
+The `block_allocator` class is responsible for efficient file-backed memory management with the following features:
+
+- Memory-mapped file storage with contiguous virtual address space
+- Efficient block allocation for data structures requiring direct memory access
+- Support for block-aligned memory operations
+- Atomically safe growth operations that maintain pointer stability
+
+## Improvements over Original Implementation
+
+The SAL library implements several critical improvements over the original arbtrie codebase:
+
+### 1. Enhanced Memory Mapping Strategy
+
+**Original Approach:**
+- Memory regions were unmapped and remapped during growth
+- Pointers to previously allocated blocks could become invalidated
+- This caused potential memory corruption if pointers were in use
+
+**SAL Improvements:**
+- **Pointer Stability**: Once memory is allocated, its address never changes
+- **Incremental Mapping**: Only new regions are mapped, leaving existing mappings untouched
+- **Contiguous Allocation**: Maintains a contiguous virtual address space for all blocks
+
+### 2. Optimized Power-of-2 Operations
+
+**Original Approach:**
+- Used loop-based calculations for determining block sizes and offsets
+- Limited block size flexibility
+
+**SAL Improvements:**
+- **Efficient log2 Calculation**: Uses `std::countl_zero` for O(1) computation
+- **Bitwise Operations**: Fast bit shifts for multiplication/division operations
+- **Power-of-2 Validation**: Explicit validation with O(1) check: `x & (x-1) == 0`
+
+### 3. Flexible Configuration
+
+**Original Approach:**
+- Fixed relationship between parameters
+
+**SAL Improvements:**
+- **Non-power-of-2 Max Blocks**: Allows arbitrary maximum block counts
+- **Power-of-2 Block Sizes**: Enforces power-of-2 block sizes for efficiency
+- **Dynamic Address Space Allocation**: Determines maximum reservation size based on system capabilities
+
+### 4. Memory Safety Enhancements
+
+**Original Approach:**
+- Potential memory leaks during error conditions
+
+**SAL Improvements:**
+- **Clean Resource Management**: Properly handles cleanup in all error paths
+- **Exception Safety**: Provides strong exception guarantee for allocation operations
+- **Atomic Operations**: Thread-safe block count tracking
+
+### 5. Performance Optimization
+
+**Original Approach:**
+- Less efficient memory usage patterns
+
+**SAL Improvements:**
+- **Optimized Block Addressing**: Fast bit-shift operations for address calculations
+- **Block Alignment**: Efficient modulo checks with bitwise operations
+- **Reduced System Calls**: Minimizes number of mmap/munmap operations
+
+## Usage Examples
+
+```cpp
+// Create a block allocator with 16MB blocks (must be power of 2)
+sal::block_allocator allocator("data.bin", 16*1024*1024, 10);
+
+// Allocate a block and get a pointer to it
+auto offset = allocator.alloc();
+void* block_ptr = allocator.get(offset);
+
+// Write data to the block
+memcpy(block_ptr, data, data_size);
+
+// Synchronize to disk
+allocator.sync(sal::sync_type::async);
+
+// Convert between block numbers and offsets
+uint32_t block_num = allocator.offset_to_block(offset);
+sal::block_allocator::offset_ptr same_offset = allocator.block_to_offset(block_num);
+```
+
+## Design Principles
+
+The SAL library follows these core design principles:
+
+1. **Performance-first**: Optimized for high-performance systems programming
+2. **Memory safety**: Robust memory management without sacrificing performance
+3. **Simplicity**: Clean, understandable APIs with comprehensive documentation
+4. **Compatibility**: Works across different platforms and compilers
+
+The library also provides extensive debugging support and error reporting to make development easier.
 
 ## Features
 

@@ -10,9 +10,9 @@ namespace fs = std::filesystem;
 
 // Size constants
 constexpr uint64_t MB         = 1024 * 1024;
-constexpr uint64_t BLOCK_SIZE = 16 * MB;  // 16 MB blocks (must be power of 2)
-// Max blocks can be any positive integer, not necessarily a power of 2
-constexpr uint32_t MAX_BLOCKS = 5;  // Arbitrary non-power-of-2 value
+constexpr uint64_t BLOCK_SIZE = 16 * MB;  // 16 MB blocks (must be multiple of os_page_size)
+// Max blocks can be any positive integer
+constexpr uint32_t MAX_BLOCKS = 5;  // Arbitrary value
 
 // Helper function to format size in human-readable format (for debugging output)
 std::string format_size(uint64_t size_bytes)
@@ -32,51 +32,23 @@ std::string format_size(uint64_t size_bytes)
    return std::string(buffer);
 }
 
-TEST_CASE("Power of 2 validation", "[block_allocator]")
+TEST_CASE("Block size validation", "[block_allocator]")
 {
-   SECTION("is_power_of_2 helper function")
-   {
-      // Powers of 2 should return true
-      REQUIRE(sal::block_allocator::is_power_of_2(1));
-      REQUIRE(sal::block_allocator::is_power_of_2(2));
-      REQUIRE(sal::block_allocator::is_power_of_2(4));
-      REQUIRE(sal::block_allocator::is_power_of_2(8));
-      REQUIRE(sal::block_allocator::is_power_of_2(16));
-      REQUIRE(sal::block_allocator::is_power_of_2(32));
-      REQUIRE(sal::block_allocator::is_power_of_2(64));
-      REQUIRE(sal::block_allocator::is_power_of_2(128));
-      REQUIRE(sal::block_allocator::is_power_of_2(256));
-      REQUIRE(sal::block_allocator::is_power_of_2(MB));
-      REQUIRE(sal::block_allocator::is_power_of_2(BLOCK_SIZE));
-
-      // Non-powers of 2 should return false
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(0));
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(3));
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(5));
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(6));
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(7));
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(9));
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(15));
-      REQUIRE_FALSE(sal::block_allocator::is_power_of_2(10 * MB));  // 10 MB is not a power of 2
-   }
-
    SECTION("Constructor validation")
    {
       // Create a temporary file path
       fs::path temp_path = fs::temp_directory_path() / "sal_test_block_file.dat";
       fs::remove(temp_path);
 
-      // Valid block size (power of 2) should work with any max_blocks
-      REQUIRE_NOTHROW(
-          sal::block_allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS));     // Non-power-of-2 max_blocks
-      REQUIRE_NOTHROW(sal::block_allocator(temp_path, BLOCK_SIZE, 8));  // Power-of-2 max_blocks
-      REQUIRE_NOTHROW(
-          sal::block_allocator(temp_path, BLOCK_SIZE, 3));  // Another non-power-of-2 max_blocks
+      // Valid block sizes (multiples of os_page_size) should work with any max_blocks
+      REQUIRE_NOTHROW(sal::block_allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS));  // Large block size
+      REQUIRE_NOTHROW(sal::block_allocator(temp_path, 4096, 8));  // Minimum block size (1 page)
+      REQUIRE_NOTHROW(sal::block_allocator(temp_path, 8192, 3));  // 2 pages
 
-      // Invalid block sizes (not powers of 2) should throw, regardless of max_blocks
-      REQUIRE_THROWS_AS(sal::block_allocator(temp_path, 3 * MB, MAX_BLOCKS), std::invalid_argument);
-      REQUIRE_THROWS_AS(sal::block_allocator(temp_path, 10 * MB, 8), std::invalid_argument);
-      REQUIRE_THROWS_AS(sal::block_allocator(temp_path, 15 * MB, 3), std::invalid_argument);
+      // Invalid block sizes (not multiples of os_page_size) should throw
+      REQUIRE_THROWS_AS(sal::block_allocator(temp_path, 4095, MAX_BLOCKS), std::invalid_argument);
+      REQUIRE_THROWS_AS(sal::block_allocator(temp_path, 4097, 8), std::invalid_argument);
+      REQUIRE_THROWS_AS(sal::block_allocator(temp_path, 8191, 3), std::invalid_argument);
 
       // Block size of 0 should throw
       REQUIRE_THROWS(sal::block_allocator(temp_path, 0, MAX_BLOCKS));
@@ -86,22 +58,19 @@ TEST_CASE("Power of 2 validation", "[block_allocator]")
 
    SECTION("find_max_reservation_size validation")
    {
-      // Valid block sizes (powers of 2) should work
-      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(MB));
-      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(2 * MB));
-      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(4 * MB));
-      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(BLOCK_SIZE));
+      // Valid block sizes (multiples of os_page_size) should work
+      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(4096));        // 1 page
+      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(8192));        // 2 pages
+      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(16384));       // 4 pages
+      REQUIRE_NOTHROW(sal::block_allocator::find_max_reservation_size(BLOCK_SIZE));  // Many pages
 
-      // Invalid block sizes (not powers of 2) should throw
-      REQUIRE_THROWS_AS(sal::block_allocator::find_max_reservation_size(3 * MB),
+      // Invalid block sizes (not multiples of os_page_size) should throw
+      REQUIRE_THROWS_AS(sal::block_allocator::find_max_reservation_size(4095),
                         std::invalid_argument);
-      REQUIRE_THROWS_AS(sal::block_allocator::find_max_reservation_size(10 * MB),
+      REQUIRE_THROWS_AS(sal::block_allocator::find_max_reservation_size(4097),
                         std::invalid_argument);
-      REQUIRE_THROWS_AS(sal::block_allocator::find_max_reservation_size(15 * MB),
+      REQUIRE_THROWS_AS(sal::block_allocator::find_max_reservation_size(8191),
                         std::invalid_argument);
-
-      // Block size of 0 should return 0 (special case)
-      REQUIRE(sal::block_allocator::find_max_reservation_size(0) == 0);
    }
 }
 

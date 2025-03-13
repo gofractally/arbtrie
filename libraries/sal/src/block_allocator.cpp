@@ -95,8 +95,8 @@ namespace sal
       // Validate that block_size is a power of 2
       if (!is_power_of_2(block_size))
       {
-         SAL_ERROR("block_allocator constructor called with non-power-of-2 block_size: {}",
-                   block_size);
+         SAL_ERROR("block_allocator constructor {} called with non-power-of-2 block_size: {}",
+                   file.native(), block_size);
          throw std::invalid_argument("block_size must be a power of 2");
       }
 
