@@ -40,18 +40,39 @@ namespace sal
    using region_id = uint16_t;
 
    // slots per region page
-   constexpr static uint32_t address_region_page_capacity = 512;
+   constexpr static uint32_t address_page_capacity = 512;
    struct address
    {
       uint16_t region;  /// region id
       uint16_t index;   /// index into the region
-      uint16_t region_page() const { return index / address_region_page_capacity; }
-      /// index 0 to 512
-      uint16_t region_page_slot() const { return index % address_region_page_capacity; }
-      /// 0 to 8 cacheline index (64 bit bitmap)
-      uint16_t cacheline_idx() const { return region_page_slot() / 64; }
-      /// the cacheline index is always %64 the base index because it is a contuous address space
-      uint16_t index_in_cacheline() const { return index % 64; }
+
+      /// index into region_header::_page_blocks_with_free_slots[region_page()]
+      /// get_address_block(address_block_index())
+      uint16_t address_block_index() const { return index / address_page_capacity; }
+
+      /// index into region_page::slot[region_page_slot()]
+      /// index into address_block::pages[region].slots[region_page_slot()]
+      uint16_t region_page_slot() const { return index % address_page_capacity; }
+
+      /// region_page_header::free_slots[free_slot_index()]
+      uint16_t free_slot_index() const { return region_page_slot() / 64; }
+
+      /// bit index into region_page_header::free_slot[free_slot_index()]
+      uint16_t index_in_free_slot() const { return index % 64; }
+
+      /// there are only 8 address slots per cacheline
+      uint16_t index_in_cacheline() const { return index % 8; }
+
+      /// given you know the cacheline that a free slot is in, this will tell you the
+      /// free_slot[index] that you can look for the free slot in
+      static uint32_t cacheline_index_to_free_slot_index(uint32_t cacheline_index)
+      {
+         // 8 slots per cacheline, 64 slots per free_slot[] entry
+         return (cacheline_index * 8) / 64;  // compiler will optiomize this to a shift
+      }
+
+      /// index into cachelines_with_free_slots
+      uint16_t cacheline_index() const { return index / 8; }
 
       friend std::ostream& operator<<(std::ostream& os, const address& addr)
       {
@@ -69,7 +90,7 @@ namespace sal
     * @brief Try to clear a bit in the bitmap
     * @param bitmap the bitmap to clear the bit in
     * @param bit_mask the bit to clear
-    * @param prev_bitmap the previous bitmap value, updated to the value before the clear
+    * @param bitmap the previous bitmap value, updated to the value before the clear
     * @return true if the bit was cleared, false if it was already cleared
     */
    inline bool try_clear_bit(std::atomic<uint64_t>& bitmap,

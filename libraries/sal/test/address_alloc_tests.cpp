@@ -43,6 +43,86 @@ TEST_CASE("address_alloc basic operations", "[address_alloc]")
       REQUIRE(alloc.count() == 0);
    }
 
+   SECTION("Free Free Alloc pattern")
+   {
+      address_alloc alloc(test_dir);
+      auto          region = alloc.get_new_region();
+
+      // First, allocate a large batch of addresses
+      std::vector<address> addresses;
+      int                  initial_count = 513;  // Start with a large number
+      addresses.reserve(initial_count);
+
+      for (int i = 0; i < initial_count; ++i)
+      {
+         auto allocation = alloc.get_new_address(region);
+         addresses.push_back(allocation.addr);
+      }
+
+      REQUIRE(alloc.count() == initial_count);
+      SAL_WARN("Initial allocation complete. Count: {}", alloc.count());
+
+      // Now perform the free-free-alloc-free pattern until we reach zero
+      while (alloc.count() > 0)
+      {
+         // If we have at least 3 addresses left, proceed with the pattern
+         if (addresses.size() >= 2)
+         {
+            // Free two addresses
+            auto addr1 = addresses.back();
+            addresses.pop_back();
+            alloc.free_address(addr1);
+
+            auto addr2 = addresses.back();
+            addresses.pop_back();
+            alloc.free_address(addr2);
+
+            // Allocate one new address
+            auto new_allocation = alloc.get_new_address(region);
+            addresses.push_back(new_allocation.addr);
+
+            SAL_WARN("After pattern iteration. Count: {}", alloc.count());
+         }
+         else
+         {
+            // Not enough addresses for the pattern, just free the remaining ones
+            while (!addresses.empty())
+            {
+               auto addr = addresses.back();
+               addresses.pop_back();
+               alloc.free_address(addr);
+            }
+         }
+      }
+
+      // Verify all addresses have been freed
+      REQUIRE(alloc.count() == 0);
+      REQUIRE(addresses.empty());
+      exit(1);
+   }
+
+   SECTION("Alloc then Free")
+   {
+      address_alloc alloc(test_dir);
+      auto          region = alloc.get_new_region();
+
+      // Store allocated addresses
+      std::vector<address> addresses;
+      int                  test_count = 1024;
+      addresses.reserve(test_count);
+
+      for (int i = 0; i < test_count; ++i)
+      {
+         auto a1 = alloc.get_new_address(region);
+         auto a2 = alloc.get_new_address(region);
+         SAL_WARN("a1: {} a2: {} count: {}", a1.addr, a2.addr, alloc.count());
+         alloc.free_address(a2.addr);
+         auto a3 = alloc.get_new_address(region);
+         SAL_WARN("a3: {} count: {}", a3.addr, alloc.count());
+      }
+      REQUIRE(alloc.count() == 2 * test_count);
+   }
+
    SECTION("Multiple regions")
    {
       address_alloc alloc(test_dir);
@@ -131,7 +211,6 @@ TEST_CASE("address_alloc basic operations", "[address_alloc]")
 
    SECTION("Thread safety")
    {
-      return;
       address_alloc alloc(test_dir);
       auto          region = alloc.get_new_region();
 

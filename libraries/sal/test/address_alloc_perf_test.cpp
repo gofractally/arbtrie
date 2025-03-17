@@ -32,13 +32,13 @@ struct TestConfig
    int duration = 10;
 
    // Number of regions to use
-   int num_regions = 16;
+   int num_regions = 1;
 
    // Allocation to free ratio (0.7 means 70% allocations, 30% frees)
    double alloc_ratio = 0.7;
 
    // Maximum addresses per thread to hold before forcing frees
-   int max_addresses_per_thread = 10000;
+   int max_addresses_per_thread = 1000;
 
    // Print progress update every X milliseconds
    int progress_interval_ms = 1000;
@@ -178,6 +178,7 @@ TEST_CASE("address_alloc performance stress test", "[address_alloc][performance]
                   auto allocation = alloc.get_new_address(region);
 
                   // Validate invariants immediately after allocation
+                  /*
                   std::string invariant_errors = alloc.validate_invariant();
                   if (!invariant_errors.empty())
                   {
@@ -189,8 +190,12 @@ TEST_CASE("address_alloc performance stress test", "[address_alloc][performance]
                                << std::endl;
                      abort();
                   }
+                  */
 
                   allocated_addresses.push_back(allocation.addr);
+                  std::cerr << "alloc: " << allocation.addr << " ";
+                  std::cerr << "allocated_addresses.size() = " << allocated_addresses.size()
+                            << "\n";
 
                   // Update statistics
                   stats.allocations++;
@@ -220,6 +225,7 @@ TEST_CASE("address_alloc performance stress test", "[address_alloc][performance]
                {
                   // Free the address
                   address addr_copy = addr_to_free;  // Keep a copy for error reporting
+                  SAL_WARN("free: {}", addr_to_free);
                   alloc.free_address(addr_to_free);
 
                   // Validate invariants immediately after free

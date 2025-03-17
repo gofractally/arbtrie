@@ -125,6 +125,7 @@ namespace sal
 
    void address_alloc::free_address(address addr)
    {
+      SAL_WARN("free_address: {}", addr);
       // Calculate all indices directly
       const uint16_t page_idx = addr.region_page();
 
@@ -135,7 +136,7 @@ namespace sal
       auto& region_header     = get_alloc_header()->region_headers[addr.region];
 
       // Read the original allocation location from the slot value
-      uint16_t cacheline_idx = addr.cacheline_idx();
+      uint16_t free_slot_idx = addr.free_slot_index();
 
       // Mark the slot value as 0 (indicating it's not in use)
       slot_ref.store(0, std::memory_order_relaxed);
@@ -145,6 +146,8 @@ namespace sal
       // Set the corresponding bit to 1 (free) in the free_slots bitmap using fetch_add
       uint64_t prev_slots =
           page_header.free_slots[cacheline_idx].fetch_add(slot_bit, std::memory_order_release);
+      SAL_WARN("free_address: {} free_slots[{}] prev_slots: {}", addr, cacheline_idx,
+               std::bitset<64>(prev_slots));
 
       // Assert that the bit was not already set (slot was not already free)
       if (prev_slots & slot_bit)
@@ -157,13 +160,15 @@ namespace sal
       // Use same bit-checking logic as in try_alloc_slot,
       // 1 means free slots, if it was 0 before then we went from 0 to 1
       bool cacheline_now_has_free_slots = ((prev_slots >> (cacheline_idx * 8)) & 0xff) == 0;
+      SAL_WARN("free_address: {} cacheline_now_has_free_slots: {}", addr,
+               cacheline_now_has_free_slots);
 
       if (cacheline_now_has_free_slots)
       {
          uint64_t prev_cachelines_bitmap = 0;
          // we need to xor the cacheline_mask to the cachelines_with_free_slots
          prev_cachelines_bitmap = page_header.cachelines_with_free_slots.fetch_xor(
-             1ULL << cacheline_idx, std::memory_order_relaxed);
+             1ULL << (cacheline_idx * 8), std::memory_order_relaxed);
          if (not prev_cachelines_bitmap)
          {
             // we need to clear the bit in the region_header

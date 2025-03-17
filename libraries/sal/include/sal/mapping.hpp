@@ -78,6 +78,12 @@ namespace sal
          }
       }
 
+      template <typename T>
+      T* as()
+      {
+         return static_cast<T*>(data());
+      }
+
      private:
       std::atomic<void*> _data;
       std::size_t        _size;

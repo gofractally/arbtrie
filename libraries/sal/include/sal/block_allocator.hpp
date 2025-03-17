@@ -66,6 +66,11 @@ namespace sal
          assert(offset < _file_size);
          return static_cast<char*>(_mapped_base) + offset;
       }
+      template <typename T>
+      T* get(offset_ptr offset) noexcept
+      {
+         return static_cast<T*>(get(offset));
+      }
 
       /**
        * Return a const pointer to the block at the specified offset

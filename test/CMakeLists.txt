@@ -116,4 +116,24 @@ endif()
 #target_include_directories(arbtrie-tests-bigdb PUBLIC ${Boost_INCLUDE_DIRS})
 #set_target_properties(arbtrie-tests-bigdb PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${ROOT_BINARY_DIR})
 
+# Add benchmark for min_index implementations
+add_executable(min_index_benchmark min_index_benchmark.cpp)
+set_target_properties(min_index_benchmark
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Ensure we compile with optimization and native CPU instructions for benchmarking
+target_compile_options(min_index_benchmark PRIVATE -O3 -march=native)
+
+# Add benchmark for hint implementations
+add_executable(hint_benchmark hint_benchmark.cpp)
+set_target_properties(hint_benchmark
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Ensure we compile with optimization and native CPU instructions for benchmarking
+target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
+
 
