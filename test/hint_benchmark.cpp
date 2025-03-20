@@ -1,3 +1,4 @@
+#include <arm_neon.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -99,6 +100,61 @@ struct min_hint_v10
    uint64_t pages[2];
    uint64_t cachelines[8];
 };
+// Minimized hint structure with 8 cacheline bitmaps for V11 (same as V8 but with 4-way unrolled processing)
+struct min_hint_v11
+{
+   min_hint_v11() { memset((char*)this, 0, sizeof(*this)); }
+   uint64_t pages[2];
+   uint64_t cachelines[8];
+};
+
+/// @brief  works with any multiple of 8, aigned on 16 byte boundary
+/// TODO: doesn't support ignoring zeros, but could be added with a different variatin
+/// @param indices
+/// @param hint_count
+void calculate_hint_v11(min_hint_v11& h, uint16_t* indices, uint16_t hint_count)
+{
+   //uint16x8x4_t chunks[4] = {vld1q_u16_x4(indices), vld1q_u16_x4(indices + 32),
+   //                          vld1q_u16_x4(indices + 64), vld1q_u16_x4(indices + 96)};
+
+   auto      mask63 = vdupq_n_u16(63);
+   uint16_t* end    = indices + hint_count;
+   while (indices < end)
+   {
+      uint16x8_t hints              = vld1q_u16(indices);
+      uint16x8_t pages              = vshrq_n_u16(hints, 9);
+      uint16x8_t indicies           = vshrq_n_u16(hints, 15);
+      uint16x8_t bit_positions      = vandq_u16(pages, mask63);
+      uint16x8_t cacheline_indicies = vandq_u16(vshrq_n_u16(hints, 3), mask63);
+
+      h.pages[vgetq_lane_u16(pages, 0)] |= (1ULL << vgetq_lane_u16(bit_positions, 0));
+      h.pages[vgetq_lane_u16(pages, 1)] |= (1ULL << vgetq_lane_u16(bit_positions, 1));
+      h.pages[vgetq_lane_u16(pages, 2)] |= (1ULL << vgetq_lane_u16(bit_positions, 2));
+      h.pages[vgetq_lane_u16(pages, 3)] |= (1ULL << vgetq_lane_u16(bit_positions, 3));
+      h.pages[vgetq_lane_u16(pages, 4)] |= (1ULL << vgetq_lane_u16(bit_positions, 4));
+      h.pages[vgetq_lane_u16(pages, 5)] |= (1ULL << vgetq_lane_u16(bit_positions, 5));
+      h.pages[vgetq_lane_u16(pages, 6)] |= (1ULL << vgetq_lane_u16(bit_positions, 6));
+      h.pages[vgetq_lane_u16(pages, 7)] |= (1ULL << vgetq_lane_u16(bit_positions, 7));
+
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 0)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 0));
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 1)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 1));
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 2)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 2));
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 3)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 3));
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 4)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 4));
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 5)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 5));
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 6)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 6));
+      h.cachelines[vgetq_lane_u16(cacheline_indicies, 7)] |=
+          (1ULL << vgetq_lane_u16(bit_positions, 7));
+      indices += 8;
+   }
+}
 
 // Forward declaration for V6 implementation
 void calculate_hint_v6(min_hint& h, uint16_t* indices, uint16_t hint_count);
@@ -784,6 +840,38 @@ void benchmark_calculate_hint(int num_iterations)
               1.0};  // Relative speedup will be calculated later
    };
 
+   // Add new benchmark implementation for min_hint_v11
+   auto benchmark_min_v11_impl = [&](const char* name, auto func, uint16_t* data,
+                                     int count) -> HintBenchmarkResult
+   {
+      std::vector<min_hint_v11> hints(num_iterations);
+
+      auto start = std::chrono::high_resolution_clock::now();
+
+      for (int i = 0; i < num_iterations; i++)
+      {
+         func(hints[i], data, count);
+      }
+
+      auto end      = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+      // Clean up to prevent any compiler optimizations
+      double _clean = 0;
+      for (auto& h : hints)
+      {
+         _clean += h.pages[0] + h.pages[1];
+         for (int i = 0; i < 8; i++)
+            _clean += h.cachelines[i];
+      }
+      if (_clean == 0.1234)
+         std::cout << "Unlikely: " << _clean << std::endl;
+
+      return {name, count, static_cast<double>(duration.count()),
+              static_cast<double>(duration.count() * 1000.0 / (count * num_iterations)),
+              1.0};  // Relative speedup will be calculated later
+   };
+
    // Header
    std::cout << "\n";
    std::cout << "+----------------------------+-----+------------------+------------------+-------"
@@ -796,29 +884,26 @@ void benchmark_calculate_hint(int num_iterations)
    // Run benchmarks with varying numbers of indices for data without zeros
    std::cout << "Benchmarking with indices that don't contain zeros:\n";
 
-   // Only use specified sizes: 4, 16, 64, 256
-   for (int count : {4, 16, 64, 256})
+   // Only use specified sizes: 4, 16, 64, 128, 256
+   for (int count : {4, 16, 64, 128, 256})
    {
       // Get baseline for calculating speedup
       auto baseline = benchmark_impl(
-          "V1: Baseline",
-          [](hint& h, uint16_t* i, uint16_t c) { calculate_hint_v1<false>(h, i, c); },
-          indices_no_zeros, count);
+          "V1: Baseline", [](hint& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v1<false>(h, i, c); }, indices_no_zeros, count);
 
       // Compare with other implementations
       auto v3_result = benchmark_impl(
-          "V3: Loop Unrolling",
-          [](hint& h, uint16_t* i, uint16_t c) { calculate_hint_v3(h, i, c); }, indices_no_zeros,
-          count);
+          "V3: Loop Unrolling", [](hint& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v3(h, i, c); }, indices_no_zeros, count);
 
       auto v4_result = benchmark_impl(
           "V4: Prefetching", [](hint& h, uint16_t* i, uint16_t c) { calculate_hint_v4(h, i, c); },
           indices_no_zeros, count);
 
       auto v5_result = benchmark_compact_impl(
-          "V5: Compact Bitmap",
-          [](compact_hint& h, uint16_t* i, uint16_t c) { calculate_hint_v5(h, i, c); },
-          indices_no_zeros, count);
+          "V5: Compact Bitmap", [](compact_hint& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v5(h, i, c); }, indices_no_zeros, count);
 
       auto v6_result = benchmark_min_impl(
           "V6: 4-way", [](min_hint& h, uint16_t* i, uint16_t c) { calculate_hint_v6(h, i, c); },
@@ -833,14 +918,17 @@ void benchmark_calculate_hint(int num_iterations)
           indices_no_zeros, count);
 
       auto v9_result = benchmark_min_v9_impl(
-          "V9: 8-way+Unroll2",
-          [](min_hint_v9& h, uint16_t* i, uint16_t c) { calculate_hint_v9(h, i, c); },
-          indices_no_zeros, count);
+          "V9: 8-way+Unroll2", [](min_hint_v9& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v9(h, i, c); }, indices_no_zeros, count);
 
       auto v10_result = benchmark_min_v10_impl(
-          "V10: 8-way+Unroll4",
-          [](min_hint_v10& h, uint16_t* i, uint16_t c) { calculate_hint_v10(h, i, c); },
-          indices_no_zeros, count);
+          "V10: 8-way+Unroll4", [](min_hint_v10& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v10(h, i, c); }, indices_no_zeros, count);
+
+      // Benchmark V11 for all counts, not just 128
+      auto v11_result = benchmark_min_v11_impl(
+          "V11: NEON Vectorized", [](min_hint_v11& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v11(h, i, c); }, indices_no_zeros, count);
 
       // Calculate speedups relative to baseline
       v3_result.speedup  = baseline.time_us / v3_result.time_us;
@@ -851,11 +939,12 @@ void benchmark_calculate_hint(int num_iterations)
       v8_result.speedup  = baseline.time_us / v8_result.time_us;
       v9_result.speedup  = baseline.time_us / v9_result.time_us;
       v10_result.speedup = baseline.time_us / v10_result.time_us;
+      v11_result.speedup = baseline.time_us / v11_result.time_us;
 
       // Output results
-      std::vector<HintBenchmarkResult> results = {baseline,  v3_result, v4_result,
-                                                  v5_result, v6_result, v7_result,
-                                                  v8_result, v9_result, v10_result};
+      std::vector<HintBenchmarkResult> results = {baseline,   v3_result, v4_result, v5_result,
+                                                  v6_result,  v7_result, v8_result, v9_result,
+                                                  v10_result, v11_result};
 
       for (const auto& result : results)
       {
@@ -888,9 +977,8 @@ void benchmark_calculate_hint(int num_iterations)
 
       // Get baseline for calculating speedup
       auto baseline = benchmark_impl(
-          "V1: Baseline",
-          [](hint& h, uint16_t* i, uint16_t c) { calculate_hint_v1<false>(h, i, c); },
-          indices_with_zeros, count);
+          "V1: Baseline", [](hint& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v1<false>(h, i, c); }, indices_with_zeros, count);
 
       // Compare with other implementations
       auto v2_result = benchmark_impl(
@@ -898,18 +986,16 @@ void benchmark_calculate_hint(int num_iterations)
           indices_with_zeros, count);
 
       auto v3_result = benchmark_impl(
-          "V3: Loop Unrolling",
-          [](hint& h, uint16_t* i, uint16_t c) { calculate_hint_v3(h, i, c); }, indices_with_zeros,
-          count);
+          "V3: Loop Unrolling", [](hint& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v3(h, i, c); }, indices_with_zeros, count);
 
       auto v4_result = benchmark_impl(
           "V4: Prefetching", [](hint& h, uint16_t* i, uint16_t c) { calculate_hint_v4(h, i, c); },
           indices_with_zeros, count);
 
       auto v5_result = benchmark_compact_impl(
-          "V5: Compact Bitmap",
-          [](compact_hint& h, uint16_t* i, uint16_t c) { calculate_hint_v5(h, i, c); },
-          indices_with_zeros, count);
+          "V5: Compact Bitmap", [](compact_hint& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v5(h, i, c); }, indices_with_zeros, count);
 
       auto v6_result = benchmark_min_impl(
           "V6: 4-way", [](min_hint& h, uint16_t* i, uint16_t c) { calculate_hint_v6(h, i, c); },
@@ -924,14 +1010,17 @@ void benchmark_calculate_hint(int num_iterations)
           indices_with_zeros, count);
 
       auto v9_result = benchmark_min_v9_impl(
-          "V9: 8-way+Unroll2",
-          [](min_hint_v9& h, uint16_t* i, uint16_t c) { calculate_hint_v9(h, i, c); },
-          indices_with_zeros, count);
+          "V9: 8-way+Unroll2", [](min_hint_v9& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v9(h, i, c); }, indices_with_zeros, count);
 
       auto v10_result = benchmark_min_v10_impl(
-          "V10: 8-way+Unroll4",
-          [](min_hint_v10& h, uint16_t* i, uint16_t c) { calculate_hint_v10(h, i, c); },
-          indices_with_zeros, count);
+          "V10: 8-way+Unroll4", [](min_hint_v10& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v10(h, i, c); }, indices_with_zeros, count);
+
+      // Add benchmark for V11 with zeros too
+      auto v11_result = benchmark_min_v11_impl(
+          "V11: NEON Vectorized", [](min_hint_v11& h, uint16_t* i, uint16_t c)
+          { calculate_hint_v11(h, i, c); }, indices_with_zeros, count);
 
       // Calculate speedups relative to baseline
       v2_result.speedup  = baseline.time_us / v2_result.time_us;
@@ -943,11 +1032,12 @@ void benchmark_calculate_hint(int num_iterations)
       v8_result.speedup  = baseline.time_us / v8_result.time_us;
       v9_result.speedup  = baseline.time_us / v9_result.time_us;
       v10_result.speedup = baseline.time_us / v10_result.time_us;
+      v11_result.speedup = baseline.time_us / v11_result.time_us;
 
       // Output results
-      std::vector<HintBenchmarkResult> results = {baseline,  v2_result, v3_result, v4_result,
-                                                  v5_result, v6_result, v7_result, v8_result,
-                                                  v9_result, v10_result};
+      std::vector<HintBenchmarkResult> results = {baseline,  v2_result,  v3_result, v4_result,
+                                                  v5_result, v6_result,  v7_result, v8_result,
+                                                  v9_result, v10_result, v11_result};
 
       for (const auto& result : results)
       {
