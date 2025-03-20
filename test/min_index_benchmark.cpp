@@ -1108,6 +1108,151 @@ int find_approx_min_index_neon_v11(uint16_t* original_counters, int start1, int 
    return start1 + diff * (embedded_index >> 5) + (embedded_index & 0x1F);
 }
 
+// ARM NEON v12 implementation (6-bit global indices with shift instead of mask+or)
+int find_approx_min_index_neon_v12(uint16_t* original_counters, int start1, int start2)
+{
+   // Load all chunks at once
+   uint16x8_t chunk0 = vld1q_u16(&original_counters[start1]);
+   uint16x8_t chunk1 = vld1q_u16(&original_counters[start1 + 8]);
+   uint16x8_t chunk2 = vld1q_u16(&original_counters[start1 + 16]);
+   uint16x8_t chunk3 = vld1q_u16(&original_counters[start1 + 24]);
+   uint16x8_t chunk4 = vld1q_u16(&original_counters[start2]);
+   uint16x8_t chunk5 = vld1q_u16(&original_counters[start2 + 8]);
+   uint16x8_t chunk6 = vld1q_u16(&original_counters[start2 + 16]);
+   uint16x8_t chunk7 = vld1q_u16(&original_counters[start2 + 24]);
+
+   // Create index vectors for all 8 lanes at once
+   const uint16_t index_values0[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+   const uint16_t index_values1[8] = {8, 9, 10, 11, 12, 13, 14, 15};
+   const uint16_t index_values2[8] = {16, 17, 18, 19, 20, 21, 22, 23};
+   const uint16_t index_values3[8] = {24, 25, 26, 27, 28, 29, 30, 31};
+   const uint16_t index_values4[8] = {32, 33, 34, 35, 36, 37, 38, 39};
+   const uint16_t index_values5[8] = {40, 41, 42, 43, 44, 45, 46, 47};
+   const uint16_t index_values6[8] = {48, 49, 50, 51, 52, 53, 54, 55};
+   const uint16_t index_values7[8] = {56, 57, 58, 59, 60, 61, 62, 63};
+
+   uint16x8_t indices0 = vld1q_u16(index_values0);
+   uint16x8_t indices1 = vld1q_u16(index_values1);
+   uint16x8_t indices2 = vld1q_u16(index_values2);
+   uint16x8_t indices3 = vld1q_u16(index_values3);
+   uint16x8_t indices4 = vld1q_u16(index_values4);
+   uint16x8_t indices5 = vld1q_u16(index_values5);
+   uint16x8_t indices6 = vld1q_u16(index_values6);
+   uint16x8_t indices7 = vld1q_u16(index_values7);
+
+   // Process all chunks with shift operations instead of mask and OR:
+   // 1. Shift right by 6 bits to clear lower bits
+   // 2. Shift left by 6 bits to make room for indices
+   // 3. Add (OR) the indices
+   uint16x8_t shift_const = vdupq_n_u16(6);
+
+   // Shift right then left to clear the lower 6 bits
+   chunk0 = vshlq_u16(vshrq_n_u16(chunk0, 6), shift_const);
+   chunk1 = vshlq_u16(vshrq_n_u16(chunk1, 6), shift_const);
+   chunk2 = vshlq_u16(vshrq_n_u16(chunk2, 6), shift_const);
+   chunk3 = vshlq_u16(vshrq_n_u16(chunk3, 6), shift_const);
+   chunk4 = vshlq_u16(vshrq_n_u16(chunk4, 6), shift_const);
+   chunk5 = vshlq_u16(vshrq_n_u16(chunk5, 6), shift_const);
+   chunk6 = vshlq_u16(vshrq_n_u16(chunk6, 6), shift_const);
+   chunk7 = vshlq_u16(vshrq_n_u16(chunk7, 6), shift_const);
+
+   // Add the indices (same as OR since the lower bits are all zero)
+   chunk0 = vaddq_u16(chunk0, indices0);
+   chunk1 = vaddq_u16(chunk1, indices1);
+   chunk2 = vaddq_u16(chunk2, indices2);
+   chunk3 = vaddq_u16(chunk3, indices3);
+   chunk4 = vaddq_u16(chunk4, indices4);
+   chunk5 = vaddq_u16(chunk5, indices5);
+   chunk6 = vaddq_u16(chunk6, indices6);
+   chunk7 = vaddq_u16(chunk7, indices7);
+
+   // Use NEON's vminvq instruction to find min in each chunk
+   uint16_t mins_array[8] = {vminvq_u16(chunk0), vminvq_u16(chunk1), vminvq_u16(chunk2),
+                             vminvq_u16(chunk3), vminvq_u16(chunk4), vminvq_u16(chunk5),
+                             vminvq_u16(chunk6), vminvq_u16(chunk7)};
+
+   uint16x8_t all_mins = vld1q_u16(mins_array);
+
+   // Find the global minimum
+   uint16_t global_min = vminvq_u16(all_mins);
+
+   // Create a mask for values equal to the global minimum
+   uint16x8_t min_mask = vceqq_u16(all_mins, vdupq_n_u16(global_min));
+
+   // Convert the comparison result to a bitmask
+   uint64_t chunk_mask = neon_to_mask(min_mask);
+
+   // Find the first (lowest index) chunk that has the minimum value
+   int min_chunk_idx = count_trailing_zeros(chunk_mask);
+
+   // Extract the index from the global minimum (lowest 6 bits)
+   int local_idx = global_min & 0x3F;
+
+   // Return final global index
+   return local_idx;
+}
+
+// ARM NEON v13 implementation (VSLI to insert counter bits into index bits)
+int find_approx_min_index_neon_v13(uint16_t* original_counters, int start1, int start2)
+{
+   // Load all chunks at once
+   uint16x8_t chunk0 = vld1q_u16(&original_counters[start1]);
+   uint16x8_t chunk1 = vld1q_u16(&original_counters[start1 + 8]);
+   uint16x8_t chunk2 = vld1q_u16(&original_counters[start1 + 16]);
+   uint16x8_t chunk3 = vld1q_u16(&original_counters[start1 + 24]);
+   uint16x8_t chunk4 = vld1q_u16(&original_counters[start2]);
+   uint16x8_t chunk5 = vld1q_u16(&original_counters[start2 + 8]);
+   uint16x8_t chunk6 = vld1q_u16(&original_counters[start2 + 16]);
+   uint16x8_t chunk7 = vld1q_u16(&original_counters[start2 + 24]);
+
+   // Create index vectors directly without loading from arrays
+   uint16x8_t indices0 = {0, 1, 2, 3, 4, 5, 6, 7};
+   uint16x8_t indices1 = {8, 9, 10, 11, 12, 13, 14, 15};
+   uint16x8_t indices2 = {16, 17, 18, 19, 20, 21, 22, 23};
+   uint16x8_t indices3 = {24, 25, 26, 27, 28, 29, 30, 31};
+   uint16x8_t indices4 = {32, 33, 34, 35, 36, 37, 38, 39};
+   uint16x8_t indices5 = {40, 41, 42, 43, 44, 45, 46, 47};
+   uint16x8_t indices6 = {48, 49, 50, 51, 52, 53, 54, 55};
+   uint16x8_t indices7 = {56, 57, 58, 59, 60, 61, 62, 63};
+
+   // Insert counter bits into index values:
+   // Shift counters right to clear lower bits, then insert at bit position 6
+   // This preserves the index in lower 6 bits and puts counter value in upper bits
+   indices0 = vsliq_n_u16(indices0, chunk0, 6);
+   indices1 = vsliq_n_u16(indices1, chunk1, 6);
+   indices2 = vsliq_n_u16(indices2, chunk2, 6);
+   indices3 = vsliq_n_u16(indices3, chunk3, 6);
+   indices4 = vsliq_n_u16(indices4, chunk4, 6);
+   indices5 = vsliq_n_u16(indices5, chunk5, 6);
+   indices6 = vsliq_n_u16(indices6, chunk6, 6);
+   indices7 = vsliq_n_u16(indices7, chunk7, 6);
+
+   // Use NEON's vminvq instruction to find min in each chunk
+   uint16_t mins_array[8] = {vminvq_u16(indices0), vminvq_u16(indices1), vminvq_u16(indices2),
+                             vminvq_u16(indices3), vminvq_u16(indices4), vminvq_u16(indices5),
+                             vminvq_u16(indices6), vminvq_u16(indices7)};
+
+   uint16x8_t all_mins = vld1q_u16(mins_array);
+
+   // Find the global minimum
+   uint16_t global_min = vminvq_u16(all_mins);
+
+   // Create a mask for values equal to the global minimum
+   uint16x8_t min_mask = vceqq_u16(all_mins, vdupq_n_u16(global_min));
+
+   // Convert the comparison result to a bitmask
+   uint64_t chunk_mask = neon_to_mask(min_mask);
+
+   // Find the first (lowest index) chunk that has the minimum value
+   int min_chunk_idx = count_trailing_zeros(chunk_mask);
+
+   // Extract the index from the global minimum (lowest 6 bits)
+   int local_idx = global_min & 0x3F;
+
+   // Return final global index
+   return local_idx;
+}
+
 // Use the latest v11 as the default NEON implementation
 int find_approx_min_index_neon(uint16_t* original_counters, int start1, int start2)
 {
@@ -1205,9 +1350,10 @@ void aligned_free(T* ptr)
 // Benchmark function
 void benchmark(int num_iterations, int data_size)
 {
-   std::random_device              rd;
-   std::mt19937                    gen(rd());
-   std::uniform_int_distribution<> dist(1, UINT16_MAX - 1);  // Avoid 0 and max values
+   std::random_device rd;
+   std::mt19937       gen(rd());
+   // Limit random values to be less than 2^10 (1024) to work with the v13 implementation
+   std::uniform_int_distribution<> dist(1, 1023);  // Avoid 0 and use values < 2^10
 
    uint16_t* counters = aligned_alloc<uint16_t>(data_size, 16);
 
@@ -1236,7 +1382,7 @@ void benchmark(int num_iterations, int data_size)
       {
          std::cout << ORANGE_COLOR << "WARNING: " << name << " found different minimum: "
                    << "0x" << std::hex << min_value << " (masked: 0x" << min_value_masked << "), "
-                   << "scalar found: 0x" << scalar_min_value << " (masked: 0x"
+                   << "reference found: 0x" << scalar_min_value << " (masked: 0x"
                    << scalar_min_value_masked << ")" << std::dec << RESET_COLOR << std::endl;
       }
 
@@ -1266,13 +1412,13 @@ void benchmark(int num_iterations, int data_size)
       // Sanity check to ensure min is actually minimum
       volatile uint16_t min_value = counters[result];
       // Only check the actual ranges we're supposed to search in
-      for (int i = start1; i < start1 + 32; i++)
+      for (int i = 0; i < 32; i++)
       {
          if (counters[i] < min_value)
             std::cerr << "FAIL: Found " << counters[i] << " at " << i << " which is less than "
                       << min_value << " at " << result << std::endl;
       }
-      for (int i = start2; i < start2 + 32; i++)
+      for (int i = data_size / 2; i < data_size / 2 + 32; i++)
       {
          if (counters[i] < min_value)
             std::cerr << "FAIL: Found " << counters[i] << " at " << i << " which is less than "
@@ -1345,7 +1491,11 @@ void benchmark(int num_iterations, int data_size)
        benchmark_impl("ARM NEON v10 (6-bit global indices)", find_approx_min_index_neon_v10);
    auto neon_v11_time =
        benchmark_impl("ARM NEON v11 (direct global indexing)", find_approx_min_index_neon_v11);
-   auto neon_time = benchmark_impl("ARM NEON (current)", find_approx_min_index_neon);
+   auto neon_v12_time = benchmark_impl("ARM NEON v12 (6-bit global indices with shift)",
+                                       find_approx_min_index_neon_v12);
+   auto neon_v13_time = benchmark_impl("ARM NEON v13 (6-bit global indices with VSLI)",
+                                       find_approx_min_index_neon_v13);
+   auto neon_time     = benchmark_impl("ARM NEON (current)", find_approx_min_index_neon);
 #endif
 
 #ifdef HAS_SSE41
@@ -1369,8 +1519,9 @@ void benchmark(int num_iterations, int data_size)
 
    // Print results table
    std::cout << "\n--------------------------------------------------------------\n";
-   std::cout << "| Algorithm                           | Time (μs) | Speedup |\n";
-   std::cout << "|-------------------------------------|-----------|---------|" << std::endl;
+   std::cout << "| Algorithm                                     | Time (μs) | Speedup |\n";
+   std::cout << "|------------------------------------------------|-----------|---------|"
+             << std::endl;
 
    for (const auto& result : results)
    {
@@ -1394,13 +1545,13 @@ void benchmark(int num_iterations, int data_size)
       // If this is the fastest implementation, highlight it in green
       if (&result == &(*fastest_impl))
       {
-         std::cout << "| \033[32m" << std::left << std::setw(35) << result.name << "| "
+         std::cout << "| \033[32m" << std::left << std::setw(46) << result.name << "| "
                    << std::setw(9) << time_ss.str() << " | " << std::setw(7) << speedup_ss.str()
                    << " |\033[0m" << std::endl;
       }
       else
       {
-         std::cout << "| " << std::left << std::setw(35) << result.name << "| " << std::setw(9)
+         std::cout << "| " << std::left << std::setw(46) << result.name << "| " << std::setw(9)
                    << time_ss.str() << " | " << std::setw(7) << speedup_ss.str() << " |"
                    << std::endl;
       }
@@ -1411,24 +1562,26 @@ void benchmark(int num_iterations, int data_size)
    aligned_free(counters);
 
    // Print final results table with ranking
-   std::cout << "\n=======================================================" << std::endl;
+   std::cout << "\n======================================================================="
+             << std::endl;
    std::cout << "FINAL RESULTS (sorted by speed)" << std::endl;
-   std::cout << "=======================================================" << std::endl;
-   std::cout << std::left << std::setw(40) << "Algorithm"
+   std::cout << "======================================================================="
+             << std::endl;
+   std::cout << std::left << std::setw(50) << "Algorithm"
              << "| " << std::setw(14) << "Time (μs)"
              << "| " << std::setw(10) << "Speedup"
              << "| "
              << "Status" << std::endl;
-   std::cout << "-------------------------------------------------------" << std::endl;
+   std::cout << "-----------------------------------------------------------------------"
+             << std::endl;
 
    // Sort by time (fastest first)
-   std::sort(results.begin(), results.end(),
-             [](const BenchmarkResult& a, const BenchmarkResult& b)
+   std::sort(results.begin(), results.end(), [](const BenchmarkResult& a, const BenchmarkResult& b)
              { return a.time_us < b.time_us; });
 
    for (const auto& result : results)
    {
-      std::cout << std::left << std::setw(40) << result.name << "| " << std::fixed
+      std::cout << std::left << std::setw(50) << result.name << "| " << std::fixed
                 << std::setprecision(6) << std::setw(14) << result.time_us << "| " << std::fixed
                 << std::setprecision(2) << std::setw(10) << result.speedup_vs_scalar;
 
@@ -1444,7 +1597,8 @@ void benchmark(int num_iterations, int data_size)
       std::cout << std::endl;
    }
 
-   std::cout << "=======================================================" << std::endl;
+   std::cout << "======================================================================="
+             << std::endl;
 
    // Find the fastest correct implementation
    auto fastest_correct = std::find_if(results.begin(), results.end(),

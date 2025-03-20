@@ -118,13 +118,29 @@ endif()
 
 # Add benchmark for min_index implementations
 add_executable(min_index_benchmark min_index_benchmark.cpp)
-set_target_properties(min_index_benchmark
-    PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+add_executable(min_index_32_benchmark min_index_32_benchmark.cpp)
+add_executable(min_index_combined_benchmark min_index_combined_benchmark.cpp)
+
+# Set properties for benchmark executables
+set_target_properties(min_index_benchmark PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_benchmark"
+)
+
+set_target_properties(min_index_32_benchmark PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_32_benchmark"
+)
+
+set_target_properties(min_index_combined_benchmark PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_combined_benchmark"
 )
 
 # Ensure we compile with optimization and native CPU instructions for benchmarking
 target_compile_options(min_index_benchmark PRIVATE -O3 -march=native)
+target_compile_options(min_index_32_benchmark PRIVATE -O3 -march=native)
+target_compile_options(min_index_combined_benchmark PRIVATE -O3 -march=native)
 
 # Add benchmark for hint implementations
 add_executable(hint_benchmark hint_benchmark.cpp)
@@ -135,5 +151,8 @@ set_target_properties(hint_benchmark
 
 # Ensure we compile with optimization and native CPU instructions for benchmarking
 target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
+
+# Add the min_index subdirectory with its tests
+add_subdirectory(min_index)
 
 
