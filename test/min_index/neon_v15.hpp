@@ -45,7 +45,9 @@ inline uint64_t NEON_i8x64_MatchMask(uint8x16x4_t src, uint8_t match_byte)
    uint8x8_t  t4 = vshrn_n_u16(vreinterpretq_u16_u8(t3), 4);
    return vget_lane_u64(vreinterpret_u64_u8(t4), 0);
 }
-int first_match64(uint16x8x4_t chunk1, uint16x8x4_t chunk2, uint16_t match_byte)
+inline int first_match64(const uint16x8x4_t& chunk1,
+                         const uint16x8x4_t& chunk2,
+                         uint16_t            match_byte)
 {
    uint16x8_t dup          = vdupq_n_u16(match_byte);
    uint16x8_t eqmask_low   = vceqq_u16(chunk1.val[0], dup);
@@ -89,7 +91,7 @@ int first_match64(uint16x8x4_t chunk1, uint16x8x4_t chunk2, uint16_t match_byte)
    std::cout << "l0: " << std::countl_zero(u64) / 4 << "   vs " << index << "\n";
    */
 }
-int first_match32(uint16x8x4_t chunk1, uint16_t match_byte)
+inline int first_match32(const uint16x8x4_t& chunk1, uint16_t match_byte)
 {
    uint16x8_t dup          = vdupq_n_u16(match_byte);
    uint16x8_t eqmask_low   = vceqq_u16(chunk1.val[0], dup);
@@ -317,16 +319,6 @@ int find_approx_min_index_neon_v15_64(uint16_t* __attribute__((aligned(128))) or
    chunks1 = vld1q_u16_x4(&original_counters[start]);
    // Load second 32 elements (4 chunks of 8) with a single instruction, do not change
    chunks2 = vld1q_u16_x4(&original_counters[start + 32]);
-
-   // Find minimums in each chunk using vminvq_u16
-   uint16_t min0 = vminvq_u16(chunks1.val[0]);
-   uint16_t min1 = vminvq_u16(chunks1.val[1]);
-   uint16_t min2 = vminvq_u16(chunks1.val[2]);
-   uint16_t min3 = vminvq_u16(chunks1.val[3]);
-   uint16_t min4 = vminvq_u16(chunks2.val[0]);
-   uint16_t min5 = vminvq_u16(chunks2.val[1]);
-   uint16_t min6 = vminvq_u16(chunks2.val[2]);
-   uint16_t min7 = vminvq_u16(chunks2.val[3]);
 
    // Find minimum of each chunk and directly create a vector with all minimums
    uint16x8_t all_mins = {vminvq_u16(chunks1.val[0]), vminvq_u16(chunks1.val[1]),

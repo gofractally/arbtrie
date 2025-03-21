@@ -1,8 +1,10 @@
+#include <sal/hash/lehmer64.h>
 #include <bit>
 #include <optional>
 #include <sal/debug.hpp>
 #include <sal/hint.hpp>
 #include <sal/mapping.hpp>
+#include <sal/min_index.hpp>
 #include <sal/shared_ptr_alloc.hpp>
 
 namespace sal
@@ -149,7 +151,11 @@ namespace sal
          // SAL_INFO("first_free_ptr: {}", first_free_ptr);
          // SAL_INFO("ptr_index: {}", ptr_index);
          auto alloc_index = first_free_page * ptrs_per_page + *ptr_index;
-         //  SAL_WARN("alloc: {}", ptr_address{region, ptr_address::index_type(alloc_index)});
+         // SAL_WARN("alloc: {}", ptr_address{region, ptr_address::index_type(alloc_index)});
+
+         // Increment the region use count
+         get_page_table().inc_region(region);
+
          // SAL_INFO("alloc_index: {}", alloc_index);
          return allocation{ptr_address{region, ptr_address::index_type(alloc_index)}, &ptr};
       }
@@ -232,6 +238,9 @@ namespace sal
 
       ptr.~shared_ptr();  /// reset it, make it ready to be allocated again
 
+      // Decrement the region use count
+      get_page_table().dec_region(address.region);
+
       // mark the ptr as free, we are the sole owner of this bit so fetch_add is safe
       auto prev = pg.free_ptrs[free_slot_idx].fetch_add(free_slot_bit, std::memory_order_release);
 
@@ -265,5 +274,31 @@ namespace sal
       // SAL_WARN("fp_idx before: {}", std::bitset<64>(fp_idx.load()));
       fp_idx.fetch_xor(1ULL << bit_in_free_pages_idx, std::memory_order_release);
       // SAL_WARN("fp_idx after: {}", std::bitset<64>(fp_idx.load()));
+   }
+
+   /**
+    * A suggestion for a region when you don't care which region 
+    * you are allocated in, attempts provide a region that isn't
+    * already over crowded by utilizing a random sample of 32
+    * regions and selecting the least used one.
+    */
+   ptr_address::region_type shared_ptr_alloc::next_region()
+   {
+      // Get a pointer to region_use_counts aligned at 128 bytes
+      const uint16_t* region_counts =
+          reinterpret_cast<const uint16_t*>(get_page_table().region_use_counts.data());
+
+      // Get random index aligned to 32 bytes using thread-local RNG
+      // by using thread-local rng we avoid contention on the global RNG and ensure
+      // that different threads will tend to be looking at different regions and thereby
+      // reducing contention.
+      static thread_local lehmer64_rng rng(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+      uint64_t aligned_index     = (rng.next() & 0xFFFF) & ~31ULL;  // Mask to 2^16 and align to 32
+      const uint16_t* region_ptr = region_counts + aligned_index;
+
+      int min_index = find_min_index_32(region_ptr);
+
+      return ptr_address::region_type(aligned_index + min_index);
    }
 }  // namespace sal

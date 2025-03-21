@@ -57,6 +57,7 @@ if(SAL_BUILD_TESTS)
         test/block_allocator_tests.cpp
         test/mapping_tests.cpp
         test/shared_ptr_alloc_tests.cpp
+        test/min_index_tests.cpp
     )
     
     

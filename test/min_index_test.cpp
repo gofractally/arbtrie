@@ -71,7 +71,7 @@ int scalar_min_index_64(uint16_t* counters, int start)
    return min_idx;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
    // Constants for array sizes and value ranges
    const size_t   ARRAY_SIZE      = 65536;

@@ -120,6 +120,14 @@ endif()
 add_executable(min_index_benchmark min_index_benchmark.cpp)
 add_executable(min_index_32_benchmark min_index_32_benchmark.cpp)
 add_executable(min_index_combined_benchmark min_index_combined_benchmark.cpp)
+add_executable(min_index_test min_index_test.cpp)
+
+# Link with Catch2 for unit tests
+target_link_libraries(min_index_test 
+    PUBLIC 
+        arbtrie
+        Catch2::Catch2WithMain
+)
 
 # Set properties for benchmark executables
 set_target_properties(min_index_benchmark PROPERTIES
@@ -137,10 +145,21 @@ set_target_properties(min_index_combined_benchmark PROPERTIES
     OUTPUT_NAME "min_index_combined_benchmark"
 )
 
+set_target_properties(min_index_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_test"
+)
+
 # Ensure we compile with optimization and native CPU instructions for benchmarking
 target_compile_options(min_index_benchmark PRIVATE -O3 -march=native)
 target_compile_options(min_index_32_benchmark PRIVATE -O3 -march=native)
 target_compile_options(min_index_combined_benchmark PRIVATE -O3 -march=native)
+
+# Add test to CTest
+add_test(
+    NAME min_index_test
+    COMMAND min_index_test
+)
 
 # Add benchmark for hint implementations
 add_executable(hint_benchmark hint_benchmark.cpp)

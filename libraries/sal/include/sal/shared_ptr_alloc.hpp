@@ -123,21 +123,21 @@ namespace sal
 
          region& get_region(ptr_address::region_type reg) { return regions[*reg]; }
 
-         void inc_region(uint16_t reg)
+         void inc_region(ptr_address::region_type reg)
          {
-            auto idx = reg / 4;
-            auto bit = reg % 4;
+            auto idx = *reg / 4;
+            auto bit = *reg % 4;
             region_use_counts[idx].fetch_add(1ULL << (bit * 16), std::memory_order_relaxed);
          }
-         void dec_region(uint16_t reg)
+         void dec_region(ptr_address::region_type reg)
          {
-            auto idx = reg / 4;
-            auto bit = reg % 4;
+            auto idx = *reg / 4;
+            auto bit = *reg % 4;
             region_use_counts[idx].fetch_sub(1ULL << (bit * 16), std::memory_order_relaxed);
          }
 
          /// there are 4, 16 bit, counters per uint64_t.
-         std::array<std::atomic<uint64_t>, (1 << 16) / 4> region_use_counts;
+         alignas(128) std::array<std::atomic<uint64_t>, (1 << 16) / 4> region_use_counts;
       };
    }  // namespace detail
 
@@ -201,11 +201,7 @@ namespace sal
        * you are allocated in, attempts provide a region that isn't
        * already over crowded.
        */
-      ptr_address::region_type next_region()
-      {
-         return ptr_address::region_type(
-             get_page_table()._next_region.fetch_add(1, std::memory_order_relaxed));
-      }
+      ptr_address::region_type next_region();
 
       /**
        *  @throw std::runtime_error if no ptrs are available
