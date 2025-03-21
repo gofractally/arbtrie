@@ -15,7 +15,8 @@ option(SAL_DEBUG "Enable debug logging" OFF)
 add_library(sal
     src/block_allocator.cpp
     src/mapping.cpp
-    src/address_alloc.cpp
+    src/hiint.cpp
+    src/shared_ptr_alloc.cpp
 )
 
 # Set include directories
@@ -44,7 +45,6 @@ set(SAL_HEADERS
     include/sal/block_allocator.hpp
     include/sal/mapping.hpp
     include/sal/debug.hpp
-    include/sal/address_alloc.hpp
 )
 
 # Tests
@@ -56,13 +56,9 @@ if(SAL_BUILD_TESTS)
     add_executable(sal-tests
         test/block_allocator_tests.cpp
         test/mapping_tests.cpp
-        test/address_alloc_tests.cpp
+        test/shared_ptr_alloc_tests.cpp
     )
     
-    # Performance test executable
-    add_executable(sal-perf-test
-        test/address_alloc_perf_test.cpp
-    )
     
     # Link against the library and Catch2
     target_link_libraries(sal-tests
@@ -71,12 +67,6 @@ if(SAL_BUILD_TESTS)
             Catch2::Catch2WithMain
     )
     
-    # Link performance test against the library and Catch2
-    target_link_libraries(sal-perf-test
-        PRIVATE
-            sal
-            Catch2::Catch2WithMain
-    )
     
     # Set the output directory for the test executable
     set_target_properties(sal-tests
@@ -84,11 +74,6 @@ if(SAL_BUILD_TESTS)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
     
-    # Set the output directory for the performance test executable
-    set_target_properties(sal-perf-test
-        PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-    )
     
     # Register tests with CTest
     include(CTest)

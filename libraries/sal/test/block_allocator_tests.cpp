@@ -184,7 +184,8 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       // Use offset_ptr to get each block
       for (uint32_t i = 0; i < 3; i++)
       {
-         sal::block_allocator::offset_ptr offset = allocator.block_to_offset(i);
+         sal::block_allocator::offset_ptr offset =
+             allocator.block_to_offset(sal::block_allocator::block_num_type(i));
          auto block_ptr = static_cast<unsigned char*>(allocator.get(offset));
          // Set first byte to a unique value
          block_ptr[0] = static_cast<unsigned char>(0xA0 + i);
@@ -193,7 +194,8 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       // Verify data is distinct and correctly set
       for (uint32_t i = 0; i < 3; i++)
       {
-         sal::block_allocator::offset_ptr offset = allocator.block_to_offset(i);
+         sal::block_allocator::offset_ptr offset =
+             allocator.block_to_offset(sal::block_allocator::block_num_type(i));
          auto block_ptr = static_cast<const unsigned char*>(allocator.get(offset));
          REQUIRE(block_ptr[0] == static_cast<unsigned char>(0xA0 + i));
       }
@@ -236,31 +238,33 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       auto offset3 = allocator.alloc();  // Add one more block
 
       // Test offset_to_block
-      REQUIRE(allocator.offset_to_block(offset0) == 0);
-      REQUIRE(allocator.offset_to_block(offset1) == 1);
-      REQUIRE(allocator.offset_to_block(offset2) == 2);
-      REQUIRE(allocator.offset_to_block(offset3) == 3);  // Test the new block
+      REQUIRE(allocator.offset_to_block(offset0) == sal::block_allocator::block_num_type(0));
+      REQUIRE(allocator.offset_to_block(offset1) == sal::block_allocator::block_num_type(1));
+      REQUIRE(allocator.offset_to_block(offset2) == sal::block_allocator::block_num_type(2));
+      REQUIRE(allocator.offset_to_block(offset3) ==
+              sal::block_allocator::block_num_type(3));  // Test the new block
 
       // Test block_to_offset - these should use bit shift operations internally
-      REQUIRE(allocator.block_to_offset(0) == offset0);
-      REQUIRE(allocator.block_to_offset(1) == offset1);
-      REQUIRE(allocator.block_to_offset(2) == offset2);
-      REQUIRE(allocator.block_to_offset(3) == offset3);  // Test the new block
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(0)) == offset0);
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(1)) == offset1);
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(2)) == offset2);
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(3)) ==
+              offset3);  // Test the new block
 
       // Verify that block_to_offset is using the bit shift optimization
       // For a 16MB block size, _log2_block_size should be 24 (2^24 = 16*2^20)
-      REQUIRE(allocator.block_to_offset(1) == (1 << 24));
-      REQUIRE(allocator.block_to_offset(2) == (2 << 24));
-      REQUIRE(allocator.block_to_offset(3) == (3 << 24));
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(1)) == (1 << 24));
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(2)) == (2 << 24));
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(3)) == (3 << 24));
 
       // Test block alignment checks
-      REQUIRE(allocator.is_block_aligned(0));
-      REQUIRE(allocator.is_block_aligned(BLOCK_SIZE));
-      REQUIRE(allocator.is_block_aligned(2 * BLOCK_SIZE));
-      REQUIRE_FALSE(allocator.is_block_aligned(1));
-      REQUIRE_FALSE(allocator.is_block_aligned(BLOCK_SIZE - 1));
-      REQUIRE_FALSE(allocator.is_block_aligned(BLOCK_SIZE + 1));
-      REQUIRE_FALSE(allocator.is_block_aligned(BLOCK_SIZE / 2));
+      REQUIRE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{0}));
+      REQUIRE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{BLOCK_SIZE}));
+      REQUIRE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{2 * BLOCK_SIZE}));
+      REQUIRE_FALSE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{1}));
+      REQUIRE_FALSE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{BLOCK_SIZE - 1}));
+      REQUIRE_FALSE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{BLOCK_SIZE + 1}));
+      REQUIRE_FALSE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{BLOCK_SIZE / 2}));
 
       // Test round-trip conversions
       REQUIRE(allocator.block_to_offset(allocator.offset_to_block(offset0)) == offset0);
@@ -269,10 +273,18 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       REQUIRE(allocator.block_to_offset(allocator.offset_to_block(offset3)) ==
               offset3);  // Test the new block
 
-      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(0)) == 0);
-      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(1)) == 1);
-      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(2)) == 2);
-      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(3)) == 3);  // Test the new block
+      REQUIRE(allocator.offset_to_block(
+                  allocator.block_to_offset(sal::block_allocator::block_num_type(0))) ==
+              sal::block_allocator::block_num_type(0));
+      REQUIRE(allocator.offset_to_block(
+                  allocator.block_to_offset(sal::block_allocator::block_num_type(1))) ==
+              sal::block_allocator::block_num_type(1));
+      REQUIRE(allocator.offset_to_block(
+                  allocator.block_to_offset(sal::block_allocator::block_num_type(2))) ==
+              sal::block_allocator::block_num_type(2));
+      REQUIRE(allocator.offset_to_block(
+                  allocator.block_to_offset(sal::block_allocator::block_num_type(3))) ==
+              sal::block_allocator::block_num_type(3));
    }
 
    // Clean up

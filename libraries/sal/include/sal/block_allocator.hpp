@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <sal/mapping.hpp>  // sync_type
+#include <sal/typed_int.hpp>
 
 namespace sal
 {
@@ -28,7 +29,9 @@ namespace sal
    {
      public:
       // 64-bit offset from the base pointer
-      using offset_ptr = uint64_t;
+      using offset_ptr                      = typed_int<uint64_t, struct offset_ptr_tag>;
+      using block_num_type                  = typed_int<uint64_t, struct block_num_tag>;
+      static constexpr offset_ptr null_page = offset_ptr(-1);
 
       /**
        * Constructor for block_allocator.
@@ -63,8 +66,8 @@ namespace sal
        */
       inline void* get(offset_ptr offset) noexcept
       {
-         assert(offset < _file_size);
-         return static_cast<char*>(_mapped_base) + offset;
+         assert(*offset < _file_size);
+         return static_cast<char*>(_mapped_base) + *offset;
       }
       template <typename T>
       T* get(offset_ptr offset) noexcept
@@ -80,8 +83,8 @@ namespace sal
        */
       inline const void* get(offset_ptr offset) const noexcept
       {
-         assert(offset < _file_size);
-         return static_cast<const char*>(_mapped_base) + offset;
+         assert(*offset < _file_size);
+         return static_cast<const char*>(_mapped_base) + *offset;
       }
 
       /**
@@ -91,10 +94,10 @@ namespace sal
        * @param block_num The block number (index)
        * @return The offset pointer to the start of the block
        */
-      inline offset_ptr block_to_offset(uint64_t block_num) const noexcept
+      inline offset_ptr block_to_offset(block_num_type block_num) const noexcept
       {
-         assert(block_num < _num_blocks.load(std::memory_order_relaxed));
-         return block_num << _log2_block_size;  // Fast multiplication by power of 2
+         assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
+         return offset_ptr(*block_num << _log2_block_size);  // Fast multiplication by power of 2
       }
 
       /**
@@ -104,11 +107,11 @@ namespace sal
        * @param offset The offset pointer
        * @return The block number (index)
        */
-      inline uint64_t offset_to_block(offset_ptr offset) const noexcept
+      inline block_num_type offset_to_block(offset_ptr offset) const noexcept
       {
-         assert(offset < _file_size);
+         assert(*offset < _file_size);
          // Fast division by power of 2
-         return offset >> _log2_block_size;
+         return block_num_type(*offset >> _log2_block_size);
       }
 
       /**
@@ -120,7 +123,7 @@ namespace sal
       inline bool is_block_aligned(offset_ptr offset) const noexcept
       {
          // Fast modulo using bit mask since block_size is a power of 2
-         return (offset & (_block_size - 1)) == 0;
+         return (*offset & (_block_size - 1)) == 0;
       }
 
       // ensures that at least the desired number of blocks are present

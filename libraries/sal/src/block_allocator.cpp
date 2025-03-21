@@ -442,8 +442,8 @@ namespace sal
 
          if (addr != MAP_FAILED)
          {
-            offset_ptr offset = _file_size;  // Offset to the newly allocated block
-            _file_size        = new_size;
+            offset_ptr offset(_file_size);  // Offset to the newly allocated block
+            _file_size = new_size;
 
             sal_debug("Alloc: Mapped new block contiguously at base={:#x}",
                       reinterpret_cast<uintptr_t>(addr));
@@ -488,7 +488,7 @@ namespace sal
 
             // For the first block, offset is 0
             _num_blocks.fetch_add(1, std::memory_order_release);
-            return 0;
+            return offset_ptr(0);
          }
          else
          {
