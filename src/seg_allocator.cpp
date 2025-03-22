@@ -383,21 +383,32 @@ namespace arbtrie
 
          for (uint32_t i = 0; i < num_loaded; ++i)
          {
-            auto state     = ses.lock();
-            auto addr      = read_ids[i];
-            auto obj_ref   = state.get(addr);
+            auto state   = ses.lock();  // read only lock
+            auto addr    = read_ids[i];
+            auto obj_ref = state.get(addr);
+            // reads the relaxed cached load of the location
             auto start_loc = obj_ref.loc();
-            obj_ref.meta().end_pending_cache();
 
-            if (not obj_ref.ref())
+            // when the object is freed and reallocated, the pending cache
+            // bit is cleared, so we need to make sure the bit is set before
+            // we assume we are still referencing the same object.
+            if (not obj_ref.meta().try_end_pending_cache())
                continue;
 
-            auto header = obj_ref.header();
+            // before we even consider reading this pointer, we need to make
+            // sure that the location is read-only....
+            if (not state.is_read_only(start_loc))
+               continue;
+
+            // obj_ref.header() will fail here if object was released after
+            // checking ref() above...
+            auto header = state.get_node_pointer(start_loc);
+
             if (header->address() != addr)
                continue;
 
-            // TODO: need to make sure that that ses modify lock is held while modifying
-            // the freshly allocated data
+            // TODO: return a scoped lock with new_loc and new_header
+            //the ses modify lock is held while modifying while allocating
             auto [new_loc, new_header] = ses.alloc_data(header->size(), header->address_seq());
             memcpy(new_header, header, header->size());
 
@@ -406,17 +417,17 @@ namespace arbtrie
                if (not new_header->has_checksum())
                   new_header->update_checksum();
             }
+            ses.end_modify();  // modify started with ses.alloc_data
 
             /// if the location hasn't changed then we are good to go
             ///     - and the objeect is still valid ref count
-            if (false /*obj_ref.compare_exchange_location(start_loc, new_loc)*/)
+            if (obj_ref.compare_exchange_location(start_loc, new_loc))
             {
                _mapped_state->_cache_difficulty_state.compactor_promote_bytes(header->size());
                ARBTRIE_WARN("compactor_promote_rcache_data: free object: ", header->size(),
                             " bytes segment=", start_loc.segment());
                _mapped_state->_segment_data.meta[start_loc.segment()].free_object(header->size());
             }
-            ses.end_modify();  // modify started with ses.alloc_data
          }
       }
       return more_work;
@@ -446,7 +457,7 @@ namespace arbtrie
       {
          auto& sd = _mapped_state->_segment_data.meta[i];
          auto  sm = sd.data();
-         if (not sm.is_pinned)
+         if (not sm.is_read_only or not sm.is_pinned)
             continue;
          if (sm.free_space < segment_size / 8)
             continue;
@@ -749,7 +760,7 @@ namespace arbtrie
     * keeps on going... therefore the footer of the segment is not protected by the 
     * lock (unless the last_writable_page includes the footer) and yet this method 
     * is modifying the footer fields by inserting an * allocator_header into the segment... 
-    * potentially at the same time as the other  thread.  Allocator headers form a 
+    * potentially at the same time as the other thread. Allocator headers form a 
     * linked list with each pointing to the previous, so anyone (recovery) following 
     * this list needs to be prepared that the headers may not be in order due to the 
     * race condition on updating segment::_last_aheader_pos

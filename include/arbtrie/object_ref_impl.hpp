@@ -83,9 +83,10 @@ namespace arbtrie
          ARBTRIE_WARN("rcache_queue is full, skipping cache");
          return;
       }
-      if (_rlock.should_cache(size) and _meta.try_set_read_or_pending_cache())
+      if (_rlock.should_cache(size) and _rlock.is_read_only(_cached.loc()) and
+          _meta.try_set_read_or_pending_cache())
       {
-         ARBTRIE_INFO("maybe_update_read_stats: pushing to rcache_queue size=", size);
+         //         ARBTRIE_INFO("maybe_update_read_stats: pushing to rcache_queue size=", size);
          _rlock._session._rcache_queue.push(address());
       }
    }

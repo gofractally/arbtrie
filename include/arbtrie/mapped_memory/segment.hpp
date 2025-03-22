@@ -316,8 +316,8 @@ namespace arbtrie
       {
          //if (size == 2496)
          auto expected = _state_data.load(std::memory_order_relaxed);
-         ARBTRIE_INFO("free_object: size=", size,
-                      " existing free_space=", segment_meta::state_data(expected).free_space);
+         //         ARBTRIE_INFO("free_object: size=", size,
+         //                      " existing free_space=", segment_meta::state_data(expected).free_space);
          auto updated = state_data(expected).free_object(size).to_int();
          while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
             updated = state_data(expected).free_object(size).to_int();

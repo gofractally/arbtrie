@@ -207,6 +207,13 @@ namespace arbtrie
          return *this;
       }
 
+      bool try_end_pending_cache()
+      {
+         bitfield prev(
+             _meta.fetch_and(~(read_mask | pending_cache_mask), std::memory_order_relaxed));
+         return prev.pending_cache;
+      }
+
       auto& end_pending_cache()
       {
          if constexpr (std::is_same_v<Storage, std::atomic<uint64_t>>)
