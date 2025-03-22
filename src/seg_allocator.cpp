@@ -585,12 +585,14 @@ namespace arbtrie
       {
          if (foo->is_allocator_header())
          {
+            ARBTRIE_INFO("compact_segment: foo->is_allocator_header()");
             if (foo->is_end_of_segment())
                break;
             src_vage = foo->_source_age_ms;
          }
          else  // foo is a node_header
             try_copy_node((const node_header*)(foo), src_vage);
+         assert(foo != foo->next());
          foo = foo->next();
       }
 
@@ -610,7 +612,32 @@ namespace arbtrie
 
    void seg_allocator::sync_segment(int s, sync_type st) noexcept
    {
+      return;
       auto seg = get_segment(s);
+      // advance the _first_writable_page to page after alloc_pos
+      auto alloc_pos = seg->get_alloc_pos();
+      auto end_page  = round_up_multiple<uint64_t>(alloc_pos, system_config::os_page_size()) >>
+                      system_config::os_page_size_log2;
+
+      auto from_page = seg->_first_writable_page.exchange(end_page, std::memory_order_acquire);
+      /// wait for any active writes to complete
+      _mapped_state->_session_data.start_sync_segment(s);
+      // mprotect pages between from_page and end_page
+      auto start_ptr = seg->data + from_page * system_config::os_page_size();
+      auto range     = (end_page - from_page) * system_config::os_page_size();
+
+      if (end_page == pages_per_segment)
+      {
+         // we must finalize the segment here...
+         _mapped_state->_segment_data.meta[s].set_read_only(true);
+      }
+
+      if (mprotect(start_ptr, range, PROT_READ) != 0) [[unlikely]]
+         ARBTRIE_WARN("mprotect error(", errno, ") ", strerror(errno));
+
+      _mapped_state->_session_data.end_sync_segment();
+#if 0  // TODO: restore syncing to disk in addition to write protection
+
       // TODO BUG: when syncing we must sync to the end of a page,
       // but start the next sync from the beginning of the page
       // since we only store the last paged synced... we no longer
@@ -618,7 +645,6 @@ namespace arbtrie
       // therefore it may be dirty again. We may need to
       // subtract 1 page from the last sync pos (assuming it doesn't go neg)
       // and sync the page before.
-      //
       // If we store last_sync_pos as the rounded down position, then
       // getting this will work!
       auto last_sync  = _mapped_state->_segment_data.meta[s].get_last_sync_pos();
@@ -645,21 +671,31 @@ namespace arbtrie
          }
          _mapped_state->_segment_data.meta[s].set_last_sync_pos(last_alloc);
       }
+#endif
    }
    void seg_allocator::sync(sync_type st)
    {
-      if (st == sync_type::none)
-         return;
+      //  if (st == sync_type::none)
+      //      return;
 
+      // only one thread can call sync at a time...
+      // and if sync means "write-protect" and it happens on
+      // every transaction commit, then writers will block each
+      // other while waiting to protect the segment... this could
+      // be made async, eg. best effort to write protect without
+      // blocking... you would have to wait for everyone to flush
+      // regardless when you are in synchronous mode.
       std::unique_lock lock(_sync_mutex);
 
       auto ndsi = get_last_dirty_seg_idx();
       while (_last_synced_index < ndsi)
       {
+         //         ARBTRIE_WARN("sync: _last_synced_index: ", _last_synced_index, " ndsi: ", ndsi);
          auto lsi = _last_synced_index % max_segment_count;
-         _seg_sync_locks[lsi].start_sync();
-         sync_segment(_dirty_segs[ndsi % max_segment_count], st);
-         _seg_sync_locks[lsi].end_sync();
+         write_protect_segment(_dirty_segs[lsi]);
+         //   _seg_sync_locks[lsi].start_sync();
+         // sync_segment(_dirty_segs[ndsi % max_segment_count], st);
+         //   _seg_sync_locks[lsi].end_sync();
          ++_last_synced_index;
       }
    }
@@ -703,21 +739,34 @@ namespace arbtrie
     */
    void seg_allocator::write_protect_segment(segment_number seg_num)
    {
-      auto seg                     = get_segment(seg_num);
-      auto pre_alloc_pos           = seg->_alloc_pos.load(std::memory_order_acquire);
-      auto new_first_writable_pos  = round_up_multiple<os_page_size>(pre_alloc_pos);
-      auto new_first_writable_page = new_first_writable_pos / os_page_size;
+      auto seg    = get_segment(seg_num);
+      auto fw_pos = seg->get_first_write_pos();
+      if (fw_pos == segment_size)
+         return;
+      auto pre_alloc_pos = seg->_alloc_pos.load(std::memory_order_acquire);
+      auto new_first_writable_pos =
+          round_up_multiple<uint64_t>(pre_alloc_pos, system_config::os_page_size());
+      auto new_first_writable_page = new_first_writable_pos >> system_config::os_page_size_log2;
+
+      // ARBTRIE_INFO("write_protect_segment: ", seg_num, " pre_alloc_pos: ", pre_alloc_pos,
+      //              " new_first_writable_pos: ", new_first_writable_pos,
+      //             " new_first_writable_page: ", new_first_writable_page,
+      //            " pages_per_segment: ", pages_per_segment,
+      //           " os_page_size: ", system_config::os_page_size(),
+      //          " is_last_page: ", new_first_writable_page == pages_per_segment);
 
       /// we have use release to synchronize with the allocator threads that are going to
       /// acquire this before attempting to write.
       auto old_first_writable_page =
           seg->_first_writable_page.exchange(new_first_writable_page, std::memory_order_release);
+      if (new_first_writable_page == pages_per_segment)
+         assert(seg->is_read_only());
 
       /// if the first writable page hasn't changed, then we don't need to do anything
       if (new_first_writable_page == old_first_writable_page)
          return;
 
-      auto old_first_writable_pos = old_first_writable_page * os_page_size;
+      auto old_first_writable_pos = old_first_writable_page * system_config::os_page_size();
 
       /// wait until all other threads are done modifying the segment.
       start_sync_segment(seg_num);
@@ -731,9 +780,14 @@ namespace arbtrie
 
       auto post_alloc_pos = seg->_alloc_pos.load(std::memory_order_acquire);
 
+      if (new_first_writable_page == pages_per_segment)
+         assert(seg->is_read_only());
+
       /// insert header to document free space, and maybe finalize the segment
       prepare_for_write_protect(seg_num, seg, post_alloc_pos, old_first_writable_pos,
                                 new_first_writable_pos);
+      if (new_first_writable_page == pages_per_segment)
+         assert(seg->is_read_only());
 
       /// there is no reason to hold the lock until it is actually write-protected,
       /// we only need to hold it long enough to ensure all other threads are informed
@@ -742,11 +796,27 @@ namespace arbtrie
       /// TODO: release the mutex guarding the race with the allocator
       end_sync_segment();
 
+      if (new_first_writable_page == pages_per_segment)
+      {
+         // we must finalize the segment here...
+         //   ARBTRIE_WARN("write_protect_segment: finalizing segment: set read only", seg_num);
+         assert(seg->is_read_only());
+         _mapped_state->_segment_data.meta[seg_num].set_read_only(true);
+         // _mapped_state->_segment_data.meta[seg_num].finalize_segment(
+         //     0, seg->_vage_accumulator.average_age());
+      }
+
       auto range     = new_first_writable_pos - old_first_writable_pos;
       auto start_ptr = seg->data + old_first_writable_pos;
 
       /// now I have to mprotect pages from [old_first_writable_page, new_first_writable_page)
       // write protect the segment up to the alloc_pos
+
+      assert(start_ptr + range <= seg->alloc_ptr());
+      //      ARBTRIE_INFO("write_protect_segment: ", seg_num, " start_ptr: ", (uint64_t)start_ptr,
+      //                   " range: ", range, " alloc_ptr: ", (uint64_t)seg->alloc_ptr(),
+      //                   " end_ptr: ", (uint64_t)start_ptr + range,
+      //                   " os_page_size: ", system_config::os_page_size());
       if (mprotect(start_ptr, range, PROT_READ) != 0) [[unlikely]]
          ARBTRIE_WARN("mprotect error(", errno, ") ", strerror(errno));
    }
@@ -799,13 +869,16 @@ namespace arbtrie
          ahead->_checksum        = XXH64(start_checksum_pos, checksum_range, 0);
          ahead->_start_checksum_pos = old_first_writable_pos;
          ahead->_checksum_bytes     = checksum_range;
-      }
+         seg->set_alloc_pos(new_first_writable_pos);
 
-      if (new_first_writable_pos == segment_size)
-      {
-         seg->finalize();
-         _mapped_state->_segment_data.meta[seg_num].finalize_segment(
-             0, seg->_vage_accumulator.average_age());
+         if (new_first_writable_pos == segment_size and not seg->is_finalized())
+         {
+            ARBTRIE_WARN("finalizing segment: ", seg_num, " free_space: ", seg->free_space());
+            _mapped_state->_segment_data.meta[seg_num].finalize_segment(
+                seg->free_space(), seg->_vage_accumulator.average_age());
+            seg->finalize();
+            assert(seg->is_finalized());
+         }
       }
    }
 
@@ -1074,6 +1147,16 @@ namespace arbtrie
 
    void seg_allocator::provider_prepare_segment(segment_number seg_num)
    {
+      // utilized by compactor to propagate the relative age of data in a segment
+      // for the purposes of munlock the oldest data first and avoiding promoting data
+      // just because we compacted a segment to save space.
+      uint64_t now_ms = arbtrie::get_current_time_ms();
+
+      // Update the virtual age in segment metadata to match the segment header's initial value
+      auto& meta = _mapped_state->_segment_data.meta[seg_num];
+      meta.clear();
+      meta.set_vage(now_ms);
+
       auto sp = _block_alloc.get(seg_num);
       disable_segment_write_protection(seg_num);
       auto shp = new (sp) mapped_memory::segment();
@@ -1085,16 +1168,8 @@ namespace arbtrie
       shp->_session_id          = -1;
       shp->_open_time_usec      = 0;
       shp->_close_time_usec     = 0;
-
-      // utilized by compactor to propagate the relative age of data in a segment
-      // for the purposes of munlock the oldest data first and avoiding promoting data
-      // just because we compacted a segment to save space.
-      uint64_t now_ms = arbtrie::get_current_time_ms();
       shp->_vage_accumulator.reset(now_ms);
 
-      // Update the virtual age in segment metadata to match the segment header's initial value
-      auto& meta = _mapped_state->_segment_data.meta[seg_num];
-      meta.set_vage(now_ms);
       ARBTRIE_WARN("segment_provider: Prepared segment ", seg_num,
                    " freed space: ", meta.get_free_state().free_space);
    }

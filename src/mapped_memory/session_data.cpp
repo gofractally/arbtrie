@@ -10,7 +10,7 @@ namespace arbtrie
       void session_data::start_sync_segment(segment_number segment_num)
       {
          // only one thread can do syncing at a time
-         _active_mask.store(-1);
+         _active_mask.store(-1ull);
          _sync_request.store(segment_num, std::memory_order_release);
 
          // Build mask of sessions modifying this segment - fully branchless

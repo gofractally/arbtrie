@@ -43,7 +43,7 @@ namespace arbtrie
 
             static_assert((1 << 26) > segment_size);
             static_assert((1 << 20) >= segment_size / cacheline_size);
-            static_assert((1 << 14) > segment_size / os_page_size);
+            static_assert((1 << 14) > segment_size / 4096);
 
             uint64_t to_int() const { return std::bit_cast<uint64_t>(*this); }
             explicit state_data(uint64_t x) { *this = std::bit_cast<state_data>(x); }
@@ -70,10 +70,23 @@ namespace arbtrie
          void       free_object(uint32_t size);
          void       free(uint32_t size);
          void       finalize_segment(uint32_t size, uint64_t vage_value);
-         void       clear() { _state_data.store(0, std::memory_order_relaxed); }
-         bool       is_alloc() { return get_free_state().is_alloc; }
-         bool       is_pinned() { return get_free_state().is_pinned; }
-         void       set_pinned(bool s)
+         void       clear()
+         {
+            ARBTRIE_INFO("segment_meta::clear");
+            _state_data.store(0, std::memory_order_relaxed);
+         }
+         bool is_alloc() { return get_free_state().is_alloc; }
+         bool is_pinned() { return get_free_state().is_pinned; }
+         void set_read_only(bool s)
+         {
+            ARBTRIE_INFO("segment_meta::set_read_only: s: ", s);
+            auto expected = _state_data.load(std::memory_order_relaxed);
+            auto updated  = state_data(expected).set_read_only(s).to_int();
+            while (
+                not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
+               updated = state_data(expected).set_read_only(s).to_int();
+         }
+         void set_pinned(bool s)
          {
             auto expected = _state_data.load(std::memory_order_relaxed);
             auto updated  = state_data(expected).set_pinned(s).to_int();
@@ -164,7 +177,10 @@ namespace arbtrie
          void finalize()
          {
             _close_time_usec = arbtrie::get_current_time_ms();
-            _alloc_pos.store(segment_size - segment_footer_size, std::memory_order_relaxed);
+            _alloc_pos.store(segment_size, std::memory_order_relaxed);
+            ARBTRIE_INFO("segment::finalize: _close_time_usec: ", _close_time_usec,
+                         " _alloc_pos (seg_size-footer_size): ",
+                         _alloc_pos.load(std::memory_order_relaxed), " free_space: ", free_space());
          }
          bool is_finalized() const { return _close_time_usec != 0; }
 
@@ -209,7 +225,9 @@ namespace arbtrie
          {
             if (pos >= get_alloc_pos())
                return false;
-            const auto page = pos / os_page_size;
+            //const auto page = pos / system_config::os_page_size();
+            assert(pos / system_config::os_page_size() == pos >> system_config::os_page_size_log2);
+            const auto page = pos >> system_config::os_page_size_log2;
             if (page < _first_writable_page.load(std::memory_order_relaxed))
                return false;
             return pos < (segment_size - segment_footer_size);
@@ -217,13 +235,13 @@ namespace arbtrie
 
          inline uint32_t get_first_write_pos() const
          {
-            return _first_writable_page.load(std::memory_order_acquire) * os_page_size;
+            return _first_writable_page.load(std::memory_order_acquire) *
+                   system_config::os_page_size();
          }
 
          bool is_read_only() const
          {
-            return _first_writable_page.load(std::memory_order_relaxed) ==
-                   segment_size / os_page_size;
+            return _first_writable_page.load(std::memory_order_relaxed) == pages_per_segment;
          }
 
          // the next position to allocate data, only
@@ -264,7 +282,7 @@ namespace arbtrie
       // State data implementations
       inline segment_meta::state_data& segment_meta::state_data::set_last_sync_page(uint32_t page)
       {
-         assert(page <= segment_size / os_page_size);
+         assert(page <= segment_size / system_config::os_page_size());
          last_sync_page = page;
          return *this;
       }
@@ -272,7 +290,6 @@ namespace arbtrie
       inline segment_meta::state_data& segment_meta::state_data::free(uint32_t size)
       {
          assert(free_space + size <= segment_size);
-         ARBTRIE_INFO("free: size=", size);
          free_space += size;
          assert(free_space >= size);
          return *this;
@@ -281,7 +298,7 @@ namespace arbtrie
       inline segment_meta::state_data& segment_meta::state_data::free_object(uint32_t size)
       {
          assert(size > 0);
-         assert(free_space + size <= sizeof(mapped_memory::segment::data));
+         assert(free_space + size <= sizeof(mapped_memory::segment));
 
          free_space += size;
          // ++free_objects;
@@ -325,7 +342,6 @@ namespace arbtrie
 
       inline void segment_meta::free(uint32_t size)
       {
-         ARBTRIE_INFO("free: size=", size);
          auto expected = _state_data.load(std::memory_order_relaxed);
          auto updated  = state_data(expected).free(size).to_int();
          while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
@@ -355,7 +371,7 @@ namespace arbtrie
       inline uint64_t segment_meta::get_last_sync_pos() const
       {
          return state_data(_state_data.load(std::memory_order_relaxed)).last_sync_page *
-                os_page_size;
+                system_config::os_page_size();
       }
 
       inline void segment_meta::start_alloc_segment()

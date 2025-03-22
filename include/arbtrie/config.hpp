@@ -1,10 +1,38 @@
 #pragma once
 #include <arbtrie/hash/xxh32.hpp>
 #include <bit>
+#include <cstddef>
 #include <string_view>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace arbtrie
 {
+
+   namespace system_config
+   {
+      static const size_t page_size = []() -> size_t
+      {
+#ifdef _WIN32
+         SYSTEM_INFO si;
+         GetSystemInfo(&si);
+         return si.dwPageSize;
+#else
+         return sysconf(_SC_PAGESIZE);
+#endif
+      }();
+
+      const uint32_t os_page_size_log2 = []() -> uint32_t { return std::countr_zero(page_size); }();
+
+      inline size_t os_page_size()
+      {
+         return page_size;
+      }
+   }  // namespace system_config
+
    /**
     * For ACID **Durablity** requriments this configures
     * how agressive triedent will be in flushing data to disk.
@@ -240,7 +268,8 @@ namespace arbtrie
    // each thread will have a segment this size, so larger values
    // may use more memory than necessary for idle threads
    // max value: 4 GB due to type of segment_offset
-   static constexpr const uint64_t segment_size = 32 * MB;
+   static constexpr const uint64_t segment_size      = 32 * MB;
+   static const uint32_t           pages_per_segment = segment_size / system_config::os_page_size();
 
    /// object pointers can only address 48 bits
    /// 128 TB limit on database size with 47 bits, this saves us
@@ -258,7 +287,7 @@ namespace arbtrie
     */
    static constexpr const uint32_t max_threads = 64;
 
-   static constexpr const uint32_t os_page_size = 4096;
+   //static constexpr const uint32_t os_page_size = 4096;
    /**
     * Each ID region can store 512 IDs before the ID
     * file needs to grow becuase each ID takes 8 bytes, making
@@ -276,7 +305,7 @@ namespace arbtrie
     * spread across all regions to prevent premature growth to
     * 512MB or more just because one region is too dense.
     */
-   static constexpr const uint32_t id_page_size = os_page_size;
+   static constexpr const uint32_t id_page_size = 4096;
 
    static_assert(segment_size < 4 * GB, "size must be less than 4GB");
    static_assert(std::popcount(segment_size) == 1, "size must be power of 2");

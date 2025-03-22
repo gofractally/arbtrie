@@ -98,7 +98,8 @@ namespace arbtrie
       if (_alloc_seg_ptr)
       {
          auto cur_apos = _alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed);
-
+         ARBTRIE_INFO("finalize_active_segment: ", _alloc_seg_num, " cur_apos: ", cur_apos,
+                      " free_space: ", _alloc_seg_ptr->free_space());
          // update the segment meta data so that it knows the free space and
          // age of the segment data for use by compactor
          _alloc_seg_meta->finalize_segment(
