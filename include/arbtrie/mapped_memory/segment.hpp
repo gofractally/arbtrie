@@ -35,9 +35,8 @@ namespace arbtrie
          struct state_data
          {
             uint64_t free_space : 26;       // able to store segment_size
-            uint64_t unused : 20;           // store the relative virtual age
+            uint64_t unused : 21;           // store the relative virtual age
             uint64_t last_sync_page : 14;   //  segment_size / 4096 byte pages
-            uint64_t is_alloc : 1     = 0;  // the segment is a session's private alloc area
             uint64_t is_pinned : 1    = 0;  // indicates that the segment is mlocked
             uint64_t is_read_only : 1 = 0;  // indicates that the entire segment is write protected
 
@@ -51,7 +50,6 @@ namespace arbtrie
             state_data& set_last_sync_page(uint32_t page);
             state_data& free(uint32_t size);
             state_data& free_object(uint32_t size);
-            state_data& set_alloc(bool s);
             state_data& set_pinned(bool s);
             state_data& set_read_only(bool s);
 
@@ -75,11 +73,9 @@ namespace arbtrie
             ARBTRIE_INFO("segment_meta::clear");
             _state_data.store(0, std::memory_order_relaxed);
          }
-         bool is_alloc() { return get_free_state().is_alloc; }
          bool is_pinned() { return get_free_state().is_pinned; }
          void set_read_only(bool s)
          {
-            ARBTRIE_INFO("segment_meta::set_read_only: s: ", s);
             auto expected = _state_data.load(std::memory_order_relaxed);
             auto updated  = state_data(expected).set_read_only(s).to_int();
             while (
@@ -98,9 +94,6 @@ namespace arbtrie
          {
             auto expected = _state_data.load(std::memory_order_relaxed);
 
-            // Safety check: is_alloc should be false when finalizing compaction
-            assert(not state_data(expected).is_alloc);
-
             // Create updated state with reset free_space and rel_virtual_age
             // but preserve other flags like is_pinned, is_read_only, and last_sync_page
             auto updated = state_data(expected).set_free_space(0).to_int();
@@ -109,7 +102,6 @@ namespace arbtrie
                updated = state_data(expected).set_free_space(0).to_int();
             vage.store(0, std::memory_order_relaxed);
          }
-         void     set_alloc_state(bool a);
          uint64_t get_last_sync_pos() const;
          void     start_alloc_segment();
          void     set_last_sync_pos(uint64_t pos);
@@ -140,7 +132,7 @@ namespace arbtrie
              * Get the last synced position for a segment
              */
          inline uint64_t get_last_sync_pos(segment_number segment) const;
-         inline uint16_t get_first_write_pos(segment_number segment) const;
+         //   inline uint16_t get_first_write_pos(segment_number segment) const;
       };
 
       static constexpr size_t segment_footer_size = 64;
@@ -164,8 +156,6 @@ namespace arbtrie
        */
       struct segment
       {
-         char data[segment_size - segment_footer_size];
-
          uint32_t get_alloc_pos() const { return _alloc_pos.load(std::memory_order_relaxed); }
          uint32_t free_space() const { return end() - alloc_ptr(); }
 
@@ -177,14 +167,18 @@ namespace arbtrie
          void finalize()
          {
             _close_time_usec = arbtrie::get_current_time_ms();
-            _alloc_pos.store(segment_size, std::memory_order_relaxed);
-            ARBTRIE_INFO("segment::finalize: _close_time_usec: ", _close_time_usec,
-                         " _alloc_pos (seg_size-footer_size): ",
-                         _alloc_pos.load(std::memory_order_relaxed), " free_space: ", free_space());
+            //             ARBTRIE_WARN("segment::finalize: _close_time_usec: ", _close_time_usec,
+            //                         " _alloc_pos (seg_size-footer_size): ",
+            //                         _alloc_pos.load(std::memory_order_relaxed), " free_space: ", free_space());
+            assert(is_finalized());
          }
          bool is_finalized() const { return _close_time_usec != 0; }
 
-         void set_alloc_pos(uint32_t pos) { _alloc_pos.store(pos, std::memory_order_relaxed); }
+         void set_alloc_pos(uint32_t pos)
+         {
+            assert(pos <= end_pos());
+            _alloc_pos.store(pos, std::memory_order_relaxed);
+         }
 
          /// @brief  helper to convert ptr to pos
          uint32_t set_alloc_ptr(char* ptr)
@@ -198,25 +192,30 @@ namespace arbtrie
          {
             _alloc_pos           = 0;
             _first_writable_page = 0;
-            _first_unsynced_page = 0;
             _session_id          = -1;
             _seg_sequence        = -1;
          }
+         bool can_alloc(uint32_t size) const
+         {
+            assert(size == round_up_multiple<64>(size));
+            // leave enough room for the ending allocator header
+            return get_alloc_pos() + size <= sizeof(data) - 64;
+         }
+         template <typename T>
+         T* alloc(uint32_t size, auto&&... args)
+         {
+            assert(can_alloc(size));
+            auto prev = _alloc_pos.fetch_add(size, std::memory_order_relaxed);
+            return new (data + prev) T(size, std::forward<decltype(args)>(args)...);
+         }
+         void unalloc(uint32_t size)
+         {
+            assert(size == round_up_multiple<64>(size));
+            assert(size <= get_alloc_pos());
 
-         /**
-          * Calls mprotect() with PROT_READ on the set of pages
-          * [_first_unsynced_page, _alloc_pos / os_page_size] and will advance the
-          * alloc position to the start of the next page if necessary and write
-          */
-         void protect();
-
-         /**
-          * Calls protect() first to maintain the invariant, then 
-          * calls msync() with the given flags on the set of pages
-          * [_first_unsynced_page, _alloc_pos / os_page_size] and will advance the
-          * alloc position to the start of the next page if necessary.
-          */
-         void sync(sync_type sync = sync_type::async);
+            auto prev = _alloc_pos.fetch_sub(size, std::memory_order_relaxed);
+            assert(prev >= size);
+         }
 
          /**
           * We can only modify data in the range [_first_writable_page*os_page_size, _alloc_pos)
@@ -228,55 +227,104 @@ namespace arbtrie
             //const auto page = pos / system_config::os_page_size();
             assert(pos / system_config::os_page_size() == pos >> system_config::os_page_size_log2);
             const auto page = pos >> system_config::os_page_size_log2;
-            if (page < _first_writable_page.load(std::memory_order_relaxed))
+            if (page < _first_writable_page)
                return false;
             return pos < (segment_size - segment_footer_size);
          }
 
          inline uint32_t get_first_write_pos() const
          {
-            return _first_writable_page.load(std::memory_order_acquire) *
-                   system_config::os_page_size();
+            return _first_writable_page * system_config::os_page_size();
          }
 
-         bool is_read_only() const
+         /**
+          * Returns true if the entire segment is read only
+          */
+         bool is_read_only() const { return _first_writable_page == pages_per_segment; }
+
+         void sync(sync_type st, int top_root_index, id_address top_root)
          {
-            return _first_writable_page.load(std::memory_order_relaxed) == pages_per_segment;
+            auto  alloc_pos          = get_alloc_pos();
+            char* alloc_ptr          = data + alloc_pos;
+            auto  ahead              = new (alloc_ptr) allocator_header;
+            ahead->_time_stamp_ms    = arbtrie::get_current_time_ms();
+            ahead->_top_node_update  = top_root_index;
+            ahead->_top_node_id      = top_root;
+            ahead->_prev_aheader_pos = _last_aheader_pos;
+            auto lah                 = get_last_aheader();
+
+            if (lah->is_allocator_header())
+               ahead->_start_checksum_pos = _last_aheader_pos + lah->_nsize;
+
+            auto cheksum_size =
+                alloc_pos + offsetof(allocator_header, _checksum) - ahead->_start_checksum_pos;
+
+            _last_aheader_pos = alloc_pos;
+
+            uint32_t next_page_pos =
+                round_up_multiple<uint32_t>(alloc_pos + 64, system_config::os_page_size());
+
+            if (is_finalized())
+               next_page_pos = segment_size;
+            else if (next_page_pos >= end_pos())
+               finalize();
+
+            // Set size to reach page boundary
+            ahead->_nsize    = next_page_pos - alloc_pos;
+            ahead->_checksum = XXH3_64bits(data + ahead->_start_checksum_pos, cheksum_size);
+
+            auto old_first_writable_page_pos = uint32_t(_first_writable_page)
+                                               << system_config::os_page_size_log2;
+
+            _first_writable_page = next_page_pos >> system_config::os_page_size_log2;
+            auto protect_size    = next_page_pos - old_first_writable_page_pos;
+            assert(protect_size > 0);
+            set_alloc_pos(std::min<uint32_t>(next_page_pos, end_pos()));
+            /*   ARBTRIE_INFO(
+                "sync: protect_size: ", double(protect_size) / system_config::os_page_size(),
+                " old_first_writable_page_pos: ", old_first_writable_page_pos,
+                " next_page_pos: ", next_page_pos);
+                */
+            if (mprotect(data + old_first_writable_page_pos, protect_size, PROT_READ))
+            {
+               ARBTRIE_ERROR("mprotect failed: ", strerror(errno));
+               throw std::runtime_error("mprotect failed");
+            }
+            assert(is_finalized() ? is_read_only() : true);
          }
 
+         char data[segment_size - segment_footer_size];
          // the next position to allocate data, only
          // modified by the thread that owns this segment and
          // set to uint64_t max when this segment is ready
          // to be marked read only to the seg_allocator, allocator
          // thread must check _first_writable_page before before using
          // _alloc_pos.
+        private:
          std::atomic<uint32_t> _alloc_pos = 0;  /// number of bytes allocated from data
-
+        public:
          /// The os_page number of the first page that can be written to
          /// advanced by the sync() thread... sync thread waits until all
          /// modifying threads are done before enforcing the write protection
-         std::atomic<uint16_t> _first_writable_page = 0;
-         /// The os page number of the first page that is not synced to disk
-         std::atomic<uint16_t> _first_unsynced_page = 0;
-
-         uint32_t _session_id;       ///< the session id that allocated this segment
-         uint32_t _seg_sequence;     ///< the sequence number of this sessions segment alloc
-         uint64_t _open_time_usec;   ///< unix time in microseconds this segment started writing
-         uint64_t _close_time_usec;  ///< unix time in microseconds this segment was closed
+         uint16_t _first_writable_page = 0;
+         uint16_t _session_id          = -1;  ///< the session id that allocated this segment
+         uint32_t _seg_sequence        = 0;  ///< the sequence number of this sessions segment alloc
+         uint64_t _open_time_usec  = 0;  ///< unix time in microseconds this segment started writing
+         uint64_t _close_time_usec = 0;  ///< unix time in microseconds this segment was closed
 
          // the provider thread assigns sequence numbers to segments as they are
          // prepared, -1 means the segment is in the free list and not used
-         uint32_t _provider_sequence;
+         uint32_t _provider_sequence = 0;
+         uint32_t _last_aheader_pos  = 0;
+         uint64_t _unused;
 
-         // tracks how much of the segment has been checksumed and
-         // recorded in the allocator_header::checksum fields formed by the
-         // linked list of _last_aheader_pos
-         std::atomic<uint32_t> _checksum_pos     = 0;
-         std::atomic<uint32_t> _last_aheader_pos = 0;
-
+         const allocator_header* get_last_aheader() const
+         {
+            return (const allocator_header*)(data + _last_aheader_pos);
+         }
          // Tracks accumulated virtual age during allocation
          size_weighted_age _vage_accumulator;
-      };
+      };  // __attribute((packed));
       static_assert(sizeof(segment) == segment_size);
 
       // State data implementations
@@ -302,12 +350,6 @@ namespace arbtrie
 
          free_space += size;
          // ++free_objects;
-         return *this;
-      }
-
-      inline segment_meta::state_data& segment_meta::state_data::set_alloc(bool s)
-      {
-         is_alloc = s;
          return *this;
       }
 
@@ -352,20 +394,11 @@ namespace arbtrie
       {
          auto expected = _state_data.load(std::memory_order_relaxed);
 
-         assert(state_data(expected).is_alloc);
          vage = vage_value;
 
-         auto updated = state_data(expected).free(size).set_alloc(false).to_int();
+         auto updated = state_data(expected).free(size).to_int();
          while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-            updated = state_data(expected).free(size).set_alloc(false).to_int();
-      }
-
-      inline void segment_meta::set_alloc_state(bool a)
-      {
-         auto expected = _state_data.load(std::memory_order_relaxed);
-         auto updated  = state_data(expected).set_alloc(a).to_int();
-         while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-            updated = state_data(expected).set_alloc(a).to_int();
+            updated = state_data(expected).free(size).to_int();
       }
 
       inline uint64_t segment_meta::get_last_sync_pos() const
@@ -377,13 +410,10 @@ namespace arbtrie
       inline void segment_meta::start_alloc_segment()
       {
          auto expected = _state_data.load(std::memory_order_relaxed);
-         assert(not state_data(expected).is_alloc);
-         auto updated = state_data(expected).set_last_sync_page(0).set_alloc(true).to_int();
-         assert(state_data(updated).is_alloc);
+         auto updated  = state_data(expected).set_last_sync_page(0).to_int();
 
          while (not _state_data.compare_exchange_weak(expected, updated, std::memory_order_relaxed))
-            updated = state_data(expected).set_last_sync_page(0).set_alloc(true).to_int();
-         assert(state_data(updated).is_alloc);
+            updated = state_data(expected).set_last_sync_page(0).to_int();
       }
 
       inline void segment_meta::set_last_sync_pos(uint64_t pos)

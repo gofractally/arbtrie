@@ -32,8 +32,6 @@ namespace arbtrie
       if (_session._sega.config_update_checksum_on_modify())
          node_ptr->update_checksum();
 
-      _session.end_modify();
-
       assert(type == node_type::value or bool(node_ptr->_branch_id_region));
       assert(node_ptr->_nsize == size);
       assert(node_ptr->_ntype == type);
@@ -66,8 +64,6 @@ namespace arbtrie
       init(node_ptr);
       if (_session._sega.config_update_checksum_on_modify())
          node_ptr->update_checksum();
-
-      _session.end_modify();
 
       assert(type == node_type::value or bool(node_ptr->_branch_id_region));
 
@@ -105,7 +101,7 @@ namespace arbtrie
       // only check this in release if this flag is set
       if constexpr (debug_memory)
       {
-         auto ap = segment->_alloc_pos.load(std::memory_order_relaxed);
+         auto ap = segment->get_alloc_pos();
          if (ap <= loc.abs_index())
          {
             ARBTRIE_WARN("segment: ", loc.segment(), " ap: ", ap, "  loc: ", loc.aligned_index(),
@@ -114,7 +110,7 @@ namespace arbtrie
          }
       }
       else  // always check in debug builds
-         assert(segment->_alloc_pos > loc.abs_index());
+         assert(segment->get_alloc_pos() > loc.abs_index());
 
       return (node_header*)((char*)_session._sega._block_alloc.get(loc.segment()) +
                             loc.abs_index());
@@ -180,11 +176,12 @@ namespace arbtrie
       auto loc  = val.loc();
       auto lseg = loc.segment();
 
-      // if it is in read-only memory, then we need to copy the node
-      if (_rlock.is_read_only(loc) or not _rlock.try_modify_segment(lseg))
-         return (T*)(_observed_ptr = copy_on_write(val));
+      // we can only modify in place if it isnt read-only and
+      // the segment is owned by the current session
+      if (_rlock.can_modify(loc))
+         return (T*)(_observed_ptr = _rlock.get_node_pointer(loc));
 
-      return (T*)(_observed_ptr = _rlock.get_node_pointer(loc));
+      return (T*)(_observed_ptr = copy_on_write(val));
    }
 
    inline node_header* modify_lock::copy_on_write(node_meta_type::temp_type meta)
@@ -224,7 +221,7 @@ namespace arbtrie
             _observed_ptr->update_checksum();
          else
             _observed_ptr->checksum = 0;
-         _rlock.end_modify();
+         //  _rlock.end_modify();
       }
       _released = true;
    }
@@ -250,16 +247,6 @@ namespace arbtrie
       return _session.should_cache(size);
    }
 
-   inline bool read_lock::try_modify_segment(segment_number segment_num)
-   {
-      return _session.try_modify_segment(segment_num);
-   }
-
-   inline void read_lock::end_modify()
-   {
-      _session.end_modify();
-   }
-
    inline void read_lock::free_object(node_location loc, uint32_t size)
    {
       _session.free_object(loc.segment(), size);
@@ -268,6 +255,11 @@ namespace arbtrie
    inline bool read_lock::is_read_only(node_location loc) const
    {
       return _session.is_read_only(loc);
+   }
+
+   inline bool read_lock::can_modify(node_location loc) const
+   {
+      return _session.can_modify(loc);
    }
 
 }  // namespace arbtrie

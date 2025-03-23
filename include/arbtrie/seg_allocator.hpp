@@ -208,7 +208,6 @@ namespace arbtrie
         * Methods to enable/disable write protection on segments
         */
       void disable_segment_write_protection(segment_number seg_num);
-      void enable_segment_write_protection(segment_number seg_num);
 
       /**
         * Calculate statistics about read bits in a segment
@@ -223,26 +222,6 @@ namespace arbtrie
         *  the page gets 
         */
       void finalize_segment(segment_number);
-
-      /**
-        *  After all data has been removed from a segment
-        * - madvise free/don't need 
-        * - add the segment number to the free segments at allocator_header::end_ptr
-        * - increment allocator_header::end_ptr
-        */
-      void release_segment(segment_number);
-
-      void push_dirty_segment(int seg_num)
-      {
-         std::unique_lock lock(_dirty_segs_mutex);
-         _dirty_segs[_next_dirt_seg_index % max_segment_count] = seg_num;
-         ++_next_dirt_seg_index;
-      }
-      int get_last_dirty_seg_idx()
-      {
-         std::unique_lock lock(_dirty_segs_mutex);
-         return _next_dirt_seg_index;
-      }
 
       // maps ids to locations
       id_alloc _id_alloc;
@@ -309,6 +288,11 @@ namespace arbtrie
          int64_t seg = loc.segment();
          assert(seg < max_segment_count && "invalid segment passed to is_read_only");
          return get_segment(seg)->get_first_write_pos() > loc.abs_index();
+      }
+      inline bool can_modify(int ses_num, node_location loc) const
+      {
+         auto seg = get_segment(loc.segment());
+         return seg->_session_id == ses_num && seg->get_first_write_pos() > loc.abs_index();
       }
 
       /**

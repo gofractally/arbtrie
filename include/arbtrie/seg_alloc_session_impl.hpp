@@ -31,7 +31,7 @@ namespace arbtrie
    inline void seg_alloc_session::release_read_lock()
    {
       // Only release the lock if this is the last nested lock
-      if (not --_nested_read_lock)
+      if (not--_nested_read_lock)
          _session_rlock.unlock();
 
       assert(_nested_read_lock >= 0);
@@ -96,6 +96,14 @@ namespace arbtrie
    }
 
    /**
+    * 
+    */
+   inline bool seg_alloc_session::can_modify(node_location loc) const
+   {
+      return _sega.can_modify(_session_num, loc);
+   }
+
+   /**
     * Get the cache difficulty value which is used for determining read bit updates
     * 
     * @return The current cache difficulty value
@@ -126,25 +134,4 @@ namespace arbtrie
       return _session_rng.next();
    }
 
-   /**
-    * End a modify operation for the session
-    * 
-    * This method is used to end a modify operation for the session. It will
-    * notify the sync thread if the segment is waiting to be synced.
-    */
-   inline void seg_alloc_session::end_modify()
-   {
-      _sega._mapped_state->_session_data.end_modify(_session_num);
-   }
-
-   /**
-    * Try to modify a segment for the session
-    * 
-    * This method is used to try to modify a segment for the session. It will
-    * return true if the segment is waiting to be synced.
-    */
-   inline bool seg_alloc_session::try_modify_segment(segment_number segment_num)
-   {
-      return _sega._mapped_state->_session_data.try_modify_segment(_session_num, segment_num);
-   }
 }  // namespace arbtrie

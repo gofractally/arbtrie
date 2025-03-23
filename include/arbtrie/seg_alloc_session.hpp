@@ -24,11 +24,13 @@ namespace arbtrie
       // could be read while the return value of this method is in scope can
       // be reused (overwritten)
       read_lock lock();
-      void      sync(sync_type st);
+      void      sync(sync_type st, int top_root_index, id_address top_root);
 
       ~seg_alloc_session();
       seg_alloc_session(seg_alloc_session&& mv);
-      seg_alloc_session& operator=(seg_alloc_session&& mv);
+
+      // we would have to change reference members to be pointers to allow this
+      seg_alloc_session& operator=(seg_alloc_session&& mv) = delete;
 
       uint64_t count_ids_with_refs();
 
@@ -44,8 +46,8 @@ namespace arbtrie
       void init_active_segment();
       void finalize_active_segment();
 
-      void end_modify();
-      bool try_modify_segment(segment_number segment_num);
+      //   void end_modify();
+      //   bool try_modify_segment(segment_number segment_num);
 
       seg_alloc_session(seg_allocator& a, uint32_t ses_num);
       seg_alloc_session()                                    = delete;
@@ -61,6 +63,9 @@ namespace arbtrie
        */
       inline bool is_synced(node_location loc) const;
       inline bool is_read_only(node_location loc) const;
+
+      /// requires segment be owned by this session and loc not on read-only page
+      inline bool can_modify(node_location loc) const;
 
       /**
        * Get the cache difficulty value which is used for determining read bit updates
@@ -100,10 +105,11 @@ namespace arbtrie
       void lock_alloc_segment();
       void assert_modify_segment(segment_number segment_num);
 
-      segment_number               _alloc_seg_num  = -1ull;
-      mapped_memory::segment*      _alloc_seg_ptr  = nullptr;
-      mapped_memory::segment_meta* _alloc_seg_meta = nullptr;
-      bool                         _in_alloc       = false;
+      segment_number                      _alloc_seg_num  = -1ull;
+      mapped_memory::segment*             _alloc_seg_ptr  = nullptr;
+      mapped_memory::segment_meta*        _alloc_seg_meta = nullptr;
+      mapped_memory::dirty_segment_queue& _dirty_segments;
+      bool                                _in_alloc = false;
 
       // RNG for cache decisions - initialized with session number for reproducibility
       lehmer64_rng _session_rng;

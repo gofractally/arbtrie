@@ -126,10 +126,9 @@ namespace arbtrie
       for (int i = 0; i < age_index.size(); ++i)
          age_index[i] = i;
 
-      std::sort(age_index.begin(), age_index.end(),
-                [&](int a, int b) {
-                   return get_segment(a)->_provider_sequence > get_segment(b)->_provider_sequence;
-                });
+      std::sort(
+          age_index.begin(), age_index.end(), [&](int a, int b)
+          { return get_segment(a)->_provider_sequence > get_segment(b)->_provider_sequence; });
 
       _mapped_state->_segment_provider.free_segments.reset();
 
@@ -160,9 +159,7 @@ namespace arbtrie
          }
          auto seg = get_segment(i);
          auto send =
-             (node_header*)((char*)seg +
-                            std::min<uint32_t>(segment_size,
-                                               seg->_alloc_pos.load(std::memory_order_relaxed)));
+             (node_header*)((char*)seg + std::min<uint32_t>(segment_size, seg->get_alloc_pos()));
 
          node_header* foo = (node_header*)(seg);
 

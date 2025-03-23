@@ -11,6 +11,37 @@ namespace arbtrie
 
    namespace mapped_memory
    {
+      /**
+       * Each segment a transaction writes data to gets pushed to this queue,
+       * when the transaction is complete (commit or abort), everything it touched
+       * is marked read-only so that it can be cached / compacted.
+       * 
+       * This is sized for 16kb, which enables 4096 segments, each 32 MB, allowing
+       * up to 128 GB of dirty memory before an exception is thrown. There would be
+       * a lot to compact / recover so it just isn't practical to even consider
+       * more.
+       */
+      struct dirty_segment_queue
+      {
+         void push(segment_number segment_num)
+         {
+            // ARBTRIE_WARN("dirty_segment_queue::push: segment_num: ", segment_num);
+            if (_used >= 4096)
+               throw std::runtime_error("dirty_segment_queue overflow");
+            _segments[_used++] = segment_num;
+         }
+         segment_number pop()
+         {
+            //  if (_used > 0)
+            //    ARBTRIE_WARN("dirty_segment_queue::pop: _used: ", _segments[_used - 1]);
+            return _used == 0 ? -1 : _segments[--_used];
+         }
+
+        private:
+         std::array<segment_number, 4097> _segments;
+         uint32_t                         _used = 0;
+      };
+
       struct session_data
       {
          /**
@@ -36,16 +67,20 @@ namespace arbtrie
 
          /// only one thread may call this a time, will block until it is
          /// safe to sync the segment.
-         void start_sync_segment(segment_number segment_num);
-         /// call when done syncing the segment
-         void end_sync_segment();
+         // void start_sync_segment(segment_number segment_num);
+         // /// call when done syncing the segment
+         // void end_sync_segment();
 
          /// call this before attempting to modify a segment.
          /// @return true if you can modify items in place in the segment
-         inline bool try_modify_segment(uint32_t session_num, segment_number segment_num);
+         //inline bool try_modify_segment(uint32_t session_num, segment_number segment_num);
 
          /// call this when done modifying a segment
-         inline void end_modify(uint32_t session_num);
+         //inline void end_modify(uint32_t session_num);
+         dirty_segment_queue& dirty_segments(uint32_t session_num)
+         {
+            return _dirty_segments[session_num];
+         }
 
         private:
          void notify_sync_thread(uint32_t session_num);
@@ -65,23 +100,20 @@ namespace arbtrie
          // the sequence number of the next segment to be allocated by each session
          uint32_t _session_seg_seq[session_cap];
 
+         /// each transaction
+         dirty_segment_queue _dirty_segments[session_cap];
+
          /// the segments each session is currently modifying, or -1 if none
-         padded_atomic<uint64_t> _modify_lock[session_cap];
+         // padded_atomic<uint64_t> _modify_lock[session_cap];
          /// the segment waiting to be synced, or -1 if none
-         padded_atomic<uint64_t> _sync_request;
+         // padded_atomic<uint64_t> _sync_request;
          /// sessions clear bits as they exit modify when they see the sync request
-         padded_atomic<uint64_t> _active_mask;
+         // padded_atomic<uint64_t> _active_mask;
       };
 
       // Implementation of session_data methods
 
-      inline session_data::session_data()
-      {
-         for (auto& lock : _modify_lock)
-            lock.store(-1);
-         _sync_request.store(-1);
-         _active_mask.store(-1);
-      }
+      inline session_data::session_data() {}
 
       inline auto& session_data::rcache_queue(uint32_t session_num)
       {
@@ -116,54 +148,6 @@ namespace arbtrie
       inline uint32_t session_data::next_session_segment_seq(uint32_t session_num)
       {
          return _session_seg_seq[session_num] += 1;
-      }
-
-      /// call this before attempting to modify a segment.
-      /// @return true if you can modify items in place in the segment
-      inline bool session_data::try_modify_segment(uint32_t session_num, segment_number segment_num)
-      {
-         ARBTRIE_DEBUG("try_modify_segment: session_num=", session_num,
-                       " segment_num=", segment_num);
-         // only one segment can be modified at a time per session
-         assert(_modify_lock[session_num].load(std::memory_order_relaxed) == -1);
-
-         auto sync_lock_request = _sync_request.load(std::memory_order_acquire);
-         if (sync_lock_request == segment_num) [[unlikely]]
-            return false;
-
-         auto& lock = _modify_lock[session_num];
-
-         // Notify the world we are about to modify this segment
-         lock.store(segment_num, std::memory_order_release);
-
-         // Double check the lock.. before modifying
-         if (_sync_request.load(std::memory_order_acquire) == segment_num) [[unlikely]]
-         {
-            // Reset this session's mod_indicator to -1
-            lock.store(-1, std::memory_order_release);
-            notify_sync_thread(session_num);
-            return false;
-         }
-         // it is ok to modify the segment here
-         return true;
-      }
-
-      /// call this when done modifying a segment
-      inline void session_data::end_modify(uint32_t session_num)
-      {
-         ARBTRIE_DEBUG("end_modify: session_num=", session_num);
-         // TODO: if the caller kept track of the expected value, we could use store() instead
-         // of exchange() to avoid the atomic load.
-         uint32_t segment_num = _modify_lock[session_num].exchange(-1, std::memory_order_release);
-         assert(segment_num != -1);
-         if (_sync_request.load(std::memory_order_acquire) == segment_num) [[unlikely]]
-            notify_sync_thread(session_num);
-      }
-
-      /// call when done syncing the segment
-      inline void session_data::end_sync_segment()
-      {
-         _sync_request.store(-1, std::memory_order_release);
       }
 
       inline uint32_t session_data::alloc_session_num()

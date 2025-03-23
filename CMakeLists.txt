@@ -118,7 +118,7 @@ target_compile_features(arbtrie PUBLIC cxx_std_23)
 add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
 
 # Common compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension -fdiagnostics-color=always")
 
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

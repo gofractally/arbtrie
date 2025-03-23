@@ -35,9 +35,9 @@ namespace arbtrie
     *  discriminating between node_header and allocator_header types at 
     *  runtime using the _header_type flag.
     * 
-    *  From time to time the seg_allocator will write to the header to record
-    *  information about the segment and mark the ending and beginning of 
-    *  transactions, compactions, etc.
+    *  Every time a transaction is committed or a segment is finalized, an
+    *  alocator_header is written summarizing the commit and/or empty space
+    *  created by write protection. 
     *  
     *  Because the allocator works on 64 byte cachelines, the allocator_header
     *  is allowed to be the same size with little penalty. Therefore it is used
@@ -47,78 +47,86 @@ namespace arbtrie
     *  in the left over bytes at the end of the last writable page. 
     * 
     *  A segment is a sequence of allocator_headers and node_headers.
-    * 
-    * [ n n n n a n n a...]
+    * [ n n n n a n n a...] footer
+    *  ^--------^-----^---------|
     * 
     * The allocation_header stores the checksum of all data from the
-    * end of the last allocator_header to the start of this allocation header.
+    * end of the last allocator_header to the start of the checksum field
+    * in this allocator_header. In this way, any empty spaces are not
+    * included in the checksum.
     * 
-    * In most cases this is synced at the same time as the other node headers, 
-    * unless the allocator_header is the first data in the start of a new
-    * page. In that case it won't get protected or synced until the next page is 
-    * protected or synced.
-    * 
-    * The last record in a segment is always an allocator_header.
+    * The last record in a segment is always an allocator_header and it
+    * covers the span from the last node written to the segment footer. The
+    * segment footer contains a pointer to the start of the last allocation_header,
+    * and each allocation_header contains a pointer to the prior allocator_header,
+    * enabling a linked list of allocator_headers to be traversed to validate the
+    * checksum of the entire segment.
     */
    struct allocator_header
    {
       enum types : uint8_t
       {
+         /*
          end_of_segment   = 0,
          start_of_segment = 1,
          free_zone        = 2
+         */
       };
       bool is_allocator_header() const
       {
          return header_type(_header_type) == header_type::allocator;
       }
-      bool is_end_of_segment() const { return _ntype == end_of_segment; }
       /**
        *  The checksum of the region [this-_start_checksum_offset, _start_checksum_offset + _checksum_bytes)
        * 
        *  Typically this would align with the start of the prior allocator_header, but there is not always
        *  a prior allocator_header.
        */
-      uint64_t _checksum;
-      uint32_t _ntype : 3;   ///< deepnds on _header_type
-      uint32_t _nsize : 25;  ///< bytes allocated for this object
-      uint32_t _unused : 3;  ///< truly unused bits, should never be written to
+      uint64_t _time_stamp_ms = 0;   ///< the time the data was committed
+      uint32_t _ntype : 3     = 0;   ///< deepnds on _header_type
+      uint32_t _nsize : 25    = 64;  ///< bytes allocated for this object
+      uint32_t _unused : 3    = 0;   ///< truly unused bits, should never be written to
       /// used by segment allocator for bookkeeping, changes the meaning of _ntype
       uint32_t _header_type : 1 = 1;
 
-      /// time this header was written, implies everything before this record
-      /// was written before this time.
-      uint64_t _time_stamp_ms;
-
-      /// the position in the current segment where the checksumed data starts
-      uint32_t _start_checksum_pos;
-      /// the number of bytes in the checksumed data after _start_checksum_pos,
-      uint32_t _checksum_bytes;
-
-      /// the previous allocator_header in the current segment, used to
-      /// form a linked list of allocator_headers.
-      uint32_t _prev_aheader_pos;
-
-      /**
-       * When compacting data from another segment, this field tells us the original
-       * age of the source data, the compactor will use this age for all nodes it compacts
-       * until it comes across an updated age.
-       */
-      uint64_t _source_age_ms;
+      /// when committing a transaction, top_node fields are set to record the update to the
+      /// top node in the event of recovery and potential corruption of the read-write top level
+      /// data.
+      uint32_t _top_node_update = -1;  ///< the index of a top node being committed with this update
+      id_address _top_node_id;         ///< the id of the top node being committed with this update
 
       /**
        * Documents the source of the segment the data came from, which can facilitate establishing
        * a total ordering of nodes during recovery, may not be needed, but we have 64 bytes to
        * play with
        */
-      uint32_t _source_seg;
+      uint32_t _source_seg = -1;
+      /**
+       * When compacting data from another segment, this field tells us the original
+       * age of the source data, the compactor will use this age for all nodes it compacts
+       * until it comes across an updated age.
+       */
+      uint64_t _source_age_ms = 0;
+
+      uint32_t _prev_aheader_pos = 0;  ///< absolute position from start of the segment
+      /// the position in the current segment where the checksumed data starts
+      uint32_t _start_checksum_pos = 0;
+
+      /** placed at the end of the allocator_header, so everything before this can be included
+       * in the checksum.
+       */
+      uint64_t _checksum = 0;
 
       /// regardless of what _nsize is, the allocations should always be 64 byte cacheline aligned
       uint32_t          capacity() const { return (_nsize + 63) & -64; }
       allocator_header* next() const { return (allocator_header*)(((char*)this) + capacity()); }
-      allocator_header* prev(char* segment_base) const
+      const char*       start_checksum_pos(const char* segment_base) const
       {
-         return (allocator_header*)(segment_base + _prev_aheader_pos);
+         return segment_base + _start_checksum_pos;
+      }
+      const allocator_header* prev(const char* segment_base) const
+      {
+         return (const allocator_header*)(segment_base + _prev_aheader_pos);
       }
    };
    static_assert(sizeof(allocator_header) <= 64);

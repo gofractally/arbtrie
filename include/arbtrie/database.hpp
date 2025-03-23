@@ -834,11 +834,8 @@ namespace arbtrie
          // read-only, this protects what has been written from being
          // corrupted by bad memory access patterns in the same
          // process.
-         _segas->sync(stype);
+         _segas->sync(stype, index, r.address());
 
-         if constexpr (stype != sync_type::none)
-         {
-         }
          {  // lock scope
             std::unique_lock lock(_db->_root_change_mutex[index]);
             old_r = _db->_dbm->top_root[index].exchange(new_r, std::memory_order_relaxed);

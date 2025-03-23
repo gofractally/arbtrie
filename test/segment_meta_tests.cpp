@@ -67,36 +67,14 @@ TEST_CASE("segment_meta preserves is_pinned bit", "[segment_meta][pinned]")
    {
       // Set up initial state with both alloc and pinned bits set
       meta.set_pinned(true);
-      meta.set_alloc_state(true);
 
       // Verify alloc and pinned bits are set
-      REQUIRE(meta.data().is_alloc);
       REQUIRE(meta.data().is_pinned);
 
       // Call finalize_segment and verify pinned bit is still set
       // but alloc bit should be cleared
       meta.finalize_segment(1024, 100);
-      REQUIRE_FALSE(meta.data().is_alloc);
       REQUIRE(meta.data().is_pinned);
-   }
-
-   SECTION("set_alloc_state should preserve is_pinned bit")
-   {
-      // Set up initial state with pinned bit set
-      meta.set_pinned(true);
-
-      // Verify pinned bit is set
-      REQUIRE(meta.data().is_pinned);
-
-      // Call set_alloc_state and verify pinned bit is still set
-      meta.set_alloc_state(true);
-      REQUIRE(meta.data().is_pinned);
-      REQUIRE(meta.data().is_alloc);
-
-      // Toggle alloc state
-      meta.set_alloc_state(false);
-      REQUIRE(meta.data().is_pinned);
-      REQUIRE_FALSE(meta.data().is_alloc);
    }
 
    SECTION("start_alloc_segment should preserve is_pinned bit")
@@ -110,7 +88,6 @@ TEST_CASE("segment_meta preserves is_pinned bit", "[segment_meta][pinned]")
       // Call start_alloc_segment and verify pinned bit is still set
       meta.start_alloc_segment();
       REQUIRE(meta.data().is_pinned);
-      REQUIRE(meta.data().is_alloc);
    }
 
    SECTION("set_last_sync_pos should preserve is_pinned bit")
@@ -172,10 +149,8 @@ TEST_CASE("Fix for finalize_segment bug", "[segment_meta][bug][pinned]")
 
    // Set up initial state with both alloc and pinned bits set
    meta.set_pinned(true);
-   meta.set_alloc_state(true);
 
    // Verify correct initial state
-   REQUIRE(meta.data().is_alloc);
    REQUIRE(meta.data().is_pinned);
 
    // Call finalize_segment
@@ -225,8 +200,6 @@ TEST_CASE("Concurrent pinned bit operations", "[segment_meta][concurrent][pinned
    {
       meta.free(8);
       meta.free_object(8);
-      meta.set_alloc_state(true);
-      meta.set_alloc_state(false);
       meta.set_last_sync_pos(i * 10);
    }
 

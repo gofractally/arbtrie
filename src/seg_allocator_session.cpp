@@ -8,6 +8,7 @@ namespace arbtrie
          _alloc_seg_num(mv._alloc_seg_num),
          _alloc_seg_ptr(mv._alloc_seg_ptr),
          _alloc_seg_meta(mv._alloc_seg_meta),
+         _dirty_segments(mv._dirty_segments),
          _in_alloc(mv._in_alloc),
          _session_rlock(mv._session_rlock),
          _sega(mv._sega),
@@ -21,6 +22,7 @@ namespace arbtrie
       mv._session_num    = -1;
    }
 
+   /*
    seg_alloc_session& seg_alloc_session::operator=(seg_alloc_session&& mv)
    {
       // We can't really move-assign this class correctly because it contains references
@@ -49,7 +51,8 @@ namespace arbtrie
          }
 
          // Take over the transferable non-reference members
-         _session_num      = mv._session_num;
+         assert(_session_num == mv._session_num);
+         //_session_num      = mv._session_num;
          _alloc_seg_num    = mv._alloc_seg_num;
          _alloc_seg_ptr    = mv._alloc_seg_ptr;
          _alloc_seg_meta   = mv._alloc_seg_meta;
@@ -69,12 +72,14 @@ namespace arbtrie
       }
       return *this;
    }
+   */
 
    seg_alloc_session::seg_alloc_session(seg_allocator& a, uint32_t ses_num)
        : _session_num(ses_num),
          _alloc_seg_num(-1ull),
          _alloc_seg_ptr(nullptr),
          _alloc_seg_meta(nullptr),
+         _dirty_segments(a._mapped_state->_session_data.dirty_segments(ses_num)),
          _in_alloc(false),
          _session_rng(0xABBA7777 ^ ses_num),
          _session_rlock(a.get_session_rlock(ses_num)),
@@ -95,11 +100,11 @@ namespace arbtrie
 
    void seg_alloc_session::finalize_active_segment()
    {
-      if (_alloc_seg_ptr)
+      if (_alloc_seg_ptr and not _alloc_seg_ptr->is_finalized())
       {
-         auto cur_apos = _alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed);
-         ARBTRIE_INFO("finalize_active_segment: ", _alloc_seg_num, " cur_apos: ", cur_apos,
-                      " free_space: ", _alloc_seg_ptr->free_space());
+         auto cur_apos = _alloc_seg_ptr->get_alloc_pos();
+         // ARBTRIE_INFO("finalize_active_segment: ", _alloc_seg_num, " cur_apos: ", cur_apos,
+         //              " free_space: ", _alloc_seg_ptr->free_space());
          // update the segment meta data so that it knows the free space and
          // age of the segment data for use by compactor
          _alloc_seg_meta->finalize_segment(
@@ -111,11 +116,13 @@ namespace arbtrie
          _alloc_seg_ptr->finalize();
          assert(_alloc_seg_ptr->is_finalized());
 
-         _sega.push_dirty_segment(_alloc_seg_num);
-         _alloc_seg_ptr  = nullptr;
-         _alloc_seg_num  = -1ull;
-         _alloc_seg_meta = nullptr;
+         // ARBTRIE_WARN("finalize_active_segment: ", _alloc_seg_num, " cur_apos: ", cur_apos,
+         //              " free_space: ", _alloc_seg_ptr->free_space());
+         _dirty_segments.push(_alloc_seg_num);
       }
+      _alloc_seg_ptr  = nullptr;
+      _alloc_seg_num  = -1ull;
+      _alloc_seg_meta = nullptr;
    }
 
    void seg_alloc_session::init_active_segment()
@@ -132,12 +139,10 @@ namespace arbtrie
           _sega._mapped_state->_session_data.next_session_segment_seq(_session_num);
       _alloc_seg_ptr->_open_time_usec  = arbtrie::get_current_time_ms();
       _alloc_seg_ptr->_close_time_usec = 0;  // Will be set when segment is closed
-      // TODO: release the modify lock and get a new segment
    }
 
    /**
     * Gets the modify lock when failrue is not an option 
-    */
    void seg_alloc_session::assert_modify_segment(segment_number seg_num)
    {
       bool got_modify_lock = try_modify_segment(seg_num);
@@ -151,12 +156,13 @@ namespace arbtrie
          }
       }
    }
+    */
+
    /**
     * Most of the time locks are wait free, but the allocator occasionally
     * conflicts with a syncing thread and we must wait for the sync to 
     * complete before we can allocate again, note that the sync lock period
     * is very short.
-    */
    void seg_alloc_session::lock_alloc_segment()
    {
       if (not _alloc_seg_ptr or _alloc_seg_ptr->is_finalized()) [[unlikely]]
@@ -194,6 +200,7 @@ namespace arbtrie
       if (alloc_pos < first_write_pos)
          _alloc_seg_ptr->set_alloc_pos(first_write_pos);
    }
+    */
 
    /**
     * Allocates a node in the active segment and returns a pointer to the node, the
@@ -210,76 +217,58 @@ namespace arbtrie
    {
       assert(size < sizeof(mapped_memory::segment::data));
       assert(size == round_up_multiple<64>(size));
-      const auto rounded_size = size;
 
-      // ensure that a segment exists and the sync thread knows we are modifying it
-      lock_alloc_segment();
+      if (not _alloc_seg_ptr) [[unlikely]]
+         init_active_segment();
 
-      // find out where we are allocating from
-      char* cur_pos = _alloc_seg_ptr->alloc_ptr();
-
-      // B - if there isn't enough space, notify compactor go to A
-      if (cur_pos + rounded_size > _alloc_seg_ptr->end()) [[unlikely]]
+      if (not _alloc_seg_ptr->can_alloc(size)) [[unlikely]]
       {
-         /// TODO: this could be a problem if the last page has
-         /// already been locked... we could easily get locked out
-         /// of our ability to clean up if we allow sync() threads
-         /// to lock us down without a way to finalize... unless,
-         /// the threads doing the mprotect() have the responsibility
-         /// to finalize the segment *after* they have acquired the
-         /// modify lock.
-         finalize_active_segment();              // final bookkeeping before getting a new segment
-         end_modify();                           // release the modify lock on the old segment
-         init_active_segment();                  // get a new segment
-         assert_modify_segment(_alloc_seg_num);  // this should always succeed
-         cur_pos = _alloc_seg_ptr->alloc_ptr();
+         finalize_active_segment();  // final bookkeeping before getting a new segment
+         init_active_segment();      // get a new segment
       }
-
-      // at this point we have the modify lock on the segment
 
       // Update the vage_accumulator with the current allocation
       /// TODO: make the caller provide the vage value rather than force the condition on every call
       _alloc_seg_ptr->_vage_accumulator.add(size, vage ? vage : arbtrie::get_current_time_ms());
 
-      auto head = (node_header*)cur_pos;
-      // Create node_header with sequence number passed to constructor
-      head = new (head) node_header(size, adr_seq, node_type::freelist);
+      auto head = _alloc_seg_ptr->alloc<node_header>(size, adr_seq, node_type::freelist);
 
-      auto next_alloc_pos = cur_pos + rounded_size;
-      auto alloc_idx      = _alloc_seg_ptr->set_alloc_ptr(next_alloc_pos);
+      auto loc = _alloc_seg_num * segment_size + ((char*)head - _alloc_seg_ptr->data);
 
-      auto loc = _alloc_seg_num * segment_size + (cur_pos - _alloc_seg_ptr->data);
-
-      // TODO: save tombstone incase we have to advance the alloc_ptr due to
-      // a failed attempt to get the modify lock on the page we were partially
-      // through writing to.
       return {node_location::from_absolute(loc), head};
    }
 
    void seg_alloc_session::unalloc(uint32_t size)
    {
-      ARBTRIE_INFO("unalloc: size=", size);
-      auto rounded_size = round_up_multiple<64>(size);
       if (_alloc_seg_ptr) [[likely]]
-      {
-         auto cap = _alloc_seg_ptr->_alloc_pos.load(std::memory_order_relaxed);
-         if (cap and cap < segment_size) [[likely]]
-         {
-            auto cur_apos =
-                _alloc_seg_ptr->_alloc_pos.fetch_sub(rounded_size, std::memory_order_relaxed);
-            cur_apos -= rounded_size;
-            /// TODO: replace this with the proper signal in event write protection
-            ///       is enforced on this segment.
-            memset(((char*)_alloc_seg_ptr) + cur_apos, 0, sizeof(node_header));
-         }
-         //_alloc_seg_ptr->_num_objects--;
-      }
+         _alloc_seg_ptr->unalloc(size);
    }
 
-   void seg_alloc_session::sync(sync_type st)
+   void seg_alloc_session::sync(sync_type st, int top_root_index, id_address top_root)
    {
-      _sega.push_dirty_segment(_alloc_seg_num);
-      _sega.sync(st);
+      int seg_num = _alloc_seg_num;
+      if (seg_num != -1)
+         seg_num = _dirty_segments.pop();
+      //ARBTRIE_WARN("sync: pop() => seg_num: ", seg_num);
+      while (seg_num != -1)
+      {
+         auto seg = _sega.get_segment(seg_num);
+         //        ARBTRIE_WARN("sync: seg_num: ", seg_num, " is_finalized: ", seg->is_finalized());
+
+         seg->sync(st, top_root_index, top_root);
+         auto ahead = seg->get_last_aheader();
+         //   ARBTRIE_INFO("sync: segment: ", seg_num, " free_space: ", seg->free_space(),
+         //                " ahead: ", ahead->_nsize);
+         _sega.free_object(seg_num, ahead->_nsize);
+         if (seg->is_read_only() or seg->is_finalized())
+         {
+            //            ARBTRIE_ERROR("sync: read only segment: ", seg_num);
+            auto& seg_meta = _sega.get_segment_meta(seg_num);
+            seg_meta.set_read_only(true);
+            seg_meta.set_vage(seg->_vage_accumulator.average_age());
+         }
+         seg_num = _dirty_segments.pop();
+      }
    }
 
    uint64_t seg_alloc_session::count_ids_with_refs()

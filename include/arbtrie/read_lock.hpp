@@ -77,12 +77,13 @@ namespace arbtrie
       ~read_lock() { _session.release_read_lock(); }
 
       node_header* get_node_pointer(node_location);
-      void         update_read_stats(node_location, uint32_t node_size, uint64_t time);
+      //void         update_read_stats(node_location, uint32_t node_size, uint64_t time);
 
       bool       is_synced(node_location);
       sync_lock& get_sync_lock(int seg);
 
       bool is_read_only(node_location loc) const;
+      bool can_modify(node_location loc) const;
       void free_object(node_location loc, uint32_t size);
 
       /**
@@ -96,8 +97,6 @@ namespace arbtrie
       friend class seg_alloc_session;
       friend class object_ref;
       friend class modify_lock;
-      bool try_modify_segment(segment_number segment_num);
-      void end_modify();
 
       read_lock(seg_alloc_session& s) : _session(s) { _session.retain_read_lock(); }
       read_lock(const seg_alloc_session&) = delete;
