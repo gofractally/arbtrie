@@ -727,7 +727,7 @@ int  main(int argc, char** argv)
          auto read_thread = [&]() {};
 
          std::vector<std::unique_ptr<std::thread>> rthreads;
-         rthreads.reserve(14);
+         rthreads.reserve(15);
          std::atomic<bool>    done = false;
          std::atomic<int64_t> read_count;
          std::mutex           _lr_mutex;
@@ -742,9 +742,9 @@ int  main(int argc, char** argv)
                int     cn = 0;
                while (not done.load(std::memory_order_relaxed))
                {
-                  auto rtx    = rs.start_transaction(0);
                   int  roundc = 100000;
                   int  added  = 0;
+                  auto rtx    = rs.start_transaction(0);
                   for (int i = 0; i < batch_size; ++i)
                   {
                      ++added;
@@ -758,13 +758,16 @@ int  main(int argc, char** argv)
                         added = 0;
                      }
                   }
+                  read_count.fetch_add(added, std::memory_order_relaxed);
+                  added = 0;
                }
             };
             rthreads.emplace_back(new std::thread(read_loop));
          }
 
-         std::cout << "insert dense rand while reading " << rthreads.size() << " threads\n";
-         for (int ro = 0; ro < 10; ++ro)
+         std::cout << "insert dense rand while reading " << rthreads.size()
+                   << " threads  batch size: " << batch_size << "\n";
+         for (int ro = 0; ro < 100; ++ro)
          {
             auto start = std::chrono::steady_clock::now();
             for (int i = 0; i < count; ++i)
