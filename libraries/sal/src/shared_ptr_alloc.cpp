@@ -176,12 +176,15 @@ namespace sal
          if (count % 64 == 63)
             std::this_thread::yield();
          if (count % 1024 == 1023)
+         {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             SAL_WARN("shared_ptr_alloc: *contention* no pointers available after {} attempts",
                      count);
-         if (count > 1024 * 1024)
+         }
+         if (count > 16 * 1024 * 1024)
             throw std::runtime_error(
                 "shared_ptr_alloc: *contention* no pointers available after "
-                "1 mega attempt");
+                "16 mega attempts");
          alloc = try_alloc(region, h);
          count++;
       }

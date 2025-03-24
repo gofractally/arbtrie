@@ -107,14 +107,6 @@ namespace arbtrie
       friend class object_ref;
 
       void mlock_pinned_segments();
-      void write_protect_segment(segment_number seg_num);
-      void prepare_for_write_protect(segment_number          seg_num,
-                                     mapped_memory::segment* seg,
-                                     uint32_t                post_alloc_pos,
-                                     uint32_t                old_first_writable_pos,
-                                     uint32_t                new_first_writable_pos);
-      void start_sync_segment(segment_number seg_num);
-      void end_sync_segment();
 
       /**
        * Utilized by seg_alloc_session 
@@ -122,24 +114,15 @@ namespace arbtrie
       /// @{
       mapped_memory::segment* get_segment(segment_number seg) noexcept
       {
-         return static_cast<mapped_memory::segment*>(_block_alloc.get(seg));
+         return static_cast<mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
       }
       const mapped_memory::segment* get_segment(segment_number seg) const noexcept
       {
-         return static_cast<const mapped_memory::segment*>(_block_alloc.get(seg));
+         return static_cast<const mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
       }
 
       uint32_t alloc_session_num();
       void     release_session_num(uint32_t sn);
-      /**
-       * This must be called via a session because the session is responsible
-       * for documenting what regions could be read
-       *
-       * All objects are const because they cannot be modified after being
-       * written, unless accessed via a session's mutation lock
-       */
-      const node_header* get_object(node_location loc) const;
-      ///@}
 
       /**
        * Read bit decay thread methods
@@ -154,8 +137,6 @@ namespace arbtrie
 
       std::optional<segment_thread> _read_bit_decay_thread;
       //@}
-
-      void attempt_truncate_empty();
 
       /**
        * Compactor Thread Methods
@@ -241,42 +222,28 @@ namespace arbtrie
 
       // Thread state tracking for stop/start_background_threads is handled in mapped_memory
 
-      /**
-        * Free an object in a segment
-        * 
-        * @param segment The segment number containing the object
-        * @param object_size The size of the object to free
-        */
-      inline void free_object(segment_number segment, uint32_t object_size)
+      segment_number get_segment_for_object(const void* obj) const
       {
-         assert(segment < max_segment_count && "Segment number out of bounds");
-         _mapped_state->_segment_data.meta[segment].free_object(object_size);
+         auto base   = (const char*)_block_alloc.get(offset_ptr(0));
+         auto offset = (const char*)obj - base;
+         return segment_number(offset / segment_size);
       }
 
       /**
-        * Get the last synced position for a segment.
+        * When an object is moved its space is freed and we need to record the freed space
+        * so the compactor has the metadata it needs to efficiently identify segments that
+        * can be compacted.
         * 
-        * @param segment The segment number
-        * @return The last synced position in the segment
+        * @param obj The object on the segment being freed
+        * @param seg The segment number containing the object
         */
-      inline size_t get_last_sync_position(segment_number segment) const
+      template <typename T>
+      inline void record_freed_space(segment_number seg, T* obj)
       {
-         assert(segment < max_segment_count && "invalid segment passed to get_last_sync_position");
-         return _mapped_state->_segment_data.get_last_sync_pos(segment);
+         assert(get_segment_for_object(obj) == seg && "object not in segment");
+         _mapped_state->_segment_data.add_freed_space(seg, obj);
       }
 
-      /**
-        * Check if a node location has been synced to disk.
-        * 
-        * @param loc The node location to check
-        * @return true if the location is synced, false otherwise
-        */
-      inline bool is_synced(node_location loc) const
-      {
-         int64_t seg = loc.segment();
-         assert(seg < max_segment_count && "invalid segment passed to is_synced");
-         return _mapped_state->_segment_data.get_last_sync_pos(seg) > loc.abs_index();
-      }
       /**
         * Check if a node location has been synced to disk.
         * 
@@ -311,11 +278,11 @@ namespace arbtrie
        * 
        * @param segment The segment number
        * @return Reference to the segment_meta
-       */
       inline mapped_memory::segment_meta& get_segment_meta(segment_number segment)
       {
          return _mapped_state->_segment_data.meta[segment];
       }
+       */
 
       /**
         * Get the cache difficulty value which is used for determining read bit updates
@@ -359,6 +326,7 @@ namespace arbtrie
             // not send a signal to the provider to mlock the segment
             segnum = _mapped_state->_segment_provider.ready_segments.pop_back_wait_without_ack();
          }
+         ARBTRIE_DEBUG("get_new_segment: ", segnum);
          return {segnum, get_segment(segnum)};
       }
 

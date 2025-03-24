@@ -97,14 +97,12 @@ namespace arbtrie
       if (prior.ref() > 1)
          return nullptr;
 
-      auto result = _rlock.get_node_pointer(prior.loc());
-
       auto ploc    = prior.loc();
       auto obj_ptr = _rlock.get_node_pointer(ploc);
 
       _rlock.free_meta_node(_address);
-      _rlock.free_object(ploc, obj_ptr->object_capacity());
-      return result;
+      _rlock.freed_object(ploc.segment(), obj_ptr);
+      return obj_ptr;
    }
 
 }  // namespace arbtrie

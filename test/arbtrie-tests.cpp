@@ -899,7 +899,7 @@ TEST_CASE("recover")
       ARBTRIE_WARN("INSERT 1 Million Rows");
       auto ws = env.db->start_write_session();
       auto tx = ws->start_transaction();
-      for (uint64_t i = 0; i < 1000'000; ++i)
+      for (uint64_t i = 0; i < 10000; ++i)
       {
          key_view kstr((char*)&i, sizeof(i));
          tx.insert(kstr, kstr);

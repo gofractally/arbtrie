@@ -2,6 +2,7 @@
 #include <sal/block_allocator.hpp>
 #include <sal/debug.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <random>
 #include <vector>
@@ -136,12 +137,13 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       REQUIRE(allocator.num_blocks() == 0);
 
       // Allocate a block
-      auto offset = allocator.alloc();
-      REQUIRE(offset == 0);  // First block should be at offset 0
+      auto [block_num1, offset1] = allocator.alloc();
+      REQUIRE(*offset1 == 0);     // First block should be at offset 0
+      REQUIRE(*block_num1 == 0);  // First block should be index 0
       REQUIRE(allocator.num_blocks() == 1);
 
       // Get a pointer to the block
-      void* block_ptr = allocator.get(offset);
+      void* block_ptr = allocator.get(offset1);
       REQUIRE(block_ptr != nullptr);
 
       // Test we can write to the block (just the first MB to avoid excess memory usage in test)
@@ -155,8 +157,9 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       }
 
       // Allocate another block
-      auto offset2 = allocator.alloc();
-      REQUIRE(offset2 == BLOCK_SIZE);  // Second block should be at offset BLOCK_SIZE
+      auto [block_num2, offset2] = allocator.alloc();
+      REQUIRE(*offset2 == BLOCK_SIZE);  // Second block should be at offset BLOCK_SIZE
+      REQUIRE(*block_num2 == 1);        // Second block should be index 1
       REQUIRE(allocator.num_blocks() == 2);
 
       // Get pointer to second block
@@ -178,15 +181,26 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       // Reserve several blocks with a non-power-of-2 count
       uint32_t num_reserved = allocator.reserve(3);  // 3 is not a power of 2
       REQUIRE(num_reserved == 3);
+
+      // With the updated behavior, reserve() only pre-maps the space but doesn't increment num_blocks
+      // So we need to allocate the blocks explicitly
+      REQUIRE(allocator.num_blocks() == 0);
+
+      // Allocate blocks and verify they use pre-reserved space
+      std::vector<std::pair<sal::block_allocator::block_number, sal::block_allocator::offset_ptr>>
+          blocks;
+      for (uint32_t i = 0; i < 3; i++)
+      {
+         blocks.push_back(allocator.alloc());
+         REQUIRE(*blocks.back().first == i);                // Block number should match index
+         REQUIRE(*blocks.back().second == i * BLOCK_SIZE);  // Offset should be index * block_size
+      }
       REQUIRE(allocator.num_blocks() == 3);
 
       // Write different data to each block to test they're distinct
-      // Use offset_ptr to get each block
       for (uint32_t i = 0; i < 3; i++)
       {
-         sal::block_allocator::offset_ptr offset =
-             allocator.block_to_offset(sal::block_allocator::block_num_type(i));
-         auto block_ptr = static_cast<unsigned char*>(allocator.get(offset));
+         auto block_ptr = static_cast<unsigned char*>(allocator.get(blocks[i].second));
          // Set first byte to a unique value
          block_ptr[0] = static_cast<unsigned char>(0xA0 + i);
       }
@@ -194,9 +208,7 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       // Verify data is distinct and correctly set
       for (uint32_t i = 0; i < 3; i++)
       {
-         sal::block_allocator::offset_ptr offset =
-             allocator.block_to_offset(sal::block_allocator::block_num_type(i));
-         auto block_ptr = static_cast<const unsigned char*>(allocator.get(offset));
+         auto block_ptr = static_cast<const unsigned char*>(allocator.get(blocks[i].second));
          REQUIRE(block_ptr[0] == static_cast<unsigned char>(0xA0 + i));
       }
 
@@ -208,9 +220,12 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
    {
       // Create allocators with different non-power-of-2 max_blocks values
       sal::block_allocator allocator1(temp_path, BLOCK_SIZE, 3);
-      REQUIRE(allocator1.alloc() == 0);               // First block at 0
-      REQUIRE(allocator1.alloc() == BLOCK_SIZE);      // Second block
-      REQUIRE(allocator1.alloc() == 2 * BLOCK_SIZE);  // Third block
+      auto [block1_0, offset1_0] = allocator1.alloc();
+      REQUIRE(*offset1_0 == 0);  // First block at 0
+      auto [block1_1, offset1_1] = allocator1.alloc();
+      REQUIRE(*offset1_1 == BLOCK_SIZE);  // Second block
+      auto [block1_2, offset1_2] = allocator1.alloc();
+      REQUIRE(*offset1_2 == 2 * BLOCK_SIZE);  // Third block
       // Should throw when trying to allocate beyond max
       REQUIRE_THROWS_AS(allocator1.alloc(), std::runtime_error);
 
@@ -221,10 +236,60 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       sal::block_allocator allocator2(temp_path, BLOCK_SIZE, 5);
       for (int i = 0; i < 5; i++)
       {
-         REQUIRE(allocator2.alloc() == i * BLOCK_SIZE);
+         auto [block_num, offset] = allocator2.alloc();
+         REQUIRE(*offset == i * BLOCK_SIZE);
+         REQUIRE(*block_num == i);
       }
       // Should throw when trying to allocate beyond max
       REQUIRE_THROWS_AS(allocator2.alloc(), std::runtime_error);
+   }
+
+   SECTION("Pre-reserving blocks for efficient allocation")
+   {
+      sal::block_allocator allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS);
+
+      // Reserve space for 4 blocks
+      allocator.reserve(4);
+
+      // Verify num_blocks is still 0 (reserve only maps space without incrementing _num_blocks)
+      REQUIRE(allocator.num_blocks() == 0);
+
+      // Measure time to allocate pre-reserved blocks (should be fast path)
+      auto start_time = std::chrono::high_resolution_clock::now();
+
+      // Allocate blocks using the fast path (pre-reserved space)
+      std::vector<std::pair<sal::block_allocator::block_number, sal::block_allocator::offset_ptr>>
+          blocks;
+      for (int i = 0; i < 4; i++)
+      {
+         blocks.push_back(allocator.alloc());
+
+         // Verify block number and offset are correct
+         REQUIRE(*blocks[i].first == i);
+         REQUIRE(*blocks[i].second == i * BLOCK_SIZE);
+      }
+
+      auto end_time = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+
+      // Output timing for information (not a strict test requirement)
+      INFO("Time to allocate 4 pre-reserved blocks: " << duration.count() << " microseconds");
+
+      // Verify we have the expected number of blocks
+      REQUIRE(allocator.num_blocks() == 4);
+
+      // Allocate one more block that requires a slow path (not pre-reserved)
+      start_time               = std::chrono::high_resolution_clock::now();
+      auto [block_num, offset] = allocator.alloc();
+      end_time                 = std::chrono::high_resolution_clock::now();
+      duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+
+      INFO("Time to allocate 1 non-reserved block: " << duration.count() << " microseconds");
+
+      // Verify the new allocation is correct
+      REQUIRE(*block_num == 4);
+      REQUIRE(*offset == 4 * BLOCK_SIZE);
+      REQUIRE(allocator.num_blocks() == 5);
    }
 
    SECTION("Offset-block conversion methods")
@@ -232,30 +297,30 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       sal::block_allocator allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS);
 
       // Allocate a few blocks
-      auto offset0 = allocator.alloc();
-      auto offset1 = allocator.alloc();
-      auto offset2 = allocator.alloc();
-      auto offset3 = allocator.alloc();  // Add one more block
+      auto [block_num0, offset0] = allocator.alloc();
+      auto [block_num1, offset1] = allocator.alloc();
+      auto [block_num2, offset2] = allocator.alloc();
+      auto [block_num3, offset3] = allocator.alloc();  // Add one more block
 
       // Test offset_to_block
-      REQUIRE(allocator.offset_to_block(offset0) == sal::block_allocator::block_num_type(0));
-      REQUIRE(allocator.offset_to_block(offset1) == sal::block_allocator::block_num_type(1));
-      REQUIRE(allocator.offset_to_block(offset2) == sal::block_allocator::block_num_type(2));
+      REQUIRE(allocator.offset_to_block(offset0) == sal::block_allocator::block_number(0));
+      REQUIRE(allocator.offset_to_block(offset1) == sal::block_allocator::block_number(1));
+      REQUIRE(allocator.offset_to_block(offset2) == sal::block_allocator::block_number(2));
       REQUIRE(allocator.offset_to_block(offset3) ==
-              sal::block_allocator::block_num_type(3));  // Test the new block
+              sal::block_allocator::block_number(3));  // Test the new block
 
       // Test block_to_offset - these should use bit shift operations internally
-      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(0)) == offset0);
-      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(1)) == offset1);
-      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(2)) == offset2);
-      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(3)) ==
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_number(0)) == offset0);
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_number(1)) == offset1);
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_number(2)) == offset2);
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_number(3)) ==
               offset3);  // Test the new block
 
       // Verify that block_to_offset is using the bit shift optimization
       // For a 16MB block size, _log2_block_size should be 24 (2^24 = 16*2^20)
-      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(1)) == (1 << 24));
-      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(2)) == (2 << 24));
-      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_num_type(3)) == (3 << 24));
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_number(1)) == (1 << 24));
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_number(2)) == (2 << 24));
+      REQUIRE(allocator.block_to_offset(sal::block_allocator::block_number(3)) == (3 << 24));
 
       // Test block alignment checks
       REQUIRE(allocator.is_block_aligned(sal::block_allocator::offset_ptr{0}));
@@ -273,18 +338,14 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       REQUIRE(allocator.block_to_offset(allocator.offset_to_block(offset3)) ==
               offset3);  // Test the new block
 
-      REQUIRE(allocator.offset_to_block(
-                  allocator.block_to_offset(sal::block_allocator::block_num_type(0))) ==
-              sal::block_allocator::block_num_type(0));
-      REQUIRE(allocator.offset_to_block(
-                  allocator.block_to_offset(sal::block_allocator::block_num_type(1))) ==
-              sal::block_allocator::block_num_type(1));
-      REQUIRE(allocator.offset_to_block(
-                  allocator.block_to_offset(sal::block_allocator::block_num_type(2))) ==
-              sal::block_allocator::block_num_type(2));
-      REQUIRE(allocator.offset_to_block(
-                  allocator.block_to_offset(sal::block_allocator::block_num_type(3))) ==
-              sal::block_allocator::block_num_type(3));
+      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(
+                  sal::block_allocator::block_number(0))) == sal::block_allocator::block_number(0));
+      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(
+                  sal::block_allocator::block_number(1))) == sal::block_allocator::block_number(1));
+      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(
+                  sal::block_allocator::block_number(2))) == sal::block_allocator::block_number(2));
+      REQUIRE(allocator.offset_to_block(allocator.block_to_offset(
+                  sal::block_allocator::block_number(3))) == sal::block_allocator::block_number(3));
    }
 
    // Clean up

@@ -541,9 +541,10 @@ namespace arbtrie
       }
 
       // Create a search key that is the prefix followed by 0xFF bytes
+      //std::array<char, max_key_length> search_key;
       std::array<char, max_key_length> search_key;
       memcpy(search_key.data(), prefix.data(), prefix.size());
-      memset(search_key.data() + prefix.size(), 0xff, max_key_length - prefix.size());
+      memset(search_key.data() + prefix.size(), 0xff, search_key.size() - prefix.size());
 
       // Try to find a key greater than or equal to our search key
       if (lower_bound_impl(state, key_view(search_key.data(), search_key.size())))
@@ -937,7 +938,7 @@ namespace arbtrie
    template <iterator_caching_mode CacheMode>
    void iterator<CacheMode>::push_prefix(key_view prefix)
    {
-      memcpy(_branches_end, prefix.data(), prefix.size());
+      std::copy(prefix.begin(), prefix.end(), _branches_end);
       _branches_end += prefix.size();
       _path_back->prefix_size = prefix.size();
       _path_back->branch_size = 0;
@@ -948,7 +949,7 @@ namespace arbtrie
    {
       // Adjust size of branches to remove old key and make space for new key
       _branches_end -= _path_back->branch_size;
-      memcpy(_branches_end, new_branch.data(), new_branch.size());
+      std::copy(new_branch.begin(), new_branch.end(), _branches_end);
       _branches_end += new_branch.size();
 
       _path_back->branch_size = new_branch.size();

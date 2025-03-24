@@ -1,9 +1,11 @@
 #pragma once
 #include <arbtrie/config.hpp>
 #include <cassert>
+#include <sal/block_allocator.hpp>
 
 namespace arbtrie
 {
+   using offset_ptr = sal::block_allocator::offset_ptr;
 
    class node_location
    {
@@ -19,7 +21,8 @@ namespace arbtrie
       // index() into array of objects of size alignment
       uint32_t aligned_index() const { return loc_div_align & ((segment_size / alignment) - 1); }
       // index() * alignment gets the byte offset
-      uint32_t abs_index() const { return alignment * aligned_index(); }
+      uint32_t   abs_index() const { return alignment * aligned_index(); }
+      offset_ptr offset() const { return offset_ptr(alignment * loc_div_align); }
 
       uint64_t                       to_aligned() const { return loc_div_align; }
       uint64_t                       to_abs() const { return loc_div_align * alignment; }

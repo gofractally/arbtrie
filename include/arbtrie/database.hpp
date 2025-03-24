@@ -830,12 +830,6 @@ namespace arbtrie
       uint64_t old_r;
       uint64_t new_r = r.take().to_int();
       {
-         // mark everything that has been written thus far as
-         // read-only, this protects what has been written from being
-         // corrupted by bad memory access patterns in the same
-         // process.
-         _segas->sync(stype, index, r.address());
-
          {  // lock scope
             std::unique_lock lock(_db->_root_change_mutex[index]);
             old_r = _db->_dbm->top_root[index].exchange(new_r, std::memory_order_relaxed);

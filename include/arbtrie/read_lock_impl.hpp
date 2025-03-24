@@ -1,4 +1,5 @@
 #pragma once
+#include <arbtrie/fast_memcpy.hpp>
 #include <arbtrie/read_lock.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
 
@@ -14,9 +15,10 @@ namespace arbtrie
       auto seg = l.segment();
 
       // TODO: replace this with function call
-      auto obj_ptr = (node_header*)((char*)_session._sega._block_alloc.get(seg) + l.abs_index());
+      //auto obj_ptr = (node_header*)((char*)_session._sega._block_alloc.get(seg) + l.abs_index());
+      auto obj_ptr = _session._sega._block_alloc.get<node_header>(l.offset());
 
-      _session.free_object(seg, obj_ptr->object_capacity());
+      _session.record_freed_space(seg, obj_ptr);
 
       //   std::cerr << "realloc " << id <<" size: " << size <<" \n";
       // TODO: mark the free space associated with the current location of id
@@ -78,30 +80,26 @@ namespace arbtrie
       return object_ref(*this, allocation.address, allocation.meta);
    }
 
+   /**
    inline bool read_lock::is_synced(node_location loc)
    {
       return _session.is_synced(loc);
    }
+   */
 
-   inline sync_lock& read_lock::get_sync_lock(int seg)
-   {
-      return _session._sega._seg_sync_locks[seg];
-   }
    inline node_header* read_lock::get_node_pointer(node_location loc)
    {
-      auto segment = (mapped_memory::segment*)_session._sega._block_alloc.get(loc.segment());
-      // 0 means we are accessing a swapped object on a segment that hasn't started new allocs
-      // if alloc_pos > loc.index() then we haven't overwriten this object yet, we are accessing
-      // data behind the alloc pointer which should be safe
-      // to access data we had to get the location from obj id database and we should read
-      // with memory_order_acquire, when updating an object_info we need to write with
-      // memory_order_release otherwise the data written may not be visible yet to the reader coming
-      // along behind
-
-      // only check this in release if this flag is set
       if constexpr (debug_memory)
       {
-         auto ap = segment->get_alloc_pos();
+         // if alloc_pos > loc.index() then we haven't overwriten this object yet, we are accessing
+         // data behind the alloc pointer which should be safe
+         // to access data we had to get the location from obj id database and we should read
+         // with memory_order_acquire, when updating an object_info we need to write with
+         // memory_order_release otherwise the data written may not be visible yet to the reader coming
+         // along behind
+         auto ptr =
+             _session._sega._block_alloc.get<mapped_memory::segment>(block_number(loc.segment()));
+         auto ap = ptr->get_alloc_pos();
          if (ap <= loc.abs_index())
          {
             ARBTRIE_WARN("segment: ", loc.segment(), " ap: ", ap, "  loc: ", loc.aligned_index(),
@@ -109,11 +107,7 @@ namespace arbtrie
             abort();
          }
       }
-      else  // always check in debug builds
-         assert(segment->get_alloc_pos() > loc.abs_index());
-
-      return (node_header*)((char*)_session._sega._block_alloc.get(loc.segment()) +
-                            loc.abs_index());
+      return _session._sega._block_alloc.get<node_header>(loc.offset());
    }
 
    inline void read_lock::free_meta_node(id_address a)
@@ -196,8 +190,8 @@ namespace arbtrie
       /// TODO: realloc needs to obtain the lock on the segment and return responsibilty for
       /// releasing it to this modify lock, we need to add an assert that recursive calls don't
       /// try to acquire the same segment lock or one will unblock the others too soon.
-      auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(),
-                                 [&](auto ptr) { memcpy(ptr, cur_ptr, cur_ptr->_nsize); });
+      auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
+                                 { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
       return _rlock.get_node_pointer(oref.meta_data().loc());
    }
 
@@ -247,9 +241,15 @@ namespace arbtrie
       return _session.should_cache(size);
    }
 
-   inline void read_lock::free_object(node_location loc, uint32_t size)
+   /**
+    * Records when an object has been freed to update segment metadata
+    * 
+    * @param segment The segment number where the object is located
+    * @param obj_ptr Pointer to the object being freed
+    */
+   inline void read_lock::freed_object(segment_number segment, const node_header* obj_ptr)
    {
-      _session.free_object(loc.segment(), size);
+      _session.record_freed_space(segment, obj_ptr);
    }
 
    inline bool read_lock::is_read_only(node_location loc) const

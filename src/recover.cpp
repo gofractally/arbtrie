@@ -55,7 +55,6 @@ namespace arbtrie
  *        the tree is potentially corrupt and partially written
  *         (bad,bad user....)
  *         - similar to App Crash Recovery... except..
- *         - scan for modify bits that are set
  *         - check integrity of relevant nodes
  *         - produce report and/or sandbox subtree 
  */
@@ -137,15 +136,7 @@ namespace arbtrie
 
       // Clear all segment meta is_pinned bits to ensure consistency with the bitmap
       for (size_t i = 0; i < _block_alloc.num_blocks(); ++i)
-      {
-         auto& meta  = _mapped_state->_segment_data.meta[i];
-         auto  state = meta.get_free_state();
-         if (state.is_pinned)
-         {
-            // During recovery we only need to update the metadata since bitmap is already reset
-            meta._state_data.store(state.set_pinned(false).to_int(), std::memory_order_relaxed);
-         }
-      }
+         _mapped_state->_segment_data.set_pinned(i, false);
 
       _mapped_state->_segment_provider.ready_segments.reset();
 
@@ -242,7 +233,7 @@ namespace arbtrie
       const auto num_block = _block_alloc.num_blocks();
       for (int block = 0; block < num_block; ++block)
       {
-         auto ptr = _block_alloc.get(block);
+         auto ptr = _block_alloc.get(block_number(block));
          memset(ptr, 0, id_block_size);
       }
       for (int region = 0; region < max_regions; ++region)

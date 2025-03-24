@@ -7,7 +7,7 @@ namespace arbtrie
        : _session_num(mv._session_num),
          _alloc_seg_num(mv._alloc_seg_num),
          _alloc_seg_ptr(mv._alloc_seg_ptr),
-         _alloc_seg_meta(mv._alloc_seg_meta),
+         //_alloc_seg_meta(mv._alloc_seg_meta),
          _dirty_segments(mv._dirty_segments),
          _in_alloc(mv._in_alloc),
          _session_rlock(mv._session_rlock),
@@ -16,10 +16,10 @@ namespace arbtrie
          _rcache_queue(mv._rcache_queue),
          _session_rng(mv._session_rng)
    {
-      mv._alloc_seg_ptr  = nullptr;
-      mv._alloc_seg_num  = -1ull;
-      mv._alloc_seg_meta = nullptr;
-      mv._session_num    = -1;
+      mv._alloc_seg_ptr = nullptr;
+      mv._alloc_seg_num = -1ull;
+      //   mv._alloc_seg_meta = nullptr;
+      mv._session_num = -1;
    }
 
    /*
@@ -78,7 +78,7 @@ namespace arbtrie
        : _session_num(ses_num),
          _alloc_seg_num(-1ull),
          _alloc_seg_ptr(nullptr),
-         _alloc_seg_meta(nullptr),
+         // _alloc_seg_meta(nullptr),
          _dirty_segments(a._mapped_state->_session_data.dirty_segments(ses_num)),
          _in_alloc(false),
          _session_rng(0xABBA7777 ^ ses_num),
@@ -107,9 +107,9 @@ namespace arbtrie
          //              " free_space: ", _alloc_seg_ptr->free_space());
          // update the segment meta data so that it knows the free space and
          // age of the segment data for use by compactor
-         _alloc_seg_meta->finalize_segment(
-             _alloc_seg_ptr->free_space(),
-             _alloc_seg_ptr->_vage_accumulator.average_age());  // not alloc
+         // _alloc_seg_meta->finalize_segment(
+         //    _alloc_seg_ptr->free_space(),
+         //   _alloc_seg_ptr->_vage_accumulator.average_age());  // not alloc
 
          // Set the segment close time before finalization
          // ensure the alloc_pos is moved to end
@@ -120,9 +120,9 @@ namespace arbtrie
          //              " free_space: ", _alloc_seg_ptr->free_space());
          _dirty_segments.push(_alloc_seg_num);
       }
-      _alloc_seg_ptr  = nullptr;
-      _alloc_seg_num  = -1ull;
-      _alloc_seg_meta = nullptr;
+      _alloc_seg_ptr = nullptr;
+      _alloc_seg_num = -1ull;
+      // _alloc_seg_meta = nullptr;
    }
 
    void seg_alloc_session::init_active_segment()
@@ -130,8 +130,8 @@ namespace arbtrie
       auto [num, ptr] = _sega.get_new_segment(_alloc_to_pinned);
       _alloc_seg_num  = num;
       _alloc_seg_ptr  = ptr;
-      _alloc_seg_meta = &_sega.get_segment_meta(_alloc_seg_num);
-      _alloc_seg_meta->start_alloc_segment();
+      //    _alloc_seg_meta = &_sega.get_segment_meta(_alloc_seg_num);
+      //    _alloc_seg_meta->start_alloc_segment();
 
       // Initialize segment header with session information
       _alloc_seg_ptr->_session_id = _session_num;
@@ -238,10 +238,23 @@ namespace arbtrie
       return {node_location::from_absolute(loc), head};
    }
 
-   void seg_alloc_session::unalloc(uint32_t size)
+   /**
+    * Reclaims the most recently allocated size bytes
+    * 
+    * @param size The size of the object to reclaim
+    * @return true if the object was reclaimed, false otherwise
+    */
+   bool seg_alloc_session::unalloc(uint32_t size)
    {
-      if (_alloc_seg_ptr) [[likely]]
-         _alloc_seg_ptr->unalloc(size);
+      if (not _alloc_seg_ptr) [[unlikely]]
+         return false;
+
+      assert(reinterpret_cast<node_header*>(_alloc_seg_ptr->data + _alloc_seg_ptr->get_alloc_pos() -
+                                            size)
+                 ->_nsize == size);
+
+      _alloc_seg_ptr->unalloc(size);
+      return true;
    }
 
    void seg_alloc_session::sync(sync_type st, int top_root_index, id_address top_root)
@@ -255,18 +268,23 @@ namespace arbtrie
          auto seg = _sega.get_segment(seg_num);
          //        ARBTRIE_WARN("sync: seg_num: ", seg_num, " is_finalized: ", seg->is_finalized());
 
+         // sync() will write an allocation_header, and this header is space that
+         // can be reclaimed if compacted, so we need to record it in the meta data
+         // for easy access by the compactor
          seg->sync(st, top_root_index, top_root);
          auto ahead = seg->get_last_aheader();
          //   ARBTRIE_INFO("sync: segment: ", seg_num, " free_space: ", seg->free_space(),
          //                " ahead: ", ahead->_nsize);
-         _sega.free_object(seg_num, ahead->_nsize);
-         if (seg->is_read_only() or seg->is_finalized())
-         {
-            //            ARBTRIE_ERROR("sync: read only segment: ", seg_num);
-            auto& seg_meta = _sega.get_segment_meta(seg_num);
-            seg_meta.set_read_only(true);
-            seg_meta.set_vage(seg->_vage_accumulator.average_age());
-         }
+
+         _sega.record_freed_space(seg_num, ahead);
+
+         /// if the segment is entirely read only (because sync() just moved _last_writable_pos
+         /// to the end of the segment) then we can set the segment meta data to indicate that
+         /// the entire segment is read only
+         assert(seg->is_finalized() ? seg->is_read_only() : true);
+         if (seg->is_read_only())  //or seg->is_finalized())
+            _sega._mapped_state->_segment_data.prepare_for_compaction(
+                seg_num, seg->_vage_accumulator.average_age());
          seg_num = _dirty_segments.pop();
       }
    }

@@ -1,15 +1,20 @@
 #pragma once
 #include <algorithm>
+#include <arbtrie/time.hpp>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>  // For atexit
 #include <format>
+#include <mutex>
+#include <thread>
 
 namespace arbtrie
 {
+
    inline uint64_t get_current_time_ms()
    {
-      return std::chrono::duration_cast<std::chrono::milliseconds>(
-                 std::chrono::steady_clock::now().time_since_epoch())
-          .count();
+      // Simply read from the TimeManager
+      return time_manager::getCurrentTimeMs();
    }
 
    template <class Src, class Dst>

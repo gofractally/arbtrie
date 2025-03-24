@@ -29,9 +29,9 @@ namespace sal
    {
      public:
       // 64-bit offset from the base pointer
-      using offset_ptr                      = typed_int<uint64_t, struct offset_ptr_tag>;
-      using block_num_type                  = typed_int<uint64_t, struct block_num_tag>;
-      static constexpr offset_ptr null_page = offset_ptr(-1);
+      using offset_ptr                        = typed_int<uint64_t, struct offset_ptr_tag>;
+      using block_number                      = typed_int<uint64_t, struct block_num_tag>;
+      static constexpr offset_ptr null_offset = offset_ptr(-1);
 
       /**
        * Constructor for block_allocator.
@@ -64,15 +64,35 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A pointer to the block at the specified offset
        */
-      inline void* get(offset_ptr offset) noexcept
+      template <typename T = void>
+      inline T* get(offset_ptr offset) noexcept
       {
          assert(*offset < _file_size);
-         return static_cast<char*>(_mapped_base) + *offset;
+         return reinterpret_cast<T*>(((char*)_mapped_base) + *offset);
       }
-      template <typename T>
-      T* get(offset_ptr offset) noexcept
+      /**
+       * Return a const pointer to the block at the specified offset
+       * 
+       * @param offset The offset pointer (returned by alloc)
+       * @return A const pointer to the block at the specified offset
+       */
+      template <typename T = void>
+      inline const T* get(offset_ptr offset) const noexcept
       {
-         return static_cast<T*>(get(offset));
+         assert(*offset < _file_size);
+         return reinterpret_cast<const T*>(((const char*)_mapped_base) + *offset);
+      }
+      /**
+       * Return a const pointer to the block at the specified block number
+       * 
+       * @param block_num The block number (index)
+       * @return A const pointer to the block at the specified block number
+       */
+      template <typename T = void>
+      inline T* get(block_number block_num) noexcept
+      {
+         assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
+         return get<T>(block_to_offset(block_num));
       }
 
       /**
@@ -81,10 +101,11 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A const pointer to the block at the specified offset
        */
-      inline const void* get(offset_ptr offset) const noexcept
+      template <typename T = void>
+      inline const T* get(block_number block_num) const noexcept
       {
-         assert(*offset < _file_size);
-         return static_cast<const char*>(_mapped_base) + *offset;
+         assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
+         return get<T>(block_to_offset(block_num));
       }
 
       /**
@@ -94,7 +115,7 @@ namespace sal
        * @param block_num The block number (index)
        * @return The offset pointer to the start of the block
        */
-      inline offset_ptr block_to_offset(block_num_type block_num) const noexcept
+      inline offset_ptr block_to_offset(block_number block_num) const noexcept
       {
          assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
          return offset_ptr(*block_num << _log2_block_size);  // Fast multiplication by power of 2
@@ -107,11 +128,11 @@ namespace sal
        * @param offset The offset pointer
        * @return The block number (index)
        */
-      inline block_num_type offset_to_block(offset_ptr offset) const noexcept
+      inline block_number offset_to_block(offset_ptr offset) const noexcept
       {
          assert(*offset < _file_size);
          // Fast division by power of 2
-         return block_num_type(*offset >> _log2_block_size);
+         return block_number(*offset >> _log2_block_size);
       }
 
       /**
@@ -127,15 +148,27 @@ namespace sal
       }
 
       // ensures that at least the desired number of blocks are present
-      uint32_t reserve(uint32_t desired_num_blocks, bool memlock = false);
+      uint32_t reserve(uint32_t desired_num_blocks);
 
       /**
-       * Allocate a new block and return an offset pointer to it
+       * Allocate a new block and return both the block number and offset pointer to it
        * 
-       * @return An offset pointer to the newly allocated block
+       * @return A pair containing the block number and offset pointer to the newly allocated block
        * @throws std::runtime_error If the maximum number of blocks has been reached
        */
-      offset_ptr alloc();
+      std::pair<block_number, offset_ptr> alloc();
+
+      /**
+       * Resizes the block allocator to the specified number of blocks.
+       * Similar to std::vector::resize(), this ensures _num_blocks equals the desired size.
+       * 
+       * NOTE: This method is not thread-safe when used simultaneously with alloc().
+       * 
+       * @param desired_num_blocks The desired number of allocated blocks
+       * @return The actual number of blocks after resizing
+       * @throws std::runtime_error If the maximum number of blocks would be exceeded
+       */
+      uint32_t resize(uint32_t desired_num_blocks);
 
       /**
        * Finds the maximum possible reservation size as a multiple of the specified block size.

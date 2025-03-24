@@ -54,14 +54,15 @@ namespace arbtrie
       seg_alloc_session(const seg_alloc_session&)            = delete;
       seg_alloc_session& operator=(const seg_alloc_session&) = delete;
 
-      inline void free_object(segment_number segment, uint32_t object_size);
+      template <typename T>
+      inline void record_freed_space(segment_number seg, T* obj);
 
       inline size_t get_last_sync_position(segment_number segment) const;
 
       /**
        * Check if a node location has been synced to disk.
-       */
       inline bool is_synced(node_location loc) const;
+       */
       inline bool is_read_only(node_location loc) const;
 
       /// requires segment be owned by this session and loc not on read-only page
@@ -85,7 +86,10 @@ namespace arbtrie
        */
       inline uint32_t get_random();
 
-      void                                   unalloc(uint32_t size);
+      /**
+       * Reclaims the most recently allocated size bytes
+       */
+      bool                                   unalloc(uint32_t size);
       std::pair<node_location, node_header*> alloc_data(uint32_t       size,
                                                         id_address_seq adr_seq,
                                                         uint64_t       vage = 0);

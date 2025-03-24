@@ -27,6 +27,7 @@ namespace arbtrie
     */
    static constexpr const uint32_t id_block_size = id_page_size << 16;
    static constexpr const uint32_t ids_per_page  = id_page_size / sizeof(uint64_t);
+   using block_number                            = sal::block_allocator::block_number;
 
    /**
     *  @class id_alloc
@@ -162,15 +163,15 @@ namespace arbtrie
       if (block_num > 0xffff)
          throw std::runtime_error("block num out of range!");
       if (block_num >= _block_alloc.num_blocks())
-         _block_alloc.reserve(block_num + 1, true);
+         _block_alloc.resize(block_num + 1);
       return get(nid);
    }
 
    inline node_meta_type& id_alloc::get(id_address nid)
    {
-      uint64_t abs_pos        = nid.index().to_int() * sizeof(node_meta_type);
-      uint64_t block_num      = abs_pos / id_page_size;
-      uint64_t index_in_block = abs_pos & uint64_t(id_page_size - 1);
+      uint64_t     abs_pos = nid.index().to_int() * sizeof(node_meta_type);
+      block_number block_num(abs_pos / id_page_size);
+      uint64_t     index_in_block = abs_pos & uint64_t(id_page_size - 1);
 
       auto ptr = ((char*)_block_alloc.get(block_num)) + nid.region().to_int() * id_page_size +
                  index_in_block;
@@ -234,7 +235,7 @@ namespace arbtrie
                          num_pages + 1);
             // TODO: calculate a load factor before warning
          }
-         num_pages = _block_alloc.reserve(num_pages + 1, true);
+         num_pages = _block_alloc.resize(num_pages + 1);
       }
       auto na = rhead.next_alloc.load(std::memory_order_relaxed);
 

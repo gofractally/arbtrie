@@ -2138,6 +2138,13 @@ namespace arbtrie
           {
              if (top_root_node >= 0)
              {
+                // mark everything that has been written thus far as
+                // read-only, this protects what has been written from being
+                // corrupted by bad memory access patterns in the same
+                // process.
+                /// TODO: use configured sync type instead of hardcoding async
+                _segas->sync(sync_type::async, top_root_node, commit.address());
+
                 set_root(std::move(commit), top_root_node);
                 // give other writers a chance to grab the lock
                 _db->modify_lock(top_root_node).unlock();

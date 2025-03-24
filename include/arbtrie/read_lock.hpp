@@ -79,12 +79,8 @@ namespace arbtrie
       node_header* get_node_pointer(node_location);
       //void         update_read_stats(node_location, uint32_t node_size, uint64_t time);
 
-      bool       is_synced(node_location);
-      sync_lock& get_sync_lock(int seg);
-
       bool is_read_only(node_location loc) const;
       bool can_modify(node_location loc) const;
-      void free_object(node_location loc, uint32_t size);
 
       /**
        * Check if an object should be cached based on its size and difficulty threshold
@@ -92,6 +88,13 @@ namespace arbtrie
        * @return true if the object should be cached, false otherwise
        */
       bool should_cache(uint32_t size) const;
+
+      /**
+       * Records when an object has been freed to update segment metadata
+       * @param segment The segment number where the object is located
+       * @param obj_ptr Pointer to the object being freed
+       */
+      void freed_object(segment_number segment, const node_header* obj_ptr);
 
      private:
       friend class seg_alloc_session;

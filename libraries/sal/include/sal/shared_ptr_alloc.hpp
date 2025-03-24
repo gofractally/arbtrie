@@ -78,7 +78,7 @@ namespace sal
       };
 
       using page_offset                      = block_allocator::offset_ptr;
-      static constexpr page_offset null_page = block_allocator::null_page;
+      static constexpr page_offset null_page = block_allocator::null_offset;
 
       struct region
       {

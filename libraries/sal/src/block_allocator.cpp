@@ -283,17 +283,21 @@ namespace sal
       }
    }
 
-   uint32_t block_allocator::reserve(uint32_t desired_num_blocks, bool memlock)
+   uint32_t block_allocator::reserve(uint32_t desired_num_blocks)
    {
       if (desired_num_blocks > _max_blocks)
          throw std::runtime_error("unable to reserve, maximum block would be reached");
 
       std::lock_guard l{_resize_mutex};
-      if (num_blocks() >= desired_num_blocks)
-         return desired_num_blocks;
 
-      auto cur_num   = num_blocks();
-      auto add_count = desired_num_blocks - cur_num;
+      // Calculate current capacity in blocks (how many blocks the file can hold)
+      uint32_t capacity = _file_size / _block_size;
+
+      // Check if we already have enough space reserved in the file
+      if (capacity >= desired_num_blocks)
+         return capacity;
+
+      auto add_count = desired_num_blocks - capacity;
       auto new_size  = _file_size + _block_size * add_count;
 
       // Resize the file
@@ -304,205 +308,103 @@ namespace sal
 
       auto prot = PROT_READ | PROT_WRITE;
 
-      // If this is the first allocation, map the file at the reserved space
-      if (cur_num == 0)
+      // Calculate where to map
+      void*  map_addr   = static_cast<char*>(_reserved_base) + _file_size;
+      size_t map_size   = new_size - _file_size;
+      off_t  map_offset = _file_size;
+
+      // Release the protection on the portion we need
+      if (::munmap(map_addr, map_size) != 0)
       {
-         // Release the protection on the portion we need
-         if (::munmap(_reserved_base, new_size) != 0)
-         {
-            SAL_WARN("Failed to release protection on reserved space: {}", strerror(errno));
-            // Continue anyway, trying to map
-         }
+         SAL_WARN("Failed to release protection on reserved space: {}", strerror(errno));
+         // Continue anyway, trying to map
+      }
 
-         // Map the file at the exact address of our reserved space
-         void* addr = ::mmap(_reserved_base, new_size, prot, MAP_SHARED | MAP_FIXED, _fd, 0);
+      // Map the file at the specified address
+      void* addr = ::mmap(map_addr, map_size, prot, MAP_SHARED | MAP_FIXED, _fd, map_offset);
 
-         if (addr != MAP_FAILED)
+      if (addr != MAP_FAILED)
+      {
+         // Successfully mapped the file
+         if (capacity == 0)
          {
-            // Successfully mapped the file at the beginning of our reserved space
+            // First allocation: save the base pointer
             _mapped_base = addr;
-
-            if (memlock)
-            {
-               if (::mlock(addr, new_size))
-               {
-                  SAL_WARN("Unable to mlock memory region");
-                  ::madvise(addr, new_size, MADV_RANDOM);
-               }
-            }
-
-            sal_debug("Reserved {} blocks contiguously at base={:#x}", desired_num_blocks,
-                      reinterpret_cast<uintptr_t>(addr));
-
-            _file_size = new_size;
-            return _num_blocks.fetch_add(add_count, std::memory_order_release) + add_count;
          }
-         else
-         {
-            SAL_ERROR("Failed to map file at reserved space: {}", strerror(errno));
 
-            // Revert file size and throw
-            if (::ftruncate(_fd, _file_size) < 0)
-            {
-               SAL_ERROR("Additionally failed to restore file size");
-            }
-            throw std::runtime_error("unable to map file into reserved space");
-         }
+         // Update file size (increases capacity)
+         _file_size = new_size;
+
+         // Return the new capacity (not num_blocks)
+         return desired_num_blocks;
       }
       else
       {
-         // For cases where we already have a mapped region, we need to map just the new blocks
-         // DO NOT unmap the existing region to avoid invalidating existing pointers
+         SAL_ERROR("Failed to map file at expected address: {}", strerror(errno));
 
-         // Calculate address and size of the new region to map
-         void*  new_region_addr = static_cast<char*>(_reserved_base) + _file_size;
-         size_t new_region_size = new_size - _file_size;
-
-         // Release protection on just the new portion we need
-         if (::munmap(new_region_addr, new_region_size) != 0)
+         // Revert file size and throw
+         if (::ftruncate(_fd, _file_size) < 0)
          {
-            SAL_WARN("Failed to release protection on reserved space for extension: {}",
-                     strerror(errno));
-            // Continue anyway, trying to map
+            SAL_ERROR("Additionally failed to restore file size");
          }
-
-         // Map just the new portion of the file at the correct address to maintain contiguity
-         void* addr = ::mmap(new_region_addr, new_region_size, prot, MAP_SHARED | MAP_FIXED, _fd,
-                             _file_size);
-
-         if (addr != MAP_FAILED)
-         {
-            // Successfully extended the mapping contiguously
-            if (memlock)
-            {
-               if (::mlock(addr, new_region_size))
-               {
-                  SAL_WARN("Unable to mlock extended memory region");
-                  ::madvise(addr, new_region_size, MADV_RANDOM);
-               }
-            }
-
-            sal_debug("Mapped {} additional blocks contiguously at base={:#x}", add_count,
-                      reinterpret_cast<uintptr_t>(addr));
-
-            _file_size = new_size;
-            return _num_blocks.fetch_add(add_count, std::memory_order_release) + add_count;
-         }
-         else
-         {
-            SAL_ERROR("Failed to map extension at expected address: {}", strerror(errno));
-
-            // Revert file size and throw
-            if (::ftruncate(_fd, _file_size) < 0)
-            {
-               SAL_ERROR("Failed to restore file size after mapping failure");
-            }
-
-            throw std::runtime_error("Failed to extend mapping at expected address");
-         }
+         throw std::runtime_error("unable to map file at expected address");
       }
    }
 
-   block_allocator::offset_ptr block_allocator::alloc()
+   std::pair<block_allocator::block_number, block_allocator::offset_ptr> block_allocator::alloc()
    {
-      std::lock_guard l{_resize_mutex};
-      auto            nb = _num_blocks.load(std::memory_order_relaxed);
-      if (nb == _max_blocks)
+      // Atomically claim the next block index without a lock
+      uint32_t block_index = _num_blocks.fetch_add(1, std::memory_order_acquire);
+
+      // Check if we hit the max blocks limit
+      if (block_index >= _max_blocks)
+      {
+         // Undo the fetch_add to restore consistent state
+         _num_blocks.fetch_sub(1, std::memory_order_release);
+         sal_debug("ALLOC: Max blocks reached - _max_blocks={}", _max_blocks);
          throw std::runtime_error("maximum block number reached");
-
-      auto new_size = _file_size + _block_size;
-
-      // Resize the file
-      if (::ftruncate(_fd, new_size) < 0)
-      {
-         throw std::system_error(errno, std::generic_category());
       }
 
-      auto prot = PROT_READ | PROT_WRITE;
-
-      // For cases where we already have a mapped region, we need to map just the new block
-      if (_mapped_base && _mapped_base != MAP_FAILED)
+      // Check if we already have this block mapped
+      if (block_index < (_file_size / _block_size))
       {
-         // DO NOT unmap the existing region to avoid invalidating existing pointers
-
-         // Calculate address of the new block to map
-         void* new_block_addr = static_cast<char*>(_reserved_base) + _file_size;
-
-         // Release protection on just the new block we need
-         if (::munmap(new_block_addr, _block_size) != 0)
-         {
-            SAL_WARN("Failed to release protection on reserved space for alloc: {}",
-                     strerror(errno));
-            // Continue anyway, trying to map
-         }
-
-         // Map only the new block at the expected address
-         void* addr =
-             ::mmap(new_block_addr, _block_size, prot, MAP_SHARED | MAP_FIXED, _fd, _file_size);
-
-         if (addr != MAP_FAILED)
-         {
-            offset_ptr offset(_file_size);  // Offset to the newly allocated block
-            _file_size = new_size;
-
-            sal_debug("Alloc: Mapped new block contiguously at base={:#x}",
-                      reinterpret_cast<uintptr_t>(addr));
-
-            _num_blocks.fetch_add(1, std::memory_order_release);
-            return offset;
-         }
-         else
-         {
-            SAL_ERROR("Alloc: Failed to map new block at expected address: {}", strerror(errno));
-
-            // Revert file size and throw
-            if (::ftruncate(_fd, _file_size) < 0)
-            {
-               SAL_ERROR("Failed to restore file size after mapping failure");
-            }
-
-            throw std::runtime_error("Failed to map new block at expected address");
-         }
+         // Fast path: block already mapped, return the block number and offset
+         offset_ptr offset(block_index * _block_size);
+         return {block_number(block_index), offset};
       }
-      else  // First mapping
+
+      // Slow path: need to map a new block
+      try
       {
-         // Release the protection on the portion we need
-         if (::munmap(_reserved_base, new_size) != 0)
-         {
-            SAL_WARN("Failed to release protection on reserved space for first alloc: {}",
-                     strerror(errno));
-            // Continue anyway, trying to map
-         }
+         // Call reserve() to map more space (with the lock)
+         reserve(block_index + 1);
 
-         // Map the file at the exact address of our reserved space
-         void* addr = ::mmap(_reserved_base, new_size, prot, MAP_SHARED | MAP_FIXED, _fd, 0);
+         // After reserve succeeds, our previously claimed block_index is valid
+         offset_ptr offset(block_index * _block_size);
 
-         if (addr != MAP_FAILED)
-         {
-            // Successfully mapped the file at the beginning of our reserved space
-            _mapped_base = addr;
-            _file_size   = new_size;
-
-            sal_debug("Alloc: First block mapped contiguously at base={:#x}",
-                      reinterpret_cast<uintptr_t>(addr));
-
-            // For the first block, offset is 0
-            _num_blocks.fetch_add(1, std::memory_order_release);
-            return offset_ptr(0);
-         }
-         else
-         {
-            SAL_ERROR("Alloc: Failed to map file at reserved space for first alloc: {}",
-                      strerror(errno));
-
-            // Revert file size
-            if (::ftruncate(_fd, _file_size) < 0)
-            {
-               SAL_ERROR("Failed to restore file size after mapping failure");
-            }
-
-            throw std::runtime_error("Failed to map first block at reserved address space");
-         }
+         return {block_number(block_index), offset};
       }
+      catch (const std::exception& e)
+      {
+         // If reserve fails, restore consistent state
+         _num_blocks.fetch_sub(1, std::memory_order_release);
+         sal_debug("ALLOC: Slow path failed - {}", e.what());
+         throw;  // Re-throw the original exception
+      }
+   }
+
+   uint32_t block_allocator::resize(uint32_t desired_num_blocks)
+   {
+      if (desired_num_blocks > _max_blocks)
+         throw std::runtime_error("unable to resize, maximum block limit would be exceeded");
+
+      // First ensure we have enough capacity (reserve handles its own locking)
+      reserve(desired_num_blocks);
+
+      // Directly set the number of blocks
+      // NOTE: This method is not thread safe with simultaneous use of alloc()
+      _num_blocks.store(desired_num_blocks, std::memory_order_release);
+
+      return desired_num_blocks;
    }
 }  // namespace sal

@@ -53,7 +53,6 @@ option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_VISUALIZER "Build segment visualizer" )
-option(BUILD_SAL "Build SAL (Storage Abstraction Library)" ON)
 
 # Find required packages
 find_package(Threads REQUIRED)
@@ -73,17 +72,13 @@ if(BUILD_VISUALIZER)
     add_subdirectory(visualizer)
 endif()
 
-# SAL library setup
-if(BUILD_SAL)
-    # Forward relevant options to SAL
-    option(SAL_DEBUG "Enable debug logging for SAL library" ON)
-    option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
-    
-    # Add the SAL library
-    add_subdirectory(libraries/sal)
-    
-    message(STATUS "SAL library added to build")
-endif()
+# SAL library setup - required by arbtrie
+option(SAL_DEBUG "Enable debug logging for SAL library" ON)
+option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
+
+# Add the SAL library
+add_subdirectory(libraries/sal)
+message(STATUS "SAL library added to build")
 
 # Main library
 add_library(arbtrie
@@ -96,7 +91,6 @@ add_library(arbtrie
     src/recover.cpp
     src/iterator_count_keys.cpp
     src/segment_thread.cpp
-    src/block_allocator.cpp
     src/mapped_memory/session_data.cpp
 )
 
@@ -110,7 +104,7 @@ target_include_directories(arbtrie
 target_link_libraries(arbtrie 
     PUBLIC 
         Threads::Threads
-        $<$<BOOL:${BUILD_SAL}>:sal>
+        sal
 )
 target_compile_features(arbtrie PUBLIC cxx_std_23)
 
