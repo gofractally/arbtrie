@@ -156,6 +156,11 @@ namespace arbtrie
       /// used by segment allocator for bookkeeping, changes the meaning of _ntype
       uint32_t _header_type : 1 = 0;  /// = 0 for node_header, = 1 for allocator_header
 
+      bool is_allocator_header() const
+      {
+         return header_type(_header_type) == header_type::allocator;
+      }
+
       // Constructor
       inline object_header(uint32_t size, id_address_seq nid, node_type type = node_type::freelist)
           : checksum(0), sequence(nid.sequence), _node_id(nid.address), _ntype(type), _nsize(size)

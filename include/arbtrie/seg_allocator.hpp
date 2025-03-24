@@ -88,9 +88,13 @@ namespace arbtrie
       // Return struct for segment read statistics
       struct stats_result
       {
+         stats_result() { memset(this, 0, sizeof(stats_result)); }
          uint32_t nodes_with_read_bit;
          uint64_t total_bytes;
          uint32_t total_objects;
+         uint32_t non_value_nodes;          // Count of non-value nodes for average calculation
+         uint32_t index_cline_counts[257];  // Histogram of actual cacheline hits [0-256+]
+         uint32_t cline_delta_counts[257];  // Histogram of delta between actual and ideal [0-256+]
       };
 
      private:

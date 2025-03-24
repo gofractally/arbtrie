@@ -53,6 +53,10 @@ namespace arbtrie
       uint64_t total_read_bytes       = 0;  // Total bytes of valid objects across all segments
       uint32_t total_read_nodes       = 0;  // Total count of valid objects across all segments
       uint32_t mlocked_segments_count = 0;  // Count of segments in the mlock_segments bitmap
+      uint32_t total_non_value_nodes = 0;  // Total count of non-value nodes for average calculation
+      uint32_t index_cline_counts[257] = {0};  // Histogram of cacheline hits [0-256+]
+      uint32_t cline_delta_counts[257] = {
+          0};  // Histogram of delta between actual and ideal cachelines
 
       // Cache related stats
       uint32_t cache_difficulty     = 0;  // Current cache difficulty setting
@@ -244,6 +248,95 @@ namespace arbtrie
          assert(used_chars + freed_chars + unalloc_chars == width);
 
          return result;
+      }
+
+      // Helper method to create a histogram using Unicode block characters
+      static std::string create_histogram(const uint32_t data[257],
+                                          int            width  = 257,
+                                          int            height = 20)
+      {
+         static const std::string blocks[] = {" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
+
+         // Transpose the histogram to show one row per cacheline count
+         // with a maximum width of 80 characters
+         const int display_width     = 80;
+         const int count_field_width = 10;  // Width for displaying the count at start of row
+         const int graph_width = display_width - count_field_width - 3;  // Width for the actual bar
+
+         // Find the maximum value to scale the histogram
+         uint32_t max_value    = 0;
+         uint64_t total_nodes  = 0;
+         uint64_t weighted_sum = 0;
+
+         for (int i = 0; i < width; ++i)
+         {
+            if (data[i] > max_value)
+               max_value = data[i];
+            total_nodes += data[i];
+            weighted_sum += static_cast<uint64_t>(i) * data[i];
+         }
+
+         if (max_value == 0)
+            return "No data available for histogram";
+
+         // Calculate average cachelines per node
+         double avg_cachelines =
+             total_nodes > 0 ? static_cast<double>(weighted_sum) / total_nodes : 0.0;
+
+         std::ostringstream result;
+         result << "Cacheline Hits Histogram (Row = # of unique cachelines, Bar = frequency)\n";
+         result << "Total non-value nodes: " << total_nodes
+                << ", Average cachelines per node: " << std::fixed << std::setprecision(2)
+                << avg_cachelines << "\n";
+         result << std::string(display_width, '-') << "\n";
+
+         // Draw header
+         result << std::setw(count_field_width) << std::left << "Cachelines" << " │ "
+                << "Count (max: " << max_value << ")\n";
+         result << std::string(count_field_width, '-') << "┬"
+                << std::string(display_width - count_field_width - 1, '-') << "\n";
+
+         // Calculate scaling factor
+         double scale = static_cast<double>(graph_width) / max_value;
+
+         // Draw one row for each non-zero cacheline count
+         for (int i = 0; i < width; ++i)
+         {
+            // Skip rows with zero count
+            if (data[i] == 0)
+               continue;
+
+            // Draw the row number (cacheline count)
+            result << std::setw(count_field_width) << std::right << i << " │ ";
+
+            // Calculate bar length
+            int bar_length = static_cast<int>(data[i] * scale);
+
+            // Create bar with proper color based on value
+            if (data[i] >= max_value * 0.75)
+            {
+               result << COLOR_GREEN;
+            }
+            else if (data[i] >= max_value * 0.4)
+            {
+               result << COLOR_YELLOW;
+            }
+            else
+            {
+               result << COLOR_RED;
+            }
+
+            // Draw the bar
+            for (int j = 0; j < bar_length; ++j)
+            {
+               result << "█";
+            }
+
+            // Add the count at the end of the bar
+            result << COLOR_RESET << " " << data[i] << "\n";
+         }
+
+         return result.str();
       }
 
       /**
@@ -561,6 +654,44 @@ namespace arbtrie
          os << "bitmap mlocked segments: " << mlocked_segments_count
             << "  (displayed: " << bitmap_pinned_count << ")\n";
          os << "metadata pinned segments: " << meta_pinned_count << "\n\n";
+
+         // Print cacheline histogram
+         os << "\n--- cacheline hits histogram ---\n";
+
+         // Calculate total weighted sum for average
+         uint64_t weighted_sum = 0;
+         for (int i = 0; i < 257; ++i)
+         {
+            weighted_sum += static_cast<uint64_t>(i) * index_cline_counts[i];
+         }
+
+         // Calculate average cachelines per node
+         double avg_cachelines = total_non_value_nodes > 0
+                                     ? static_cast<double>(weighted_sum) / total_non_value_nodes
+                                     : 0.0;
+
+         os << "Total non-value nodes: " << total_non_value_nodes
+            << ", Average cachelines per node: " << std::fixed << std::setprecision(2)
+            << avg_cachelines << "\n";
+
+         os << create_histogram(index_cline_counts) << "\n";
+
+         // Calculate average delta for the delta histogram
+         weighted_sum = 0;
+         for (int i = 0; i < 257; ++i)
+         {
+            weighted_sum += static_cast<uint64_t>(i) * cline_delta_counts[i];
+         }
+
+         double avg_delta = total_non_value_nodes > 0
+                                ? static_cast<double>(weighted_sum) / total_non_value_nodes
+                                : 0.0;
+
+         os << "\n--- cacheline delta from ideal histogram ---\n";
+         os << "Average delta from ideal: " << std::fixed << std::setprecision(2) << avg_delta
+            << " cachelines\n";
+
+         os << create_histogram(cline_delta_counts) << "\n";
 
          // Calculate total space and unused space
          uint64_t total_space  = total_segments * segment_size;

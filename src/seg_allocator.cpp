@@ -1,6 +1,7 @@
 #include <errno.h>  // For errno and ESRCH
 #include <sys/mman.h>
 #include <algorithm>
+#include <arbtrie/arbtrie.hpp>
 #include <arbtrie/binary_node.hpp>
 #include <arbtrie/file_fwd.hpp>
 #include <arbtrie/seg_alloc_dump.hpp>
@@ -12,7 +13,8 @@
 #include <new>
 #include <sal/debug.hpp>
 #include <string>
-#include <thread>  // For std::this_thread::sleep_for
+#include <thread>         // For std::this_thread::sleep_for
+#include <unordered_set>  // For std::unordered_set
 
 static const uint64_t page_size      = getpagesize();
 static const uint64_t page_size_mask = ~(page_size - 1);
@@ -576,6 +578,9 @@ namespace arbtrie
           _mapped_state->_cache_difficulty_state.total_promoted_bytes.load(
               std::memory_order_relaxed);
 
+      // Initialize total non-value nodes counter
+      result.total_non_value_nodes = 0;
+
       // Gather segment information
       for (uint32_t i = 0; i < total_segs; ++i)
       {
@@ -583,6 +588,16 @@ namespace arbtrie
 
          // Get stats directly as a stats_result struct
          auto stats = calculate_segment_read_stats(i);
+
+         // Copy cacheline statistics to the result
+         for (int j = 0; j < 257; j++)
+         {
+            result.index_cline_counts[j] += stats.index_cline_counts[j];
+            result.cline_delta_counts[j] += stats.cline_delta_counts[j];
+         }
+
+         // Track total non-value nodes for average calculation
+         result.total_non_value_nodes += stats.non_value_nodes;
 
          const auto&                  seg_data    = _mapped_state->_segment_data;
          const auto                   freed_space = seg_data.get_freed_space(i);
@@ -644,11 +659,53 @@ namespace arbtrie
       return result;
    }
 
+   /** 
+    * Count the number of unique cachelines and total branches for a node.
+    * @param nh The node header to analyze
+    * @return A tuple containing {number of unique cachelines, total number of branches, ideal cachelines}
+    */
+   std::tuple<uint32_t, uint32_t, uint32_t> count_cacheline_hits(const node_header* nh)
+   {
+      // Visit the address of each branch, divide it by 64 to get the cacheline,
+      // keep track of unique cachelines as well as total branches
+      uint32_t                     total_branches = 0;
+      std::unordered_set<uint32_t> unique_cachelines;
+
+      // Lambda to count each branch's cacheline
+      auto count_branch = [&](id_address branch_addr)
+      {
+         if (branch_addr)
+         {
+            total_branches++;
+
+            // Calculate cacheline from the address index - divide by 8 objects  8 bytes each per cacheline
+            uint32_t cacheline = branch_addr.index().to_int() / 8;
+            unique_cachelines.insert(cacheline);
+         }
+      };
+
+      // Skip if null or is an allocator header
+      if (!nh || nh->is_allocator_header())
+      {
+         return {0, 0, 0};
+      }
+
+      // Use cast_and_call to handle different node types
+      cast_and_call(nh, [&](const auto* typed_node) { typed_node->visit_branches(count_branch); });
+
+      // Calculate ideal number of cachelines: (branches+7)/8
+      uint32_t ideal_cachelines = (total_branches + 7) / 8;
+
+      return {static_cast<uint32_t>(unique_cachelines.size()), total_branches, ideal_cachelines};
+   }
+
    seg_allocator::stats_result seg_allocator::calculate_segment_read_stats(segment_number seg_num)
    {
-      uint32_t nodes_with_read_bit = 0;
-      uint64_t total_bytes         = 0;
-      uint32_t total_objects       = 0;  // Added counter for all objects
+      seg_allocator::stats_result result;
+      uint32_t                    nodes_with_read_bit = 0;
+      uint64_t                    total_bytes         = 0;
+      uint32_t                    total_objects       = 0;  // All objects
+      uint32_t non_value_nodes = 0;  // Count of non-value nodes for average calculation
 
       auto seg  = get_segment(seg_num);
       auto send = (const node_header*)((char*)seg + segment_size);
@@ -660,8 +717,43 @@ namespace arbtrie
 
       while (foo < send && foo->address())
       {
+         if (foo->is_allocator_header())
+         {
+            foo = foo->next();
+            continue;
+         }
+
+         // Skip value_node types for cacheline counting
+         if (foo->get_type() != node_type::value)
+         {
+            // Count cacheline hits for this node
+            auto [unique_cachelines, branch_count, ideal_cachelines] = count_cacheline_hits(foo);
+
+            // Skip nodes with 0 cachelines
+            if (unique_cachelines > 0)
+            {
+               if (unique_cachelines < 257)
+               {
+                  result.index_cline_counts[unique_cachelines]++;
+               }
+
+               // Calculate and store delta between actual and ideal
+               uint32_t delta = unique_cachelines > ideal_cachelines
+                                    ? unique_cachelines - ideal_cachelines
+                                    : ideal_cachelines - unique_cachelines;
+
+               if (delta < 257)
+               {
+                  result.cline_delta_counts[delta]++;
+               }
+
+               non_value_nodes++;  // Count non-value nodes for average calculation
+            }
+         }
+
          // Get the object reference for this node
-         auto  foo_address = foo->address();
+         auto foo_address = foo->address();
+
          auto& obj_ref     = _id_alloc.get(foo_address);
          auto  current_loc = obj_ref.loc();
          auto  foo_idx     = (char*)foo - (char*)seg;
@@ -685,7 +777,12 @@ namespace arbtrie
          foo = foo->next();
       }
 
-      return {nodes_with_read_bit, total_bytes, total_objects};
+      result.nodes_with_read_bit = nodes_with_read_bit;
+      result.total_bytes         = total_bytes;
+      result.total_objects       = total_objects;
+      result.non_value_nodes     = non_value_nodes;  // Store non-value node count
+
+      return result;
    }
 
    //-----------------------------------------------------------------------------
