@@ -381,7 +381,10 @@ namespace arbtrie
          //                  " potential_free_space: ", potential_free_space);
       }
       if (potential_free_space < segment_size)
+      {
+         usleep(1000);
          return false;
+      }
 
       for (int i = 0; i < total_qualifying; ++i)
          compact_segment(ses, qualifying_segments[i].first);
@@ -394,17 +397,32 @@ namespace arbtrie
       size_t total_qualifying = 0;
 
       // Define N as the maximum number of top segments to track
-      constexpr int                                     N = 4;  // Number of top segments to track
+      constexpr int                                     N = 8;  // Number of top segments to track
       std::array<std::pair<segment_number, int64_t>, N> qualifying_segments;
 
       uint32_t    potential_free_space = 0;
       const auto& seg_data             = _mapped_state->_segment_data;
+      int         not_read_only        = 0;
+      int         pinned               = 0;
+      int         insufficient_space   = 0;
       for (int i = 0; i < total_segs; ++i)
       {
          const auto freed_space = seg_data.get_freed_space(i);
-         if (not seg_data.is_read_only(i) or not seg_data.is_pinned(i) or
-             freed_space < segment_size / 2)
+         if (not seg_data.is_read_only(i))
+         {
+            not_read_only++;
             continue;
+         }
+         if (seg_data.is_pinned(i))
+         {
+            pinned++;
+            continue;
+         }
+         if (freed_space < segment_size / 2)
+         {
+            insufficient_space++;
+            continue;
+         }
 
          int64_t vage = seg_data.get_vage(i);
 
@@ -415,11 +433,18 @@ namespace arbtrie
          //     ARBTRIE_INFO("compact_unpinned_segment: ", i, " freed_space: ", freed_space,
          //                  " potential_free_space: ", potential_free_space);
       }
-
+      /*
+      ARBTRIE_WARN("compact_unpinned_segment: ", potential_free_space,
+                   " total_qualifying: ", total_qualifying, " not_read_only: ", not_read_only,
+                   " pinned: ", pinned, " insufficient_space: ", insufficient_space);
+                   */
       if (potential_free_space < segment_size)
+      {
+         usleep(1000);
          return false;
+      }
 
-      //      ARBTRIE_WARN("compact_unpinned_segments: ", total_qualifying);
+      ARBTRIE_WARN("compact_unpinned_segments: ", total_qualifying);
 
       // configure the session to not allocate from the pinned segments
       for (int i = 0; i < total_qualifying; ++i)

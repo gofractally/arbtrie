@@ -795,12 +795,14 @@ int  main(int argc, char** argv)
                              (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
                       << "  lowerbound/sec \n";
          }
-         std::this_thread::sleep_for(std::chrono::seconds(5));
-         db.print_stats(std::cout);
 
          done = true;
          for (auto& r : rthreads)
             r->join();
+
+         ARBTRIE_WARN("sleeping for 15 seconds");
+         std::this_thread::sleep_for(std::chrono::seconds(15));
+         db.print_stats(std::cout);
 
          if (sync_compact)
          {

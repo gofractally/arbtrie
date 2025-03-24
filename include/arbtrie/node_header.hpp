@@ -234,7 +234,9 @@ namespace arbtrie
       id_region _branch_id_region;  // the ID region branches from this node are allocated to
 
       uint16_t _num_branches : 9;  // number of branches that are set
-      uint16_t _unused : 7;        // unused bits
+      uint16_t _binary_node_opt : 1 =
+          0;                 ///< used to indicate whetehr binary_node is in optimized layout
+      uint16_t _unused : 6;  // unused bits
 
       inline node_header(uint32_t       size,
                          id_address_seq nid,
