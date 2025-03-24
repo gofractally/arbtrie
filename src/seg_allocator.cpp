@@ -80,9 +80,7 @@ namespace arbtrie
    seg_allocator::seg_allocator(std::filesystem::path dir)
        : _id_alloc(dir / "ids"),
          _block_alloc(dir / "segs", segment_size, max_segment_count),
-         _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
-         _seg_sync_locks(max_segment_count),
-         _dirty_segs(max_segment_count)
+         _seg_alloc_state_file(dir / "header", access_mode::read_write, true)
    {
       if (_seg_alloc_state_file.size() == 0)
       {

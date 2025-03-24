@@ -214,12 +214,6 @@ namespace arbtrie
       mapped_memory::allocator_state* _mapped_state;
       std::mutex                      _sync_mutex;
 
-      std::vector<sync_lock> _seg_sync_locks;
-      std::vector<int>       _dirty_segs;
-      std::mutex             _dirty_segs_mutex;
-      uint64_t               _next_dirt_seg_index = 0;
-      uint64_t               _last_synced_index   = 0;
-
       // Thread state tracking for stop/start_background_threads is handled in mapped_memory
 
       segment_number get_segment_for_object(const void* obj) const
