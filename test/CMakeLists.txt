@@ -8,6 +8,7 @@ add_executable(arbtrie-tests
     seg_alloc_dump_tests.cpp
     cache_difficulty_state_tests.cpp
     mapped_memory_tests.cpp
+    poly_buffer_test.cpp
 )
 
 target_link_libraries(arbtrie-tests 

@@ -52,6 +52,8 @@ namespace arbtrie
          segment_thread_state   compact_thread_state;
          cache_difficulty_state _cache_difficulty_state;
 
+         segment_thread_state pinned_compact_thread_state;
+
          // read lock queue, compactor pushes provider pops
          read_lock_queue _read_lock_queue;
 

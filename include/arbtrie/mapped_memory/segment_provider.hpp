@@ -1,6 +1,7 @@
 #pragma once
 #include <arbtrie/circular_buffer.hpp>
 #include <arbtrie/hierarchical_bitmap.hpp>
+#include <arbtrie/poly_buffer.hpp>
 #include <arbtrie/spmc_buffer.hpp>
 #include <atomic>
 
@@ -15,15 +16,8 @@ namespace arbtrie
       {
          uint32_t max_mlocked_segments = 32;
 
-         /** 
-          * Segment Provider thread attempts to keep this buffer full of segments
-          * so that the allocator never has to wait on IO to get a new segment.
-          *
-          * Segment Provider attempts to keep this buffer full of segments,
-          * while Session Threads take prepared segments when they need to
-          * write to the database.
-          */
-         spmc_buffer<small_segment_number> ready_segments;
+         poly_buffer<segment_number> ready_pinned_segments;
+         poly_buffer<segment_number> ready_unpinned_segments;
 
          /** 
           * bitmap of segments that are free to be recycled pushed into

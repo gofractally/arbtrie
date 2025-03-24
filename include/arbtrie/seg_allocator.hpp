@@ -168,9 +168,10 @@ namespace arbtrie
        */
       ///@{
       void                          provider_munlock_excess_segments();
-      void                          provider_process_acknowledged_segments();
-      void                          provider_prepare_segment(segment_number seg_num);
+      void                          provider_prepare_segment(segment_number seg_num, bool pin_it);
       void                          provider_process_recycled_segments();
+      void                          provider_populate_pinned_segments();
+      void                          provider_populate_unpinned_segments();
       std::optional<segment_number> find_first_free_and_pinned_segment();
       segment_number                provider_allocate_new_segment();
 
@@ -196,13 +197,6 @@ namespace arbtrie
         * @return A pair containing {number of node headers with read bit set, total bytes of those nodes}
         */
       stats_result calculate_segment_read_stats(segment_number seg_num);
-
-      /**
-        *  After all writes are complete, and there is not enough space
-        *  to allocate the next object the alloc_ptr gets set to MAX and
-        *  the page gets 
-        */
-      void finalize_segment(segment_number);
 
       // maps ids to locations
       id_alloc _id_alloc;
@@ -312,15 +306,16 @@ namespace arbtrie
          {
             // takes the highest priority pinned segment available, and if not pinned
             // then it will ack the segment provider who will get it pinned right-quick
-            segnum = _mapped_state->_segment_provider.ready_segments.pop_wait();
+            segnum = _mapped_state->_segment_provider.ready_pinned_segments.pop();
+            //            ARBTRIE_WARN("get_new_segment pinned: ", segnum);
          }
          else
          {
             // back takes the lowest priority segment, without ack means it will
             // not send a signal to the provider to mlock the segment
-            segnum = _mapped_state->_segment_provider.ready_segments.pop_back_wait_without_ack();
+            segnum = _mapped_state->_segment_provider.ready_unpinned_segments.pop();
+            ARBTRIE_WARN("get_new_segment unpinned: ", segnum);
          }
-         ARBTRIE_DEBUG("get_new_segment: ", segnum);
          return {segnum, get_segment(segnum)};
       }
 

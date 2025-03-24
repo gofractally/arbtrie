@@ -138,7 +138,8 @@ namespace arbtrie
       for (size_t i = 0; i < _block_alloc.num_blocks(); ++i)
          _mapped_state->_segment_data.set_pinned(i, false);
 
-      _mapped_state->_segment_provider.ready_segments.reset();
+      _mapped_state->_segment_provider.ready_pinned_segments.clear();
+      _mapped_state->_segment_provider.ready_unpinned_segments.clear();
 
       int next_free_seg = 0;
       for (auto i : age_index)

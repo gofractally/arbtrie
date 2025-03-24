@@ -148,7 +148,6 @@ namespace arbtrie
       if (_segment_provider_thread)
       {
          // Wake up any threads that might be waiting in the ready_segments buffer
-         _mapped_state->_segment_provider.ready_segments.wake_blocked();
 
          // Stop the thread
          _segment_provider_thread->stop();
@@ -244,6 +243,9 @@ namespace arbtrie
       sal::set_current_thread_name("compactor");
 
       auto ses = start_session();
+      // compact them in order into a new session
+      auto unpinned_session = start_session();
+      unpinned_session.set_alloc_to_pinned(false);
 
       /** 
        *  The compactor always prioritizes cache, then ram, then
@@ -255,101 +257,9 @@ namespace arbtrie
          compactor_promote_rcache_data(ses);
          compact_pinned_segment(ses);
          compactor_promote_rcache_data(ses);
-         compact_unpinned_segment(ses);
+         compact_unpinned_segment(unpinned_session);
       }
-
-      // prioritize compacting pinned segments that are not being used by any session
-      // 1. dead space in RAM is a waste of memory and hurts performance
-      // 2. data pinned in RAM don't cause SSD wear to move around...
-      // 3. process data in a way that minimizes the difference between the
-      //    virtual age of the source segment and the active writing segment.
-      // 4. process hot data first (read cache), then pinned, then old data.
-
-      // when processing data from unpinned segments, we don't want to move it to a
-      // pinned segment because that will cause wear on the SSD... what we really want
-      // is a way to claim an unpinned ready segment... by default, the pending segments
-      // queue will be filled with pinned segments (because they go to the front of the line),
-      // so we would want to allocate from the unpinned segments first.
-
-      // This could happen by having a pop_back() method on the spmc circular buffer...
-      // these are the ready segments closest to the head of the file.
-
-      //     TODO: we need a way to capture bump the recylcled pinned segments
-      //           to the front of the allocation list (after going rlock pergatory)
-      //           because if we remove the mlock for even 1 second, let alone mark
-      //           the pages as MADV_DONTNEED, we will cause a lot of wear on the SSD.
-      //           - therefore, MADV_DONTNEED and munlock should only be called by the
-      //             Segment Provider Thread, if it is not able to immediately push them
-      //             to the front of the line. In fact, the Segment Provider Thread should
-      //             swap any segments that are in line with mlocked segments.
-      //
-      //           - the Segment Provider Thread should be the only thread that can
-      //             call munlock, and it should only unlock segments that are not in
-      //             use by any session.
-      //
-      //           - the Segment Provider Thread should also be the only thread that can
-      //             call MADV_DONTNEED.
-
-      /**
-       *  0. process the read cache for each session and move to a segment with current age
-       *  1. find the set of pinned segments that are below the configuration threshold for
-       *     maximum empty space of a pinned segment, then sort them by virtual age, then
-       *     compact them in order of virtual age (to minimize movement of virtual age of 
-       *     objects)... starting with the most recent virtual age first (closest to the read_cache age)
-       *  2. find the set of segments that are above the configuration threshold for
-       *     maximum empty space of a unpinned segment, sort by virtual age, then compact 
-       *     them to a new segment remembering to keep the virtual age with new allocations. 
-       *  After doing all this work, mark the rest of the active segment as free and start
-       *  from the top. We don't want to mix old virtual age data with the read cache data.
-       *        - it may leave a segment mostly empty, but it will have an old virtual age and
-       *          will be compacted near the end of the next pass.
-       */
    }
-#if 0
-   void seg_allocator::compact_loop_old()
-   {
-      ARBTRIE_WARN("compact_loop");
-      using namespace std::chrono_literals;
-      if (not _compactor_session)
-         _compactor_session.emplace(start_session());
-
-      ARBTRIE_WARN("compact_loop start: ", _done.load());
-      while (not _done.load())
-      {
-         if (not compact_next_segment())
-         {
-            /// don't let the alloc threads starve for want of a free segment
-            /// if the free segment queue is getting low, top it up... but
-            /// don't top it up just because read threads have things blocked
-            /// because they could "block" for a long time...
-
-            auto min = get_min_read_ptr();
-            auto ap  = _mapped_state->alloc_ptr.load(std::memory_order_relaxed);
-            auto ep  = _mapped_state->end_ptr.load(std::memory_order_relaxed);
-            if (min - ap <= 1 and (ep - ap) < 3)
-            {
-               auto seg = get_new_segment();
-               munlock(seg.second, segment_size);
-               madvise(seg.second, segment_size, MADV_RANDOM);
-               seg.second->_alloc_pos.store(0, std::memory_order_relaxed);
-               seg.second->_age = -1;
-
-               _mapped_state->seg_meta[seg.first].clear();
-               _mapped_state->free_seg_buffer[_mapped_state->end_ptr.load(std::memory_order_relaxed) &
-                                        (max_segment_count - 1)] = seg.first;
-               auto prev = _mapped_state->end_ptr.fetch_add(1, std::memory_order_release);
-               set_session_end_ptrs(prev);
-            }
-            using namespace std::chrono_literals;
-            std::this_thread::sleep_for(100ms);
-         }
-         promote_rcache_data();
-      }
-      ARBTRIE_WARN("compact_loop end: ", _done.load());
-      ARBTRIE_WARN("compact_loop done");
-      _compactor_session.reset();
-   }
-#endif
 
    /**
     * For each session, pop up to 1024 objects from the read cache 
@@ -511,10 +421,6 @@ namespace arbtrie
 
       //      ARBTRIE_WARN("compact_unpinned_segments: ", total_qualifying);
 
-      // compact them in order into a new session
-      auto unpinned_session = start_session();
-      unpinned_session.set_alloc_to_pinned(false);
-
       // configure the session to not allocate from the pinned segments
       for (int i = 0; i < total_qualifying; ++i)
          compact_segment(ses, qualifying_segments[i].first);
@@ -568,7 +474,10 @@ namespace arbtrie
          if (obj_ref.type() == node_type::binary)
             copy_binary_node((binary_node*)head, (const binary_node*)nh);
          else
-            memcpy(head, nh, nh->size());
+         {
+            memcpy_aligned_64byte(head, nh, nh->size());
+            //memcpy(head, nh, nh->size());
+         }
 
          // update checksum if needed, because the user may
          // have used config::update_checksum_on_upsert = false
@@ -802,11 +711,6 @@ namespace arbtrie
 
       ARBTRIE_DEBUG("segment_provider: Starting provider thread");
 
-      // Clear any interrupt flag from previous runs to ensure we start clean
-      // This is important because the flag is stored in shared memory
-      // and might be left set from a previous crash or restart
-      provider_state.ready_segments.clear_interrupt();
-
       // Set a reasonable timeout that allows for regular heartbeat checks
       const std::chrono::milliseconds wait_timeout(50);
 
@@ -818,59 +722,55 @@ namespace arbtrie
          // Handle excess mlocked segments
          provider_munlock_excess_segments();
 
-         // Process segments acknowledged by consumers
-         provider_process_acknowledged_segments();
-
          // Process segments that have been recycled and are available to be reused
          provider_process_recycled_segments();
 
-         // If we can't push, sleep briefly and continue to next iteration
-         if (!provider_state.ready_segments.can_push())
-            continue;
-
-         // prioritize segments that are free and pinned
-         std::optional<segment_number> free_pinned_seg = find_first_free_and_pinned_segment();
-
-         segment_number seg_num;
-         // Get a segment ready
-         if (not free_pinned_seg)
-            seg_num = provider_state.free_segments.unset_first_set();
-         else
-         {
-            seg_num = *free_pinned_seg;
-            provider_state.free_segments.reset(seg_num);
-         }
-
-         // Handle segment source appropriately
-         if (seg_num == provider_state.free_segments.invalid_index)
-         {
-            seg_num = provider_allocate_new_segment();
-            ARBTRIE_ERROR("segment_provider: Allocated new segment: ", seg_num);
-         }
-         else
-         {
-            ARBTRIE_DEBUG("segment_provider: Reused segment: ", seg_num);
-         }
-
-         // Prepare the segment for use
-         provider_prepare_segment(seg_num);
-
-         // Push the segment to the ready queue (this will always succeed)
-         int64_t result;
-         if (free_pinned_seg)
-            result = provider_state.ready_segments.push_front(seg_num);
-         else
-            result = provider_state.ready_segments.push(seg_num);
-
-         ARBTRIE_DEBUG("segment_provider: Pushed segment ", seg_num,
-                       " to ready_segments, result: ", result,
-                       ", new usage: ", provider_state.ready_segments.usage(), "/",
-                       provider_state.ready_segments.capacity());
-
-         // This should never happen since we checked can_push() first
-         assert(result >= 0);
+         provider_populate_pinned_segments();
+         provider_populate_unpinned_segments();
       }
       ARBTRIE_WARN("segment_provider: Exiting provider loop");
+   }
+   void seg_allocator::provider_populate_pinned_segments()
+   {
+      auto& provider_state = _mapped_state->_segment_provider;
+      if (provider_state.ready_pinned_segments.usage() > 4)
+         return;
+      // prioritize segments that are free and pinned
+      std::optional<segment_number> free_pinned_seg = find_first_free_and_pinned_segment();
+
+      segment_number seg_num;
+      // Get a segment ready
+      if (not free_pinned_seg)
+         seg_num = provider_state.free_segments.unset_first_set();
+      else
+      {
+         seg_num = *free_pinned_seg;
+         provider_state.free_segments.reset(seg_num);
+      }
+      if (seg_num == provider_state.free_segments.invalid_index)
+      {
+         // grab a segment from the unpinned queue
+         auto maybe_seg = provider_state.ready_unpinned_segments.try_pop();
+         if (maybe_seg)
+            seg_num = *maybe_seg;
+         else
+            seg_num = provider_allocate_new_segment();
+      }
+
+      provider_prepare_segment(seg_num, true /* pin it*/);
+      provider_state.ready_pinned_segments.push(seg_num);
+   }
+   void seg_allocator::provider_populate_unpinned_segments()
+   {
+      auto& provider_state = _mapped_state->_segment_provider;
+      if (provider_state.ready_unpinned_segments.usage() > 2)
+         return;
+
+      segment_number seg_num = provider_state.free_segments.unset_first_set();
+      if (seg_num == provider_state.free_segments.invalid_index)
+         seg_num = provider_allocate_new_segment();
+      provider_prepare_segment(seg_num, false /* don't pin it*/);
+      provider_state.ready_unpinned_segments.push(seg_num);
    }
 
    segment_number seg_allocator::provider_allocate_new_segment()
@@ -879,8 +779,10 @@ namespace arbtrie
       return *block_num;
    }
 
-   void seg_allocator::provider_prepare_segment(segment_number seg_num)
+   void seg_allocator::provider_prepare_segment(segment_number seg_num, bool pin)
    {
+      auto& provider_state = _mapped_state->_segment_provider;
+
       // utilized by compactor to propagate the relative age of data in a segment
       // for the purposes of munlock the oldest data first and avoiding promoting data
       // just because we compacted a segment to save space.
@@ -890,7 +792,36 @@ namespace arbtrie
       _mapped_state->_segment_data.prepare_for_reuse(seg_num);
       disable_segment_write_protection(seg_num);
 
-      auto sp  = _block_alloc.get<mapped_memory::segment>(block_number(seg_num));
+      auto sp = _block_alloc.get<mapped_memory::segment>(block_number(seg_num));
+      if (pin)
+      {
+         // if it is not already mlocked, mlock it
+         if (not provider_state.mlock_segments.test(seg_num))
+         {
+            if (mlock(sp, segment_size) != 0) [[unlikely]]
+            {
+               ARBTRIE_ERROR("mlock error(", errno, ") ", strerror(errno));
+               update_segment_pinned_state(seg_num, false);
+            }
+            else
+            {
+               update_segment_pinned_state(seg_num, true);
+               // munlock the oldest mlocked segment(s) if needed
+               provider_munlock_excess_segments();
+            }
+         }
+      }
+      else
+      {
+         if (provider_state.mlock_segments.test(seg_num))
+         {
+            if (munlock(sp, segment_size) != 0) [[unlikely]]
+            {
+               ARBTRIE_ERROR("munlock error(", errno, ") ", strerror(errno));
+            }
+            update_segment_pinned_state(seg_num, false);
+         }
+      }
       auto shp = new (sp) mapped_memory::segment();
       shp->_provider_sequence =
           _mapped_state->_segment_provider._next_alloc_seq.fetch_add(1, std::memory_order_relaxed);
@@ -965,53 +896,6 @@ namespace arbtrie
          ARBTRIE_WARN("madvise error(", errno, ") ", strerror(errno));
    }
 
-   /**
-    * Process segments that have been acknowledged by consumers via pop_ack()
-    * and lock them in memory if under the maximum limit
-    */
-   void seg_allocator::provider_process_acknowledged_segments()
-   {
-      auto& provider_state = _mapped_state->_segment_provider;
-
-      int processed_count = 0;
-      while (auto seg_ack = provider_state.ready_segments.pop_ack())
-      {
-         processed_count++;
-
-         //ARBTRIE_INFO("mlock segment: ", *seg_ack,
-         //             " current mlock state: ", provider_state.mlock_segments.test(*seg_ack));
-         if (provider_state.mlock_segments.test(*seg_ack))
-         {
-            continue;
-         }
-         void* seg_ptr = get_segment(*seg_ack);
-         if (mlock(seg_ptr, segment_size) == 0)
-         {
-            /*ARBTRIE_WARN("mlocked segment: ", *seg_ack,
-                         " count: ", provider_state.mlock_segments.count(),
-                         " vage abs: ", _mapped_state->_segment_data.meta[*seg_ack].get_vage(),
-                         "     rel age ms: ",
-                         arbtrie::get_current_time_ms() -
-                             _mapped_state->_segment_data.meta[*seg_ack].get_vage()); */
-            // Set both the bitmap and the meta bit using the helper
-            update_segment_pinned_state(*seg_ack, true);
-
-            // munlock the oldest mlocked segment(s) if needed
-            provider_munlock_excess_segments();
-         }
-         else
-         {
-            ARBTRIE_WARN("mlock error(", errno, ") ", strerror(errno));
-            if (madvise(seg_ptr, segment_size, MADV_RANDOM) != 0)
-            {
-               ARBTRIE_WARN("madvice error(", errno, ") ", strerror(errno));
-            }
-         }
-      }
-      // if (processed_count > 0)
-      //    ARBTRIE_WARN("processed ", processed_count, " acknowledged segments");
-   }
-
    bool seg_allocator::stop_background_threads()
    {
       bool any_stopped = false;
@@ -1031,7 +915,6 @@ namespace arbtrie
       if (_segment_provider_thread && _segment_provider_thread->is_running())
       {
          // Wake up any threads that might be waiting in the ready_segments buffer
-         _mapped_state->_segment_provider.ready_segments.wake_blocked();
          _segment_provider_thread->stop();
          any_stopped = true;
       }
