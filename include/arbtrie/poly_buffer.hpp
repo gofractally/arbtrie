@@ -64,8 +64,10 @@ namespace arbtrie
       static constexpr uint64_t producer_mask  = 0x00000000FFFFFFFFULL;
       static constexpr uint64_t consumer_mask  = 0xFFFFFFFF00000000ULL;
 
-      std::array<std::atomic<T>, buffer_size> buf;
-      padded_atomic<uint64_t> bitmap{0};  // Combined bitmap for both producer and consumer state
+      std::array<T, buffer_size> buf;
+      std::atomic<uint64_t>      bitmap{0};         /// tracks slots with data
+      std::atomic<uint32_t> next_producer_slot{0};  /// next slot for the producer (wraps around)
+      std::atomic<uint32_t> next_consumer_slot{0};  /// next slot for the consumer (wraps around)
 
       // Helper to find slot index from bit position in bitmap
       static constexpr uint64_t bit_to_slot(uint64_t bit_pos) { return bit_pos & mask; }
@@ -122,20 +124,42 @@ namespace arbtrie
       // Get current bitmap state
       uint64_t current = bitmap.load(std::memory_order_acquire);
 
-      // Find a slot that's free (both producer and consumer bits clear)
-      uint64_t slot = find_free_slot(current);
+      // Calculate free and occupied slots
+      uint64_t producer_bits = current & producer_mask;
+      uint64_t consumer_bits = (current & consumer_mask) >> consumer_shift;
+      uint64_t occupied      = producer_bits | consumer_bits;
 
-      if (slot >= buffer_size)
-         return false;  // No free slots
+      // If all bits are set, buffer is full
+      if (occupied == 0xFFFFFFFFULL)
+         return false;
 
-      // Write data first with release ordering
-      buf[slot].store(std::move(value), std::memory_order_release);
+      // Get the next slot to write to (stored in next_producer_slot)
+      uint32_t slot = next_producer_slot.load(std::memory_order_relaxed);
 
-      // Set the producer bit to mark this slot as having data
+      // Find a valid slot (starting from the intended next slot)
+      for (uint32_t i = 0; i < buffer_size; ++i)
+      {
+         uint32_t try_slot = (slot + i) & mask;
+
+         // Check if this slot is free
+         if (!(occupied & (1ULL << try_slot)))
+         {
+            slot = try_slot;
+            break;
+         }
+      }
+
+      // Write data
+      buf[slot] = std::move(value);
+
+      // Set the producer bit
       uint64_t bit  = producer_bit(slot);
       uint64_t prev = bitmap.fetch_or(bit, std::memory_order_release);
 
-      // If buffer was empty, notify waiters
+      // Update next_producer_slot to point to the next slot
+      next_producer_slot.store((slot + 1) & mask, std::memory_order_relaxed);
+
+      // Notify if buffer was empty
       if ((prev & producer_mask) == 0)
          bitmap.notify_all();
 
@@ -170,45 +194,57 @@ namespace arbtrie
       uint64_t current = bitmap.load(std::memory_order_acquire);
 
       // Check if any producer bits are set (data available)
-      if ((current & producer_mask) == 0)
-         return std::nullopt;  // No data available
+      uint64_t producer_bits = current & producer_mask;
+      if (producer_bits == 0)
+         return std::nullopt;
 
-      // Find the first available slot (producer bit is set)
-      uint64_t bit_pos = find_available_slot(current);
-      if (bit_pos >= buffer_size)
-         return std::nullopt;  // No slots with data found
+      // Get the next slot to read from (stored in next_consumer_slot)
+      uint32_t slot = next_consumer_slot.load(std::memory_order_relaxed);
 
-      uint64_t slot = bit_to_slot(bit_pos);
+      // Find a valid slot with data (starting from the intended next slot)
+      bool found = false;
+      for (uint32_t i = 0; i < buffer_size; ++i)
+      {
+         uint32_t try_slot = (slot + i) & mask;
+
+         // Check if this slot has data
+         if (producer_bits & (1ULL << try_slot))
+         {
+            slot  = try_slot;
+            found = true;
+            break;
+         }
+      }
+
+      if (!found)
+         return std::nullopt;
 
       // Set the consumer bit to claim this slot
       uint64_t consumer_mask = consumer_bit(slot);
       uint64_t prev          = bitmap.fetch_or(consumer_mask, std::memory_order_acq_rel);
 
-      // Simple check: if consumer bit was already set, slot is already claimed
+      // Check if already claimed
       if (prev & consumer_mask)
-      {
-         // Another consumer already claimed this slot
          return std::nullopt;
-      }
 
-      // Also verify producer bit is still set (rare race with parallel pop+push)
+      // Verify producer bit is still set
       if (!(prev & producer_bit(slot)))
       {
-         // Producer bit was cleared - another consumer got this slot
-         // Clear our consumer bit
          bitmap.fetch_and(~consumer_mask, std::memory_order_release);
          return std::nullopt;
       }
 
-      // We've successfully claimed the slot, read the data
-      T data = buf[slot].load(std::memory_order_acquire);
+      // Read the data
+      T data = buf[slot];
 
-      // Atomically clear BOTH producer and consumer bits in a single operation
-      // This releases the slot back to the producer and prevents the race condition
+      // Clear both bits
       uint64_t combined_mask = combined_bits(slot);
       bitmap.fetch_and(~combined_mask, std::memory_order_release);
 
-      // Notify producer if bitmap was full
+      // Update next_consumer_slot to point to the next slot
+      next_consumer_slot.store((slot + 1) & mask, std::memory_order_relaxed);
+
+      // Notify if buffer was full
       if ((prev & producer_mask) == producer_mask)
          bitmap.notify_all();
 
