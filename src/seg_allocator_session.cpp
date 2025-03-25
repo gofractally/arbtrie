@@ -235,7 +235,7 @@ namespace arbtrie
 
       auto loc = _alloc_seg_num * segment_size + ((char*)head - _alloc_seg_ptr->data);
 
-      return {node_location::from_absolute(loc), head};
+      return {node_location::from_absolute_address(loc), head};
    }
 
    /**

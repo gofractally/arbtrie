@@ -31,7 +31,7 @@ namespace arbtrie
 
      private:
       void         unlock();
-      node_header* copy_on_write(node_meta_type::temp_type meta);
+      node_header* copy_on_write(temp_meta_type meta);
 
       // it starts out true because lock isn't acquired unless as() is called
       // and exposes the protected memory to the caller

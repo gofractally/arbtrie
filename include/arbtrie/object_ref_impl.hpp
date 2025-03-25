@@ -17,25 +17,6 @@ namespace arbtrie
    {
    }
 
-   inline void object_ref::store(temp_meta_type tmt, auto memory_order)
-   {
-      if constexpr (not debug_memory)
-      {
-         _meta.store(_cached = tmt, memory_order);
-      }
-      else
-      {
-         auto clok = _cached.loc();
-         auto old  = _meta.exchange(_cached = tmt, memory_order);
-         if (old.loc() != clok)
-         {
-            ARBTRIE_WARN(
-                "stomping on location that changed from cache,"
-                " this may result in memory leak until compacted");
-         }
-      }
-   }
-
    template <typename Type, bool SetReadBit>
    const Type* object_ref::as() const
    {
@@ -47,7 +28,7 @@ namespace arbtrie
    template <typename T, bool SetReadBit>
    inline const T* object_ref::header() const
    {
-      assert(_meta.load(std::memory_order_relaxed).ref());
+      assert(_meta.load(std::memory_order_relaxed).ref);
       auto m = _meta.load(std::memory_order_acquire);
       auto r = (const T*)_rlock.get_node_pointer(m.loc());
       if constexpr (debug_memory)
@@ -84,25 +65,21 @@ namespace arbtrie
          return;
       }
       if (_rlock.should_cache(size) and _rlock.is_read_only(_cached.loc()) and
-          _meta.try_set_read_or_pending_cache())
-      {
-         //         ARBTRIE_INFO("maybe_update_read_stats: pushing to rcache_queue size=", size);
+          _meta.try_inc_activity())
          _rlock._session._rcache_queue.push(address());
-      }
    }
 
    inline const node_header* object_ref::release()
    {
       auto prior = _meta.release();
-      if (prior.ref() > 1)
+      if (prior.ref > 1)
          return nullptr;
 
-      auto ploc    = prior.loc();
-      auto obj_ptr = _rlock.get_node_pointer(ploc);
-
+      auto ploc = prior.loc();
+      auto nptr = _rlock.get_node_pointer(ploc);
       _rlock.free_meta_node(_address);
-      _rlock.freed_object(ploc.segment(), obj_ptr);
-      return obj_ptr;
+      _rlock.freed_object(get_segment_num(ploc), nptr);
+      return nptr;
    }
 
 }  // namespace arbtrie

@@ -19,47 +19,33 @@ namespace sal
       std::atomic<uint64_t> _data;
 
      public:
+      static constexpr uint64_t location_offset = 21;
       /**
        * The internal structure of the bits stored in the atomic _data
        */
       struct shared_ptr_data
       {
-         /// reference count, up to 524k shared references
-         uint64_t ref : 19;
+         /// reference count, up to 2M shared references
+         uint64_t ref : 21;
          /// index to the cacheline of up to 128 TB of memory with 64 bytes per cacheline
          /// this is the maximum addressable by mapped memory on modern systems.
          uint64_t cacheline_offset : 41;
 
-         /// indicates this object doesn't have any shared_ptr members,
-         /// nor destructor calls needed
-         uint64_t is_pod : 1;
+         /// set this bit when object is read, clearered when ref count goes to 0
+         uint64_t active : 1;
+         /// set this bit when object should be cached, but this gets cleared
+         /// when reference count goes to 0 along with the active bit.
+         uint64_t pending_cache : 1;
 
-         /// 0 for small objects, 1 for large objects
-         uint64_t zone : 1;
-
-         /// used to track the activity of object for caching purposes
-         /// saturated integer, 0 to 3
-         uint64_t activity : 2;
-
-         shared_ptr_data() : ref(0), cacheline_offset(0), is_pod(0), zone(0), activity(0) {}
+         shared_ptr_data() : ref(0), cacheline_offset(0), active(0), pending_cache(0) {}
          shared_ptr_data(uint64_t value) { from_int(value); }
          uint64_t to_int() const { return std::bit_cast<uint64_t>(*this); }
          void     from_int(uint64_t value) { *this = std::bit_cast<shared_ptr_data>(value); }
          location loc() const { return location::from_cacheline(cacheline_offset); }
 
-         shared_ptr_data& inc_activity()
-         {
-            activity = std::min(int(activity) + 1, 3);
-            return *this;
-         }
-         shared_ptr_data& dec_activity()
-         {
-            activity = std::max(int(activity) - 1, 0);
-            return *this;
-         }
-
          shared_ptr_data& set_ref(uint64_t r)
          {
+            assert(r <= max_ref_count);
             ref = r;
             return *this;
          }
@@ -68,19 +54,14 @@ namespace sal
             cacheline_offset = l.cacheline();
             return *this;
          }
-         shared_ptr_data& set_pod(bool p)
+         shared_ptr_data& set_active(bool a)
          {
-            is_pod = p;
+            active = a;
             return *this;
          }
-         shared_ptr_data& set_zone(bool z)
+         shared_ptr_data& set_pending_cache(bool p)
          {
-            zone = z;
-            return *this;
-         }
-         shared_ptr_data& set_activity(uint64_t a)
-         {
-            activity = a;
+            pending_cache = p;
             return *this;
          }
       };
@@ -93,7 +74,7 @@ namespace sal
        * without causing problems.  This is why we subtract the number of threads from
        * the maximum possible ref count.
        */
-      static constexpr uint64_t max_ref_count = (1ULL << 19) - sal::max_threads;
+      static constexpr uint64_t max_ref_count = (1ULL << 21) - sal::max_threads;
 
       int  use_count() const { return shared_ptr_data(_data.load(std::memory_order_relaxed)).ref; }
       bool unique() const { return use_count() == 1; }
@@ -107,6 +88,14 @@ namespace sal
          return true;
       };
 
+      uint32_t ref() const { return load().ref; }
+      location loc() const { return load().loc(); }
+      bool     active() const { return load().active; }
+      bool     pending_cache() const { return load().pending_cache; }
+
+      /// @deprecated dont use this
+      uint64_t to_int(auto order = std::memory_order_relaxed) const { return _data.load(order); }
+
       shared_ptr_data load(std::memory_order order = std::memory_order_relaxed) const
       {
          return shared_ptr_data(_data.load(order));
@@ -114,6 +103,14 @@ namespace sal
       void store(shared_ptr_data value, std::memory_order order = std::memory_order_relaxed)
       {
          _data.store(value.to_int(), order);
+      }
+      void reset(location loc, int ref = 1, auto order = std::memory_order_release)
+      {
+         store(shared_ptr_data().set_loc(loc).set_ref(ref), order);
+      }
+      void set_ref(int ref, auto order = std::memory_order_relaxed)
+      {
+         store(load(order).set_ref(ref), order);
       }
 
       /**
@@ -125,13 +122,28 @@ namespace sal
          assert(prior.ref > 0);
          if constexpr (debug_memory)
          {
-            if (prior.ref == 1)
+            if (prior.ref == 0)
                abort();
          }
+         if (prior.ref == 1)
+            clear_pending_cache();
          return prior;
       };
+      void clear_pending_cache()
+      {
+         uint64_t        expected = _data.load(std::memory_order_relaxed);
+         shared_ptr_data updated;
+         do
+         {
+            updated.from_int(expected);
+            updated.set_active(false);
+            updated.set_pending_cache(false);
+         } while (
+             !_data.compare_exchange_weak(expected, updated.to_int(), std::memory_order_release));
+      }
 
       /**
+       * compare and swap move,
        * updates the cacheline_offset to the desired value 
        * if the current value is equal to the expected value 
        * and the ref count is not 0, note that other changes to
@@ -153,35 +165,66 @@ namespace sal
       }
 
       /**
-       * Activity is a "probabilistic" counter, this method will attempt to
-       * increment the activity, but if there is contention it may fail, and
-       * this should be acceptable as simulating the random sampling behavior
-       * that we are trying to model anyway, we wont' want the caller to spin 
+       * Moves the location without regard to the prior location, but
+       * without disrupting any other fields that may be updated by
+       * other threads.
        * 
-       * @return the value read before attempted change, says nothing about
-       * whether the change was successful or not.
+       * @return the updated shared_ptr_data
        */
-      shared_ptr_data try_inc_activity()
+      shared_ptr_data move(location loc, auto order = std::memory_order_relaxed)
       {
-         uint64_t        expected = _data.load(std::memory_order_relaxed);
-         shared_ptr_data updated(expected);
-         updated.inc_activity();
-         _data.compare_exchange_weak(expected, updated.to_int(), std::memory_order_relaxed);
-         return shared_ptr_data(expected);
+         auto            expected = _data.load(order);
+         shared_ptr_data updated;
+         do
+         {
+            updated.from_int(expected);
+            updated.set_loc(loc);
+         } while (not _data.compare_exchange_weak(expected, updated.to_int(), order));
+         return updated;
       }
 
       /**
-       *  @return the value read before attempted change, says nothing about
-       * whether the change was successful or not.
+       * Attempts to increment the activity counter in a non-blocking way.
+       * If the object is not marked as active, tries to set the active bit.
+       * If already active, tries to set the pending_cache bit.
+       * May fail if there is contention, which is acceptable since this 
+       * simulates random sampling behavior.
+       *
+       * @return true if successfully incremented activity, false if failed due to contention
        */
-      shared_ptr_data try_dec_activity()
+      bool try_inc_activity()
       {
          uint64_t        expected = _data.load(std::memory_order_relaxed);
          shared_ptr_data updated(expected);
-         updated.dec_activity();
-         _data.compare_exchange_weak(expected, updated.to_int(), std::memory_order_relaxed);
-         return shared_ptr_data(expected);
+         if (updated.pending_cache)
+            return false;
+         if (updated.active)
+            return _data.compare_exchange_weak(expected, updated.set_pending_cache(true).to_int(),
+                                               std::memory_order_relaxed);
+         return _data.compare_exchange_weak(expected, updated.set_active(true).to_int(),
+                                            std::memory_order_relaxed);
       }
+
+      /**
+       *  Clears the pending cache bit, returns false if it is already cleared
+       * 
+       * @return true if the pending cache bit was cleared, false otherwise
+       */
+      bool try_end_pending_cache()
+      {
+         uint64_t        expected = _data.load(std::memory_order_relaxed);
+         shared_ptr_data updated;
+         do
+         {
+            updated.from_int(expected);
+            if (updated.pending_cache == false)
+               return false;
+            updated.set_pending_cache(false);
+         } while (not _data.compare_exchange_weak(expected, updated.to_int(),
+                                                  std::memory_order_relaxed));
+         return true;
+      }
+
       static_assert(sizeof(shared_ptr_data) == 8, "shared_ptr_data must be 8 bytes");
    };
    static_assert(sizeof(shared_ptr) == 8, "shared_ptr must be 8 bytes");

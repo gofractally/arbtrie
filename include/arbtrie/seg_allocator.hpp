@@ -244,14 +244,14 @@ namespace arbtrie
         */
       inline bool is_read_only(node_location loc) const
       {
-         int64_t seg = loc.segment();
+         int64_t seg = get_segment_num(loc);
          assert(seg < max_segment_count && "invalid segment passed to is_read_only");
-         return get_segment(seg)->get_first_write_pos() > loc.abs_index();
+         return get_segment(seg)->get_first_write_pos() > get_segment_offset(loc);
       }
       inline bool can_modify(int ses_num, node_location loc) const
       {
-         auto seg = get_segment(loc.segment());
-         return seg->_session_id == ses_num && seg->get_first_write_pos() > loc.abs_index();
+         auto seg = get_segment(get_segment_num(loc));
+         return seg->_session_id == ses_num && seg->get_first_write_pos() < get_segment_offset(loc);
       }
 
       /**

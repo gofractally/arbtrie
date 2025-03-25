@@ -455,19 +455,19 @@ namespace arbtrie
       id_address remove_eof(object_ref& r, const NodeType* fn);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_inner(object_ref& r, key_view key);
+      id_address upsert_inner(object_ref& r, const NodeType* fn, key_view key);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_inner(object_ref&& r, key_view key)
+      id_address upsert_inner(object_ref&& r, const NodeType* fn, key_view key)
       {
-         return upsert_inner<mode>(r, key);
+         return upsert_inner<mode>(r, fn, key);
       }
 
       template <upsert_mode mode>
       id_address upsert_eof_value(object_ref& root);
 
       template <upsert_mode mode>
-      id_address upsert_value(object_ref& root, key_view key);
+      id_address upsert_value(object_ref& root, const value_node* vn, key_view key);
 
       //=======================
       // binary_node operations
@@ -478,7 +478,7 @@ namespace arbtrie
                              const value_type& val);
 
       template <upsert_mode mode>
-      id_address upsert_binary(object_ref& root, key_view key);
+      id_address upsert_binary(object_ref& root, const binary_node* bn, key_view key);
 
       template <upsert_mode mode>
       id_address update_binary_key(object_ref&        root,
@@ -595,8 +595,13 @@ namespace arbtrie
 
       auto release_id = [&](id_address b) { release_node(state.get(b)); };
 
+      // release returns a pointer to the node if it needs to be released,
+      // we must be very careful that the automatic hardware prefetching doesn't
+      // try to fetch the node that we only access *if* it is actually released,
+      // this was measured to have a HUGE performance impact if the pointer ever
+      // materializes in a a hot cacheline the prefetcher just can't help itself
       if (auto n = r.release())
-         cast_and_call(r.type(), n, [&](const auto* ptr) { ptr->visit_branches(release_id); });
+         cast_and_call_noinline(n, [&](const auto* ptr) { ptr->visit_branches(release_id); });
    }
 
    inline void release_node(object_ref&& r)
@@ -707,7 +712,6 @@ namespace arbtrie
             else
             {
                auto vr = root.rlock().get(val_node_id);
-               assert(vr.type() == node_type::value);
                auto vn = vr.template as<value_node>();
 
                // a value node with a subtree value should have
@@ -795,7 +799,6 @@ namespace arbtrie
    // TODO: fix this so it doesn't recurse through subtrees
    void visit_node(object_ref&& n, int depth, auto& on_node)
    {
-      assert(n.type() == n.header()->get_type());
       assert(n.ref() > 0);
       cast_and_call(n.header(),
                     [&](const auto* no)

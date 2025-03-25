@@ -10,15 +10,11 @@ namespace arbtrie
    inline object_ref read_lock::realloc(object_ref& oref, uint32_t size, node_type type, auto init)
    {
       auto adr = oref.address();
-
       auto l   = oref.loc();
-      auto seg = l.segment();
 
-      // TODO: replace this with function call
-      //auto obj_ptr = (node_header*)((char*)_session._sega._block_alloc.get(seg) + l.abs_index());
       auto obj_ptr = _session._sega._block_alloc.get<node_header>(l.offset());
 
-      _session.record_freed_space(seg, obj_ptr);
+      _session.record_freed_space(get_segment_num(l), obj_ptr);
 
       //   std::cerr << "realloc " << id <<" size: " << size <<" \n";
       // TODO: mark the free space associated with the current location of id
@@ -39,9 +35,7 @@ namespace arbtrie
       assert(node_ptr->_ntype == type);
       assert(node_ptr->_node_id == adr);
 
-      /// TODO: eliminate the redundant load with refresh
-      oref.meta().set_location_and_type(loc, type, std::memory_order_release);
-      oref.refresh(std::memory_order_relaxed);
+      oref.move(loc, std::memory_order_release);
       return oref;
    }
 
@@ -69,13 +63,11 @@ namespace arbtrie
 
       assert(type == node_type::value or bool(node_ptr->_branch_id_region));
 
-      allocation.meta.store(temp_meta_type().set_type(type).set_location(loc).set_ref(1),
-                            std::memory_order_release);
+      allocation.meta.store(temp_meta_type().set_loc(loc).set_ref(1), std::memory_order_release);
 
       assert(node_ptr->_nsize == size);
       assert(node_ptr->_ntype == type);
       assert(node_ptr->_node_id == allocation.address);
-      assert(object_ref(*this, allocation.address, allocation.meta).type() != node_type::undefined);
 
       return object_ref(*this, allocation.address, allocation.meta);
    }
@@ -97,13 +89,13 @@ namespace arbtrie
          // with memory_order_acquire, when updating an object_info we need to write with
          // memory_order_release otherwise the data written may not be visible yet to the reader coming
          // along behind
-         auto ptr =
-             _session._sega._block_alloc.get<mapped_memory::segment>(block_number(loc.segment()));
+         auto ptr = _session._sega._block_alloc.get<mapped_memory::segment>(
+             block_number(get_segment_num(loc)));
          auto ap = ptr->get_alloc_pos();
-         if (ap <= loc.abs_index())
+         if (ap <= get_segment_offset(loc))
          {
-            ARBTRIE_WARN("segment: ", loc.segment(), " ap: ", ap, "  loc: ", loc.aligned_index(),
-                         " abs: ", loc.abs_index());
+            ARBTRIE_WARN("segment: ", get_segment_num(loc), " ap: ", ap,
+                         "  loc: ", get_segment_offset(loc));
             abort();
          }
       }
@@ -166,9 +158,8 @@ namespace arbtrie
       // syncing either the current segment or the COW segment.
       _released = false;
 
-      auto val  = _meta.load(std::memory_order_acquire);
-      auto loc  = val.loc();
-      auto lseg = loc.segment();
+      auto val = _meta.load(std::memory_order_acquire);
+      auto loc = val.loc();
 
       // we can only modify in place if it isnt read-only and
       // the segment is owned by the current session
@@ -178,18 +169,14 @@ namespace arbtrie
       return (T*)(_observed_ptr = copy_on_write(val));
    }
 
-   inline node_header* modify_lock::copy_on_write(node_meta_type::temp_type meta)
+   inline node_header* modify_lock::copy_on_write(temp_meta_type meta)
    {
-      auto loc  = meta.loc();
-      auto lseg = loc.segment();
+      auto loc = meta.loc();
 
       auto cur_ptr  = _rlock.get_node_pointer(loc);
       auto old_oref = _rlock.get(cur_ptr->address());
       assert(cur_ptr->address() == old_oref.address());
 
-      /// TODO: realloc needs to obtain the lock on the segment and return responsibilty for
-      /// releasing it to this modify lock, we need to add an assert that recursive calls don't
-      /// try to acquire the same segment lock or one will unblock the others too soon.
       auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
                                  { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
       return _rlock.get_node_pointer(oref.meta_data().loc());

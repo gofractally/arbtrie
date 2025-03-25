@@ -57,8 +57,6 @@ namespace arbtrie
       template <typename T>
       inline void record_freed_space(segment_number seg, T* obj);
 
-      inline size_t get_last_sync_position(segment_number segment) const;
-
       /**
        * Check if a node location has been synced to disk.
       inline bool is_synced(node_location loc) const;

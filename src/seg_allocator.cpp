@@ -331,12 +331,12 @@ namespace arbtrie
             if (obj_ref.compare_exchange_location(start_loc, new_loc))
             {
                _mapped_state->_cache_difficulty_state.compactor_promote_bytes(header->size());
-               record_freed_space(start_loc.segment(), header);
+               record_freed_space(get_segment_num(start_loc), header);
             }
             else
             {
                if (not ses.unalloc(header->size()))
-                  record_freed_space(new_loc.segment(), new_header);
+                  record_freed_space(get_segment_num(new_loc), new_header);
             }
          }
       }
@@ -484,7 +484,7 @@ namespace arbtrie
 
          const auto foo_idx    = (const char*)foo - (const char*)s;
          auto       expect_loc = obj_ref.loc();
-         if (expect_loc.to_abs() != seg_num * segment_size + foo_idx)
+         if (expect_loc.absolute_address() != seg_num * segment_size + foo_idx)
             return;  // object was moved
 
          // assert / throw exception if the checksum is invalid,
@@ -498,7 +498,7 @@ namespace arbtrie
          auto [loc, head] = ses.alloc_data(nh->size(), nh->address_seq(), vage);
 
          // binary nodes get optimized on copy
-         if (obj_ref.type() == node_type::binary)
+         if (nh->get_type() == node_type::binary)
             copy_binary_node((binary_node*)head, (const binary_node*)nh);
          else
          {
@@ -516,7 +516,7 @@ namespace arbtrie
 
          if (not obj_ref.compare_exchange_location(expect_loc, loc))
             if (not ses.unalloc(nh->size()))
-               record_freed_space(loc.segment(), head);
+               record_freed_space(get_segment_num(loc), head);
       };  /// end try_copy_node lambda
 
       uint32_t src_vage = s->_vage_accumulator.average_age();
@@ -759,7 +759,7 @@ namespace arbtrie
          auto  foo_idx     = (char*)foo - (char*)seg;
 
          // Only count if the object reference is pointing to this exact node
-         if (current_loc.to_abs() != seg_num * segment_size + foo_idx)
+         if (current_loc.absolute_address() != seg_num * segment_size + foo_idx)
          {
             foo = foo->next();
             continue;
@@ -768,7 +768,7 @@ namespace arbtrie
          total_objects++;
 
          // Check if the read bit is set and if the location matches
-         if (obj_ref.is_read())
+         if (obj_ref.active())
          {
             nodes_with_read_bit++;
             total_bytes += foo->size();
