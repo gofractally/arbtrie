@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <filesystem>
 #include <memory>
@@ -855,6 +856,101 @@ TEST_CASE("shared_ptr_alloc used count", "[sal][shared_ptr_alloc]")
 
       // Should be back to 0
       REQUIRE(alloc.used() == 0);
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
+
+TEST_CASE("shared_ptr_alloc region statistics", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_region_stats_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   // Create the allocator
+   sal::shared_ptr_alloc alloc(temp_path);
+
+   SECTION("Empty allocator should return default stats")
+   {
+      auto stats = alloc.region_stats();
+      REQUIRE(stats.count == 0);
+      REQUIRE(stats.min == 0);
+      REQUIRE(stats.max == 0);
+      REQUIRE(stats.mean == 0.0);
+      REQUIRE(stats.stddev == 0.0);
+   }
+
+   SECTION("Statistics with varied region usage")
+   {
+      // Create multiple regions with different counts of allocations
+      std::vector<sal::ptr_address::region_type> regions;
+      std::vector<std::vector<sal::ptr_address>> region_addresses;
+
+      // Create 5 regions with different usage patterns
+      // Region 0: 5 pointers
+      // Region 1: 10 pointers
+      // Region 2: 15 pointers
+      // Region 3: 20 pointers
+      // Region 4: 25 pointers
+      const int num_regions = 5;
+      region_addresses.resize(num_regions);
+
+      for (int r = 0; r < num_regions; ++r)
+      {
+         auto region = alloc.get_new_region();
+         regions.push_back(region);
+
+         // Allocate different number of pointers in each region
+         int count = (r + 1) * 5;  // 5, 10, 15, 20, 25
+         for (int i = 0; i < count; ++i)
+         {
+            auto allocation = alloc.alloc(region);
+            region_addresses[r].push_back(allocation.address);
+         }
+      }
+
+      // Check statistics
+      auto stats = alloc.region_stats();
+
+      // We should have 5 regions with allocations
+      REQUIRE(stats.count == 5);
+
+      // Min should be 5, max should be 25
+      REQUIRE(stats.min == 5);
+      REQUIRE(stats.max == 25);
+
+      // Mean should be (5+10+15+20+25)/5 = 15
+      REQUIRE(std::abs(stats.mean - 15.0) < 0.001);
+
+      // Stddev calculation: sqrt(sum((x-mean)^2)/n)
+      // (5-15)^2 + (10-15)^2 + (15-15)^2 + (20-15)^2 + (25-15)^2 = 100+25+0+25+100 = 250
+      // sqrt(250/5) = sqrt(50) ≈ 7.07
+      REQUIRE(std::abs(stats.stddev - 7.07) < 0.01);
+
+      // Free pointers in one region and check updated stats
+      for (auto& addr : region_addresses[2])  // Free all pointers in region 2 (15 pointers)
+      {
+         alloc.free(addr);
+      }
+
+      auto updated_stats = alloc.region_stats();
+
+      // Now we should have 4 regions with allocations
+      REQUIRE(updated_stats.count == 4);
+
+      // Min should still be 5, max should still be 25
+      REQUIRE(updated_stats.min == 5);
+      REQUIRE(updated_stats.max == 25);
+
+      // Mean should be (5+10+20+25)/4 = 15
+      REQUIRE(std::abs(updated_stats.mean - 15.0) < 0.001);
+
+      // New stddev: sqrt(sum((x-mean)^2)/n)
+      // (5-15)^2 + (10-15)^2 + (20-15)^2 + (25-15)^2 = 100+25+25+100 = 250
+      // sqrt(250/4) = sqrt(62.5) ≈ 7.91
+      REQUIRE(std::abs(updated_stats.stddev - 7.91) < 0.01);
    }
 
    // Clean up

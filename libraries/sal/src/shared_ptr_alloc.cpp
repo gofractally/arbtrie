@@ -1,5 +1,7 @@
 #include <sal/hash/lehmer64.h>
 #include <bit>
+#include <cmath>
+#include <numeric>
 #include <optional>
 #include <sal/debug.hpp>
 #include <sal/hint.hpp>
@@ -41,7 +43,6 @@ namespace sal
             // Still null, we're the first thread to allocate this page
             pg_idx = alloc_page(pg_num);
             reg.pages[*pg_num].store(pg_idx, std::memory_order_release);
-            SAL_INFO("Allocated new page {} at offset {}", *pg_num, pg_idx);
          }
       }
       return get_page(pg_idx);
@@ -521,5 +522,66 @@ namespace sal
       }
 
       return total_used;
+   }
+
+   shared_ptr_alloc::region_stats_t shared_ptr_alloc::region_stats() const
+   {
+      region_stats_t        stats = {UINT16_MAX, 0, 0.0, 0.0, 0};
+      std::vector<uint16_t> counts;
+
+      // Reserve space for all possible regions (2^16)
+      // Each region is a 16-bit value, so total memory is only 128KB
+      counts.reserve(1ULL << 16);
+
+      // First pass: collect all non-zero region counts
+      for (size_t i = 0; i < get_page_table().region_use_counts.size(); ++i)
+      {
+         uint64_t packed_counts =
+             get_page_table().region_use_counts[i].load(std::memory_order_relaxed);
+
+         // Process each of the 4 regions in this packed value
+         uint16_t counts_array[4] = {static_cast<uint16_t>(packed_counts & 0xFFFF),
+                                     static_cast<uint16_t>((packed_counts >> 16) & 0xFFFF),
+                                     static_cast<uint16_t>((packed_counts >> 32) & 0xFFFF),
+                                     static_cast<uint16_t>((packed_counts >> 48) & 0xFFFF)};
+
+         for (int j = 0; j < 4; ++j)
+         {
+            if (counts_array[j] > 0)
+            {
+               // Update min and max
+               stats.min = std::min(stats.min, counts_array[j]);
+               stats.max = std::max(stats.max, counts_array[j]);
+
+               // Add to our collection for mean and stddev calculation
+               counts.push_back(counts_array[j]);
+            }
+         }
+      }
+
+      // Update count of non-empty regions
+      stats.count = counts.size();
+
+      // If no regions have pointers, return early with defaults
+      if (stats.count == 0)
+      {
+         stats.min = 0;
+         return stats;
+      }
+
+      // Calculate mean using std::accumulate
+      uint64_t sum = std::accumulate(counts.begin(), counts.end(), 0ULL);
+      stats.mean   = static_cast<double>(sum) / stats.count;
+
+      // Calculate standard deviation
+      double sum_of_squares = 0.0;
+      for (auto count : counts)
+      {
+         double diff = count - stats.mean;
+         sum_of_squares += diff * diff;
+      }
+      stats.stddev = sqrt(sum_of_squares / stats.count);
+
+      return stats;
    }
 }  // namespace sal

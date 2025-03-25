@@ -270,6 +270,20 @@ namespace sal
       /// @brief Returns the total number of used pointers across all regions
       /// @return The sum of all region use counts
       uint64_t used() const;
+
+      /**
+       * @brief Calculate statistics on region usage
+       * @return A struct containing min, max, mean, and standard deviation of region usage
+       */
+      struct region_stats_t
+      {
+         uint16_t min;     ///< Minimum number of used pointers in any non-empty region
+         uint16_t max;     ///< Maximum number of used pointers in any region
+         double   mean;    ///< Average number of used pointers across non-empty regions
+         double   stddev;  ///< Standard deviation of used pointers across non-empty regions
+         uint32_t count;   ///< Number of non-empty regions
+      };
+      region_stats_t region_stats() const;
       /// @}
 
      private:
