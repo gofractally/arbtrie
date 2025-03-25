@@ -41,7 +41,7 @@ namespace arbtrie
 
    inline id_allocation read_lock::get_new_meta_node(id_region reg)
    {
-      return _session._sega._id_alloc.get_new_id(reg);
+      return _session._sega._id_alloc.alloc(reg);
    }
 
    inline object_ref read_lock::alloc(id_region reg, uint32_t size, node_type type, auto init)
@@ -49,7 +49,7 @@ namespace arbtrie
       assert(size >= sizeof(node_header));
       assert(type != node_type::undefined);
 
-      auto allocation = _session._sega._id_alloc.get_new_id(reg);
+      auto allocation = _session._sega._id_alloc.alloc(reg);
 
       // alloc_data() starts a modify lock on the allocation segment, which
       // which must be released by calling end_modify() after all writes are done
@@ -63,13 +63,13 @@ namespace arbtrie
 
       assert(type == node_type::value or bool(node_ptr->_branch_id_region));
 
-      allocation.meta.store(temp_meta_type().set_loc(loc).set_ref(1), std::memory_order_release);
+      allocation.ptr->store(temp_meta_type().set_loc(loc).set_ref(1), std::memory_order_release);
 
       assert(node_ptr->_nsize == size);
       assert(node_ptr->_ntype == type);
       assert(node_ptr->_node_id == allocation.address);
 
-      return object_ref(*this, allocation.address, allocation.meta);
+      return object_ref(*this, allocation.address, *allocation.ptr);
    }
 
    /**
@@ -104,7 +104,7 @@ namespace arbtrie
 
    inline void read_lock::free_meta_node(id_address a)
    {
-      _session._sega._id_alloc.free_id(a);
+      _session._sega._id_alloc.free(a);
    }
 
    inline id_region read_lock::get_new_region()

@@ -19,6 +19,9 @@ namespace sal
       std::atomic<uint64_t> _data;
 
      public:
+      // Default constructor to ensure proper initialization of the atomic
+      shared_ptr() : _data(0) {}
+
       static constexpr uint64_t location_offset = 21;
       /**
        * The internal structure of the bits stored in the atomic _data

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <arbtrie/arbtrie.hpp>
 #include <arbtrie/binary_node.hpp>
+#include <arbtrie/file_fwd.hpp>
 #include <arbtrie/iterator.hpp>
 #include <arbtrie/mapped_memory.hpp>
 #include <arbtrie/node_handle.hpp>
@@ -518,7 +519,6 @@ namespace arbtrie
       read_session start_read_session();
 
       void print_stats(std::ostream& os, bool detail = false);
-      void print_region_stats();
 
       void recover(recover_args args = recover_args());
       bool validate();

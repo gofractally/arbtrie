@@ -252,8 +252,8 @@ namespace arbtrie
          assert(intptr_t(this) % 64 == 0);
       }
 
-      id_region branch_region() const { return id_region(_branch_id_region); }
-      void      set_branch_region(id_region r) { _branch_id_region = r.to_int(); }
+      id_region branch_region() const { return _branch_id_region; }
+      void      set_branch_region(id_region r) { _branch_id_region = r; }
 
       uint16_t num_branches() const { return _num_branches; }
    } __attribute((packed));

@@ -87,7 +87,6 @@ add_library(arbtrie
     src/mapping.cpp
     src/seg_allocator.cpp
     src/seg_allocator_session.cpp
-    src/id_alloc.cpp
     src/recover.cpp
     src/iterator_count_keys.cpp
     src/segment_thread.cpp

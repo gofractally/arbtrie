@@ -22,9 +22,22 @@ namespace sal
       using region_type = typed_int<uint16_t, struct region_tag>;
       ptr_address() {}
       ptr_address(region_type region, index_type index) : index(index), region(region) {}
+      explicit ptr_address(uint32_t addr)
+          : index(index_type(addr & 0xffff)), region(region_type(addr >> 16))
+      {
+      }
 
       index_type  index;
       region_type region;
+
+      uint32_t                     to_int() const { return uint32_t(*region) << 16 | *index; }
+      static constexpr ptr_address from_int(uint32_t addr)
+      {
+         return ptr_address(region_type(addr >> 16), index_type(addr & 0xffff));
+      }
+      explicit operator bool() const { return bool(index); }
+
+      friend bool operator<=>(const ptr_address& a, const ptr_address& b) = default;
 
       friend std::ostream& operator<<(std::ostream& os, const ptr_address& addr)
       {
@@ -32,6 +45,31 @@ namespace sal
       }
    };
    static_assert(sizeof(ptr_address) == 4, "ptr_address must be 4 bytes");
+
+   /**
+    * operator to combine a region and index into an address
+    */
+   inline ptr_address operator+(ptr_address::region_type r, ptr_address::index_type i)
+   {
+      return ptr_address(r, i);
+   }
+
+   /**
+    * When address are allocated they are assigned a sequence number
+    * which is used to track the order of allocation across threads and
+    * facilitate recovery when multiple segments have the same node with
+    * the same address. 
+    */
+   struct ptr_address_seq
+   {
+      ptr_address address;
+      uint32_t    sequence;
+
+      constexpr ptr_address_seq(ptr_address addr, uint32_t seq) : address(addr), sequence(seq) {}
+
+      constexpr      operator ptr_address() const { return address; }
+      constexpr bool operator==(const ptr_address_seq& other) const = default;
+   };
 
    struct hint;
 
@@ -45,7 +83,7 @@ namespace sal
        * Stores 512 pointers in a region along with
        * index information to help identify free slots.
        */
-      struct page  // 4176 bytes
+      struct alignas(std::hardware_destructive_interference_size) page  // 4176 bytes
       {
          /// 1 bit for each ptr in page::ptrs, 64 bytes 1 cacheline
          std::array<std::atomic<uint64_t>, ptrs_per_page / 64> free_ptrs;
@@ -74,7 +112,7 @@ namespace sal
          }
 
          // 64 cachelines, 512 ptrs
-         std::array<shared_ptr, ptrs_per_page> ptrs;
+         alignas(64) std::array<shared_ptr, ptrs_per_page> ptrs;
       };
 
       using page_offset                      = block_allocator::offset_ptr;
@@ -253,6 +291,20 @@ namespace sal
       }
 
       /**
+       * @brief Get a shared_ptr by address, allocating it if it doesn't exist
+       * 
+       * This method is used in recovery scenarios where we need to ensure a pointer
+       * exists at a specific address. If the pointer already exists, it returns a
+       * reference to the existing pointer. If it doesn't exist, it allocates a new
+       * pointer at that address.
+       * 
+       * @param address The address to retrieve or allocate at
+       * @return A reference to the shared_ptr at the specified address
+       * @throws std::runtime_error if allocation fails
+       */
+      shared_ptr& get_or_alloc(ptr_address address);
+
+      /**
        * This API is utilized to rebuild the allocator in the event of a 
        * a crash that corrupted the state.
        * @group recovery_api
@@ -285,6 +337,9 @@ namespace sal
       };
       region_stats_t region_stats() const;
       /// @}
+
+      static constexpr uint32_t max_regions = 1 << 16;
+      void clear_active_bits(ptr_address::region_type start_region, uint32_t num_regions);
 
      private:
       /**

@@ -184,8 +184,8 @@ namespace arbtrie
       using namespace std::chrono_literals;
 
       // Initialize current_region from the persisted state
-      uint16_t current_region =
-          _mapped_state->next_clear_read_bit_region.load(std::memory_order_relaxed);
+      auto current_region =
+          id_region(_mapped_state->next_clear_read_bit_region.load(std::memory_order_relaxed));
 
       // Number of total iterations needed to cover all regions (processing at least 1 region per iteration)
       const auto total_iterations_needed = id_alloc::max_regions;
@@ -197,10 +197,10 @@ namespace arbtrie
       while (thread.yield(sleep_duration))
       {
          auto start_time = high_resolution_clock::now();
-         _id_alloc.clear_some_read_bits(current_region, 1);
+         _id_alloc.clear_active_bits(current_region, 1);
 
          // save and update the next region to process, wrapping around because uint16_t
-         _mapped_state->next_clear_read_bit_region.store(++current_region,
+         _mapped_state->next_clear_read_bit_region.store(*(++current_region),
                                                          std::memory_order_relaxed);
 
          // Dynamically calculate sleep time based on window size
@@ -679,7 +679,7 @@ namespace arbtrie
             total_branches++;
 
             // Calculate cacheline from the address index - divide by 8 objects  8 bytes each per cacheline
-            uint32_t cacheline = branch_addr.index().to_int() / 8;
+            uint32_t cacheline = *branch_addr.index / 8;
             unique_cachelines.insert(cacheline);
          }
       };

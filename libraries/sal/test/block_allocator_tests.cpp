@@ -200,7 +200,7 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       // Write different data to each block to test they're distinct
       for (uint32_t i = 0; i < 3; i++)
       {
-         auto block_ptr = static_cast<unsigned char*>(allocator.get(blocks[i].second));
+         auto block_ptr = reinterpret_cast<unsigned char*>(allocator.get(blocks[i].second));
          // Set first byte to a unique value
          block_ptr[0] = static_cast<unsigned char>(0xA0 + i);
       }
@@ -208,7 +208,7 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
       // Verify data is distinct and correctly set
       for (uint32_t i = 0; i < 3; i++)
       {
-         auto block_ptr = static_cast<const unsigned char*>(allocator.get(blocks[i].second));
+         auto block_ptr = reinterpret_cast<const unsigned char*>(allocator.get(blocks[i].second));
          REQUIRE(block_ptr[0] == static_cast<unsigned char>(0xA0 + i));
       }
 
@@ -375,7 +375,7 @@ TEST_CASE("Block allocator truncate operations", "[block_allocator]")
          blocks.push_back(allocator.alloc());
 
          // Write some identifiable data to each block
-         auto* data = static_cast<unsigned char*>(allocator.get(blocks[i].second));
+         auto* data = reinterpret_cast<unsigned char*>(allocator.get(blocks[i].second));
          data[0]    = static_cast<unsigned char>(0xA0 + i);
       }
 
@@ -390,7 +390,7 @@ TEST_CASE("Block allocator truncate operations", "[block_allocator]")
       // Verify the first two blocks still have their data
       for (int i = 0; i < 2; i++)
       {
-         auto* data = static_cast<const unsigned char*>(allocator.get(blocks[i].second));
+         auto* data = reinterpret_cast<const unsigned char*>(allocator.get(blocks[i].second));
          REQUIRE(data[0] == static_cast<unsigned char>(0xA0 + i));
       }
 

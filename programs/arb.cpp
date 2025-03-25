@@ -80,7 +80,7 @@ void validate_invariant(session_rlock& state, id_address i, auto* in)
    in->visit_branches_with_br(
        [&](int br, id_address adr)
        {
-          if (in->branch_region() != adr.region())
+          if (in->branch_region() != adr.region)
              throw std::runtime_error("region invariant violated");
           validate_invariant(state, adr);
        });
@@ -721,8 +721,6 @@ int  main(int argc, char** argv)
                              (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
                       << "  rand lowerbound/sec  total items: " << add_comma(seq) << "\n";
          }
-
-         db.print_region_stats();
 
          auto read_thread = [&]() {};
 

@@ -121,7 +121,7 @@ namespace arbtrie
                                    binary_node::key_index::value_type t2)
        : node_header(asize, nid, node_type::binary, 0), _alloc_pos(0)
    {
-      _branch_id_region = branch_reg.to_int();
+      _branch_id_region = branch_reg;
       _branch_cap       = min_branch_cap(2);
       if (k1 < k2)
       {

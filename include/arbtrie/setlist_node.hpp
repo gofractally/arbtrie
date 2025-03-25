@@ -249,9 +249,9 @@ namespace arbtrie
       void set_index(int idx, uint8_t byte, id_address adr)
       {
          assert(idx < _num_branches);
-         assert(adr.region() == branch_region());
+         assert(adr.region == branch_region());
          assert((char*)(get_branch_ptr() + idx) < tail());
-         get_branch_ptr()[idx]  = id_index(adr.index().to_int());
+         get_branch_ptr()[idx]  = adr.index;  //id_index(adr.index.to_int());
          get_setlist_ptr()[idx] = byte;
       }
 
@@ -387,11 +387,11 @@ namespace arbtrie
          assert(br < 257);
          assert(br > 0);
          assert(b);
-         assert(b.region() == branch_region());
+         assert(b.region == branch_region());
 
          auto pos = get_setlist().find(br - 1);
          assert(pos != key_view::npos);
-         get_branch_ptr()[pos] = id_index(b.index().to_int());
+         get_branch_ptr()[pos] = b.index;  //id_index(b.index().to_int());
          return *this;
       }
 
@@ -534,7 +534,7 @@ namespace arbtrie
    {
       assert(br < max_branch_count);
       assert(br > 0);
-      assert(b.region() == branch_region());
+      assert(b.region == branch_region());
 
       id_index* branches = get_branch_ptr();
       assert(_num_branches <= branch_capacity());
@@ -559,7 +559,7 @@ namespace arbtrie
       assert((char*)b_found + 1 + ((char*)b_end - (char*)b_found) <= tail());
       memmove(b_found + 1, b_found, (char*)b_end - (char*)b_found);
 
-      *b_found = id_index(b.index().to_int());
+      *b_found = b.index;  //id_index(b.index().to_int());
 
       ++_num_branches;
       return *this;

@@ -20,6 +20,8 @@ namespace sal
       uint64_t                  cacheline() const { return _cacheline_offset; }
       offset_ptr                offset() const { return offset_ptr(absolute_address()); }
 
+      location() : _cacheline_offset(0) {}
+
       static constexpr location from_absolute_address(uint64_t address)
       {
          return location(address / 64);

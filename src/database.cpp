@@ -111,7 +111,7 @@ namespace arbtrie
        const clone_config&              cfg   = {},
        std::invocable<NodeType*> auto&& uinit = [](NodeType*) {})
    {
-      return clone_impl<mode.make_same_region()>(r.address().region().to_int(), r, src, cfg,
+      return clone_impl<mode.make_same_region()>(r.address().region, r, src, cfg,
                                                  std::forward<decltype(uinit)>(uinit));
    }
 
@@ -133,7 +133,7 @@ namespace arbtrie
                     std::invocable<NodeType*> auto&& uinit,
                     CArgs&&... cargs)
    {
-      return clone_impl<mode.make_same_region()>(r.address().region().to_int(), r, src, cfg,
+      return clone_impl<mode.make_same_region()>(r.address().region, r, src, cfg,
                                                  std::forward<decltype(uinit)>(uinit),
                                                  std::forward<CArgs>(cargs)...);
    }
@@ -153,7 +153,7 @@ namespace arbtrie
    object_ref clone(object_ref& r, const NodeType* src, const clone_config& cfg, CArgs&&... cargs)
    {
       return clone_impl<mode.make_same_region()>(
-          r.address().region().to_int(), r, src, cfg, [](auto) {}, std::forward<CArgs>(cargs)...);
+          r.address().region, r, src, cfg, [](auto) {}, std::forward<CArgs>(cargs)...);
    }
 
    template <upsert_mode mode, typename NodeType, typename... CArgs>
@@ -226,10 +226,6 @@ namespace arbtrie
       if (not _dbm->clean_shutdown)
       {
          ARBTRIE_WARN("database was not shutdown cleanly, memory may have leaked");
-         int num_modify = _sega.clear_lock_bits();
-
-         if (num_modify)
-            ARBTRIE_WARN(num_modify, " node(s) failed to complete modification before shutdown");
          ARBTRIE_DEBUG("validating database state");
          std::cerr << std::setw(5) << "root"
                    << " | " << std::setw(10) << "nodes"
@@ -267,10 +263,6 @@ namespace arbtrie
       std::make_shared<database>(dir, cfg, access_mode::read_write);
    }
 
-   void database::print_region_stats()
-   {
-      _sega.print_region_stats();
-   }
    void database::print_stats(std::ostream& os, bool detail)
    {
       os << _sega.dump();
@@ -516,8 +508,7 @@ namespace arbtrie
          else  // shared
          {
             //ARBTRIE_WARN( "make value node" );
-            return make<value_node>(root.address().region().to_int(), state, key, _cur_val)
-                .address();
+            return make<value_node>(root.address().region, state, key, _cur_val).address();
          }
       }
       else  // add key
@@ -558,7 +549,7 @@ namespace arbtrie
             }
             else  // shared
             {
-               return make<binary_node>(root.address().region().to_int(), state,
+               return make<binary_node>(root.address().region, state,
                                         clone_config{.data_cap = binary_node_initial_size}, new_reg,
                                         k1, v1, t1, k2, v2, t2)
                    .address();
@@ -699,7 +690,7 @@ namespace arbtrie
       auto& state       = r.rlock();
       auto  init_binary = [&](binary_node* bn)
       {
-         bn->_branch_id_region = state.get_new_region().to_int();
+         bn->_branch_id_region = state.get_new_region();
 
          for (int i = from; i < to; ++i)
          {
@@ -763,8 +754,8 @@ namespace arbtrie
                        ? root->get_key_val_ptr(0)->value_id()
                        : make_value(bregion, r.rlock(), root->get_key_val_ptr(0)->value());
 
-      std::pair<uint8_t, int> branches[nbranch - has_eof_value];
-      auto*                   next_branch = branches;
+      std::pair<uint8_t, id_index> branches[nbranch - has_eof_value];
+      auto*                        next_branch = branches;
       for (int from = has_eof_value; from < numb;)
       {
          const auto    k    = root->get_key(from);
@@ -817,7 +808,7 @@ namespace arbtrie
          from = to;
 
          assert(next_branch < branches + nbranch);
-         *next_branch = {byte, new_child.index().to_int()};
+         *next_branch = {byte, new_child.index};
          ++next_branch;
          //fn->add_branch(uint16_t(byte) + 1, new_child);
       }
@@ -841,8 +832,7 @@ namespace arbtrie
          }
          else
          {
-            return make<full_node>(r.address().region().to_int(), r.rlock(), {.set_prefix = cpre},
-                                   init_full);
+            return make<full_node>(r.address().region, r.rlock(), {.set_prefix = cpre}, init_full);
          }
       }
 
@@ -869,7 +859,7 @@ namespace arbtrie
          return remake<setlist_node>(r, init_setlist,
                                      clone_config{.branch_cap = nbranch, .set_prefix = cpre});
       else
-         return make<setlist_node>(r.address().region().to_int(), r.rlock(),
+         return make<setlist_node>(r.address().region, r.rlock(),
                                    {.branch_cap = nbranch, .set_prefix = cpre}, init_setlist);
    }
    template <upsert_mode mode, typename NodeType>
@@ -897,8 +887,8 @@ namespace arbtrie
       if constexpr (mode.is_unique())
          return remake<full_node>(r, init_fn, clone_config{.set_prefix = src->get_prefix()});
       else
-         return make<full_node>(r.address().region().to_int(), r.rlock(),
-                                {.set_prefix = src->get_prefix()}, init_fn);
+         return make<full_node>(r.address().region, r.rlock(), {.set_prefix = src->get_prefix()},
+                                init_fn);
    }
 
    // Example Transformation:
@@ -947,7 +937,7 @@ namespace arbtrie
 
       auto new_reg = state.get_new_region();
       // ARBTRIE_DEBUG( "New Region: ", new_reg );
-      while (id_region(new_reg) == r.address().region() or
+      while (id_region(new_reg) == r.address().region or
              id_region(new_reg) == id_region(fn->branch_region())) [[unlikely]]
          new_reg = state.get_new_region();
 
@@ -995,15 +985,13 @@ namespace arbtrie
       {  // eof
          //   ARBTRIE_DEBUG("  value is on the node (EOF)");
          _delta_keys = 1;
-         auto v      = make_value(child_id.region().to_int(), state, _cur_val);
+         auto v      = make_value(child_id.region, state, _cur_val);
          // must be same region as r because we can't cange the region our parent
          // put this node in.
-         return make<setlist_node>(r.address().region().to_int(), state,
-                                   {.branch_cap = 2, .set_prefix = cpre},
+         return make<setlist_node>(r.address().region, state, {.branch_cap = 2, .set_prefix = cpre},
                                    [&](setlist_node* sln)
                                    {
-                                      //                                ARBTRIE_WARN("CHILD ID REGION INSTEAD OF NEW?");
-                                      sln->set_branch_region(child_id.region().to_int());
+                                      sln->set_branch_region(child_id.region);
                                       sln->set_eof(v);
                                       sln->add_branch(char_to_branch(root_prebranch), child_id);
                                       sln->set_descendants(1 + fn->descendants());
@@ -1016,25 +1004,22 @@ namespace arbtrie
          //                     " rpre: ", to_hex(rootpre));
          //
          // NOTE: make_binary with 1 key currently makes a value_node.. TODO: rename
-         auto abx =
-             make_binary(child_id.region().to_int(), state, key.substr(cpre.size() + 1), _cur_val);
+         auto abx    = make_binary(child_id.region, state, key.substr(cpre.size() + 1), _cur_val);
          _delta_keys = 1;
-         return make<setlist_node>(
-                    r.address().region().to_int(), state, {.branch_cap = 2, .set_prefix = cpre},
-                    [&](setlist_node* sln)
-                    {
-                       sln->set_branch_region(new_reg);
-                       std::pair<branch_index_type, id_address> brs[2];
-                       sln->set_descendants(1 + fn->descendants());
+         return make<setlist_node>(r.address().region, state, {.branch_cap = 2, .set_prefix = cpre},
+                                   [&](setlist_node* sln)
+                                   {
+                                      sln->set_branch_region(new_reg);
+                                      std::pair<branch_index_type, id_address> brs[2];
+                                      sln->set_descendants(1 + fn->descendants());
 
-                       auto order  = key[cpre.size()] < root_prebranch;  //rootpre[cpre.size()];
-                       brs[order]  = {char_to_branch(key[cpre.size()]), abx};
-                       brs[!order] = {char_to_branch(root_prebranch), child_id};
-                       //                ARBTRIE_DEBUG( "abx: ", abx);
-                       //               ARBTRIE_DEBUG( "child_id: ", child_id, " on branch: ", root_prebranch);
-                       sln->add_branch(brs[0].first, brs[0].second);
-                       sln->add_branch(brs[1].first, brs[1].second);
-                    })
+                                      auto order  = key[cpre.size()] < root_prebranch;
+                                      brs[order]  = {char_to_branch(key[cpre.size()]), abx};
+                                      brs[!order] = {char_to_branch(root_prebranch), child_id};
+
+                                      sln->add_branch(brs[0].first, brs[0].second);
+                                      sln->add_branch(brs[1].first, brs[1].second);
+                                   })
              .address();
       }
    }  // upsert_prefix

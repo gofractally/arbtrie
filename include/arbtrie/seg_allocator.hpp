@@ -14,6 +14,7 @@
 #include <arbtrie/segment_thread.hpp>
 #include <arbtrie/sync_lock.hpp>
 #include <condition_variable>
+#include <sal/block_allocator.hpp>
 #include <thread>
 #include <vector>
 
@@ -54,8 +55,7 @@ namespace arbtrie
        * @group Debugging
        */
       ///@{
-      void           print_region_stats() { _id_alloc.print_region_stats(); }
-      uint64_t       count_ids_with_refs() { return _id_alloc.count_ids_with_refs(); }
+      uint64_t       count_ids_with_refs() { return _id_alloc.used(); }
       seg_alloc_dump dump();
       ///@}
 
@@ -99,11 +99,9 @@ namespace arbtrie
 
      private:
       friend class database;
-      void    release_unreachable();
-      void    reset_meta_nodes(recover_args args);
-      void    reset_reference_counts();
-      int64_t clear_lock_bits();
-      void    sync_segment(int seg, sync_type st) noexcept;
+      void release_unreachable();
+      void reset_meta_nodes(recover_args args);
+      void reset_reference_counts();
 
       friend class seg_alloc_session;
       friend class read_lock;
@@ -118,11 +116,12 @@ namespace arbtrie
       /// @{
       mapped_memory::segment* get_segment(segment_number seg) noexcept
       {
-         return static_cast<mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
+         return reinterpret_cast<mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
       }
       const mapped_memory::segment* get_segment(segment_number seg) const noexcept
       {
-         return static_cast<const mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
+         return reinterpret_cast<const mapped_memory::segment*>(
+             _block_alloc.get(block_number(seg)));
       }
 
       uint32_t alloc_session_num();
@@ -206,7 +205,7 @@ namespace arbtrie
       id_alloc _id_alloc;
 
       // allocates new segments
-      block_allocator _block_alloc;
+      sal::block_allocator _block_alloc;
 
       mapping                         _seg_alloc_state_file;
       mapped_memory::allocator_state* _mapped_state;

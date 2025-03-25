@@ -105,7 +105,7 @@ void validate_refcount(session_rlock& state, id_address i, const auto* in, int c
    in->visit_branches_with_br(
        [&](int br, id_address adr)
        {
-          if (in->branch_region().to_int() != adr.region().to_int())
+          if (in->branch_region() != adr.region)
              throw std::runtime_error("region refcount violated");
           validate_refcount(state, adr, c);
        });

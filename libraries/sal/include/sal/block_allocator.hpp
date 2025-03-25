@@ -69,10 +69,10 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A pointer to the block at the specified offset
        */
-      template <typename T = void>
+      template <typename T = char>
       inline T* get(offset_ptr offset) noexcept
       {
-         assert(*offset < _file_size);
+         assert(*offset + sizeof(T) <= _file_size);
          return reinterpret_cast<T*>(((char*)_mapped_base) + *offset);
       }
       /**
@@ -81,10 +81,10 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A const pointer to the block at the specified offset
        */
-      template <typename T = void>
+      template <typename T = char>
       inline const T* get(offset_ptr offset) const noexcept
       {
-         assert(*offset < _file_size);
+         assert(*offset + sizeof(T) <= _file_size);
          return reinterpret_cast<const T*>(((const char*)_mapped_base) + *offset);
       }
       /**
@@ -93,7 +93,7 @@ namespace sal
        * @param block_num The block number (index)
        * @return A const pointer to the block at the specified block number
        */
-      template <typename T = void>
+      template <typename T = char>
       inline T* get(block_number block_num) noexcept
       {
          assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
@@ -106,7 +106,7 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A const pointer to the block at the specified offset
        */
-      template <typename T = void>
+      template <typename T = char>
       inline const T* get(block_number block_num) const noexcept
       {
          assert(*block_num < _num_blocks.load(std::memory_order_relaxed));

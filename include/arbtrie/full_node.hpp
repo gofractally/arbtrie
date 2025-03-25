@@ -55,7 +55,7 @@ namespace arbtrie
 
          // For non-empty key, check if branch exists at index corresponding to first byte
          auto idx = uint8_t(k.front()) + 1;
-         return get_branch(idx) ? local_index(idx) : end_index();
+         return bool(get_branch(idx)) ? local_index(idx) : end_index();
       }
 
       // idx 0 = eof_value
@@ -72,7 +72,7 @@ namespace arbtrie
          const auto* br  = branches();
          const auto* bre = br + branch_count;
          const auto* b   = br + idx.to_int();  // this is next when you factor in the eof_value
-         while (b < bre and not *b)
+         while (b < bre and not*b)
             ++b;
          return local_index(b - br + 1);
       }
@@ -84,7 +84,7 @@ namespace arbtrie
          const auto* br  = branches();
          const auto* bre = br + branch_count;
          const auto* b   = br + idx.to_int() - 2;
-         while (b >= br and not *b)
+         while (b >= br and not*b)
             --b;
          return local_index(b - br + 1);
       }
@@ -210,12 +210,12 @@ namespace arbtrie
          assert(br < max_branch_count);
          assert(br > 0);
          assert(not branches()[br - 1]);
-         assert(b.region() == branch_region());
+         assert(b.region == branch_region());
          assert(_num_branches < max_branch_count);
 
          ++_num_branches;
          auto& idx = branches()[br - 1];
-         idx       = id_index(b.index().to_int());
+         idx       = b.index;  //id_index(b.index().to_int());
          return *this;
       }
 
@@ -236,10 +236,10 @@ namespace arbtrie
          assert(br < max_branch_count);
          assert(br > 0);
          assert(get_branch(br));
-         assert(b.region() == branch_region());
+         assert(b.region == branch_region());
 
          auto& idx = branches()[br - 1];
-         idx       = id_index(b.index().to_int());
+         idx       = b.index;  //id_index(b.index().to_int());
 
          return *this;
       }

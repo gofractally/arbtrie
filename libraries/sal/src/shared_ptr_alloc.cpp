@@ -22,6 +22,13 @@ namespace sal
          _page_table->resize(sizeof(detail::page_table));
          new (_page_table->data()) detail::page_table();
       }
+
+      // Mark region 0 as maximally used so it's never selected
+      // First 16 bits of the first region_use_counts element correspond to region 0
+      uint64_t current = get_page_table().region_use_counts[0].load(std::memory_order_relaxed);
+      uint64_t new_value =
+          (current & ~0xFFFFULL) | 0xFFFFULL;  // Set region 0 count to max (0xFFFF)
+      get_page_table().region_use_counts[0].store(new_value, std::memory_order_relaxed);
    }
 
    shared_ptr_alloc::~shared_ptr_alloc() {}
@@ -41,6 +48,7 @@ namespace sal
          if (pg_idx == detail::null_page)
          {
             // Still null, we're the first thread to allocate this page
+            // Let alloc_page handle all allocation logic
             pg_idx = alloc_page(pg_num);
             reg.pages[*pg_num].store(pg_idx, std::memory_order_release);
          }
@@ -53,12 +61,30 @@ namespace sal
       auto np      = get_page_table()._pages_alloced.fetch_add(1, std::memory_order_acquire);
       auto nblocks = _page_allocator->num_blocks();
       if (nblocks * _page_allocator->block_size() <= np * sizeof(detail::page))
+      {
          _page_allocator->reserve(
-             1 + ((nblocks + 1) * sizeof(detail::page) / _page_allocator->block_size()));
+             1 + ((np + 1) * sizeof(detail::page) / _page_allocator->block_size()));
+      }
       detail::page_offset offset(sizeof(detail::page) * np);
       auto                pg = new (&get_page(offset)) detail::page();
       if (not pg_num)
+      {
+         // Mark the first pointer as used (pointer 0)
          pg->free_ptrs[0].store(~1ULL, std::memory_order_release);
+
+         // We also need to update the free_cachelines bitmap if this was the only pointer in that cacheline
+         // First check if there are still other free pointers in the first cacheline
+         // The first 8 pointers (0-7) are in cacheline 0, bit 0 of free_cachelines
+         uint64_t first_cacheline_bits = pg->free_ptrs[0].load(std::memory_order_relaxed) & 0xFF;
+
+         // If there are no other free pointers in this cacheline, update free_cachelines
+         if (first_cacheline_bits == 0)
+         {
+            // Clear bit 0 in free_cachelines (marking cacheline 0 as having no free pointers)
+            uint64_t free_cl = pg->free_cachelines.load(std::memory_order_relaxed);
+            pg->free_cachelines.store(free_cl & ~1ULL, std::memory_order_release);
+         }
+      }
       return offset;
    }
 
@@ -180,16 +206,16 @@ namespace sal
          if (count % 1024 == 1023)
          {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            SAL_WARN("shared_ptr_alloc: *contention* no pointers available after {} attempts",
-                     count);
          }
-         if (count > 16 * 1024 * 1024)
+         if (count > 1024 * 1024)
             throw std::runtime_error(
                 "shared_ptr_alloc: *contention* no pointers available after "
-                "16 mega attempts");
+                "1 mega attempts");
          alloc = try_alloc(region, h);
          count++;
       }
+      if (count > 1024)
+         SAL_WARN("shared_ptr_alloc: *contention* took {} attempts", count);
       // Sequence number is now assigned in try_alloc
       return *alloc;
    }
@@ -305,21 +331,46 @@ namespace sal
 
       int min_index = find_min_index_32(region_ptr);
 
-      return ptr_address::region_type(aligned_index + min_index);
+      auto result = ptr_address::region_type(aligned_index + min_index);
+
+      // In debug mode, throw if we somehow got region 0 - should never happen
+      if constexpr (debug_memory)
+      {
+         if (*result == 0)
+            throw std::runtime_error("get_new_region returned region 0, which is reserved");
+      }
+
+      return result;
    }
 
    void shared_ptr_alloc::clear_all()
    {
+      // Reset free_pages bitmaps
       for (auto& region : get_page_table().regions)
          region.free_pages[0].store(~0ULL, std::memory_order_relaxed);
       for (auto& region : get_page_table().regions)
          region.free_pages[1].store(~0ULL, std::memory_order_relaxed);
+
+      // Reset all page table entries to null_page
+      for (auto& region : get_page_table().regions)
+      {
+         for (uint32_t page_idx = 0; page_idx < pages_per_region; ++page_idx)
+         {
+            region.pages[page_idx].store(detail::null_page, std::memory_order_relaxed);
+         }
+      }
+
       // Reset page table to initial state
       get_page_table()._pages_alloced.store(0, std::memory_order_relaxed);
 
-      // Reset region use counts - can't use fill on atomics
-      for (auto& count : get_page_table().region_use_counts)
-         count.store(0, std::memory_order_relaxed);
+      // Reset region use counts to 0, except region 0 which stays at max
+      for (size_t i = 1; i < get_page_table().region_use_counts.size(); ++i)
+         get_page_table().region_use_counts[i].store(0, std::memory_order_relaxed);
+
+      // Ensure region 0 is at max count
+      uint64_t current   = get_page_table().region_use_counts[0].load(std::memory_order_relaxed);
+      uint64_t new_value = (current & ~0xFFFFULL) | 0xFFFFULL;
+      get_page_table().region_use_counts[0].store(new_value, std::memory_order_relaxed);
 
       // Reset block allocator to start fresh
       _page_allocator->truncate(0);
@@ -417,18 +468,29 @@ namespace sal
     */
    void shared_ptr_alloc::release_unreachable()
    {
-      // First, reset region use counts
-      for (uint32_t region_idx = 0; region_idx < (1 << 16); ++region_idx)
+      // First, reset region use counts - start at 1 to preserve region 0
+      for (uint32_t region_idx = 1; region_idx < (1 << 16); ++region_idx)
       {
          // Reset region use count to 0
-         get_page_table().region_use_counts[region_idx / 4].store(0, std::memory_order_relaxed);
+         auto idx = region_idx / 4;
+         auto bit = region_idx % 4;
+
+         // Clear only this region's bits, preserving others
+         uint64_t mask    = ~(0xFFFFULL << (bit * 16));
+         uint64_t current = get_page_table().region_use_counts[idx].load(std::memory_order_relaxed);
+         get_page_table().region_use_counts[idx].store(current & mask, std::memory_order_relaxed);
       }
+
+      // Make sure region 0 is set to max
+      uint64_t current   = get_page_table().region_use_counts[0].load(std::memory_order_relaxed);
+      uint64_t new_value = (current & ~0xFFFFULL) | 0xFFFFULL;
+      get_page_table().region_use_counts[0].store(new_value, std::memory_order_relaxed);
 
       // Track count of freed pointers
       int pointers_freed = 0;
 
-      // Iterate through existing pages to minimize overhead
-      for (uint32_t region_idx = 0; region_idx < (1 << 16); ++region_idx)
+      // Iterate through existing pages to minimize overhead - skip region 0
+      for (uint32_t region_idx = 1; region_idx < (1 << 16); ++region_idx)
       {
          auto& region = get_page_table().regions[region_idx];
 
@@ -511,7 +573,6 @@ namespace sal
              get_page_table().region_use_counts[i].load(std::memory_order_relaxed);
 
          // Extract the 4 separate 16-bit counts from the packed 64-bit value
-         // Each 16-bit count is stored at a multiple of 16 bits
          uint16_t count0 = packed_counts & 0xFFFF;
          uint16_t count1 = (packed_counts >> 16) & 0xFFFF;
          uint16_t count2 = (packed_counts >> 32) & 0xFFFF;
@@ -520,6 +581,9 @@ namespace sal
          // Add all 4 counts to the total
          total_used += count0 + count1 + count2 + count3;
       }
+
+      // Subtract region 0's count (which is always set to maximum)
+      total_used -= 0xFFFF;
 
       return total_used;
    }
@@ -583,5 +647,143 @@ namespace sal
       stats.stddev = sqrt(sum_of_squares / stats.count);
 
       return stats;
+   }
+
+   /**
+    * @brief Clears active bits for pointers in the specified range of regions
+    * @param start_region The region to start clearing from
+    * @param num_regions The number of regions to process
+    */
+   void shared_ptr_alloc::clear_active_bits(ptr_address::region_type start_region,
+                                            uint32_t                 num_regions)
+   {
+      // Calculate the end region, bounded by max_regions
+      const auto end_region = std::min<uint32_t>(*start_region + num_regions, max_regions);
+
+      // Iterate through the specified regions
+      for (uint32_t region_idx = *start_region; region_idx < end_region; ++region_idx)
+      {
+         auto& region = get_page_table().regions[region_idx];
+
+         // For each region, iterate through all its pages
+         for (uint32_t page_offset = 0; page_offset < pages_per_region; ++page_offset)
+         {
+            // Get the page offset from the region's page table
+            auto page_idx  = detail::page_number(page_offset);
+            auto pg_offset = region.pages[*page_idx].load(std::memory_order_relaxed);
+
+            // Skip if page hasn't been allocated yet
+            if (pg_offset == detail::null_page)
+               continue;
+
+            // Get the page and process it
+            auto& page = get_page(pg_offset);
+
+            // Process each slot in the page
+            for (uint32_t slot_idx = 0; slot_idx < ptrs_per_page / 64; ++slot_idx)
+            {
+               // Get the bitmap of free pointers in this slot
+               uint64_t free_ptrs_bitmap = page.free_ptrs[slot_idx].load(std::memory_order_relaxed);
+
+               // Start from bit 1 for slot 0, bit 0 for other slots (skip null pointer)
+               uint32_t start_bit = (slot_idx == 0);
+
+               // Iterate through all bits in the bitmap
+               for (uint32_t bit_idx = start_bit; bit_idx < 64; ++bit_idx)
+               {
+                  // If the bit is NOT set, the pointer is allocated
+                  if (!(free_ptrs_bitmap & (1ULL << bit_idx)))
+                  {
+                     // Calculate the pointer index
+                     auto ptr_idx = ptr_address::index_type(slot_idx * 64 + bit_idx);
+
+                     // Get reference to the shared_ptr
+                     auto& ptr = page.get_ptr(ptr_idx);
+
+                     // Clear active bit by clearing pending_cache flag
+                     if (ptr.pending_cache())
+                     {
+                        // Use the existing clear_pending_cache() method
+                        ptr.clear_pending_cache();
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   /**
+    * Returns a reference to a shared_ptr at the specified address, allocating it if needed.
+    * This is primarily used for recovery operations where we need to ensure pointers
+    * exist at specific addresses.
+    */
+   shared_ptr& shared_ptr_alloc::get_or_alloc(ptr_address address)
+   {
+      // First check if the pointer already exists
+      shared_ptr* existing_ptr = try_get(address);
+      if (existing_ptr != nullptr)
+      {
+         return *existing_ptr;
+      }
+
+      // If we need to allocate, first check if we need to create the page
+      auto& region = get_page_table().get_region(address.region);
+
+      // Calculate page number from the address index
+      detail::page_number page_num = address_index_to_page(address.index);
+
+      // Get or allocate the page
+      detail::page& page = get_or_alloc_page(region, page_num);
+
+      // Calculate slot and bit indices
+      uint32_t slot_idx = *address.index / 64;
+      uint32_t bit_idx  = *address.index % 64;
+
+      // Attempt to mark the bit as allocated (clear the bit in the free bitmap)
+      uint64_t expected_bitmap = page.free_ptrs[slot_idx].load(std::memory_order_relaxed);
+      uint64_t desired_bitmap;
+
+      do
+      {
+         // If the bit is already cleared, the pointer is already allocated
+         if (!(expected_bitmap & (1ULL << bit_idx)))
+         {
+            // Pointer is already allocated, just return it
+            return page.get_ptr(address.index);
+         }
+
+         // Clear the bit to mark it as allocated
+         desired_bitmap = expected_bitmap & ~(1ULL << bit_idx);
+
+      } while (!page.free_ptrs[slot_idx].compare_exchange_weak(
+          expected_bitmap, desired_bitmap, std::memory_order_release, std::memory_order_relaxed));
+
+      // Update half-free and free cachelines bits as needed
+      // Similar to the logic in the try_alloc method
+
+      // For simplicity, we also update the bitmap of free cachelines
+      if (std::popcount(desired_bitmap) <= 4)
+      {
+         // This cacheline is now half-free or less
+         page.half_free_cachelines.fetch_or(1ULL << slot_idx, std::memory_order_relaxed);
+      }
+
+      if (desired_bitmap == 0)
+      {
+         // No more free pointers in this cacheline
+         page.free_cachelines.fetch_and(~(1ULL << slot_idx), std::memory_order_relaxed);
+      }
+
+      // Increment the region use count
+      get_page_table().inc_region(address.region);
+
+      // Return a reference to the now allocated pointer
+      shared_ptr& result = page.get_ptr(address.index);
+
+      // Initialize the shared_ptr to have a zero reference count
+      result.reset(sal::location(), 0);
+
+      return result;
    }
 }  // namespace sal

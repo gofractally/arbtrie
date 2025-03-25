@@ -956,3 +956,336 @@ TEST_CASE("shared_ptr_alloc region statistics", "[sal][shared_ptr_alloc]")
    // Clean up
    fs::remove_all(temp_path);
 }
+
+TEST_CASE("shared_ptr_alloc clear_active_bits", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_clear_active_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   // Create the allocator
+   sal::shared_ptr_alloc alloc(temp_path);
+
+   SECTION("Clear active bits in a specific range of regions")
+   {
+      // Create multiple regions with pointers having different states
+      std::vector<sal::ptr_address::region_type> regions;
+      std::vector<std::vector<sal::ptr_address>> region_addresses;
+      std::vector<std::vector<sal::shared_ptr*>> region_pointers;
+
+      // Set up 5 regions with 10 pointers each
+      const int num_regions     = 5;
+      const int ptrs_per_region = 10;
+
+      regions.resize(num_regions);
+      region_addresses.resize(num_regions);
+      region_pointers.resize(num_regions);
+
+      // Allocate pointers in each region
+      for (int r = 0; r < num_regions; ++r)
+      {
+         // Get a new region for allocation
+         regions[r] = alloc.get_new_region();
+
+         // Allocate some pointers in this region
+         for (int p = 0; p < ptrs_per_region; ++p)
+         {
+            auto allocation = alloc.alloc(regions[r]);
+            region_addresses[r].push_back(allocation.address);
+            region_pointers[r].push_back(allocation.ptr);
+
+            // Set a valid location
+            allocation.ptr->reset(sal::location::from_cacheline(100 + p), 1);
+
+            // Set pending_cache bit on every other pointer
+            if (p % 2 == 0)
+            {
+               // Call try_inc_activity() in a loop until it returns true twice
+               // First call sets the active bit, second call sets the pending_cache bit
+               bool active_set  = false;
+               bool pending_set = false;
+
+               while (!pending_set)
+               {
+                  bool result = allocation.ptr->try_inc_activity();
+                  if (result)
+                  {
+                     if (!active_set)
+                        active_set = true;
+                     else
+                        pending_set = true;
+                  }
+               }
+
+               REQUIRE(allocation.ptr->pending_cache() == true);
+            }
+         }
+      }
+
+      // Count how many pointers have the pending_cache bit set initially
+      int initial_pending_count = 0;
+      for (int r = 0; r < num_regions; ++r)
+      {
+         for (int p = 0; p < ptrs_per_region; ++p)
+         {
+            if (region_pointers[r][p]->pending_cache())
+               initial_pending_count++;
+         }
+      }
+
+      // Should be half of all pointers
+      REQUIRE(initial_pending_count == num_regions * ptrs_per_region / 2);
+
+      // Now clear active bits for regions 1-3 (indices 1, 2)
+      alloc.clear_active_bits(regions[1], 2);
+
+      // Verify bits were cleared only in the specified regions
+      int cleared_region_pending_count = 0;
+      int other_region_pending_count   = 0;
+
+      for (int r = 0; r < num_regions; ++r)
+      {
+         int region_pending_count = 0;
+         for (int p = 0; p < ptrs_per_region; ++p)
+         {
+            if (region_pointers[r][p]->pending_cache())
+               region_pending_count++;
+         }
+
+         if (r == 1 || r == 2)
+         {
+            // These regions should have no pending_cache bits set
+            cleared_region_pending_count += region_pending_count;
+         }
+         else
+         {
+            // Other regions should still have pending_cache bits
+            other_region_pending_count += region_pending_count;
+         }
+      }
+
+      // The cleared regions should have no pending_cache bits
+      REQUIRE(cleared_region_pending_count == 0);
+
+      // The other regions should still have their pending_cache bits
+      REQUIRE(other_region_pending_count == (num_regions - 2) * ptrs_per_region / 2);
+
+      // Clear all regions
+      alloc.clear_active_bits(regions[0], num_regions);
+
+      // Verify all bits were cleared
+      int final_pending_count = 0;
+      for (int r = 0; r < num_regions; ++r)
+      {
+         for (int p = 0; p < ptrs_per_region; ++p)
+         {
+            if (region_pointers[r][p]->pending_cache())
+               final_pending_count++;
+         }
+      }
+
+      // All pending_cache bits should now be cleared
+      REQUIRE(final_pending_count == 0);
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
+
+TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_get_or_alloc_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   // Create the allocator
+   sal::shared_ptr_alloc alloc(temp_path);
+
+   SECTION("Get existing pointers or allocate new ones")
+   {
+      // Get a new region
+      auto region = alloc.get_new_region();
+
+      // 1. First create some pointers through normal allocation
+      std::vector<sal::ptr_address> addresses;
+
+      // Allocate 5 pointers
+      for (int i = 0; i < 5; ++i)
+      {
+         auto allocation = alloc.alloc(region);
+
+         // Set a reference count and location
+         allocation.ptr->reset(sal::location::from_cacheline(100 + i), i + 1);
+
+         addresses.push_back(allocation.address);
+      }
+
+      // 2. Test get_or_alloc on existing pointers
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         // Should return the existing pointer
+         sal::shared_ptr& ptr = alloc.get_or_alloc(addresses[i]);
+
+         // Verify it has the values we set
+         REQUIRE(ptr.use_count() == i + 1);
+         REQUIRE(ptr.loc().cacheline() == 100 + i);
+      }
+
+      // 3. Create some specific addresses that don't exist yet
+      for (int i = 0; i < 5; ++i)
+      {
+         // Create an address with a high index to ensure it doesn't exist yet
+         auto             custom_index = 10000 + i;
+         sal::ptr_address new_addr(region, sal::ptr_address::index_type(custom_index));
+
+         // The first call should allocate the pointer
+         sal::shared_ptr& new_ptr = alloc.get_or_alloc(new_addr);
+
+         // Set some values to verify later
+         new_ptr.reset(sal::location::from_cacheline(200 + i), 10 + i);
+
+         // The second call should return the same pointer
+         sal::shared_ptr& existing_ptr = alloc.get_or_alloc(new_addr);
+
+         // Verify it's the same pointer with the same values
+         REQUIRE(existing_ptr.use_count() == 10 + i);
+         REQUIRE(existing_ptr.loc().cacheline() == 200 + i);
+
+         // Also check with try_get to ensure it's registered properly
+         sal::shared_ptr* ptr = alloc.try_get(new_addr);
+         REQUIRE(ptr != nullptr);
+         REQUIRE(ptr->use_count() == 10 + i);
+      }
+
+      // 4. Test with a completely new region
+      auto             new_region = alloc.get_new_region();
+      sal::ptr_address region_addr(new_region, sal::ptr_address::index_type(42));
+
+      // Should create a new pointer
+      sal::shared_ptr& region_ptr = alloc.get_or_alloc(region_addr);
+
+      // Set some data to verify
+      region_ptr.reset(sal::location::from_cacheline(500), 5);
+
+      // Verify it exists and has the correct data
+      REQUIRE(alloc.try_get(region_addr) != nullptr);
+      REQUIRE(alloc.try_get(region_addr)->use_count() == 5);
+      REQUIRE(alloc.try_get(region_addr)->loc().cacheline() == 500);
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
+
+TEST_CASE("ptr_address memory layout and to_int", "[sal][ptr_address]")
+{
+   SECTION("Memory layout matches to_int() representation")
+   {
+      // Test various region/index combinations
+      for (uint16_t r = 0; r < 0xFFFF; r += 0x1111)
+      {
+         for (uint16_t i = 0; i < 0xFFFF; i += 0x1111)
+         {
+            // Create address using explicit constructor
+            sal::ptr_address addr{sal::ptr_address::region_type(r),
+                                  sal::ptr_address::index_type(i)};
+
+            // Manually compute expected integer representation
+            uint32_t expected = (static_cast<uint32_t>(r) << 16) | i;
+
+            // Test to_int() matches expected layout
+            REQUIRE(addr.to_int() == expected);
+
+            // Direct memory comparison between ptr_address and uint32_t
+            REQUIRE(memcmp(&addr, &expected, sizeof(uint32_t)) == 0);
+
+            // Test round-trip conversion using static method
+            auto roundtrip = sal::ptr_address::from_int(expected);
+            REQUIRE(*roundtrip.region == r);
+            REQUIRE(*roundtrip.index == i);
+
+            // Test explicit uint32_t constructor
+            sal::ptr_address from_int(expected);
+            REQUIRE(*from_int.region == r);
+            REQUIRE(*from_int.index == i);
+            REQUIRE(from_int.to_int() == expected);
+         }
+      }
+   }
+}
+
+TEST_CASE("shared_ptr_alloc handles large initial allocation", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_large_initial_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   SECTION("Large batch allocation from scratch")
+   {
+      // Create a fresh allocator (nblocks = 0)
+      sal::shared_ptr_alloc alloc(temp_path);
+      auto                  region = alloc.get_new_region();
+
+      // Force allocation of a large number of pages at once
+      std::vector<sal::ptr_address> addresses;
+
+      // Number that requires multiple pages (4000 pointers would require ~7-8 pages)
+      // Each page holds 512 pointers, so we need enough to trigger multiple page allocations
+      constexpr size_t large_allocation_count = 4000;
+
+      // Reserve space to avoid vector reallocations
+      addresses.reserve(large_allocation_count);
+
+      // Allocate all pointers in a tight loop - this forces allocating many pages at once
+      std::cout << "Starting large allocation test - allocating " << large_allocation_count
+                << " pointers..." << std::endl;
+      for (size_t i = 0; i < large_allocation_count; ++i)
+      {
+         if (i % 500 == 0)
+         {
+            std::cout << "Allocated " << i << " pointers..." << std::endl;
+         }
+
+         auto allocation = alloc.alloc(region);
+         addresses.push_back(allocation.address);
+
+         // Initialize with some data to verify
+         allocation.ptr->reset(sal::location::from_cacheline(i % 1000), 1);
+      }
+      std::cout << "Finished allocating " << large_allocation_count << " pointers" << std::endl;
+
+      // Verify all allocations are valid
+      std::cout << "Verifying allocations..." << std::endl;
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         if (i % 500 == 0)
+         {
+            std::cout << "Verified " << i << " pointers..." << std::endl;
+         }
+
+         sal::shared_ptr& ptr = alloc.get(addresses[i]);
+         REQUIRE(ptr.use_count() == 1);
+         REQUIRE(ptr.loc().cacheline() == i % 1000);
+      }
+      std::cout << "All allocations verified successfully" << std::endl;
+
+      // Free all allocations
+      std::cout << "Freeing allocations..." << std::endl;
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         if (i % 500 == 0)
+         {
+            std::cout << "Freed " << i << " pointers..." << std::endl;
+         }
+
+         alloc.free(addresses[i]);
+      }
+      std::cout << "All allocations freed successfully" << std::endl;
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
