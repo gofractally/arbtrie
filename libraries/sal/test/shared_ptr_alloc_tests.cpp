@@ -34,7 +34,7 @@ TEST_CASE("shared_ptr_alloc basic operations", "[sal][shared_ptr_alloc]")
       sal::shared_ptr_alloc alloc(temp_path);
 
       // Get a region for allocation
-      auto region = alloc.next_region();
+      auto region = alloc.get_new_region();
 
       // Allocate a shared_ptr
       auto allocation = alloc.alloc(region);
@@ -52,7 +52,7 @@ TEST_CASE("shared_ptr_alloc basic operations", "[sal][shared_ptr_alloc]")
    SECTION("Multiple allocations and frees")
    {
       sal::shared_ptr_alloc alloc(temp_path);
-      auto                  region = alloc.next_region();
+      auto                  region = alloc.get_new_region();
 
       // Allocate a smaller number of shared_ptrs to avoid potential issues
       constexpr size_t              num_allocs = 10;
@@ -81,8 +81,8 @@ TEST_CASE("shared_ptr_alloc basic operations", "[sal][shared_ptr_alloc]")
       sal::shared_ptr_alloc alloc(temp_path);
 
       // Get multiple regions
-      auto region1 = alloc.next_region();
-      auto region2 = alloc.next_region();
+      auto region1 = alloc.get_new_region();
+      auto region2 = alloc.get_new_region();
 
       // They should be different
       REQUIRE(*region1 != *region2);
@@ -115,7 +115,7 @@ TEST_CASE("shared_ptr_alloc persistence", "[sal][shared_ptr_alloc]")
    // First allocator instance
    {
       sal::shared_ptr_alloc alloc(temp_path);
-      auto                  region = alloc.next_region();
+      auto                  region = alloc.get_new_region();
 
       // Allocate a small number of pointers
       for (int i = 0; i < 5; ++i)
@@ -154,7 +154,7 @@ TEST_CASE("shared_ptr_alloc exhaustive allocation and free", "[sal][shared_ptr_a
    fs::create_directories(temp_path);
 
    sal::shared_ptr_alloc alloc(temp_path);
-   auto                  region = alloc.next_region();
+   auto                  region = alloc.get_new_region();
 
    // Vector to hold our permanent allocations (A pointers)
    std::vector<sal::ptr_address> permanent_addrs;
@@ -228,7 +228,7 @@ TEST_CASE("shared_ptr_alloc multithreaded test", "[sal][shared_ptr_alloc][multit
 
    // Create allocator and single region for all threads
    sal::shared_ptr_alloc alloc(temp_path);
-   auto                  region = alloc.next_region();
+   auto                  region = alloc.get_new_region();
 
    // Number of threads to use
    constexpr int num_threads = 16;
@@ -347,4 +347,516 @@ TEST_CASE("shared_ptr_alloc multithreaded test", "[sal][shared_ptr_alloc][multit
    fs::remove_all(temp_path);
 
    SAL_INFO("Multithreaded test completed successfully");
+}
+
+TEST_CASE("shared_ptr_alloc reset_all_refs", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_reset_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   // Create a vector to track our allocations
+   std::vector<sal::ptr_address> addresses;
+   std::vector<sal::shared_ptr*> pointers;
+
+   // Create the allocator and a region for allocations
+   sal::shared_ptr_alloc alloc(temp_path);
+   auto                  region = alloc.get_new_region();
+
+   SECTION("Reset ref counts to 1 for active pointers")
+   {
+      // Allocate several pointers and set them to different states
+      for (int i = 0; i < 10; ++i)
+      {
+         auto allocation = alloc.alloc(region);
+         addresses.push_back(allocation.address);
+         pointers.push_back(allocation.ptr);
+
+         // Set the location to a valid value (non-zero cacheline)
+         allocation.ptr->reset(sal::location::from_cacheline(100 + i), 0);
+
+         // For each pointer, set a different reference count
+         // - Some with 0 refs (should be freed by reset_all_refs)
+         // - Some with 1 ref (should remain at 1)
+         // - Some with >1 refs (should be reset to 1)
+         if (i % 3 == 0)
+         {
+            // Set to 0 refs - these should be freed
+            allocation.ptr->set_ref(0);
+            REQUIRE(allocation.ptr->use_count() == 0);
+         }
+         else if (i % 3 == 1)
+         {
+            // Set to 1 ref - these should remain at 1
+            allocation.ptr->set_ref(1);
+            REQUIRE(allocation.ptr->use_count() == 1);
+         }
+         else
+         {
+            // Set to >1 refs - these should be reset to 1
+            allocation.ptr->set_ref(5);
+            REQUIRE(allocation.ptr->use_count() == 5);
+         }
+      }
+
+      // Now call reset_all_refs
+      alloc.reset_all_refs();
+
+      // Verify the results for each pointer
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         if (i % 3 == 0)
+         {
+            // These should have been freed, try to re-allocate them
+            auto allocation = alloc.alloc(region);
+
+            // In a FIFO system, we'd expect to get the freed pointers back in order
+            // but this might be implementation dependent, so we'll just verify we can allocate
+            REQUIRE(allocation.ptr != nullptr);
+
+            // Clean up
+            alloc.free(allocation.address);
+         }
+         else
+         {
+            // For both 1-ref and >1-ref cases, they should now be exactly 1
+            // We need to access the pointers again to see the updated reference count
+            sal::shared_ptr& ptr = alloc.get(addresses[i]);
+            REQUIRE(ptr.use_count() == 1);
+         }
+      }
+   }
+
+   SECTION("reset_all_refs should handle wrap-around case")
+   {
+      // Allocate enough pointers to wrap around the first page
+      // We'll need at least 512 pointers to trigger wrapping
+      std::vector<sal::ptr_address> wrap_addresses;
+      std::vector<sal::shared_ptr*> wrap_pointers;
+
+      // First fill up one page
+      for (int i = 0; i < 512; ++i)
+      {
+         auto allocation = alloc.alloc(region);
+
+         // Set location and ref count for every pointer
+         allocation.ptr->reset(sal::location::from_cacheline(100 + i), 3);
+
+         wrap_addresses.push_back(allocation.address);
+         wrap_pointers.push_back(allocation.ptr);
+      }
+
+      // Now free every other pointer to create a sparse pattern
+      for (size_t i = 0; i < wrap_addresses.size(); i += 2)
+      {
+         alloc.free(wrap_addresses[i]);
+      }
+
+      // Set various ref counts for the remaining pointers
+      for (size_t i = 1; i < wrap_addresses.size(); i += 2)
+      {
+         int ref_count = (i % 6 == 1) ? 0 : ((i % 6 == 3) ? 1 : 5);
+         wrap_pointers[i]->set_ref(ref_count);
+         // Verify the reference count was set correctly
+         REQUIRE(wrap_pointers[i]->use_count() == ref_count);
+      }
+
+      // Call reset_all_refs
+      alloc.reset_all_refs();
+
+      // Verify the results
+      for (size_t i = 1; i < wrap_addresses.size(); i += 2)
+      {
+         if (i % 6 == 1)
+         {
+            // These had 0 refs and should be freed - skip them
+            continue;
+         }
+         else
+         {
+            // First check directly via the pointer
+            int direct_ref_count = wrap_pointers[i]->use_count();
+
+            // Then check via alloc.get()
+            sal::shared_ptr& ptr           = alloc.get(wrap_addresses[i]);
+            int              get_ref_count = ptr.use_count();
+
+            // They should match and be 1
+            REQUIRE(direct_ref_count == 1);
+            REQUIRE(get_ref_count == 1);
+         }
+      }
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
+
+TEST_CASE("shared_ptr_alloc release_unreachable", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_release_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   SECTION("Release unreferenced and unreachable pointers")
+   {
+      // Create a vector to track our allocations
+      std::vector<sal::ptr_address> addresses;
+      std::vector<sal::shared_ptr*> pointers;
+
+      // Create the allocator and a region for allocations
+      sal::shared_ptr_alloc alloc(temp_path);
+      auto                  region = alloc.get_new_region();
+
+      // Allocate several pointers and set them to different states
+      for (int i = 0; i < 10; ++i)
+      {
+         auto allocation = alloc.alloc(region);
+         addresses.push_back(allocation.address);
+         pointers.push_back(allocation.ptr);
+
+         // Set the location to a valid value (non-zero cacheline)
+         allocation.ptr->reset(sal::location::from_cacheline(100 + i), 0);
+
+         // For each pointer, set a different reference count:
+         // - Some with 0 refs (should be freed immediately)
+         // - Some with 1 ref (should be freed after release)
+         // - Some with 2 refs (should be kept, but decremented to 1)
+         // - Some with >2 refs (should be kept, but decremented to >1)
+         if (i % 4 == 0)
+         {
+            // Set to 0 refs - these should be freed immediately
+            allocation.ptr->set_ref(0);
+            REQUIRE(allocation.ptr->use_count() == 0);
+         }
+         else if (i % 4 == 1)
+         {
+            // Set to 1 ref - these should be freed after release
+            allocation.ptr->set_ref(1);
+            REQUIRE(allocation.ptr->use_count() == 1);
+         }
+         else if (i % 4 == 2)
+         {
+            // Set to 2 refs - these should be decremented to 1
+            allocation.ptr->set_ref(2);
+            REQUIRE(allocation.ptr->use_count() == 2);
+         }
+         else
+         {
+            // Set to >2 refs - these should be decremented but still >1
+            allocation.ptr->set_ref(5);
+            REQUIRE(allocation.ptr->use_count() == 5);
+         }
+      }
+
+      // Now call release_unreachable
+      alloc.release_unreachable();
+
+      // Verify the results
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         if (i % 4 == 0 || i % 4 == 1)
+         {
+            // These had 0 or 1 refs and should have been freed
+            // Try to re-allocate to confirm
+            auto allocation = alloc.alloc(region);
+
+            // We're not guaranteed to get the same pointers back in the same order
+            // But we should be able to allocate a new pointer
+            REQUIRE(allocation.ptr != nullptr);
+
+            // Clean up
+            alloc.free(allocation.address);
+         }
+         else if (i % 4 == 2)
+         {
+            // These had 2 refs, should now have 1
+            sal::shared_ptr& ptr = alloc.get(addresses[i]);
+            REQUIRE(ptr.use_count() == 1);
+         }
+         else
+         {
+            // These had 5 refs, should now have 4
+            sal::shared_ptr& ptr = alloc.get(addresses[i]);
+            REQUIRE(ptr.use_count() == 4);
+         }
+      }
+   }
+
+   SECTION("Combination of reset_all_refs and release_unreachable")
+   {
+      // Create the allocator and a region for allocations
+      sal::shared_ptr_alloc alloc(temp_path);
+      auto                  region = alloc.get_new_region();
+
+      std::vector<sal::ptr_address> addresses;
+      std::vector<sal::shared_ptr*> pointers;
+
+      // Create a "reachable" tree-like structure of nodes with different ref counts
+
+      // The root node will have ref=3 initially
+      auto root = alloc.alloc(region);
+      root.ptr->reset(sal::location::from_cacheline(200), 3);
+      addresses.push_back(root.address);
+      pointers.push_back(root.ptr);
+
+      // Create some child nodes with ref>1 (simulating shared references)
+      for (int i = 0; i < 3; ++i)
+      {
+         auto child = alloc.alloc(region);
+         child.ptr->reset(sal::location::from_cacheline(300 + i), 2);
+         addresses.push_back(child.address);
+         pointers.push_back(child.ptr);
+      }
+
+      // Create some nodes with ref=1 (these would be freed by release_unreachable)
+      for (int i = 0; i < 3; ++i)
+      {
+         auto node = alloc.alloc(region);
+         node.ptr->reset(sal::location::from_cacheline(400 + i), 1);
+         addresses.push_back(node.address);
+         pointers.push_back(node.ptr);
+      }
+
+      // Create some nodes with ref=0 (these would be freed immediately)
+      for (int i = 0; i < 3; ++i)
+      {
+         auto node = alloc.alloc(region);
+         node.ptr->reset(sal::location::from_cacheline(500 + i), 0);
+         addresses.push_back(node.address);
+         pointers.push_back(node.ptr);
+      }
+
+      // First reset all refs (sets all refs>1 to 1)
+      alloc.reset_all_refs();
+
+      // Verify refs were reset
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         if (i < 7)  // The first 7 pointers had ref counts > 0
+         {
+            sal::shared_ptr& ptr = alloc.get(addresses[i]);
+            if (pointers[i]->use_count() > 0)
+               REQUIRE(ptr.use_count() == 1);
+         }
+      }
+
+      // Now simulate retaining the reachable nodes (root and its children)
+      // by incrementing their reference counts
+      for (size_t i = 0; i < 4; ++i)  // Root + 3 children
+      {
+         sal::shared_ptr& ptr = alloc.get(addresses[i]);
+         REQUIRE(ptr.retain());  // Increment to 2
+      }
+
+      // Now release_unreachable should free nodes with ref=1 and decrement others
+      alloc.release_unreachable();
+
+      // Verify the results
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         if (i < 4)  // Reachable nodes (root + children)
+         {
+            // These had ref=2, should now have ref=1
+            sal::shared_ptr& ptr = alloc.get(addresses[i]);
+            REQUIRE(ptr.use_count() == 1);
+         }
+         else
+         {
+            // These had ref=1 or ref=0, should be freed
+            // Attempt to allocate to verify
+            auto allocation = alloc.alloc(region);
+            REQUIRE(allocation.ptr != nullptr);
+            alloc.free(allocation.address);
+         }
+      }
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
+
+TEST_CASE("shared_ptr_alloc try_get method", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_try_get_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   // Create the allocator and a region for allocations
+   sal::shared_ptr_alloc alloc(temp_path);
+   auto                  region = alloc.get_new_region();
+
+   SECTION("try_get with valid addresses")
+   {
+      // Allocate some pointers
+      std::vector<sal::ptr_address> addresses;
+      for (int i = 0; i < 5; ++i)
+      {
+         auto allocation = alloc.alloc(region);
+         addresses.push_back(allocation.address);
+
+         // Set some data to verify later
+         allocation.ptr->reset(sal::location::from_cacheline(100 + i), i + 1);
+      }
+
+      // Verify try_get returns non-null pointers for all valid addresses
+      for (size_t i = 0; i < addresses.size(); ++i)
+      {
+         sal::shared_ptr* ptr = alloc.try_get(addresses[i]);
+         REQUIRE(ptr != nullptr);
+         REQUIRE(ptr->use_count() == i + 1);
+         REQUIRE(ptr->loc().cacheline() == 100 + i);
+      }
+
+      // Clean up
+      for (const auto& addr : addresses)
+      {
+         alloc.free(addr);
+      }
+   }
+
+   SECTION("try_get with freed addresses")
+   {
+      // Allocate and then free some pointers
+      std::vector<sal::ptr_address> addresses;
+      for (int i = 0; i < 5; ++i)
+      {
+         auto allocation = alloc.alloc(region);
+         addresses.push_back(allocation.address);
+         alloc.free(allocation.address);
+      }
+
+      // try_get should return nullptr for freed addresses
+      for (const auto& addr : addresses)
+      {
+         REQUIRE(alloc.try_get(addr) == nullptr);
+      }
+   }
+
+   SECTION("try_get with non-existent addresses")
+   {
+      // Create some addresses pointing to non-existent locations
+
+      // Address in a valid region but with a page that hasn't been allocated
+      sal::ptr_address addr1(region,
+                             sal::ptr_address::index_type(65000));  // Far beyond any allocated page
+      REQUIRE(alloc.try_get(addr1) == nullptr);
+
+      // Address in a non-existent region
+      sal::ptr_address addr2(sal::ptr_address::region_type(65000), sal::ptr_address::index_type(0));
+      REQUIRE(alloc.try_get(addr2) == nullptr);
+
+      // Address with an out-of-bounds index value
+      sal::ptr_address addr3(region, sal::ptr_address::index_type(UINT16_MAX));
+      REQUIRE(alloc.try_get(addr3) == nullptr);
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
+
+TEST_CASE("shared_ptr_alloc used count", "[sal][shared_ptr_alloc]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_used_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   sal::shared_ptr_alloc alloc(temp_path);
+
+   // Initially there should be no used pointers
+   REQUIRE(alloc.used() == 0);
+
+   SECTION("Count increases with allocations")
+   {
+      // Create some pointers in the first region
+      auto                          region1 = alloc.get_new_region();
+      std::vector<sal::ptr_address> addresses1;
+
+      // Allocate 10 pointers in first region
+      for (int i = 0; i < 10; ++i)
+      {
+         auto allocation = alloc.alloc(region1);
+         addresses1.push_back(allocation.address);
+      }
+
+      // Should have 10 used pointers
+      REQUIRE(alloc.used() == 10);
+
+      // Create another region with different pointers
+      auto                          region2 = alloc.get_new_region();
+      std::vector<sal::ptr_address> addresses2;
+
+      // Allocate 5 pointers in second region
+      for (int i = 0; i < 5; ++i)
+      {
+         auto allocation = alloc.alloc(region2);
+         addresses2.push_back(allocation.address);
+      }
+
+      // Should have 15 used pointers
+      REQUIRE(alloc.used() == 15);
+
+      // Free some pointers from the first region
+      for (int i = 0; i < 3; ++i)
+      {
+         alloc.free(addresses1[i]);
+      }
+
+      // Should have 12 used pointers
+      REQUIRE(alloc.used() == 12);
+
+      // Free all remaining pointers
+      for (size_t i = 3; i < addresses1.size(); ++i)
+      {
+         alloc.free(addresses1[i]);
+      }
+
+      for (auto& addr : addresses2)
+      {
+         alloc.free(addr);
+      }
+
+      // Should be back to 0
+      REQUIRE(alloc.used() == 0);
+   }
+
+   SECTION("Handles pointers across many regions")
+   {
+      std::vector<sal::ptr_address::region_type> regions;
+      std::vector<sal::ptr_address>              all_addresses;
+
+      // Create 8 regions to ensure we span multiple 64-bit entries in region_use_counts
+      // (since each 64-bit entry contains 4 region counts)
+      for (int r = 0; r < 8; ++r)
+      {
+         regions.push_back(alloc.get_new_region());
+
+         // Allocate a different number of pointers in each region
+         int count = r + 1;
+         for (int i = 0; i < count; ++i)
+         {
+            auto allocation = alloc.alloc(regions.back());
+            all_addresses.push_back(allocation.address);
+         }
+      }
+
+      // Total should be sum of 1+2+3+4+5+6+7+8 = 36
+      REQUIRE(alloc.used() == 36);
+
+      // Free all pointers
+      for (auto& addr : all_addresses)
+      {
+         alloc.free(addr);
+      }
+
+      // Should be back to 0
+      REQUIRE(alloc.used() == 0);
+   }
+
+   // Clean up
+   fs::remove_all(temp_path);
 }

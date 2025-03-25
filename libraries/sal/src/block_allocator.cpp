@@ -407,4 +407,96 @@ namespace sal
 
       return desired_num_blocks;
    }
+
+   void block_allocator::truncate(uint32_t nblocks)
+   {
+      std::lock_guard l{_resize_mutex};
+
+      // Check if the requested size is greater than max_blocks
+      if (nblocks > _max_blocks)
+         throw std::runtime_error("cannot truncate to size larger than max_blocks");
+
+      // Calculate the new file size
+      uint64_t new_size = static_cast<uint64_t>(nblocks) * _block_size;
+
+      // If the new size is larger than current, use reserve instead
+      if (new_size > _file_size)
+      {
+         // Release the lock and call reserve
+         l.~lock_guard();
+         reserve(nblocks);
+         return;
+      }
+
+      // If new size is the same as current, just update num_blocks if needed
+      if (new_size == _file_size)
+      {
+         uint32_t current_blocks = _num_blocks.load(std::memory_order_acquire);
+         if (current_blocks != nblocks)
+         {
+            _num_blocks.store(nblocks, std::memory_order_release);
+         }
+         return;
+      }
+
+      // For shrinking, we need to:
+      // 1. Unmap the portion we're going to remove
+      // 2. Truncate the file
+      // 3. Update our state variables
+
+      // Unmap the part we're removing
+      void*  unmap_start = static_cast<char*>(_mapped_base) + new_size;
+      size_t unmap_size  = _file_size - new_size;
+
+      if (::munmap(unmap_start, unmap_size) != 0)
+      {
+         SAL_WARN("Failed to unmap portion of file during truncate: {}", strerror(errno));
+         // Continue anyway - the file will still be truncated
+      }
+
+      // Truncate the file to the new size
+      if (::ftruncate(_fd, new_size) < 0)
+      {
+         // If truncation fails, we need to remap the unmapped portion
+         int   prot = PROT_READ | PROT_WRITE;
+         void* remapped =
+             ::mmap(unmap_start, unmap_size, prot, MAP_SHARED | MAP_FIXED, _fd, new_size);
+
+         if (remapped == MAP_FAILED)
+         {
+            SAL_ERROR("Failed to remap file after truncate failure: {}", strerror(errno));
+            // We're in an inconsistent state at this point
+            throw std::runtime_error("failed to remap file after truncate failure");
+         }
+
+         throw std::system_error(errno, std::generic_category(), "failed to truncate file");
+      }
+
+      // Update our state variables
+      _file_size = new_size;
+      _num_blocks.store(nblocks, std::memory_order_release);
+
+      // Restore the protection on the released virtual address space
+      if (_reserved_base && _reservation_size > 0)
+      {
+         void*  prot_start = static_cast<char*>(_reserved_base) + new_size;
+         size_t prot_size  = _reservation_size - new_size;
+
+         if (prot_size > 0)
+         {
+            // Remap as protected memory to maintain our reservation
+            void* protected_area = ::mmap(prot_start, prot_size, PROT_NONE,
+                                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+
+            if (protected_area == MAP_FAILED)
+            {
+               SAL_WARN("Failed to restore protection on address space after truncate: {}",
+                        strerror(errno));
+               // Not a fatal error, we can continue without this
+            }
+         }
+      }
+
+      sal_debug("Truncated file to {} blocks ({} bytes)", nblocks, new_size);
+   }
 }  // namespace sal

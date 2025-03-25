@@ -94,7 +94,10 @@ namespace sal
       bool     pending_cache() const { return load().pending_cache; }
 
       /// @deprecated dont use this
-      uint64_t to_int(auto order = std::memory_order_relaxed) const { return _data.load(order); }
+      uint64_t to_int(std::memory_order order = std::memory_order_relaxed) const
+      {
+         return _data.load(order);
+      }
 
       shared_ptr_data load(std::memory_order order = std::memory_order_relaxed) const
       {
@@ -104,11 +107,11 @@ namespace sal
       {
          _data.store(value.to_int(), order);
       }
-      void reset(location loc, int ref = 1, auto order = std::memory_order_release)
+      void reset(location loc, int ref = 1, std::memory_order order = std::memory_order_release)
       {
          store(shared_ptr_data().set_loc(loc).set_ref(ref), order);
       }
-      void set_ref(int ref, auto order = std::memory_order_relaxed)
+      void set_ref(int ref, std::memory_order order = std::memory_order_relaxed)
       {
          store(load(order).set_ref(ref), order);
       }
@@ -171,7 +174,7 @@ namespace sal
        * 
        * @return the updated shared_ptr_data
        */
-      shared_ptr_data move(location loc, auto order = std::memory_order_relaxed)
+      shared_ptr_data move(location loc, std::memory_order order = std::memory_order_relaxed)
       {
          auto            expected = _data.load(order);
          shared_ptr_data updated;

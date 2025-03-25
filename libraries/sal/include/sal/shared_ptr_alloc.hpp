@@ -115,6 +115,7 @@ namespace sal
       {
          /// next region to allocate in for those who don't care which region
          std::atomic<uint16_t> _next_region = 0;
+         std::atomic<uint32_t> _sequence    = 0;
 
          /// protected by _page_alloc_mutex
          std::atomic<uint64_t> _pages_alloced = 0;
@@ -145,6 +146,7 @@ namespace sal
    {
       ptr_address address;
       shared_ptr* ptr;
+      uint32_t    sequence;
    };
 
    /**
@@ -201,7 +203,7 @@ namespace sal
        * you are allocated in, attempts provide a region that isn't
        * already over crowded.
        */
-      ptr_address::region_type next_region();
+      ptr_address::region_type get_new_region();
 
       /**
        *  @throw std::runtime_error if no ptrs are available
@@ -221,6 +223,54 @@ namespace sal
              get_page_table().get_region(address.region).get_page_offset(address.index);
          return get_page(poff).get_ptr(address.index);
       }
+
+      /// @brief Try to get a pointer, returning nullptr if the address is invalid or freed
+      /// @param address The address to look up
+      /// @return A pointer to the shared_ptr if it exists and is allocated, nullptr otherwise
+      shared_ptr* try_get(ptr_address address)
+      {
+         auto& region = get_page_table().get_region(address.region);
+
+         // Check if the page exists
+         detail::page_offset poff = region.get_page_offset(address.index);
+         if (poff == detail::null_page)
+            return nullptr;
+
+         // Get the page
+         auto& page = get_page(poff);
+
+         // Check if the pointer is allocated (bit is NOT set in the free bitmap)
+         uint32_t slot_idx = *address.index / 64;
+         uint32_t bit_idx  = *address.index % 64;
+
+         // If the bit is set, the pointer is free
+         uint64_t free_ptrs_bitmap = page.free_ptrs[slot_idx].load(std::memory_order_relaxed);
+         if (free_ptrs_bitmap & (1ULL << bit_idx))
+            return nullptr;
+
+         // Pointer exists and is allocated
+         return &page.get_ptr(address.index);
+      }
+
+      /**
+       * This API is utilized to rebuild the allocator in the event of a 
+       * a crash that corrupted the state.
+       * @group recovery_api
+       */
+      /// @{
+      // set all meta nodes to 0
+      void clear_all();
+
+      // release all refs, if prior was <= 1 move to free list
+      void release_unreachable();
+
+      // set all refs > 1 to 1, leave 0 alone
+      void reset_all_refs();
+
+      /// @brief Returns the total number of used pointers across all regions
+      /// @return The sum of all region use counts
+      uint64_t used() const;
+      /// @}
 
      private:
       /**
@@ -253,6 +303,12 @@ namespace sal
          return *_page_allocator->get<detail::page>(pg);
       }
       detail::page_table& get_page_table() { return *_page_table->as<detail::page_table>(); }
+
+      // Const versions for read-only access
+      const detail::page_table& get_page_table() const
+      {
+         return *_page_table->as<detail::page_table>();
+      }
 
       static constexpr uint32_t ptrs_per_page    = 512;
       static constexpr uint32_t pages_per_region = (1 << 16) / ptrs_per_page;

@@ -54,6 +54,11 @@ namespace sal
       uint64_t num_blocks() const { return _num_blocks.load(std::memory_order_relaxed); }
 
       /**
+       * Resizes the file and num_blocks() count to nblocks.
+       */
+      void truncate(uint32_t nblocks);
+
+      /**
        * This method syncs all mapped memory to disk.
        */
       void sync(sync_type st);

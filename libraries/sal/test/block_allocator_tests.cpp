@@ -351,3 +351,113 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
    // Clean up
    fs::remove(temp_path);
 }
+
+TEST_CASE("Block allocator truncate operations", "[block_allocator]")
+{
+   // Create a temporary file path
+   fs::path temp_path = fs::temp_directory_path() / "sal_test_block_file_truncate.dat";
+
+   // Make sure we start clean
+   fs::remove(temp_path);
+
+   SECTION("Truncate to smaller size")
+   {
+      sal::block_allocator allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS);
+
+      // First reserve some blocks and allocate them
+      allocator.reserve(4);
+
+      // Allocate 4 blocks
+      std::vector<std::pair<sal::block_allocator::block_number, sal::block_allocator::offset_ptr>>
+          blocks;
+      for (int i = 0; i < 4; i++)
+      {
+         blocks.push_back(allocator.alloc());
+
+         // Write some identifiable data to each block
+         auto* data = static_cast<unsigned char*>(allocator.get(blocks[i].second));
+         data[0]    = static_cast<unsigned char>(0xA0 + i);
+      }
+
+      REQUIRE(allocator.num_blocks() == 4);
+
+      // Now truncate to 2 blocks
+      allocator.truncate(2);
+
+      // Verify the size was reduced
+      REQUIRE(allocator.num_blocks() == 2);
+
+      // Verify the first two blocks still have their data
+      for (int i = 0; i < 2; i++)
+      {
+         auto* data = static_cast<const unsigned char*>(allocator.get(blocks[i].second));
+         REQUIRE(data[0] == static_cast<unsigned char>(0xA0 + i));
+      }
+
+      // Allocating should now start from block 2
+      auto [new_block, new_offset] = allocator.alloc();
+      REQUIRE(*new_block == 2);
+      REQUIRE(*new_offset == 2 * BLOCK_SIZE);
+      REQUIRE(allocator.num_blocks() == 3);
+   }
+
+   SECTION("Truncate to same size")
+   {
+      sal::block_allocator allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS);
+
+      // Allocate 2 blocks
+      allocator.alloc();
+      allocator.alloc();
+      REQUIRE(allocator.num_blocks() == 2);
+
+      // Truncate to same size
+      allocator.truncate(2);
+
+      // Size should remain the same
+      REQUIRE(allocator.num_blocks() == 2);
+
+      // Allocating should now create block 2
+      auto [new_block, new_offset] = allocator.alloc();
+      REQUIRE(*new_block == 2);
+   }
+
+   SECTION("Truncate to larger size (should call reserve)")
+   {
+      sal::block_allocator allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS);
+
+      // Allocate 1 block
+      allocator.alloc();
+      REQUIRE(allocator.num_blocks() == 1);
+
+      // Truncate to larger size
+      allocator.truncate(3);
+
+      // Size should be updated, but blocks aren't allocated until used
+      REQUIRE(allocator.num_blocks() == 1);
+
+      // We should now be able to allocate up to block 2 without resizing
+      auto [block1, offset1] = allocator.alloc();
+      REQUIRE(*block1 == 1);
+
+      auto [block2, offset2] = allocator.alloc();
+      REQUIRE(*block2 == 2);
+
+      REQUIRE(allocator.num_blocks() == 3);
+
+      // Should be able to allocate beyond original truncate size
+      auto [block3, offset3] = allocator.alloc();
+      REQUIRE(*block3 == 3);
+      REQUIRE(allocator.num_blocks() == 4);
+   }
+
+   SECTION("Truncate beyond max blocks (should throw)")
+   {
+      sal::block_allocator allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS);
+
+      // Truncate beyond max_blocks should throw
+      REQUIRE_THROWS_AS(allocator.truncate(MAX_BLOCKS + 1), std::runtime_error);
+   }
+
+   // Clean up
+   fs::remove(temp_path);
+}
