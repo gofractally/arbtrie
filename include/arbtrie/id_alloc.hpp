@@ -27,6 +27,7 @@ namespace arbtrie
     */
    static constexpr const uint32_t id_block_size = id_page_size << 16;
    static constexpr const uint32_t ids_per_page  = id_page_size / sizeof(uint64_t);
+   using block_number                            = sal::block_allocator::block_number;
 
    /**
     *  @class id_alloc
@@ -162,15 +163,15 @@ namespace arbtrie
       if (block_num > 0xffff)
          throw std::runtime_error("block num out of range!");
       if (block_num >= _block_alloc.num_blocks())
-         _block_alloc.reserve(block_num + 1, true);
+         _block_alloc.resize(block_num + 1);
       return get(nid);
    }
 
    inline node_meta_type& id_alloc::get(id_address nid)
    {
-      uint64_t abs_pos        = nid.index().to_int() * sizeof(node_meta_type);
-      uint64_t block_num      = abs_pos / id_page_size;
-      uint64_t index_in_block = abs_pos & uint64_t(id_page_size - 1);
+      uint64_t     abs_pos = nid.index().to_int() * sizeof(node_meta_type);
+      block_number block_num(abs_pos / id_page_size);
+      uint64_t     index_in_block = abs_pos & uint64_t(id_page_size - 1);
 
       auto ptr = ((char*)_block_alloc.get(block_num)) + nid.region().to_int() * id_page_size +
                  index_in_block;
@@ -234,7 +235,7 @@ namespace arbtrie
                          num_pages + 1);
             // TODO: calculate a load factor before warning
          }
-         num_pages = _block_alloc.reserve(num_pages + 1, true);
+         num_pages = _block_alloc.resize(num_pages + 1);
       }
       auto na = rhead.next_alloc.load(std::memory_order_relaxed);
 
@@ -249,7 +250,7 @@ namespace arbtrie
          {
             assert(nid != 0);
             auto nadr = r + id_index(nid);
-            assert(get(nadr).ref() == 0 and get(nadr).loc().aligned_index() == 0);
+            //       assert(get(nadr).ref() == 0 and get(nadr).loc().aligned_index() == 0);
             //     ARBTRIE_WARN( "alloc: ", nadr );
             return {get(nadr), nadr, seq};
          }
@@ -271,7 +272,7 @@ namespace arbtrie
       node_meta_type* ffa;
 
       // TODO: make this compile time constant
-      static const uint64_t eofl = temp_meta_type().set_location(end_of_freelist).to_int();
+      static const uint64_t eofl = temp_meta_type().set_loc(end_of_freelist).to_int();
       {  // lock scope, must lock to alloc because of race between
          // reading last free and storing, conviently there are
          // 65k different regions so should be little contention
@@ -280,30 +281,30 @@ namespace arbtrie
 
          //     ARBTRIE_DEBUG("reg: ", r.to_int(), " alloc from ff_index: ", ff_index, " idx: ", (ff_index >> 18),
          //                   "  tmd: ", temp_meta_type(ff_index).loc().to_aligned(), "  eofl: ", eofl);
-         uint64_t next_free = get(r + id_index(temp_meta_type(ff_index).loc().to_aligned()))
+         uint64_t next_free = get(r + id_index(temp_meta_type(ff_index).loc().cacheline()))
                                   .to_int(std::memory_order_seq_cst);
 
-         assert(temp_meta_type(next_free).ref() == 0);
-         assert(temp_meta_type(next_free).type() == node_type::freelist);
+         assert(temp_meta_type(next_free).ref == 0);
+         //  assert(temp_meta_type(next_free).type() == node_type::freelist);
          do
          {
             if (ff_index == eofl)  //end_of_freelist.to_aligned())
                throw std::runtime_error("reached end of free list, that shouldn't happen!");
-            alloced_id = r + id_index(ff_index >> node_meta<>::location_offset);
+            alloced_id = r + id_index(ff_index >> sal::shared_ptr::location_offset);
             ffa        = &get(alloced_id);
 
             next_free = ffa->to_int(std::memory_order_seq_cst);
 
-            assert(temp_meta_type(next_free).ref() == 0);
-            assert(temp_meta_type(next_free).type() == node_type::freelist);
+            assert(temp_meta_type(next_free).ref == 0);
+            //    assert(temp_meta_type(next_free).type() == node_type::freelist);
          } while (rhead.first_free.compare_exchange_weak(ff_index, next_free));
          // , std::memory_order_relaxed));
-         assert(temp_meta_type(next_free).ref() == 0);
-         assert(temp_meta_type(next_free).type() == node_type::freelist);
+         assert(temp_meta_type(next_free).ref == 0);
+         //   assert(temp_meta_type(next_free).type() == node_type::freelist);
       }
 
       temp_meta_type tmeta;
-      tmeta.set_ref(1).set_location(null_node);
+      tmeta.set_ref(1).set_loc(null_node);
 
       // store 1 = ref count 1 prevents object as being interpreted as unalloc
       ffa->store(tmeta.to_int(), std::memory_order_relaxed);
@@ -324,8 +325,8 @@ namespace arbtrie
       auto& rhead     = _state->regions[adr.region().to_int()];
       auto& next_free = get(adr);
       auto  new_head  = temp_meta_type()
-                          .set_location(node_location::from_aligned(adr.index().to_int()))
-                          .end_pending_cache()
+                          .set_loc(node_location::from_cacheline(adr.index().to_int()))
+                          .set_pending_cache(false)
                           .to_int();
 
       {

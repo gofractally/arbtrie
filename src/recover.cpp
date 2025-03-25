@@ -15,7 +15,7 @@ namespace arbtrie
    {
       r.retain();
       auto retain_id = [&](id_address b) { recusive_retain_all(r.rlock().get(b)); };
-      cast_and_call(r.type(), r.header(), [&](const auto* ptr) { ptr->visit_branches(retain_id); });
+      cast_and_call(r.header(), [&](const auto* ptr) { ptr->visit_branches(retain_id); });
    }
 
    /**
@@ -55,7 +55,6 @@ namespace arbtrie
  *        the tree is potentially corrupt and partially written
  *         (bad,bad user....)
  *         - similar to App Crash Recovery... except..
- *         - scan for modify bits that are set
  *         - check integrity of relevant nodes
  *         - produce report and/or sandbox subtree 
  */
@@ -126,8 +125,9 @@ namespace arbtrie
       for (int i = 0; i < age_index.size(); ++i)
          age_index[i] = i;
 
-      std::sort(age_index.begin(), age_index.end(),
-                [&](int a, int b) { return get_segment(a)->_age > get_segment(b)->_age; });
+      std::sort(
+          age_index.begin(), age_index.end(), [&](int a, int b)
+          { return get_segment(a)->_provider_sequence > get_segment(b)->_provider_sequence; });
 
       _mapped_state->_segment_provider.free_segments.reset();
 
@@ -136,35 +136,24 @@ namespace arbtrie
 
       // Clear all segment meta is_pinned bits to ensure consistency with the bitmap
       for (size_t i = 0; i < _block_alloc.num_blocks(); ++i)
-      {
-         auto& meta  = _mapped_state->_segment_data.meta[i];
-         auto  state = meta.get_free_state();
-         if (state.is_pinned)
-         {
-            // During recovery we only need to update the metadata since bitmap is already reset
-            meta._state_data.store(state.set_pinned(false).to_int(), std::memory_order_relaxed);
-         }
-      }
+         _mapped_state->_segment_data.set_pinned(i, false);
 
-      _mapped_state->_segment_provider.ready_segments.reset();
+      _mapped_state->_segment_provider.ready_pinned_segments.clear();
+      _mapped_state->_segment_provider.ready_unpinned_segments.clear();
 
       int next_free_seg = 0;
       for (auto i : age_index)
       {
-         if (get_segment(i)->_age < 0)
+         if (get_segment(i)->_provider_sequence < 0)
          {
             _mapped_state->_segment_provider.free_segments.set(i);
             continue;
          }
          auto seg = get_segment(i);
          auto send =
-             (node_header*)((char*)seg +
-                            std::min<uint32_t>(segment_size,
-                                               seg->_alloc_pos.load(std::memory_order_relaxed)));
+             (node_header*)((char*)seg + std::min<uint32_t>(segment_size, seg->get_alloc_pos()));
 
-         const char* foc =
-             (const char*)seg + round_up_multiple<64>(sizeof(mapped_memory::segment_header));
-         node_header* foo = (node_header*)(foc);
+         node_header* foo = (node_header*)(seg);
 
          int free_space = 0;
          while (foo < send and foo->address())
@@ -181,15 +170,15 @@ namespace arbtrie
             //  null or in the same segment it should be updated because
             //  objects in a segment are ordered from oldest to newest
             //  and we are iterating segments from newest to oldest
-            if ((not loc.to_aligned()) or (loc.segment() == i))
+            if ((not loc.cacheline()) or (get_segment_num(loc) == i))
             {
-               if (loc.segment() == i)
-                  free_space += ((const node_header*)((const char*)seg + loc.abs_index()))->_nsize;
+               if (get_segment_num(loc) == i)
+                  free_space +=
+                      ((const node_header*)((const char*)seg + get_segment_offset(loc)))->_nsize;
                met.store(temp_meta_type()
-                             .set_location(node_location::from_absolute(i * segment_size +
-                                                                        ((char*)foo) - (char*)seg))
-                             .set_ref(1)
-                             .set_type(foo->get_type()),
+                             .set_loc(node_location::from_absolute_address(
+                                 i * segment_size + ((char*)foo) - (char*)seg))
+                             .set_ref(1),
                          std::memory_order_relaxed);
             }
             else
@@ -205,7 +194,8 @@ namespace arbtrie
          //   make sure free space calculations are up to date for the segment
       }
       _mapped_state->clean_exit_flag.store(false);
-      _mapped_state->next_alloc_age.store(get_segment(age_index[0])->_age + 1);
+      _mapped_state->_segment_provider._next_alloc_seq.store(
+          get_segment(age_index[0])->_provider_sequence + 1);
    }
 
    void seg_allocator::release_unreachable()
@@ -218,25 +208,7 @@ namespace arbtrie
    }
    int64_t id_alloc::clear_lock_bits()
    {
-      int64_t    count     = 0;
-      const auto num_block = _block_alloc.num_blocks();
-      for (int block = 0; block < num_block; ++block)
-         for (int region = 0; region < 0xffff; ++region)
-            for (int index = block ? 0 : 8; index < ids_per_page; ++index)
-            {
-               id_address fma  = {region, ids_per_page * block + index};
-               auto&      meta = get(fma);
-               auto       mval = meta.to_int();
-               if (mval & (node_meta<>::copy_mask | node_meta<>::modify_mask |
-                           node_meta<>::pending_cache_mask))
-               {
-                  count += bool(mval & node_meta<>::modify_mask);
-                  meta.store(mval & ~(node_meta<>::copy_mask | node_meta<>::modify_mask |
-                                      node_meta<>::pending_cache_mask),
-                             std::memory_order_relaxed);
-               }
-            }
-      return count;
+      return 0;  // lock bits no longer exist
    }
 
    void id_alloc::clear_all()
@@ -244,7 +216,7 @@ namespace arbtrie
       const auto num_block = _block_alloc.num_blocks();
       for (int block = 0; block < num_block; ++block)
       {
-         auto ptr = _block_alloc.get(block);
+         auto ptr = _block_alloc.get(block_number(block));
          memset(ptr, 0, id_block_size);
       }
       for (int region = 0; region < max_regions; ++region)
@@ -253,7 +225,7 @@ namespace arbtrie
          _state->regions[region].next_alloc.store(0, std::memory_order_relaxed);
          _state->regions[region].alloc_seq.store(0, std::memory_order_relaxed);
          _state->regions[region].first_free.store(
-             temp_meta_type().set_location(end_of_freelist).to_int(), std::memory_order_relaxed);
+             temp_meta_type().set_loc(end_of_freelist).to_int(), std::memory_order_relaxed);
          new (&_state->regions[region].alloc_mutex) interprocess_mutex();
       }
    }
@@ -273,8 +245,8 @@ namespace arbtrie
             {
                id_address fma  = {region, ids_per_page * block + index};
                auto&      meta = get(fma);
-               if (meta.is_read())
-                  meta.clear_read_bit(std::memory_order_relaxed);
+               if (meta.active() and not meta.pending_cache())
+                  meta.clear_pending_cache();
             }
    }
 
@@ -289,29 +261,22 @@ namespace arbtrie
                id_address fma  = {region, ids_per_page * block + index};
                auto&      meta = get(fma);
                if (meta.ref() > 0)
-                  meta.set_ref(1);
+                  meta.set_ref(1, std::memory_order_relaxed);
             }
    }
    uint64_t id_alloc::count_ids_with_refs()
    {
       uint64_t   count     = 0;
       const auto num_block = _block_alloc.num_blocks();
-      uint64_t   by_type[8];
-      memset(by_type, 0, sizeof(by_type));
       for (int block = 0; block < num_block; ++block)
          for (int region = 0; region < max_regions; ++region)
             for (int index = block ? 0 : 8; index < ids_per_page; ++index)
             {
                id_address fma  = {region, ids_per_page * block + index};
                auto&      meta = get(fma);
-               by_type[meta.type()]++;
                count += meta.ref() > 0;
             }
       std::cerr << "------------------------------\n";
-      for (int i = 0; i < node_type::undefined; ++i)
-      {
-         std::cerr << node_type_names[i] << ": " << by_type[i] << "\n";
-      }
       std::cerr << "total: " << count << "\n";
       std::cerr << "------------------------------\n";
 
@@ -325,7 +290,7 @@ namespace arbtrie
       {
          _state->regions[region].use_count.store(0, std::memory_order_relaxed);
          _state->regions[region].first_free.store(
-             temp_meta_type().set_location(end_of_freelist).to_int(), std::memory_order_relaxed);
+             temp_meta_type().set_loc(end_of_freelist).to_int(), std::memory_order_relaxed);
          _state->regions[region].next_alloc.store(num_block * ids_per_page,
                                                   std::memory_order_relaxed);
       }
@@ -340,7 +305,7 @@ namespace arbtrie
                auto&      meta = get(fma);
                if (meta.ref() == 0)
                   free_id(fma);
-               else if (meta.release().ref() == 1)
+               else if (meta.release().ref == 1)
                   free_id(fma);
             }
          }

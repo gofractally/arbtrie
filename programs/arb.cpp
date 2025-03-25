@@ -141,7 +141,7 @@ void print_pre(session_rlock&           state,
              print_hex(prefix);
              std::cout << "   " << bid << "  ";
              auto va = state.get(bid);
-             std::cout << node_type_names[va.type()] << "    ";
+             std::cout << node_type_names[va.header()->get_type()] << "    ";
              // std::cout << va->value();
              // assert(to_upper(prefix) == va->value());
              //print_hex(to_str(va->value()));
@@ -207,7 +207,7 @@ void print_pre(session_rlock&           state,
                int                      depth)
 {
    auto obj = state.get(i);
-   switch (obj.type())
+   switch (obj.header()->get_type())
    {
       case node_type::binary:
          return print_pre(state, obj.as<binary_node>(), prefix, path, depth);
@@ -219,7 +219,7 @@ void print_pre(session_rlock&           state,
          std::cout << "VALUE: id: " << i << "\n";
          return;
       default:
-         std::cout << "UNKNOWN!: id: " << i << "  " << obj.type() << "\n";
+         std::cout << "UNKNOWN!: id: " << i << "  " << obj.header()->get_type() << "\n";
          return;
    }
 }
@@ -351,7 +351,7 @@ void find_refs(session_rlock& state, object_id i, int depth)
 void print(session_rlock& state, id_address i, int depth)
 {
    auto obj = state.get(i);
-   switch (obj.type())
+   switch (obj.header()->get_type())
    {
       case node_type::binary:
          return print(state, obj.as<binary_node>(), depth);
@@ -364,7 +364,7 @@ void print(session_rlock& state, id_address i, int depth)
          std::cout << "VALUE: id: " << i << "\n";
          return;
       default:
-         std::cout << "UNKNOWN!: id: " << i << " " << obj.type() << " -\n";
+         std::cout << "UNKNOWN!: id: " << i << " " << obj.header()->get_type() << " -\n";
          return;
    }
 }
@@ -393,7 +393,7 @@ int  main(int argc, char** argv)
    std::vector<std::string> v;
    std::string              str;
 
-   int64_t batch_size = 1000;
+   int64_t batch_size = 10000;
 
    // Read the next line from File until it reaches the
    // end.
@@ -471,7 +471,7 @@ int  main(int argc, char** argv)
          };
 
          uint64_t seq3  = 0;
-         auto     ttest = temp_meta_type(5).to_bitfield();
+         auto     ttest = temp_meta_type(5);
 
          if (vm["dense-rand"].as<bool>())
          {
@@ -727,7 +727,7 @@ int  main(int argc, char** argv)
          auto read_thread = [&]() {};
 
          std::vector<std::unique_ptr<std::thread>> rthreads;
-         rthreads.reserve(14);
+         rthreads.reserve(15);
          std::atomic<bool>    done = false;
          std::atomic<int64_t> read_count;
          std::mutex           _lr_mutex;
@@ -742,9 +742,9 @@ int  main(int argc, char** argv)
                int     cn = 0;
                while (not done.load(std::memory_order_relaxed))
                {
-                  auto rtx    = rs.start_transaction(0);
                   int  roundc = 100000;
                   int  added  = 0;
+                  auto rtx    = rs.start_transaction(0);
                   for (int i = 0; i < batch_size; ++i)
                   {
                      ++added;
@@ -758,13 +758,16 @@ int  main(int argc, char** argv)
                         added = 0;
                      }
                   }
+                  read_count.fetch_add(added, std::memory_order_relaxed);
+                  added = 0;
                }
             };
             rthreads.emplace_back(new std::thread(read_loop));
          }
 
-         std::cout << "insert dense rand while reading " << rthreads.size() << " threads\n";
-         for (int ro = 0; ro < 10; ++ro)
+         std::cout << "insert dense rand while reading " << rthreads.size()
+                   << " threads  batch size: " << batch_size << "\n";
+         for (int ro = 0; ro < 20; ++ro)
          {
             auto start = std::chrono::steady_clock::now();
             for (int i = 0; i < count; ++i)
@@ -792,12 +795,14 @@ int  main(int argc, char** argv)
                              (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
                       << "  lowerbound/sec \n";
          }
-         std::this_thread::sleep_for(std::chrono::seconds(5));
-         db.print_stats(std::cout);
 
          done = true;
          for (auto& r : rthreads)
             r->join();
+
+         ARBTRIE_WARN("sleeping for 15 seconds");
+         std::this_thread::sleep_for(std::chrono::seconds(15));
+         db.print_stats(std::cout);
 
          if (sync_compact)
          {

@@ -1,0 +1,12 @@
+---
+description: build system rules
+globs: 
+alwaysApply: false
+---
+
+# Your rule content
+use Catch2 for tests
+use make for builds
+use full paths with rm commands 
+use build/debug and build/release directories 
+don't recreate build/debug or build/release 

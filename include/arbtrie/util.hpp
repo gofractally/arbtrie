@@ -1,15 +1,20 @@
 #pragma once
 #include <algorithm>
+#include <arbtrie/time.hpp>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>  // For atexit
 #include <format>
+#include <mutex>
+#include <thread>
 
 namespace arbtrie
 {
+
    inline uint64_t get_current_time_ms()
    {
-      return std::chrono::duration_cast<std::chrono::milliseconds>(
-                 std::chrono::steady_clock::now().time_since_epoch())
-          .count();
+      // Simply read from the TimeManager
+      return time_manager::getCurrentTimeMs();
    }
 
    template <class Src, class Dst>
@@ -25,6 +30,13 @@ namespace arbtrie
       static_assert(std::popcount(N) == 1, "N must be power of 2");
       return (v + (T(N) - 1)) & -T(N);
    }
+   template <typename T>
+   constexpr T round_up_multiple(T v, T N)
+   {
+      assert(std::popcount(N) == 1 && "N must be power of 2");
+      return (v + (N - 1)) & -N;
+   }
+
    template <unsigned int N, typename T>
    constexpr T round_down_multiple(T v)
    {
@@ -114,17 +126,41 @@ namespace arbtrie
    template <typename F>
    class scoped_exit
    {
-      F _cleanup;
+      F    _cleanup;
+      bool _active = true;  // Flag to track if this instance owns the cleanup responsibility
 
      public:
       explicit scoped_exit(F&& cleanup) : _cleanup(std::move(cleanup)) {}
-      ~scoped_exit() { _cleanup(); }
+      ~scoped_exit()
+      {
+         if (_active)
+            _cleanup();
+      }
 
-      // Prevent copying and moving
+      // Prevent copying
       scoped_exit(const scoped_exit&)            = delete;
       scoped_exit& operator=(const scoped_exit&) = delete;
-      scoped_exit(scoped_exit&&)                 = delete;
-      scoped_exit& operator=(scoped_exit&&)      = delete;
+
+      // Allow moving
+      scoped_exit(scoped_exit&& other) noexcept
+          : _cleanup(std::move(other._cleanup)), _active(other._active)
+      {
+         other._active = false;  // Transfer ownership
+      }
+
+      scoped_exit& operator=(scoped_exit&& other) noexcept
+      {
+         if (this != &other)
+         {
+            if (_active)
+               _cleanup();  // Call cleanup of current object before replacing it
+
+            _cleanup      = std::move(other._cleanup);
+            _active       = other._active;
+            other._active = false;  // Transfer ownership
+         }
+         return *this;
+      }
    };
 
    // Deduction guide

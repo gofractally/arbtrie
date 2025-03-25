@@ -174,6 +174,13 @@ namespace arbtrie
    {
       try
       {
+         // Special case for 1ms sleep
+         if (time_ms.count() <= 10)
+         {
+            std::this_thread::sleep_for(time_ms);
+            return !_stop.load(std::memory_order_relaxed);
+         }
+
          // Check if yield is being called infrequently
          auto now = std::chrono::steady_clock::now();
          auto time_since_last_yield =

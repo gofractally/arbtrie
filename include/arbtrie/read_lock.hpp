@@ -1,4 +1,5 @@
 #pragma once
+#include <arbtrie/id_alloc.hpp>
 #include <arbtrie/node_meta.hpp>
 
 namespace arbtrie
@@ -29,14 +30,15 @@ namespace arbtrie
       void release();
 
      private:
-      void unlock();
+      void         unlock();
+      node_header* copy_on_write(temp_meta_type meta);
 
-      bool            _released = false;
-      temp_meta_type  _locked_val;
+      // it starts out true because lock isn't acquired unless as() is called
+      // and exposes the protected memory to the caller
+      bool            _released = true;
       node_meta_type& _meta;
       read_lock&      _rlock;
       node_header*    _observed_ptr = nullptr;
-      sync_lock*      _sync_lock    = nullptr;
    };
 
    class object_ref;
@@ -45,7 +47,10 @@ namespace arbtrie
      * Ensures the read-lock is released so segments can be recycled
      * and ensures that all data access flows through a read_lock.
      *
-     * note: no mutexes are involved with this lock
+     * note: this is a wait-free lock that prevents segments from
+     * being reused until all reads are complete. It is cheap to
+     * acquire and release, but holding it a long time will increase
+     * memory usage and reduce cache performance.
      */
    class read_lock
    {
@@ -72,12 +77,10 @@ namespace arbtrie
       ~read_lock() { _session.release_read_lock(); }
 
       node_header* get_node_pointer(node_location);
-      void         update_read_stats(node_location, uint32_t node_size, uint64_t time);
+      //void         update_read_stats(node_location, uint32_t node_size, uint64_t time);
 
-      bool       is_synced(node_location);
-      sync_lock& get_sync_lock(int seg);
-
-      void free_object(node_location loc, uint32_t size);
+      bool is_read_only(node_location loc) const;
+      bool can_modify(node_location loc) const;
 
       /**
        * Check if an object should be cached based on its size and difficulty threshold
@@ -86,9 +89,17 @@ namespace arbtrie
        */
       bool should_cache(uint32_t size) const;
 
+      /**
+       * Records when an object has been freed to update segment metadata
+       * @param segment The segment number where the object is located
+       * @param obj_ptr Pointer to the object being freed
+       */
+      void freed_object(segment_number segment, const node_header* obj_ptr);
+
      private:
       friend class seg_alloc_session;
       friend class object_ref;
+      friend class modify_lock;
 
       read_lock(seg_alloc_session& s) : _session(s) { _session.retain_read_lock(); }
       read_lock(const seg_alloc_session&) = delete;

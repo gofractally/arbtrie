@@ -1,0 +1,303 @@
+# Design for Small Segments (OS Page Size, 4096)
+
+## Data Structure - Hiearchical Bitmap of Free Slots (0 alloc, 1 free)
+1 bit per cacheline (smallest unit of allocation)
+2 GB of to track 1 TB, 0.2% (to track every free cacheline)
+
+                                  Index Size
+64 cachelines per page (4096)    
+64 pages per block (256 kb)
+64 blocks per segment (16 MB)     (2MB for 256 TB DB)
+64 segments per group (1 GB)
+
+## Single Threaded Allocation
+  1. find the first free cacheline using the hierarchical bitmap
+  2. have multiple pages active, for different sized objects..
+     - basically, sort your pages by space till empty,
+       then insert into first page that will fit...
+     - only 64 possible sizes...
+     - bitset can tell you what pages are active and
+       the size, giving a single mask + clz to identify
+       the segment.. after alloc..you may end up with
+       many segments in the same zone, with no requests
+       coming in to fill those slots.... 
+     - let the overflow go and wait for garbage collection
+       to clean up later rather than increase book keeping
+       on initial alloc.
+
+## Simple Multi-Threaded Allocation
+  1. use an atomic hierarich bitmap and follow the same policy 
+  2. places all write threads in contention trying to claim the
+     the same slot... 
+
+## Advanced Threaded Allocation
+  1. give each thread a share of the pinned memory to focus on,
+     when full the thread can ask for a different share. 
+  2. removes all contention if the shares are large enough
+     that threads don't have to switch which share they are
+     working out of very often. 
+  3. background thread can monitor the most empty regions and
+     publish a queue so that the allocator threads don't have 
+     to spend time searching and once found don't have to switch
+     as often.
+
+## Most Frequently Used Cache
+    - First N MB of the File 
+    - scan node_meta with decay thread
+       - if a node is in the pinned area and doesn't have read bit, move it to the unpinned
+       - if a node is in the unpinned area, move it to the pinned 
+    - read theads could do this same check given they no longer require 32 MB per thread
+        for alloc. 
+
+## Copy while Modify Protection 
+    - Reference Counting & Unique Ownership prevent changes to shared nodes
+    - Any read thread knows it is either a unique owner or shared because it
+      traverses the same tree... so when it comes across a node to cache, it
+      is either the owner with write authority and knows it is not writing or
+      it is shared and knows no one else can be writing either.... therefore,
+      the read threads can easily promote cold to hot...
+    - Demoting hot to cold requires a background thread looking for 
+      "tires with chalk marks" to see who has parked to long... when it finds
+      a node..
+          a. try to increase the reference count, if it goes from 2+ to 3+ then
+             it knows that it got a clean reference and no one would dare modify
+             it. It can copy it to a new location, and atomic CAS the new location
+          b. if it comes across a ref count of 1, we have a potential race:
+             - the owner might be modifying it right now...
+             - even if you increase the ref count, the owner might not see it...
+             - publish your intent to copy a node...
+                - before every modify of a node...
+                    1. they check to see if the compactor is copying it
+                         - if so, they COW it themselves
+                    2. publish their intent to modify the node..
+                    3.   - double check to see if the compactor has it.
+                    4. write away
+                    5. clear their intent
+                - before every non-owning copy the background thread 
+                    1. expresses intent
+                    2. checks all threads to see if they are modifying it
+                    4. waits for them to complete 
+
+## Memory Protection 
+  - each page is either Read/Write (RW) or Read Only (RO) and after each commit of a transaction we need
+  to mark all RW pages with allocated data as RO. 
+  - all data in the cold section of the DB is automatically considered RO, mods should promote it to hot
+  - 1 bit per page of RAM tracks the state of pinned pages  (32 MB for 1 TB of pinned RAM)
+  - as threads allocate they set bits that are dirty in atomic hashmap..
+       - they should be operating in independent regions of the pinned memory so that
+       they are to conflicting with writes... at the 16MB level there is no false sharing
+       of the underlying bits
+  - before modifying a node
+       1. check if it is located in pinned memory
+       2. check if it is marked as RO 
+       3. if not, check to see if compactor is reading it.
+       4. if not, then you can modify it. 
+  - on commit the committing thread needs to:
+       1. mark all bits as RO
+            - have two sets of bits and toggle the active one so clearing is fast and atomic
+            - utilize a method similar to our read_lock...
+                - at the start of each mutation operation (upsert) record which set of bits you are using
+                   - you record the one the compact thread isn't currently using
+                - when you are done publish no bits..
+       2. wait until it knows all modifying threads have seen it
+            - after zeroing all bits, swap the target for mutation 
+            - wait until all other threads have updated to the new target (or nothing)
+            - iterate over your bits and clear them as you mprotect
+
+## Read Lock
+  - the challenge with freeing data is that it cannot be re-allocated unless you are sure
+  all active readers are done with it. If you free it because of a reference count decrease,
+  then you are sure, but if it is freed because a non-owner moved the underlying then we have
+  a problem.
+
+  - the solution is a free queue just like where the compactor pushed segments... any
+  page cleared by the background thread gets added to this queue... the problem is
+  the cache moves my move some data, then a node is released...thinks it is the last owner..
+
+  - so any time any thread clears the last cacheline on a page, it pushes that page index
+  into a queue... since many threads will be doing this each thread will needs its own queue.
+  - currently threads have contention over the "segment_meta::freed_bytes" field when they
+  release a node... under the new model each thread writes to its own single-producer,
+  single consumer queue. 
+  - a background thread pops from all other threads and pushes into a global queue
+  - read locks record the index in the global queue
+  - once all threads have moved past.. then the bits can be cleared... and mprotect(write) 
+   called on them... this will have to be a background thread due to the number of system
+   calls.
+
+   - these queues operating on the scale of 4kb... many nodes are 4kb... what if the
+   release queue operated on the node level instead of on the page level... 
+       - does not work because a node can be moved freeing cachelines but the
+       address is still being used.  
+
+Each thread
+   1. picks the first segment with free pages not already assigned to another thread
+        - keeps allocation near the front of the file, in pinned memory
+        - two allocation regions are possible, 1st not in use after pinned area
+   2. allocates from that segment (without conflict of other threads)
+        - until full, then goes back to step 1
+   3. compactor thread scans blocks for the most free pages...
+      then scans those pages for the most free cachelines
+      then moves nodes from those cachelines. 
+        - in this way, the compactor focuses on the most
+        sparse part of the database working to clear up larger
+        and larger bulk units. 
+
+  
+      completely free segments
+      - attempts to grab segment with most empty space
+         - look at popcount of blocks below
+   2. allocates pages from that region until it is full
+
+Large Objects
+1. large data needs to be allocated once and never moved until free
+2. it could be allocated with traditional malloc method
+3. it would never be pinned or read cached
+4. it would utilize a mutex...
+5. it could be msync separately
+6. no need to track per-cacheline bits for it...
+7. escapes my current 16 MB limit...
+8. no background threads will try to move it so doesn't
+   require any of that infrastrucutre... 
+
+
+Recovery on Crash
+1. each page is still populated with node_headers like segments are today...
+2. each node header requires the sequence of the ID allocation... so newer 
+    sequences numbers are more recent allocations (it is a 32 bit number and can wrap,
+                                                   meaning we must disambiguate within 31 bits
+                                                   worth if ID allocs).
+
+2. each page requires a sequence number so we know priority for duplicate
+   objects... 
+      - as pages are written we could write a log listing the page numbers
+      in the order that they are allocated... 
+      - each node contains the session sequence number... if each session
+      wrote the pages in the order they were filled...
+      36 bits per page logged... would need to log page + clines... 6 bits
+      for the clines... assume 48 bits per log entry, one log per thread,
+
+      - on sync, each thread logs the position of all other threads...
+      - given two nodes with the same session number, the most recent sequence wins
+      - given two nodes with different session numbers... use their log
+
+
+      Thread A  P1 P2 BP4
+           implies P1 P2 P3 P4
+
+      Thread B  P3 P4 AP2
+           implies P3 P4 P1 P2
+
+      This range is ambigious and so would rely on ID sequence to record the
+      whether Thread A or Thread B is the newest allocator of a given address...
+      however... recording a timestamp with each entry would solve the issue:
+
+      48 bits for page + line
+      16 bits for seconds, establishes order with 9 hours to know 
+      who is ahead or behind... could be ms from last commit time...
+      with this data we can now establish relative order between the
+      two threads with sub-second accuracy on the pages and if the pages
+      conflict, the per-id sequence number breaks the tie.
+
+      Therefore, we have N logs per thread, these logs track the order
+      in which pages need to be scanned in reverse when rebuilding the
+      ID database... 
+      
+      How long does this log have to be? 
+
+      Each page needs a sequence number or time stamp...but that would
+      be a massive amount of data... 32x as much data per page as the
+      bit tracking its free space, assuming we were only using seconds.
+
+      If all redundant copies of data get cleared before the sequence
+      number can wrap.. then we won't have a problem... this would 
+      require scanning the free space and zeroing it out so that it
+      doesn't confuse future recovery efforts... that doesn't solve..
+      on moving a node the sequence number could be updated by +1 which
+      however... moving a node means it is "read only" and read only
+      means both copies would be the same... therefore on recovery
+      it doesn't matter which one we choose.  It is only when we 
+      modify a node that we care about the version.. in which case
+      each modify could bump the sequence number...
+          - allocate and get seq 1...
+          - modify it 3 times...goes to 4
+          - release id...
+          - next thread allocate and gets 2... 
+          - now we have a problem.
+
+          - there are 7 to 10 bits in the node header that could be
+            used for a "version"... every modify updates this
+          - when the version "wraps" ask id_alloc for a new sequence
+          - 1000 edits..., if mod in place we don't need to increment.
+          - only when we COW do we increment... so this would be 
+            1000 transactions committed changing the same ID... but this
+            would be in the risky "modify live copy" rather than allocating
+            a new ID for the clone which would solve the ordering issue.
+
+
+  On Recovery We have
+  1. a node_meta file of unknown age... but we can assume ids 
+     on the same page are the same age.
+  2. pages with nodes, each node with a sequence number and an id
+  3. a set of IDs with exactly one canidate (easy)
+  4. a set of nodes with the same id
+      - but different sequence numbers, newest sequence number wins
+      - how do we know the sequence numbers didn't wrap?
+      - check with the old node_meta, does it confirm the sequence number by pointing to the newest, the other one, or something not found.
+          - do the other ids on the same page line up.. if so then that
+          saved node meta page was likely good... especially if after doing
+          recovery the ref counts line up.
+
+  5. do recovery, then compare to stale node_meta... 
+      
+
+
+
+       
+
+
+
+
+
+
+
+Benefits Over Existing Design
+1. Pinned Memory is Fixed, zero SSD wear unless sync mode is enforced
+2. Less contention on tracking free space in segments
+3. less dead space in RAM produces better caching
+4. 
+
+Pitfalls
+1. msync and mprotect are no longer large contigious writes 
+    - by allocating in 16 mb blocks, filling gaps in order
+     chances are there are some contig pages we could protect..
+    - we can pass large ranges of already protected pages so long 
+    as there is no write enabled in the middle. This reduces system
+    call overhead, who knows how the OS is tracking that and if
+    that is more effecient than being more precise. 
+
+    - for msync we would want to be careful about whether syncing
+    already read-only pages multiple times will write them again.
+    - we could skip msync and use io_uring to batch write the pages
+    in one system call... this might force extra work as the OS
+    has no way of knowing if the data is new data ..I suppose it could
+    look to see if the address range is the data that is already in
+    the file and skip writing... 
+
+    - mprotect is optional... we can still treat it as read-only
+    even if the OS doesn't... therefore, mprotect can be on a
+    best effort and should be outside the critical path unless
+    user really wants to wait for it before continuing 
+
+2. extra release queue per thread, plus global read_queue...
+    uses extra memory and requires larger queues when operating
+    at 4kb per entry rather than 32 MB... 
+
+32 GB of node_meta for 4 billion nodes representing at least 256 GB
+of node data assuming each node was 1 cacheline. 
+512 MB of cacheline free bits.... (not bad, best case with 4b)
+
+
+
+
+

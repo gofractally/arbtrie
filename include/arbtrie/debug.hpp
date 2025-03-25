@@ -196,6 +196,13 @@ namespace arbtrie
          return str.length() > max_len ? str.substr(0, max_len) : str;
       }
 
+      // Track the maximum location width seen so far
+      inline size_t& max_location_width()
+      {
+         static size_t width = 25;  // Start with default width of 25
+         return width;
+      }
+
       // Pre-computed spaces for indentation (avoids allocations)
       constexpr int MAX_INDENT = 32;  // Max reasonable indentation level
       static const std::array<std::string_view, MAX_INDENT> SPACES = []()
@@ -230,6 +237,13 @@ namespace arbtrie
                                                     static_cast<int>(filename.length()), filename.data(), line);
       std::string_view location(location_buf, location_len);
 
+      // Update max width if this location is longer
+      size_t& max_width = detail::max_location_width();
+      if (location_len > max_width)
+      {
+         max_width = location_len + 1;  // Add 1 for a bit of padding
+      }
+
       // Get thread name as string_view (no allocation)
       const char*      tname = thread_name();
       std::string_view thread_str;
@@ -245,9 +259,9 @@ namespace arbtrie
       int              indent_level = scope::indent();
       std::string_view indent = detail::SPACES[std::min(indent_level, detail::MAX_INDENT - 1)];
 
-      // Format the header (back to std::format, which is still efficient)
-      std::string header =
-          std::format("{:<25}  {:<9}  {:<20}  {}", location, thread_str, func_str, indent);
+      // Format the header using dynamic width
+      std::string header = std::format("{:<{}}  {:<9}  {:<20}  {}", location, max_width, thread_str,
+                                       func_str, indent);
 
       // Append the message using ostringstream for compatibility with existing code
       std::ostringstream output;

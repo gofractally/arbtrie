@@ -31,7 +31,7 @@ namespace arbtrie
    inline void seg_alloc_session::release_read_lock()
    {
       // Only release the lock if this is the last nested lock
-      if (not --_nested_read_lock)
+      if (not--_nested_read_lock)
          _session_rlock.unlock();
 
       assert(_nested_read_lock >= 0);
@@ -57,9 +57,10 @@ namespace arbtrie
     * @param segment The segment number containing the object
     * @param object_size The size of the object to free
     */
-   inline void seg_alloc_session::free_object(segment_number segment, uint32_t object_size)
+   template <typename T>
+   inline void seg_alloc_session::record_freed_space(segment_number seg, T* obj)
    {
-      _sega.free_object(segment, object_size);
+      _sega.record_freed_space(seg, obj);
    }
 
    /**
@@ -67,21 +68,40 @@ namespace arbtrie
     * 
     * @param segment The segment number
     * @return The last synced position in the segment
-    */
    inline size_t seg_alloc_session::get_last_sync_position(segment_number segment) const
    {
       return _sega.get_last_sync_position(segment);
    }
+    */
 
    /**
     * Check if a node location has been synced to disk.
     * 
     * @param loc The node location to check
     * @return true if the location is synced, false otherwise
-    */
    inline bool seg_alloc_session::is_synced(node_location loc) const
    {
       return _sega.is_synced(loc);
+   }
+    */
+
+   /**
+    * Check if a node location is read-only
+    * 
+    * @param loc The node location to check
+    * @return true if the location is read-only, false otherwise
+    */
+   inline bool seg_alloc_session::is_read_only(node_location loc) const
+   {
+      return _sega.is_read_only(loc);
+   }
+
+   /**
+    * 
+    */
+   inline bool seg_alloc_session::can_modify(node_location loc) const
+   {
+      return _sega.can_modify(_session_num, loc);
    }
 
    /**
@@ -114,4 +134,5 @@ namespace arbtrie
    {
       return _session_rng.next();
    }
+
 }  // namespace arbtrie

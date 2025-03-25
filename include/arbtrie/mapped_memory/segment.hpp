@@ -1,0 +1,309 @@
+#pragma once
+#include <arbtrie/config.hpp>
+#include <arbtrie/debug.hpp>
+#include <arbtrie/mapping.hpp>
+#include <arbtrie/node_header.hpp>
+#include <arbtrie/padded_atomic.hpp>
+#include <arbtrie/size_weighted_age.hpp>
+#include <cassert>
+#include <cstdint>
+
+namespace arbtrie
+{
+   namespace mapped_memory
+   {
+      /// meta data about each segment used by the compactor to
+      /// quickly determine which segments are eligible for compaction and
+      /// to track data about the segments once segments are read-only.
+      ///
+      /// - stored in an array in allocator_state indexed by segment number
+      /// - data is reconstructed on crash recovery and not synced
+      struct segment_meta
+      {
+        private:
+         /// tracks the virtual age of the segment, impacting its priority for
+         /// pinning and compaction, updated only by the session thread that
+         /// owns the segment when the segment becomes entirely read only and
+         /// therefore eligible for compaction. From this point on it is only
+         /// read by the compaction thread.
+         std::atomic<uint64_t> vage;
+
+         /// tracks the space that could be reclaimed if compacted
+         /// written to by any thread objects are released or moved enabling
+         /// the space to be reclaimed if compacted.
+         std::atomic<uint32_t> freed_space;
+
+         enum segment_flags : uint32_t
+         {
+            read_only = 1 << 0,
+            pinned    = 1 << 1
+         };
+
+         /// tracks if the segment is read only, set by the session thread when the
+         /// sync() method has moved the _first_writable_page to the end of the segment
+         /// cleared by the provider thread when the segment is prepared for reuse.
+         std::atomic<uint32_t> flags;
+
+        public:
+         void prepare_for_reuse()
+         {
+            freed_space.store(0, std::memory_order_relaxed);
+            flags.fetch_and(~read_only, std::memory_order_relaxed);
+         }
+
+         void add_freed_space(uint32_t size)
+         {
+            assert(size + freed_space.load(std::memory_order_relaxed) <= segment_size);
+            freed_space.fetch_add(size, std::memory_order_relaxed);
+         }
+
+         void prepare_for_compaction(uint64_t vage_value)
+         {
+            vage.store(vage_value, std::memory_order_relaxed);
+            flags.fetch_or(read_only, std::memory_order_relaxed);
+         }
+         void set_pinned(bool is_pinned)
+         {
+            if (is_pinned)
+               flags.fetch_or(pinned, std::memory_order_relaxed);
+            else
+               flags.fetch_and(~pinned, std::memory_order_relaxed);
+         }
+         bool     is_read_only() const { return flags.load(std::memory_order_relaxed) & read_only; }
+         bool     is_pinned() const { return flags.load(std::memory_order_relaxed) & pinned; }
+         uint32_t get_freed_space() const { return freed_space.load(std::memory_order_relaxed); }
+         uint64_t get_vage() const { return vage.load(std::memory_order_relaxed); }
+      };  // segment_meta
+
+      /**
+       * Meta data about every possible segment.
+       */
+      struct segment_data
+      {
+         template <typename T>
+         void add_freed_space(segment_number segment, const T* obj)
+         {
+            meta[segment].add_freed_space(obj->_nsize);
+         }
+
+         // initial condition of a new segment, given a starting age
+         void prepare_for_reuse(segment_number segment) { meta[segment].prepare_for_reuse(); }
+         void prepare_for_compaction(segment_number segment, uint64_t vage)
+         {
+            meta[segment].prepare_for_compaction(vage);
+         }
+         uint32_t get_freed_space(segment_number segment) const
+         {
+            return meta[segment].get_freed_space();
+         }
+         uint64_t get_vage(segment_number segment) const { return meta[segment].get_vage(); }
+         bool is_read_only(segment_number segment) const { return meta[segment].is_read_only(); }
+         bool is_pinned(segment_number segment) const { return meta[segment].is_pinned(); }
+         void set_pinned(segment_number segment, bool pinned) { meta[segment].set_pinned(pinned); }
+
+        private:
+         segment_meta meta[max_segment_count];
+      };
+
+      static constexpr size_t segment_footer_size = 64;
+
+      /**
+       * The main unit of memory allocation, can be thought of as a "super page" because
+       * it is at this resolution that memory is mlocked, madvised, and it determines the
+       * largest size that can be allocated. 
+       * 
+       * Data is written in append only fashion, and once a transaction is committed,
+       * everything that has been written becomes mprotected as read only. At this point
+       * the user can also call sync() to flush the data to disk.
+       * 
+       * It is an invariant that _first_unsynced_page <= _first_writable_page <= _alloc_pos / os_page_size
+       * because we never want to modify data that has already been synced to disk.
+       * 
+       * The segment is designed to hold a sequence of object_header derived objects where
+       * each object is aligned on cpu cache line boundaries. Each object_header contains a
+       * type and _nsize field which allows us to navigate the objects in order through the
+       * segment. 
+       */
+      struct segment
+      {
+         uint32_t get_alloc_pos() const { return _alloc_pos.load(std::memory_order_relaxed); }
+
+         /// @brief  the amount of space available for allocation
+         uint32_t free_space() const { return end() - alloc_ptr(); }
+
+         char*       alloc_ptr() { return data + get_alloc_pos(); }
+         const char* alloc_ptr() const { return data + get_alloc_pos(); }
+         uint32_t    end_pos() const { return segment_size - segment_footer_size; }
+         const char* end() const { return data + end_pos(); }
+
+         /// @brief  records the time allocation was completed
+         void finalize()
+         {
+            _close_time_usec = arbtrie::get_current_time_ms();
+            //             ARBTRIE_WARN("segment::finalize: _close_time_usec: ", _close_time_usec,
+            //                         " _alloc_pos (seg_size-footer_size): ",
+            //                         _alloc_pos.load(std::memory_order_relaxed), " free_space: ", free_space());
+            assert(is_finalized());
+         }
+
+         /// @brief  returns true if finalize() has been called setting the _close_time_usec
+         bool is_finalized() const { return _close_time_usec != 0; }
+
+         void set_alloc_pos(uint32_t pos)
+         {
+            assert(pos <= end_pos());
+            _alloc_pos.store(pos, std::memory_order_relaxed);
+         }
+
+         /// @brief  helper to convert ptr to pos
+         uint32_t set_alloc_ptr(char* ptr)
+         {
+            auto idx = ptr - data;
+            set_alloc_pos(idx);
+            return idx;
+         }
+
+         segment()
+         {
+            _alloc_pos           = 0;
+            _first_writable_page = 0;
+            _session_id          = -1;
+            _seg_sequence        = -1;
+         }
+         bool can_alloc(uint32_t size) const
+         {
+            assert(size == round_up_multiple<64>(size));
+            // leave enough room for the ending allocator header
+            return get_alloc_pos() + size <= sizeof(data) - 64;
+         }
+         template <typename T>
+         T* alloc(uint32_t size, auto&&... args)
+         {
+            assert(can_alloc(size));
+            auto prev = _alloc_pos.fetch_add(size, std::memory_order_relaxed);
+            return new (data + prev) T(size, std::forward<decltype(args)>(args)...);
+         }
+         void unalloc(uint32_t size)
+         {
+            assert(size == round_up_multiple<64>(size));
+            assert(size <= get_alloc_pos());
+
+            auto prev = _alloc_pos.fetch_sub(size, std::memory_order_relaxed);
+            assert(prev >= size);
+         }
+
+         /**
+          * We can only modify data in the range [_first_writable_page*os_page_size, _alloc_pos)
+          */
+         bool can_modify(uint32_t pos) const
+         {
+            if (pos >= get_alloc_pos())
+               return false;
+            //const auto page = pos / system_config::os_page_size();
+            assert(pos / system_config::os_page_size() == pos >> system_config::os_page_size_log2);
+            const auto page = pos >> system_config::os_page_size_log2;
+            if (page < _first_writable_page)
+               return false;
+            return pos < (segment_size - segment_footer_size);
+         }
+
+         inline uint32_t get_first_write_pos() const
+         {
+            return _first_writable_page * system_config::os_page_size();
+         }
+
+         /**
+          * Returns true if the entire segment is read only
+          */
+         bool is_read_only() const { return _first_writable_page == pages_per_segment; }
+
+         void sync(sync_type st, int top_root_index, id_address top_root)
+         {
+            auto  alloc_pos          = get_alloc_pos();
+            char* alloc_ptr          = data + alloc_pos;
+            auto  ahead              = new (alloc_ptr) allocator_header;
+            ahead->_time_stamp_ms    = arbtrie::get_current_time_ms();
+            ahead->_top_node_update  = top_root_index;
+            ahead->_top_node_id      = top_root;
+            ahead->_prev_aheader_pos = _last_aheader_pos;
+            auto lah                 = get_last_aheader();
+
+            if (lah->is_allocator_header())
+               ahead->_start_checksum_pos = _last_aheader_pos + lah->_nsize;
+
+            auto cheksum_size =
+                alloc_pos + offsetof(allocator_header, _checksum) - ahead->_start_checksum_pos;
+
+            assert(alloc_pos <= segment_size - 64);
+            _last_aheader_pos = alloc_pos;
+
+            uint32_t next_page_pos =
+                round_up_multiple<uint32_t>(alloc_pos + 64, system_config::os_page_size());
+
+            if (is_finalized())
+               next_page_pos = segment_size;
+            else if (next_page_pos >= end_pos())
+               finalize();
+
+            auto new_alloc_pos = std::min<uint32_t>(next_page_pos, end_pos());
+
+            // Set size to reach page boundary
+            ahead->_nsize    = new_alloc_pos - alloc_pos;
+            ahead->_checksum = XXH3_64bits(data + ahead->_start_checksum_pos, cheksum_size);
+
+            auto old_first_writable_page_pos = uint32_t(_first_writable_page)
+                                               << system_config::os_page_size_log2;
+
+            _first_writable_page = next_page_pos >> system_config::os_page_size_log2;
+            auto protect_size    = next_page_pos - old_first_writable_page_pos;
+            assert(protect_size > 0);
+            set_alloc_pos(new_alloc_pos);
+            /*   ARBTRIE_INFO(
+                "sync: protect_size: ", double(protect_size) / system_config::os_page_size(),
+                " old_first_writable_page_pos: ", old_first_writable_page_pos,
+                " next_page_pos: ", next_page_pos);
+                */
+            if (mprotect(data + old_first_writable_page_pos, protect_size, PROT_READ))
+            {
+               ARBTRIE_ERROR("mprotect failed: ", strerror(errno));
+               throw std::runtime_error("mprotect failed");
+            }
+            assert(is_finalized() ? is_read_only() : true);
+         }
+
+         char data[segment_size - segment_footer_size];
+         // the next position to allocate data, only
+         // modified by the thread that owns this segment and
+         // set to uint64_t max when this segment is ready
+         // to be marked read only to the seg_allocator, allocator
+         // thread must check _first_writable_page before before using
+         // _alloc_pos.
+        private:
+         std::atomic<uint32_t> _alloc_pos = 0;  /// number of bytes allocated from data
+        public:
+         /// The os_page number of the first page that can be written to
+         /// advanced by the sync() thread... sync thread waits until all
+         /// modifying threads are done before enforcing the write protection
+         uint16_t _first_writable_page = 0;
+         uint16_t _session_id          = -1;  ///< the session id that allocated this segment
+         uint32_t _seg_sequence        = 0;  ///< the sequence number of this sessions segment alloc
+         uint64_t _open_time_usec  = 0;  ///< unix time in microseconds this segment started writing
+         uint64_t _close_time_usec = 0;  ///< unix time in microseconds this segment was closed
+
+         // the provider thread assigns sequence numbers to segments as they are
+         // prepared, -1 means the segment is in the free list and not used
+         uint32_t _provider_sequence = 0;
+         uint32_t _last_aheader_pos  = 0;
+         uint64_t _unused;
+
+         const allocator_header* get_last_aheader() const
+         {
+            return (const allocator_header*)(data + _last_aheader_pos);
+         }
+         // Tracks accumulated virtual age during allocation
+         size_weighted_age _vage_accumulator;
+      };  // __attribute((packed));
+      static_assert(sizeof(segment) == segment_size);
+
+   }  // namespace mapped_memory
+}  // namespace arbtrie

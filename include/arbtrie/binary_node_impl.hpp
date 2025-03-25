@@ -1,7 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <arbtrie/debug.hpp>
-
+#include <arbtrie/fast_memcpy.hpp>
 namespace arbtrie
 {
    constexpr void lower_bound_idx_pos(int n, int key, uint16_t* table)
@@ -304,6 +304,11 @@ namespace arbtrie
     */
    inline void copy_binary_node(binary_node* ptr, const binary_node* src)
    {
+      if (src->_binary_node_opt)
+      {
+         memcpy_aligned_64byte(ptr, src, src->size());
+         return;
+      }
       memcpy(ptr, src, sizeof(binary_node));
       memcpy(ptr->key_hashes(), src->key_hashes(), ptr->_num_branches);
       memcpy(ptr->value_hashes(), src->value_hashes(), ptr->_num_branches);
@@ -328,6 +333,7 @@ namespace arbtrie
       }
       assert(src->validate());
       assert(ptr->validate());
+      ptr->_binary_node_opt = 1;
       if (src->has_checksum())
          ptr->update_checksum();
    }
@@ -427,6 +433,7 @@ namespace arbtrie
             assert(get_key_val_ptr(find_key_idx(k))->key() == k);
          }
       }
+      _binary_node_opt = 1;
       assert(validate());
    }
 

@@ -1,6 +1,6 @@
 #pragma once
-
 #include <sys/mman.h>
+#include <arbtrie/config.hpp>
 #include <atomic>
 #include <filesystem>
 #include <memory>
@@ -9,38 +9,6 @@
 namespace arbtrie
 {
 
-   enum access_mode
-   {
-      read_only  = 0,
-      read_write = 1
-   };
-
-   /**
-    * For ACID **Durablity** requriments this configures
-    * how agressive triedent will be in flushing data to disk.
-    * 
-    * 0. none - msync() will not be called and data will be
-    *      lost if the computer crashes. So long as the OS
-    *      doesn't crash your data is safe even if your
-    *      program crashes.
-    * 1. async - msync(MS_ASYNC) will be used which will tell
-    *      the OS to write as soon as possible without blocking
-    *      the caller. This will write data frequently, and
-    *      churn the SSD more than none. 
-    * 2. sync - msync(MS_SYNC) will be used to block caller
-    *      when they update the top-root. In this mode the
-    *      database is "gauranteed" to be recoverable assuming
-    *      the OS didn't silently buffer and the disks didn't
-    *      silently buffer contrary to the implied behavior
-    *      of msync()
-    *
-    */
-   enum sync_type
-   {
-      none  = 0,  // on program close or as OS chooses
-      async = 1,  // nonblocking, but write soon
-      sync  = 2   // block until changes are committed to disk
-   };
    // none is implimented by specifiying MS_ASYNC and MS_SYNC which will
    // cause msync to fail if not checked.
    inline int msync_flag(sync_type st)

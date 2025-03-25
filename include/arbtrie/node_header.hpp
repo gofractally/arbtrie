@@ -24,10 +24,123 @@ namespace arbtrie
       return uint8_t(b - 1);
    }
 
+   enum class header_type : uint32_t
+   {
+      node      = 0,
+      allocator = 1
+   };
+
+   /**
+    *  Designed to overlap with the object_header data structure and enable
+    *  discriminating between node_header and allocator_header types at 
+    *  runtime using the _header_type flag.
+    * 
+    *  Every time a transaction is committed or a segment is finalized, an
+    *  alocator_header is written summarizing the commit and/or empty space
+    *  created by write protection. 
+    *  
+    *  Because the allocator works on 64 byte cachelines, the allocator_header
+    *  is allowed to be the same size with little penalty. Therefore it is used
+    *  track useful statistics and error recovery information. Furthermore, when
+    *  protecting or msyncing data the OS requires page aligned addresses which
+    *  means that in most cases the allocator_header will occupy the free space
+    *  in the left over bytes at the end of the last writable page. 
+    * 
+    *  A segment is a sequence of allocator_headers and node_headers.
+    * [ n n n n a n n a...] footer
+    *  ^--------^-----^---------|
+    * 
+    * The allocation_header stores the checksum of all data from the
+    * end of the last allocator_header to the start of the checksum field
+    * in this allocator_header. In this way, any empty spaces are not
+    * included in the checksum.
+    * 
+    * The last record in a segment is always an allocator_header and it
+    * covers the span from the last node written to the segment footer. The
+    * segment footer contains a pointer to the start of the last allocation_header,
+    * and each allocation_header contains a pointer to the prior allocator_header,
+    * enabling a linked list of allocator_headers to be traversed to validate the
+    * checksum of the entire segment.
+    */
+   struct allocator_header
+   {
+      enum types : uint8_t
+      {
+         /*
+         end_of_segment   = 0,
+         start_of_segment = 1,
+         free_zone        = 2
+         */
+      };
+      bool is_allocator_header() const
+      {
+         return header_type(_header_type) == header_type::allocator;
+      }
+      /**
+       *  The checksum of the region [this-_start_checksum_offset, _start_checksum_offset + _checksum_bytes)
+       * 
+       *  Typically this would align with the start of the prior allocator_header, but there is not always
+       *  a prior allocator_header.
+       */
+      uint64_t _time_stamp_ms = 0;   ///< the time the data was committed
+      uint32_t _ntype : 3     = 0;   ///< deepnds on _header_type
+      uint32_t _nsize : 25    = 64;  ///< bytes allocated for this object
+      uint32_t _unused : 3    = 0;   ///< truly unused bits, should never be written to
+      /// used by segment allocator for bookkeeping, changes the meaning of _ntype
+      uint32_t _header_type : 1 = 1;
+
+      /// when committing a transaction, top_node fields are set to record the update to the
+      /// top node in the event of recovery and potential corruption of the read-write top level
+      /// data.
+      uint32_t _top_node_update = -1;  ///< the index of a top node being committed with this update
+      id_address _top_node_id;         ///< the id of the top node being committed with this update
+
+      /**
+       * Documents the source of the segment the data came from, which can facilitate establishing
+       * a total ordering of nodes during recovery, may not be needed, but we have 64 bytes to
+       * play with
+       */
+      uint32_t _source_seg = -1;
+      /**
+       * When compacting data from another segment, this field tells us the original
+       * age of the source data, the compactor will use this age for all nodes it compacts
+       * until it comes across an updated age.
+       */
+      uint64_t _source_age_ms = 0;
+
+      uint32_t _prev_aheader_pos = 0;  ///< absolute position from start of the segment
+      /// the position in the current segment where the checksumed data starts
+      uint32_t _start_checksum_pos = 0;
+
+      /** placed at the end of the allocator_header, so everything before this can be included
+       * in the checksum.
+       */
+      uint64_t _checksum = 0;
+
+      /// regardless of what _nsize is, the allocations should always be 64 byte cacheline aligned
+      uint32_t          capacity() const { return (_nsize + 63) & -64; }
+      allocator_header* next() const { return (allocator_header*)(((char*)this) + capacity()); }
+      const char*       start_checksum_pos(const char* segment_base) const
+      {
+         return segment_base + _start_checksum_pos;
+      }
+      const allocator_header* prev(const char* segment_base) const
+      {
+         return (const allocator_header*)(segment_base + _prev_aheader_pos);
+      }
+   };
+   static_assert(sizeof(allocator_header) <= 64);
+
    /**
     * Base class for all objects that can be addressed and stored in the database.
     * Contains the core identity and type information, but doesn't include branch
     * region or number of branches which are specific to node types.
+    * 
+    * @note the object_header must align with the mapped_memory::allocation_header such that
+    * _header_type bit is in the same position in both types. It cannot be the
+    * first byte of the object because of checksum requirements and we cannot
+    * use other types of inheritance to enforce this alignment due to the use of
+    * bitfields. This invariant is checked in the unit tests.
     */
    struct object_header
    {
@@ -36,9 +149,17 @@ namespace arbtrie
       uint32_t   sequence : 24;  // 24-bit sequence number, set only during construction
       id_address _node_id;       // the ID of this object
 
-      uint32_t _ntype : 3;    // node_type
-      uint32_t _nsize : 25;   // bytes allocated for this object
-      uint32_t _unused2 : 4;  // truly unused bits, should never be written to
+      uint32_t _ntype : 3;   ///< node_type
+      uint32_t _nsize : 25;  ///< bytes allocated for this object
+      uint32_t _unused : 3;  ///< truly unused bits, should never be written to
+
+      /// used by segment allocator for bookkeeping, changes the meaning of _ntype
+      uint32_t _header_type : 1 = 0;  /// = 0 for node_header, = 1 for allocator_header
+
+      bool is_allocator_header() const
+      {
+         return header_type(_header_type) == header_type::allocator;
+      }
 
       // Constructor
       inline object_header(uint32_t size, id_address_seq nid, node_type type = node_type::freelist)
@@ -91,6 +212,11 @@ namespace arbtrie
             return (checksum == calculate_checksum());
          return true;
       }
+      void assert_checksum() const
+      {
+         if (not validate_checksum())
+            throw std::runtime_error("checksum validation failed");
+      }
 
       // Return next object in memory
       inline node_header* next() const { return (node_header*)(((char*)this) + object_capacity()); }
@@ -113,7 +239,9 @@ namespace arbtrie
       id_region _branch_id_region;  // the ID region branches from this node are allocated to
 
       uint16_t _num_branches : 9;  // number of branches that are set
-      uint16_t _unused : 7;        // unused bits
+      uint16_t _binary_node_opt : 1 =
+          0;                 ///< used to indicate whetehr binary_node is in optimized layout
+      uint16_t _unused : 6;  // unused bits
 
       inline node_header(uint32_t       size,
                          id_address_seq nid,

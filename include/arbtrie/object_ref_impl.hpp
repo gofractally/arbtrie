@@ -17,25 +17,6 @@ namespace arbtrie
    {
    }
 
-   inline void object_ref::store(temp_meta_type tmt, auto memory_order)
-   {
-      if constexpr (not debug_memory)
-      {
-         _meta.store(_cached = tmt, memory_order);
-      }
-      else
-      {
-         auto clok = _cached.loc();
-         auto old  = _meta.exchange(_cached = tmt, memory_order);
-         if (old.loc() != clok)
-         {
-            ARBTRIE_WARN(
-                "stomping on location that changed from cache,"
-                " this may result in memory leak until compacted");
-         }
-      }
-   }
-
    template <typename Type, bool SetReadBit>
    const Type* object_ref::as() const
    {
@@ -44,15 +25,10 @@ namespace arbtrie
       return reinterpret_cast<const Type*>(header());
    }
 
-   inline auto object_ref::try_move(node_location expected_prior_loc, node_location move_to_loc)
-   {
-      return _meta.try_move(expected_prior_loc, move_to_loc);
-   }
-
    template <typename T, bool SetReadBit>
    inline const T* object_ref::header() const
    {
-      assert(_meta.load(std::memory_order_relaxed).ref());
+      assert(_meta.load(std::memory_order_relaxed).ref);
       auto m = _meta.load(std::memory_order_acquire);
       auto r = (const T*)_rlock.get_node_pointer(m.loc());
       if constexpr (debug_memory)
@@ -69,6 +45,7 @@ namespace arbtrie
       return r;
    }
 
+   /*
    template <typename T>
    std::pair<const T*, node_location> object_ref::try_move_header()
    {
@@ -78,6 +55,7 @@ namespace arbtrie
       }
       return {nullptr, node_location::from_absolute(0)};
    }
+   */
 
    inline void object_ref::maybe_update_read_stats(uint32_t size) const
    {
@@ -86,24 +64,22 @@ namespace arbtrie
          ARBTRIE_WARN("rcache_queue is full, skipping cache");
          return;
       }
-      if (_rlock.should_cache(size) and _meta.try_set_read_or_pending_cache())
+      if (_rlock.should_cache(size) and _rlock.is_read_only(_cached.loc()) and
+          _meta.try_inc_activity())
          _rlock._session._rcache_queue.push(address());
    }
 
    inline const node_header* object_ref::release()
    {
       auto prior = _meta.release();
-      if (prior.ref() > 1)
+      if (prior.ref > 1)
          return nullptr;
 
-      auto result = _rlock.get_node_pointer(prior.loc());
-
-      auto ploc    = prior.loc();
-      auto obj_ptr = _rlock.get_node_pointer(ploc);
-
+      auto ploc = prior.loc();
+      auto nptr = _rlock.get_node_pointer(ploc);
       _rlock.free_meta_node(_address);
-      _rlock.free_object(ploc, obj_ptr->object_capacity());
-      return result;
+      _rlock.freed_object(get_segment_num(ploc), nptr);
+      return nptr;
    }
 
 }  // namespace arbtrie

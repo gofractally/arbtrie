@@ -24,11 +24,13 @@ namespace arbtrie
       // could be read while the return value of this method is in scope can
       // be reused (overwritten)
       read_lock lock();
-      void      sync(sync_type st);
+      void      sync(sync_type st, int top_root_index, id_address top_root);
 
       ~seg_alloc_session();
       seg_alloc_session(seg_alloc_session&& mv);
-      seg_alloc_session& operator=(seg_alloc_session&& mv);
+
+      // we would have to change reference members to be pointers to allow this
+      seg_alloc_session& operator=(seg_alloc_session&& mv) = delete;
 
       uint64_t count_ids_with_refs();
 
@@ -40,21 +42,29 @@ namespace arbtrie
 
       void retain_read_lock();
       void release_read_lock();
+
+      void init_active_segment();
       void finalize_active_segment();
+
+      //   void end_modify();
+      //   bool try_modify_segment(segment_number segment_num);
 
       seg_alloc_session(seg_allocator& a, uint32_t ses_num);
       seg_alloc_session()                                    = delete;
       seg_alloc_session(const seg_alloc_session&)            = delete;
       seg_alloc_session& operator=(const seg_alloc_session&) = delete;
 
-      inline void free_object(segment_number segment, uint32_t object_size);
-
-      inline size_t get_last_sync_position(segment_number segment) const;
+      template <typename T>
+      inline void record_freed_space(segment_number seg, T* obj);
 
       /**
        * Check if a node location has been synced to disk.
-       */
       inline bool is_synced(node_location loc) const;
+       */
+      inline bool is_read_only(node_location loc) const;
+
+      /// requires segment be owned by this session and loc not on read-only page
+      inline bool can_modify(node_location loc) const;
 
       /**
        * Get the cache difficulty value which is used for determining read bit updates
@@ -74,7 +84,10 @@ namespace arbtrie
        */
       inline uint32_t get_random();
 
-      void                                   unalloc(uint32_t size);
+      /**
+       * Reclaims the most recently allocated size bytes
+       */
+      bool                                   unalloc(uint32_t size);
       std::pair<node_location, node_header*> alloc_data(uint32_t       size,
                                                         id_address_seq adr_seq,
                                                         uint64_t       vage = 0);
@@ -91,10 +104,14 @@ namespace arbtrie
       uint32_t       _session_num;  // index into _sega's active sessions list
       bool           _alloc_to_pinned = true;
 
-      segment_number                 _alloc_seg_num  = -1ull;
-      mapped_memory::segment_header* _alloc_seg_ptr  = nullptr;
-      mapped_memory::segment_meta*   _alloc_seg_meta = nullptr;
-      bool                           _in_alloc       = false;
+      void lock_alloc_segment();
+      void assert_modify_segment(segment_number segment_num);
+
+      segment_number                      _alloc_seg_num  = -1ull;
+      mapped_memory::segment*             _alloc_seg_ptr  = nullptr;
+      mapped_memory::segment_meta*        _alloc_seg_meta = nullptr;
+      mapped_memory::dirty_segment_queue& _dirty_segments;
+      bool                                _in_alloc = false;
 
       // RNG for cache decisions - initialized with session number for reproducibility
       lehmer64_rng _session_rng;
@@ -106,4 +123,5 @@ namespace arbtrie
       // Reference to the read cache queue from seg_allocator
       rcache_queue_type& _rcache_queue;
    };
+
 }  // namespace arbtrie

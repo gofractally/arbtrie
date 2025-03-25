@@ -26,8 +26,7 @@ namespace arbtrie
    template <typename NodeType, typename... CArgs>
    object_ref make(id_region reg, session_rlock& state, CArgs&&... cargs)
    {
-      return make<NodeType>(
-          reg, state, [](auto&&) {}, std::forward<CArgs>(cargs)...);
+      return make<NodeType>(reg, state, [](auto&&) {}, std::forward<CArgs>(cargs)...);
    }
 
    template <typename NodeType, typename... CArgs>
@@ -43,8 +42,7 @@ namespace arbtrie
    template <typename NodeType, typename... CArgs>
    object_ref remake(object_ref& r, CArgs&&... cargs)
    {
-      return remake<NodeType>(
-          r, [](auto&&) {}, std::forward<CArgs>(cargs)...);
+      return remake<NodeType>(r, [](auto&&) {}, std::forward<CArgs>(cargs)...);
    }
 
    template <typename NodeType>
@@ -87,15 +85,13 @@ namespace arbtrie
                          std::invocable<NodeType*> auto&& uinit,
                          CArgs&&... cargs)
    {
-      assert(r.type() == src->get_type());
-      // assert(r.template as<NodeType>() == src);
-
       if constexpr (mode.is_shared())
          retain_children(r.rlock(), src);
 
       auto asize = NodeType::alloc_size(src, cfg, cargs...);
 
-      auto copy_init = [&](node_header* cl) {
+      auto copy_init = [&](node_header* cl)
+      {
          uinit(new (cl)
                    NodeType(asize, cl->address_seq(), src, cfg, std::forward<CArgs>(cargs)...));
       };
@@ -167,8 +163,7 @@ namespace arbtrie
                     const clone_config& cfg,
                     CArgs&&... cargs)
    {
-      return clone_impl<mode>(
-          reg, r, src, cfg, [](auto) {}, std::forward<CArgs>(cargs)...);
+      return clone_impl<mode>(reg, r, src, cfg, [](auto) {}, std::forward<CArgs>(cargs)...);
    }
 
    uint8_t object_header::calculate_checksum() const
@@ -185,13 +180,10 @@ namespace arbtrie
       // prevent other threads from modifying the root while we are
       _db->modify_lock(index).lock();
 
-      // must take the lock to prevent a race condition around
-      // retaining the current top root... otherwise we must
-      //     read the current top root address,
-      //     read / lookup the meta for the address
-      //     attempt to retain the meta while making sure the top root
-      //     hasn't changed, the lock is probably faster anyway
-      std::unique_lock lock(_db->_root_change_mutex[index]);
+      // this lock is not needed because anyone who would modify the root
+      // already has modify lock, we don't need to grab this lock until
+      // we go to set the root on commit to synchronize with the readers
+      // std::unique_lock lock(_db->_root_change_mutex[index]);
 
       return node_handle(
           *this, id_address::from_int(_db->_dbm->top_root[index].load(std::memory_order_relaxed)));
@@ -260,7 +252,6 @@ namespace arbtrie
 
    database::~database()
    {
-      _sega.sync(sync_type::sync);
       _dbm->clean_shutdown = true;
       _dbfile.sync(sync_type::sync);
    }
@@ -304,9 +295,7 @@ namespace arbtrie
 
    id_address make_value(id_region reg, session_rlock& state, const value_type& val)
    {
-      return make<value_node>(
-                 reg, state, [](auto) {}, val)
-          .address();
+      return make<value_node>(reg, state, [](auto) {}, val).address();
    }
    std::optional<node_handle> write_session::upsert(node_handle& r, key_view key, node_handle sub)
    {
@@ -436,23 +425,21 @@ namespace arbtrie
          }
       }
 
-      id_address result;
-      switch (root.type())
+      id_address         result;
+      const node_header* nh = root.header();
+      switch (nh->get_type())
       {
          case node_type::value:
-            result = upsert_value<mode>(root, key);
+            result = upsert_value<mode>(root, nh->as<value_node>(), key);
             break;
          case node_type::binary:
-            result = upsert_binary<mode>(root, key);
+            result = upsert_binary<mode>(root, nh->as<binary_node>(), key);
             break;
          case node_type::setlist:
-            result = upsert_inner<mode, setlist_node>(root, key);
+            result = upsert_inner<mode, setlist_node>(root, nh->as<setlist_node>(), key);
             break;
-            //     case node_type::bitset:
-            //       result = upsert_inner<mode, bitset_node>(root, key, val);
-            //      break;
          case node_type::full:
-            result = upsert_inner<mode, full_node>(root, key);
+            result = upsert_inner<mode, full_node>(root, nh->as<full_node>(), key);
             break;
          default:
             throw std::runtime_error("unhandled type in upsert");
@@ -467,12 +454,6 @@ namespace arbtrie
          assert((result != root.address()));
          release_node(root);
       }
-      //  else // if unique mode
-      //   We cannot assert this because there is one case where the root
-      //   changes under unique mode; however, in that case it is released
-      //   so we still don't have to release here
-      //   assert( result == root.address() );
-      //
 
       return result;
    }
@@ -491,10 +472,9 @@ namespace arbtrie
    //  split into a binary node containing both keys
    //================================
    template <upsert_mode mode>
-   id_address write_session::upsert_value(object_ref& root, key_view key)
+   id_address write_session::upsert_value(object_ref& root, const value_node* vn, key_view key)
    {
       auto& state        = root.rlock();
-      auto  vn           = root.as<value_node>();
       auto  new_val_size = _cur_val.size();
 
       if constexpr (mode.is_remove())
@@ -660,14 +640,12 @@ namespace arbtrie
       // this should be handled at the inner node layer
       assert(not _cur_val.is_subtree());
 
+      const node_header* nh = root.header();
       if constexpr (mode.is_shared())
       {
-         if (root.type() == node_type::value)
+         if (nh->get_type() == node_type::value)
          {
-            // TODO: the only reason we have to fetch the old value
-            // is to get its size.  If we aren't interested in the old value
-            // size, then this could be skipped, perhaps another 'mode' flag?
-            auto vn         = root.as<value_node>();
+            auto vn         = nh->as<value_node>();
             _old_value_size = vn->value_size();
 
             return make_value(state.get_new_region(), root.rlock(), _cur_val);
@@ -677,9 +655,9 @@ namespace arbtrie
       else if constexpr (mode.is_unique())
       {
          assert(root.ref() == 1);
-         if (root.type() == node_type::value)
+         if (nh->get_type() == node_type::value)
          {
-            auto vn         = root.as<value_node>();
+            auto vn         = nh->as<value_node>();
             _old_value_size = vn->value_size();
 
             assert(_cur_val.is_view());
@@ -1103,9 +1081,8 @@ namespace arbtrie
          {
             if (_cur_val.is_subtree())
             {
-               auto cref =
-                   clone<mode>(r, fn, {.branch_cap = 16},
-                               [&](auto cl) { cl->set_eof_subtree(_cur_val.subtree_address()); });
+               auto cref = clone<mode>(r, fn, {.branch_cap = 16}, [&](auto cl)
+                                       { cl->set_eof_subtree(_cur_val.subtree_address()); });
                release_node(old_val);
                return cref.address();
             }
@@ -1450,10 +1427,9 @@ namespace arbtrie
    //
    //========================================
    template <upsert_mode mode, typename NodeType>
-   id_address write_session::upsert_inner(object_ref& r, key_view key)
+   id_address write_session::upsert_inner(object_ref& r, const NodeType* fn, key_view key)
    {
       auto& state = r.rlock();
-      auto  fn    = r.as<NodeType>();
 
       auto rootpre = fn->get_prefix();
       auto cpre    = common_prefix(rootpre, key);
@@ -1481,10 +1457,8 @@ namespace arbtrie
    }  // end upsert_inner<T>
 
    template <upsert_mode mode>
-   id_address write_session::upsert_binary(object_ref& root, key_view key)
+   id_address write_session::upsert_binary(object_ref& root, const binary_node* bn, key_view key)
    {
-      auto bn = root.as<binary_node>();
-
       int_fast16_t lb_idx;
       uint64_t     key_hash  = binary_node::key_hash(key);
       bool         key_found = false;
@@ -1564,10 +1538,11 @@ namespace arbtrie
                root.modify().as<binary_node>()->insert(kvi, key, _cur_val);
             }
             else  // definite obj_id (aka value node)
-               root.modify().as<binary_node>()->insert(
-                   kv_index(lb_idx, kv_type::obj_id), key,
-                   value_type::make_value_node(
-                       make_value(bn->branch_region(), root.rlock(), _cur_val)));
+            {
+               auto val = make_value(bn->branch_region(), root.rlock(), _cur_val);
+               root.modify().as<binary_node>()->insert(kv_index(lb_idx, kv_type::obj_id), key,
+                                                       value_type::make_value_node(val));
+            }
             return root.address();
          }
          // else we have to refactor...
@@ -1747,14 +1722,10 @@ namespace arbtrie
             }
             else  // value node -> updated value node
             {
-               auto nv = upsert_value<mode>(cval, {});
+               auto nv = upsert_value<mode>(cval, cval.as<value_node>(), {});
                if (nv != kvp->value_id())
-               {
-                  ARBTRIE_WARN("release old value...?");
-                  //release_node(cval);
                   root.modify().as<binary_node>()->set_value(kv_index(lb_idx, kv_type::obj_id),
                                                              value_type::make_value_node(nv));
-               }
                return root.address();
             }
          }
@@ -1860,7 +1831,7 @@ namespace arbtrie
             {
                auto nval = make_value(bn->branch_region(), root.rlock(), _cur_val);
                auto r    = clone<mode>(root, bn, {},
-                                    binary_node::clone_update(kv_index(lb_idx, kv_type::obj_id),
+                                       binary_node::clone_update(kv_index(lb_idx, kv_type::obj_id),
                                                                  value_type::make_value_node(nval)));
                release_node(cval);  // because clone retained a copy
                return r.address();
@@ -2137,11 +2108,6 @@ namespace arbtrie
       */
    }
 
-   void write_session::abort_write(int index)
-   {
-      _db->modify_lock(index).unlock();
-   }
-
    write_transaction write_session::start_transaction(int top_root_node)
    {
       // Use shared_from_this() to get a shared_ptr to this session
@@ -2151,6 +2117,13 @@ namespace arbtrie
           {
              if (top_root_node >= 0)
              {
+                // mark everything that has been written thus far as
+                // read-only, this protects what has been written from being
+                // corrupted by bad memory access patterns in the same
+                // process.
+                /// TODO: use configured sync type instead of hardcoding async
+                _segas->sync(sync_type::async, top_root_node, commit.address());
+
                 set_root(std::move(commit), top_root_node);
                 // give other writers a chance to grab the lock
                 _db->modify_lock(top_root_node).unlock();
@@ -2165,7 +2138,7 @@ namespace arbtrie
           [this, top_root_node]()
           {
              if (top_root_node >= 0)
-                abort_write(top_root_node);
+                _db->modify_lock(top_root_node).unlock();
           });
    }
 

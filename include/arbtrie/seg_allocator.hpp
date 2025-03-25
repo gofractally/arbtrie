@@ -59,6 +59,15 @@ namespace arbtrie
       seg_alloc_dump dump();
       ///@}
 
+      /**
+       * @group Configuration Methods
+       */
+      ///@{
+      bool config_validate_checksum_on_compact() const;
+      bool config_update_checksum_on_compact() const;
+      bool config_update_checksum_on_modify() const;
+      ///@}
+
       void sync(sync_type st = sync_type::sync);
 
       seg_alloc_session start_session() { return seg_alloc_session(*this, alloc_session_num()); }
@@ -79,9 +88,13 @@ namespace arbtrie
       // Return struct for segment read statistics
       struct stats_result
       {
+         stats_result() { memset(this, 0, sizeof(stats_result)); }
          uint32_t nodes_with_read_bit;
          uint64_t total_bytes;
          uint32_t total_objects;
+         uint32_t non_value_nodes;          // Count of non-value nodes for average calculation
+         uint32_t index_cline_counts[257];  // Histogram of actual cacheline hits [0-256+]
+         uint32_t cline_delta_counts[257];  // Histogram of delta between actual and ideal [0-256+]
       };
 
      private:
@@ -103,21 +116,17 @@ namespace arbtrie
        * Utilized by seg_alloc_session 
        */
       /// @{
-      mapped_memory::segment_header* get_segment(segment_number seg) noexcept
+      mapped_memory::segment* get_segment(segment_number seg) noexcept
       {
-         return static_cast<mapped_memory::segment_header*>(_block_alloc.get(seg));
+         return static_cast<mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
       }
+      const mapped_memory::segment* get_segment(segment_number seg) const noexcept
+      {
+         return static_cast<const mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
+      }
+
       uint32_t alloc_session_num();
       void     release_session_num(uint32_t sn);
-      /**
-       * This must be called via a session because the session is responsible
-       * for documenting what regions could be read
-       *
-       * All objects are const because they cannot be modified after being
-       * written, unless accessed via a session's mutation lock
-       */
-      const node_header* get_object(node_location loc) const;
-      ///@}
 
       /**
        * Read bit decay thread methods
@@ -132,8 +141,6 @@ namespace arbtrie
 
       std::optional<segment_thread> _read_bit_decay_thread;
       //@}
-
-      void attempt_truncate_empty();
 
       /**
        * Compactor Thread Methods
@@ -165,9 +172,10 @@ namespace arbtrie
        */
       ///@{
       void                          provider_munlock_excess_segments();
-      void                          provider_process_acknowledged_segments();
-      void                          provider_prepare_segment(segment_number seg_num);
+      void                          provider_prepare_segment(segment_number seg_num, bool pin_it);
       void                          provider_process_recycled_segments();
+      void                          provider_populate_pinned_segments();
+      void                          provider_populate_unpinned_segments();
       std::optional<segment_number> find_first_free_and_pinned_segment();
       segment_number                provider_allocate_new_segment();
 
@@ -186,7 +194,6 @@ namespace arbtrie
         * Methods to enable/disable write protection on segments
         */
       void disable_segment_write_protection(segment_number seg_num);
-      void enable_segment_write_protection(segment_number seg_num);
 
       /**
         * Calculate statistics about read bits in a segment
@@ -194,33 +201,6 @@ namespace arbtrie
         * @return A pair containing {number of node headers with read bit set, total bytes of those nodes}
         */
       stats_result calculate_segment_read_stats(segment_number seg_num);
-
-      /**
-        *  After all writes are complete, and there is not enough space
-        *  to allocate the next object the alloc_ptr gets set to MAX and
-        *  the page gets 
-        */
-      void finalize_segment(segment_number);
-
-      /**
-        *  After all data has been removed from a segment
-        * - madvise free/don't need 
-        * - add the segment number to the free segments at allocator_header::end_ptr
-        * - increment allocator_header::end_ptr
-        */
-      void release_segment(segment_number);
-
-      void push_dirty_segment(int seg_num)
-      {
-         std::unique_lock lock(_dirty_segs_mutex);
-         _dirty_segs[_next_dirt_seg_index % max_segment_count] = seg_num;
-         ++_next_dirt_seg_index;
-      }
-      int get_last_dirty_seg_idx()
-      {
-         std::unique_lock lock(_dirty_segs_mutex);
-         return _next_dirt_seg_index;
-      }
 
       // maps ids to locations
       id_alloc _id_alloc;
@@ -232,36 +212,28 @@ namespace arbtrie
       mapped_memory::allocator_state* _mapped_state;
       std::mutex                      _sync_mutex;
 
-      std::vector<sync_lock> _seg_sync_locks;
-      std::vector<int>       _dirty_segs;
-      std::mutex             _dirty_segs_mutex;
-      uint64_t               _next_dirt_seg_index = 0;
-      uint64_t               _last_synced_index   = 0;
-
       // Thread state tracking for stop/start_background_threads is handled in mapped_memory
 
-      /**
-        * Free an object in a segment
-        * 
-        * @param segment The segment number containing the object
-        * @param object_size The size of the object to free
-        */
-      inline void free_object(segment_number segment, uint32_t object_size)
+      segment_number get_segment_for_object(const void* obj) const
       {
-         assert(segment < max_segment_count && "Segment number out of bounds");
-         _mapped_state->_segment_data.meta[segment].free_object(object_size);
+         auto base   = (const char*)_block_alloc.get(offset_ptr(0));
+         auto offset = (const char*)obj - base;
+         return segment_number(offset / segment_size);
       }
 
       /**
-        * Get the last synced position for a segment.
+        * When an object is moved its space is freed and we need to record the freed space
+        * so the compactor has the metadata it needs to efficiently identify segments that
+        * can be compacted.
         * 
-        * @param segment The segment number
-        * @return The last synced position in the segment
+        * @param obj The object on the segment being freed
+        * @param seg The segment number containing the object
         */
-      inline size_t get_last_sync_position(segment_number segment) const
+      template <typename T>
+      inline void record_freed_space(segment_number seg, T* obj)
       {
-         assert(segment < max_segment_count && "invalid segment passed to get_last_sync_position");
-         return _mapped_state->_segment_data.get_last_sync_pos(segment);
+         assert(get_segment_for_object(obj) == seg && "object not in segment");
+         _mapped_state->_segment_data.add_freed_space(seg, obj);
       }
 
       /**
@@ -270,11 +242,16 @@ namespace arbtrie
         * @param loc The node location to check
         * @return true if the location is synced, false otherwise
         */
-      inline bool is_synced(node_location loc) const
+      inline bool is_read_only(node_location loc) const
       {
-         int64_t seg = loc.segment();
-         assert(seg < max_segment_count && "invalid segment passed to is_synced");
-         return _mapped_state->_segment_data.get_last_sync_pos(seg) > loc.abs_index();
+         int64_t seg = get_segment_num(loc);
+         assert(seg < max_segment_count && "invalid segment passed to is_read_only");
+         return get_segment(seg)->get_first_write_pos() > get_segment_offset(loc);
+      }
+      inline bool can_modify(int ses_num, node_location loc) const
+      {
+         auto seg = get_segment(get_segment_num(loc));
+         return seg->_session_id == ses_num && seg->get_first_write_pos() < get_segment_offset(loc);
       }
 
       /**
@@ -293,11 +270,11 @@ namespace arbtrie
        * 
        * @param segment The segment number
        * @return Reference to the segment_meta
-       */
       inline mapped_memory::segment_meta& get_segment_meta(segment_number segment)
       {
          return _mapped_state->_segment_data.meta[segment];
       }
+       */
 
       /**
         * Get the cache difficulty value which is used for determining read bit updates
@@ -325,7 +302,7 @@ namespace arbtrie
        * 
        * @return A pair containing the segment number and the segment header
        */
-      std::pair<segment_number, mapped_memory::segment_header*> get_new_segment(
+      std::pair<segment_number, mapped_memory::segment*> get_new_segment(
           bool alloc_to_pinned = true)
       {
          segment_number segnum;
@@ -333,13 +310,15 @@ namespace arbtrie
          {
             // takes the highest priority pinned segment available, and if not pinned
             // then it will ack the segment provider who will get it pinned right-quick
-            segnum = _mapped_state->_segment_provider.ready_segments.pop_wait();
+            segnum = _mapped_state->_segment_provider.ready_pinned_segments.pop();
+            //            ARBTRIE_WARN("get_new_segment pinned: ", segnum);
          }
          else
          {
             // back takes the lowest priority segment, without ack means it will
             // not send a signal to the provider to mlock the segment
-            segnum = _mapped_state->_segment_provider.ready_segments.pop_back_wait_without_ack();
+            segnum = _mapped_state->_segment_provider.ready_unpinned_segments.pop();
+            ARBTRIE_WARN("get_new_segment unpinned: ", segnum);
          }
          return {segnum, get_segment(segnum)};
       }
@@ -347,6 +326,21 @@ namespace arbtrie
       // Helper to synchronize segment pinned state between bitmap and metadata
       void update_segment_pinned_state(segment_number seg_num, bool is_pinned);
    };  // seg_allocator
+
+   inline bool seg_allocator::config_validate_checksum_on_compact() const
+   {
+      return _mapped_state->_config.validate_checksum_on_compact;
+   }
+
+   inline bool seg_allocator::config_update_checksum_on_compact() const
+   {
+      return _mapped_state->_config.update_checksum_on_compact;
+   }
+
+   inline bool seg_allocator::config_update_checksum_on_modify() const
+   {
+      return _mapped_state->_config.update_checksum_on_modify;
+   }
 
 }  // namespace arbtrie
 #include <arbtrie/read_lock_impl.hpp>

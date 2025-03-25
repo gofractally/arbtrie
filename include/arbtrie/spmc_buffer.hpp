@@ -602,8 +602,6 @@ namespace arbtrie
 
             // Find lowest available slot
             uint64_t bit_pos = __builtin_ctzll(filtered_bits);
-            T        data    = buf[bit_pos];
-
             // Determine which bits to clear based on ack mode
             uint64_t bits_to_clear;
             if constexpr (AckModeT == ack_mode::require_ack)
@@ -626,6 +624,8 @@ namespace arbtrie
                uint64_t used = __builtin_popcountll(
                    (bitmap.load(std::memory_order_acquire) & avail_mask) >> avail_shift);
                uint64_t low = low_water_mark.load(std::memory_order_relaxed);
+
+               auto data = buf[bit_pos];
 
                if (used <= low && producer_waiting.load(std::memory_order_acquire))
                {

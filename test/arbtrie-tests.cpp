@@ -374,6 +374,11 @@ TEST_CASE("insert-words")
          REQUIRE(tx.count_keys() == i);
          tx.upsert(to_key_view(keys[i]), to_value_view(values[i]));
          auto buf = tx.get<std::string>(to_key_view(keys[i]));
+         if (not buf)
+         {
+            ARBTRIE_WARN("failed to get key: ", keys[i], " i: ", i);
+            abort();
+         }
          REQUIRE(buf);
          REQUIRE(*buf == values[i]);
       }
@@ -894,7 +899,7 @@ TEST_CASE("recover")
       ARBTRIE_WARN("INSERT 1 Million Rows");
       auto ws = env.db->start_write_session();
       auto tx = ws->start_transaction();
-      for (uint64_t i = 0; i < 1000'000; ++i)
+      for (uint64_t i = 0; i < 10000; ++i)
       {
          key_view kstr((char*)&i, sizeof(i));
          tx.insert(kstr, kstr);

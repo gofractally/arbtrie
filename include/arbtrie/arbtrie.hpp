@@ -48,4 +48,11 @@ namespace arbtrie
       return cast_and_call(h->get_type(), h, std::forward<decltype(func)>(func));
    }
 
+   template <typename T>
+      requires is_node_header<T>
+   __attribute__((noinline)) auto cast_and_call_noinline(T* h, auto&& func)
+   {
+      return cast_and_call(h->get_type(), h, std::forward<decltype(func)>(func));
+   }
+
 }  // namespace arbtrie

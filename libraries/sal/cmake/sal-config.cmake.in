@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/sal-targets.cmake")
+check_required_components(sal)
+
+# Provide some library usage information
+set(SAL_LIBRARIES sal::sal)
+set(SAL_INCLUDE_DIRS "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@") 

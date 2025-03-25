@@ -1,10 +1,204 @@
 #pragma once
 #include <arbtrie/hash/xxh32.hpp>
 #include <bit>
+#include <cstddef>
 #include <string_view>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace arbtrie
 {
+
+   namespace system_config
+   {
+      static const size_t page_size = []() -> size_t
+      {
+#ifdef _WIN32
+         SYSTEM_INFO si;
+         GetSystemInfo(&si);
+         return si.dwPageSize;
+#else
+         return sysconf(_SC_PAGESIZE);
+#endif
+      }();
+
+      const uint32_t os_page_size_log2 = []() -> uint32_t { return std::countr_zero(page_size); }();
+
+      inline size_t os_page_size()
+      {
+         return page_size;
+      }
+   }  // namespace system_config
+
+   /**
+    * For ACID **Durablity** requriments this configures
+    * how agressive triedent will be in flushing data to disk.
+    * 
+    * 0. none - msync() will not be called and data will be
+    *      lost if the computer crashes. So long as the OS
+    *      doesn't crash your data is safe even if your
+    *      program crashes.
+    * 1. async - msync(MS_ASYNC) will be used which will tell
+    *      the OS to write as soon as possible without blocking
+    *      the caller. This will write data frequently, and
+    *      churn the SSD more than none. 
+    * 2. sync - msync(MS_SYNC) will be used to block caller
+    *      when they update the top-root. In this mode the
+    *      database is "gauranteed" to be recoverable assuming
+    *      the OS didn't silently buffer and the disks didn't
+    *      silently buffer contrary to the implied behavior
+    *      of msync()
+    *
+    */
+   enum sync_type
+   {
+      none  = 0,  // on program close or as OS chooses
+      async = 1,  // nonblocking, but write soon
+      sync  = 2   // block until changes are committed to disk
+   };
+
+   enum access_mode
+   {
+      read_only  = 0,
+      read_write = 1
+   };
+
+   /**
+    * Parameters that can be changed at runtime.
+    */
+   struct runtime_config
+   {
+      /**
+       * The default is 1 GB, this gives 32 segments,
+       * if you have a lot of write threads you may want to 
+       * increase this to 64 MB per thread or more. The
+       * more the better, but this should be less than
+       * the system memory or you will start seeing errors
+       * in the logs about mlock() failing.
+       * 
+       * This should be a multiple of the segment size
+       */
+      uint64_t max_pinned_cache_size_mb = 1024;
+
+      /**
+       * The default is 1 hour, and this impacts the
+       * rate of cache eviction and the amount of SSD
+       * wear.  Longer windows are slower to adapt to
+       * changing access patterns, but are more effecient
+       * with respect to CPU and SSD wear. 
+       */
+      uint64_t read_cache_window_sec = 60 * 60;
+
+      /**
+       * When true, read operations will promote
+       * the most frequently accessed data to pinned
+       * cache. This has minimal overhead for readers,
+       * because the work is offloaded to background thread,
+       * but may cause additional SSD wear and consume
+       * some memory bandwidth. Having a large 
+       * max_pinned_cache_size_mb will minimize the
+       * SSD wear when used in conjunection with 
+       * sync_mode::none
+       */
+      bool enable_read_cache = true;
+
+      /**
+       * When true, the database will write protect the
+       * data that has been committed even if it is not
+       * being actively msync() to disk. This prevents stray
+       * writes from other parts of the process from corrupting
+       * the database memory, but it comes at the cost of 
+       * increasing the amount of Copy on Write utilized and
+       * there is a small amount of overhead in system calls
+       * updating the memory protection.
+       * 
+       * This only has effect when sync_mode is "none", because
+       * we have to ensure that once data is synced that we
+       * don't modify it again.
+       */
+      bool write_protect_on_commit = true;
+
+      /**
+       * 0 = none, 
+       *    fastest, least SSD wear,
+       *    enables write_protect_on_commit option
+       *    data may not persist until program exit.
+       *    safe as long as OS doesn't crash or power loss
+       * 1 = async, background msync(), most data gets to disk
+       *    the OS gets the data to disk ASAP, but without blocking
+       *    the database will be slower, more SSD wear, but likely
+       *    most data will be recoverable even after a power loss
+       * 2 = sync, block until data is on disk
+       *    the database will be slower, more SSD wear, but the in
+       *    theory the most durable, but most OS's will not even
+       *    fully gaurantee that the data is on the physical disk 
+       *    limits according to the msync(MS_SYNC) documentation and
+       *    each OS and hardware configuration is different.
+       */
+      sync_type sync_mode = sync_type::none;
+
+      /**
+       * Calculating the checksum is expensive and mostly
+       * used to detect corruption of data at rest, generally
+       * we can rely upon background processes to keep the checksums
+       * up to date to minimize latency for the user.
+       */
+      bool update_checksum_on_upsert = false;
+
+      /**
+       * This is a perfect opportunity to discover corruption
+       * early and will halt the process when corruption is detected
+       * and give the user a chance to recover.
+       */
+      bool validate_checksum_on_compact = true;
+
+      /**
+       * This uses more CPU, but it is in the background so it
+       * is worth having accurate checksums.
+       */
+      bool update_checksum_on_compact = true;
+      bool update_checksum_on_modify  = false;
+
+      /**
+       * This determines the tolerance of freed data in the
+       * mlock() pages before the compactor will move the
+       * remaining unpinned data to a new segment. 
+       * 
+       * If this is set too high, a lot of RAM will be wasted
+       * and not helping with performance.
+       * 
+       * If this is set too low, the compactor will be agressive
+       * and may move data around more than necessary, consuming
+       * memory bandwidth and may also cause more SSD wear, if you
+       * are using anything other than sync_type::none because the
+       * OS will have to flush the moved data to disk, even though
+       * it is mlock() for read performance. 
+       * 
+       * The default is 4MB, which means the compactor will not
+       * compact a segment unless it can convert 8 segments into
+       * 7 or fewer segments.
+       * 
+       * TODO: redefine the algorithm for the compactor such that
+       * it will always compact when it can produce at least 1
+       * recycled segment as a result. 
+       */
+      uint8_t compact_pinned_unused_threshold_mb = 4;
+
+      /**
+       * Unpinned data is not mlocked() and is therefore subject to
+       * the OS page cache eviction policies which operate on
+       * a 4096 page level. This threshold should be high enough
+       * that the compactor will not move data around too often 
+       * causing SSD wear. By default this is set to 50% of the
+       * segment size, meaning that the compactor will not compact
+       * unless it can combine 2 segments into 1.
+       */
+      uint8_t compact_unpinned_unused_threshold_mb = 16;
+   };
+
    // designed to fit within 4096 bytes with other header information
    // so msync the page doesn't waste data.
    static constexpr const uint32_t num_top_roots = 510;
@@ -74,7 +268,8 @@ namespace arbtrie
    // each thread will have a segment this size, so larger values
    // may use more memory than necessary for idle threads
    // max value: 4 GB due to type of segment_offset
-   static constexpr const uint64_t segment_size = 32 * MB;
+   static constexpr const uint64_t segment_size      = 32 * MB;
+   static const uint32_t           pages_per_segment = segment_size / system_config::os_page_size();
 
    /// object pointers can only address 48 bits
    /// 128 TB limit on database size with 47 bits, this saves us
@@ -92,7 +287,7 @@ namespace arbtrie
     */
    static constexpr const uint32_t max_threads = 64;
 
-   static constexpr const uint32_t os_page_size = 4096;
+   //static constexpr const uint32_t os_page_size = 4096;
    /**
     * Each ID region can store 512 IDs before the ID
     * file needs to grow becuase each ID takes 8 bytes, making
@@ -110,7 +305,7 @@ namespace arbtrie
     * spread across all regions to prevent premature growth to
     * 512MB or more just because one region is too dense.
     */
-   static constexpr const uint32_t id_page_size = os_page_size;
+   static constexpr const uint32_t id_page_size = 4096;
 
    static_assert(segment_size < 4 * GB, "size must be less than 4GB");
    static_assert(std::popcount(segment_size) == 1, "size must be power of 2");

@@ -2,13 +2,13 @@
 add_executable(arbtrie-tests
     arbtrie-tests.cpp
     hierarchical_bitmap_tests.cpp
-#spmc_circular_buffer.cpp
     padded_atomic_tests.cpp
-    node_meta_tests.cpp
     segment_meta_tests.cpp
     interprocess_mutex_tests.cpp
     seg_alloc_dump_tests.cpp
     cache_difficulty_state_tests.cpp
+    mapped_memory_tests.cpp
+    poly_buffer_test.cpp
 )
 
 target_link_libraries(arbtrie-tests 
@@ -116,5 +116,63 @@ endif()
 #target_link_libraries(arbtrie-tests-bigdb PUBLIC Boost::program_options arbtrie)
 #target_include_directories(arbtrie-tests-bigdb PUBLIC ${Boost_INCLUDE_DIRS})
 #set_target_properties(arbtrie-tests-bigdb PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${ROOT_BINARY_DIR})
+
+# Add benchmark for min_index implementations
+add_executable(min_index_benchmark min_index_benchmark.cpp)
+add_executable(min_index_32_benchmark min_index_32_benchmark.cpp)
+add_executable(min_index_combined_benchmark min_index_combined_benchmark.cpp)
+add_executable(min_index_test min_index_test.cpp)
+
+# Link with Catch2 for unit tests
+target_link_libraries(min_index_test 
+    PUBLIC 
+        arbtrie
+        Catch2::Catch2WithMain
+)
+
+# Set properties for benchmark executables
+set_target_properties(min_index_benchmark PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_benchmark"
+)
+
+set_target_properties(min_index_32_benchmark PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_32_benchmark"
+)
+
+set_target_properties(min_index_combined_benchmark PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_combined_benchmark"
+)
+
+set_target_properties(min_index_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    OUTPUT_NAME "min_index_test"
+)
+
+# Ensure we compile with optimization and native CPU instructions for benchmarking
+target_compile_options(min_index_benchmark PRIVATE -O3 -march=native)
+target_compile_options(min_index_32_benchmark PRIVATE -O3 -march=native)
+target_compile_options(min_index_combined_benchmark PRIVATE -O3 -march=native)
+
+# Add test to CTest
+add_test(
+    NAME min_index_test
+    COMMAND min_index_test
+)
+
+# Add benchmark for hint implementations
+add_executable(hint_benchmark hint_benchmark.cpp)
+set_target_properties(hint_benchmark
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Ensure we compile with optimization and native CPU instructions for benchmarking
+target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
+
+# Add the min_index subdirectory with its tests
+add_subdirectory(min_index)
 
 
