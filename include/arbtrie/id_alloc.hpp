@@ -8,5 +8,6 @@ namespace arbtrie
    using id_address    = sal::ptr_address;
    using id_region     = sal::ptr_address::region_type;
    using id_index      = sal::ptr_address::index_type;
+   using alloc_hint    = sal::alloc_hint;
 
 }  // namespace arbtrie

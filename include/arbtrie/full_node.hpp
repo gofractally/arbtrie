@@ -331,6 +331,11 @@ namespace arbtrie
          return value_type::make_value_node(branch_addr);
       }
 
+      sal::alloc_hint get_branch_alloc_hint() const
+      {
+         return sal::alloc_hint(branches(), branch_count);
+      }
+
       //private:
       id_index*       branches() { return ((id_index*)tail()) - branch_count; }
       const id_index* branches() const { return ((const id_index*)tail()) - branch_count; }

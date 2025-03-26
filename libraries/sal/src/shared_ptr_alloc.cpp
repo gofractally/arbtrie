@@ -192,9 +192,7 @@ namespace sal
       return std::nullopt;
    }
 
-   allocation shared_ptr_alloc::alloc(ptr_address::region_type region,
-                                      ptr_address::index_type* /*index_hints*/,
-                                      uint16_t /*hint_count*/)
+   allocation shared_ptr_alloc::alloc(ptr_address::region_type region, const alloc_hint& /*ahint*/)
    {
       hint                      h     = hint::any();
       std::optional<allocation> alloc = try_alloc(region, h);

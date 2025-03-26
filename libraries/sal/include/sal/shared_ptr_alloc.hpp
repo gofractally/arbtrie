@@ -71,7 +71,25 @@ namespace sal
       constexpr bool operator==(const ptr_address_seq& other) const = default;
    };
 
+   /// forward declared internal hint which is the aggregate of alloc_hints
    struct hint;
+
+   /**
+    * The allocator should make its best effort to allocate a new ptr on
+    * the same cacheline as one of the hints. If the allocator can't find
+    * a cacheline with a free slot, it will allocate a new ptr in a new
+    * cacheline that is mostly empty.
+    */
+   struct alloc_hint
+   {
+      alloc_hint(const ptr_address::index_type* hints, uint16_t count = 1)
+          : hints(hints), count(count)
+      {
+      }
+      static constexpr alloc_hint    any() { return alloc_hint{nullptr, 0}; }
+      const ptr_address::index_type* hints = nullptr;
+      uint16_t                       count = 0;
+   };
 
    namespace detail
    {
@@ -247,9 +265,7 @@ namespace sal
        *  @throw std::runtime_error if no ptrs are available
        *  @return an the address of the allocated ptr and a pointer to the shared_ptr
        */
-      allocation alloc(ptr_address::region_type region,
-                       ptr_address::index_type* hint       = 0,
-                       uint16_t                 hint_count = 0);
+      allocation alloc(ptr_address::region_type region, const alloc_hint& hint = alloc_hint::any());
 
       /// @pre address is a valid pointer address
       void free(ptr_address address);

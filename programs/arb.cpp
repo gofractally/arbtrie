@@ -393,7 +393,7 @@ int  main(int argc, char** argv)
    std::vector<std::string> v;
    std::string              str;
 
-   int64_t batch_size = 10000;
+   int64_t batch_size = 100;
 
    // Read the next line from File until it reaches the
    // end.

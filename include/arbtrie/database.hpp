@@ -424,9 +424,9 @@ namespace arbtrie
 
      private:
       template <upsert_mode mode>
-      id_address upsert(object_ref& root, key_view key);
+      id_address upsert(object_ref& root, key_view key, const alloc_hint& parent_hint);
       template <upsert_mode mode>
-      id_address upsert(object_ref&& root, key_view key);
+      id_address upsert(object_ref&& root, key_view key, const alloc_hint& parent_hint);
 
       template <upsert_mode mode, typename NodeType>
       id_address upsert_inner_existing_br(object_ref&       r,
@@ -434,63 +434,81 @@ namespace arbtrie
                                           const NodeType*   fn,
                                           key_view          cpre,
                                           branch_index_type bidx,
-                                          id_address        br);
+                                          id_address        br,
+                                          const alloc_hint& parent_hint);
       template <upsert_mode mode, typename NodeType>
       id_address upsert_inner_new_br(object_ref&       r,
                                      key_view          key,
                                      const NodeType*   fn,
                                      key_view          cpre,
                                      branch_index_type bidx,
-                                     id_address        br);
+                                     id_address        br,
+                                     const alloc_hint& parent_hint);
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_prefix(object_ref&     r,
-                               key_view        key,
-                               key_view        cpre,
-                               const NodeType* fn,
-                               key_view        rootpre);
+      id_address upsert_prefix(object_ref&       r,
+                               key_view          key,
+                               key_view          cpre,
+                               const NodeType*   fn,
+                               key_view          rootpre,
+                               const alloc_hint& parent_hint);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_eof(object_ref& r, const NodeType* fn);
+      id_address upsert_eof(const alloc_hint& parent_hint, object_ref& r, const NodeType* fn);
 
       template <upsert_mode mode, typename NodeType>
-      id_address remove_eof(object_ref& r, const NodeType* fn);
+      id_address remove_eof(const alloc_hint& parent_hint, object_ref& r, const NodeType* fn);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_inner(object_ref& r, const NodeType* fn, key_view key);
+      id_address upsert_inner(object_ref&       r,
+                              const NodeType*   fn,
+                              key_view          key,
+                              const alloc_hint& parent_hint);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_inner(object_ref&& r, const NodeType* fn, key_view key)
+      id_address upsert_inner(object_ref&&      r,
+                              const NodeType*   fn,
+                              key_view          key,
+                              const alloc_hint& parent_hint)
       {
-         return upsert_inner<mode>(r, fn, key);
+         return upsert_inner<mode>(r, fn, key, parent_hint);
       }
 
       template <upsert_mode mode>
       id_address upsert_eof_value(object_ref& root);
 
       template <upsert_mode mode>
-      id_address upsert_value(object_ref& root, const value_node* vn, key_view key);
+      id_address upsert_value(object_ref&       root,
+                              const value_node* vn,
+                              key_view          key,
+                              const alloc_hint& hint);
 
       //=======================
       // binary_node operations
       // ======================
       id_address make_binary(id_region         reg,
+                             const alloc_hint& parent_hint,
                              session_rlock&    state,
                              key_view          key,
                              const value_type& val);
 
       template <upsert_mode mode>
-      id_address upsert_binary(object_ref& root, const binary_node* bn, key_view key);
+      id_address upsert_binary(object_ref&        root,
+                               const binary_node* bn,
+                               key_view           key,
+                               const alloc_hint&  parent_hint);
 
       template <upsert_mode mode>
       id_address update_binary_key(object_ref&        root,
                                    const binary_node* bn,
                                    uint16_t           lb_idx,
-                                   key_view           key);
+                                   key_view           key,
+                                   const alloc_hint&  parent_hint);
       template <upsert_mode mode>
       id_address remove_binary_key(object_ref&        root,
                                    const binary_node* bn,
                                    uint16_t           lb_idx,
-                                   key_view           key);
+                                   key_view           key,
+                                   const alloc_hint&  parent_hint);
    };
 
    class database

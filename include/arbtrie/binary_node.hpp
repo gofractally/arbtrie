@@ -794,6 +794,32 @@ namespace arbtrie
          }
       }
 
+      /**
+       * @param mem an array of id_index to store the branch indices
+       * @param size the size of the mem array reserved for the hints
+       * @return an alloc_hint with a pointer to mem and a count of number of hints, up to size
+       */
+      inline sal::alloc_hint get_branch_alloc_hint(id_index* mem, uint32_t size) const
+      {
+         sal::alloc_hint hint(mem, 0);
+         auto*           mem_pos = mem;
+         auto            start   = key_offsets();
+         auto            pos     = start;
+         const auto      end     = start + num_branches();
+         while (pos != end and hint.count < size)
+         {
+            if (pos->type & key_index::obj_id)  // object_id or subtree
+            {
+               assert(get_key_val_ptr_offset(pos->pos)->value_size() == sizeof(id_address));
+               *mem_pos = id_address(get_key_val_ptr_offset(pos->pos)->value_id()).index;
+               ++mem_pos;
+               ++hint.count;
+            }
+            ++pos;
+         }
+         return hint;
+      }
+
       // key_index contains the index position + type
       void insert(key_index kidx, key_view key, const value_type& val);
 

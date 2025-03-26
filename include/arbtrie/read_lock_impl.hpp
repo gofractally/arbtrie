@@ -39,17 +39,25 @@ namespace arbtrie
       return oref;
    }
 
-   inline id_allocation read_lock::get_new_meta_node(id_region reg)
+   /*
+   inline id_allocation read_lock::get_new_ptr(id_region               reg,
+                                               id_address::index_type* index_hints,
+                                               uint16_t                hint_count)
    {
-      return _session._sega._id_alloc.alloc(reg);
+      return _session._sega._id_alloc.alloc(reg, index_hints, hint_count);
    }
+   */
 
-   inline object_ref read_lock::alloc(id_region reg, uint32_t size, node_type type, auto init)
+   inline object_ref read_lock::alloc(id_region         reg,
+                                      const alloc_hint& hint,
+                                      uint32_t          size,
+                                      node_type         type,
+                                      auto              init)
    {
       assert(size >= sizeof(node_header));
       assert(type != node_type::undefined);
 
-      auto allocation = _session._sega._id_alloc.alloc(reg);
+      auto allocation = _session._sega._id_alloc.alloc(reg, hint);
 
       // alloc_data() starts a modify lock on the allocation segment, which
       // which must be released by calling end_modify() after all writes are done
