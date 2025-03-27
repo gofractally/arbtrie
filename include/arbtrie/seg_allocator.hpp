@@ -68,7 +68,7 @@ namespace arbtrie
       bool config_update_checksum_on_modify() const;
       ///@}
 
-      void sync(sync_type st = sync_type::sync);
+      void sync(sync_type st = sync_type::sync) { _block_alloc.sync(sal::sync_type(st)); }
 
       seg_alloc_session start_session() { return seg_alloc_session(*this, alloc_session_num()); }
 
@@ -229,10 +229,26 @@ namespace arbtrie
         * @param seg The segment number containing the object
         */
       template <typename T>
-      inline void record_freed_space(segment_number seg, T* obj)
+      inline void record_freed_space(const uint32_t ses_num, segment_number seg, T* obj)
       {
          assert(get_segment_for_object(obj) == seg && "object not in segment");
+         /*
+         auto base   = _block_alloc.get(offset_ptr());
+         auto offset = (const char*)obj - base;
+         if (can_modify(ses_num, node_location::from_absolute_address(offset)))
+         {
+            if (not obj->is_allocator_header())
+            {
+               record_reusable(ses_num, obj->size());
+            }
+         }
+         */
          _mapped_state->_segment_data.add_freed_space(seg, obj);
+      }
+
+      inline void record_session_write(uint32_t session_num, uint64_t bytes)
+      {
+         _mapped_state->_session_data.add_bytes_written(session_num, bytes);
       }
 
       /**

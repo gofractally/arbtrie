@@ -217,7 +217,8 @@ namespace arbtrie
           */
          bool is_read_only() const { return _first_writable_page == pages_per_segment; }
 
-         void sync(sync_type st, int top_root_index, id_address top_root)
+         /// @return the total bytes synced/written by this session
+         uint64_t sync(sync_type st, int top_root_index, id_address top_root)
          {
             auto  alloc_pos          = get_alloc_pos();
             char* alloc_ptr          = data + alloc_pos;
@@ -254,8 +255,8 @@ namespace arbtrie
             auto old_first_writable_page_pos = uint32_t(_first_writable_page)
                                                << system_config::os_page_size_log2;
 
-            _first_writable_page = next_page_pos >> system_config::os_page_size_log2;
-            auto protect_size    = next_page_pos - old_first_writable_page_pos;
+            _first_writable_page  = next_page_pos >> system_config::os_page_size_log2;
+            uint64_t protect_size = next_page_pos - old_first_writable_page_pos;
             assert(protect_size > 0);
             set_alloc_pos(new_alloc_pos);
             /*   ARBTRIE_INFO(
@@ -268,7 +269,12 @@ namespace arbtrie
                ARBTRIE_ERROR("mprotect failed: ", strerror(errno));
                throw std::runtime_error("mprotect failed");
             }
+            if (msync(data + old_first_writable_page_pos, protect_size, MS_SYNC))
+            {
+               ARBTRIE_ERROR("msync failed: ", strerror(errno));
+            }
             assert(is_finalized() ? is_read_only() : true);
+            return protect_size;
          }
 
          char data[segment_size - segment_footer_size];

@@ -76,6 +76,7 @@ namespace arbtrie
       {
          return header_type(_header_type) == header_type::allocator;
       }
+      uint32_t size() const { return _nsize; }
       /**
        *  The checksum of the region [this-_start_checksum_offset, _start_checksum_offset + _checksum_bytes)
        * 

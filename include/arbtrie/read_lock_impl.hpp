@@ -3,6 +3,7 @@
 #include <arbtrie/read_lock.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
 
+static uint64_t total_reusable_freed_space[64];
 namespace arbtrie
 {
 
@@ -245,6 +246,8 @@ namespace arbtrie
    inline void read_lock::freed_object(segment_number segment, const node_header* obj_ptr)
    {
       _session.record_freed_space(segment, obj_ptr);
+      // if (can_modify(
+      //    total_reusable_freed_space[session_num()] += obj_ptr->size();
    }
 
    inline bool read_lock::is_read_only(node_location loc) const

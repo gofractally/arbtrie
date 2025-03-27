@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>           // Add include for std::sort
 #include <arbtrie/config.hpp>  // Include for segment_size constant
 #include <arbtrie/util.hpp>
 #include <cassert>  // Add include for assert
@@ -35,9 +36,10 @@ namespace arbtrie
 
       struct session_info
       {
-         uint32_t session_num = 0;
-         uint32_t read_ptr    = 0;
-         bool     is_locked   = true;
+         uint32_t session_num         = 0;
+         uint32_t read_ptr            = 0;
+         bool     is_locked           = true;
+         uint64_t total_bytes_written = 0;  // Total bytes written by this session
       };
 
       struct pending_segment
@@ -122,6 +124,36 @@ namespace arbtrie
          {
             // Display as days
             result << (seconds / 86400.0) << " d";
+         }
+
+         return result.str();
+      }
+
+      // Helper function to format bytes with appropriate units (GB, MB, KB)
+      static std::string format_bytes(uint64_t bytes)
+      {
+         std::ostringstream result;
+         result << std::fixed << std::setprecision(2);
+
+         const double GB = 1024.0 * 1024.0 * 1024.0;
+         const double MB = 1024.0 * 1024.0;
+         const double KB = 1024.0;
+
+         if (bytes >= GB)
+         {
+            result << (bytes / GB) << " GB";
+         }
+         else if (bytes >= MB)
+         {
+            result << (bytes / MB) << " MB";
+         }
+         else if (bytes >= KB)
+         {
+            result << (bytes / KB) << " KB";
+         }
+         else
+         {
+            result << bytes << " bytes";
          }
 
          return result.str();
@@ -880,6 +912,56 @@ namespace arbtrie
          }
          os << "--------------------------\n";
          os << "free release +/- = " << free_release_count << "\n";
+
+         // Print session information in a table format if there are any sessions with data
+         if (!sessions.empty())
+         {
+            os << "\n--- session bytes written ---\n";
+
+            // Define column widths for the table
+            const int sess_width      = 8;   // Session number
+            const int bytes_width     = 15;  // Total bytes written
+            const int formatted_width = 12;  // Formatted bytes
+
+            // Print table header
+            os << std::left << std::setw(sess_width) << "Session" << std::right
+               << std::setw(bytes_width) << "Bytes Written" << std::setw(formatted_width) << "Size"
+               << "\n";
+
+            // Add horizontal rule
+            os << std::string(sess_width + bytes_width + formatted_width, '-') << "\n";
+
+            // Sort sessions by total bytes written (descending)
+            std::vector<session_info> sorted_sessions = sessions;
+            std::sort(sorted_sessions.begin(), sorted_sessions.end(),
+                      [](const session_info& a, const session_info& b)
+                      { return a.total_bytes_written > b.total_bytes_written; });
+
+            // Calculate total bytes written across all sessions
+            uint64_t all_sessions_total = 0;
+            for (const auto& session : sorted_sessions)
+            {
+               all_sessions_total += session.total_bytes_written;
+            }
+
+            // Print each session
+            for (const auto& session : sorted_sessions)
+            {
+               std::string formatted_bytes = format_bytes(session.total_bytes_written);
+
+               os << std::left << std::setw(sess_width) << session.session_num << std::right
+                  << std::setw(bytes_width) << session.total_bytes_written
+                  << std::setw(formatted_width) << formatted_bytes << "\n";
+            }
+
+            // Add horizontal rule
+            os << std::string(sess_width + bytes_width + formatted_width, '-') << "\n";
+
+            // Print total
+            os << std::left << std::setw(sess_width) << "TOTAL" << std::right
+               << std::setw(bytes_width) << all_sessions_total << std::setw(formatted_width)
+               << format_bytes(all_sessions_total) << "\n";
+         }
       }
 
       // ostream operator now just calls print()

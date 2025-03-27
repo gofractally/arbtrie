@@ -273,13 +273,21 @@ namespace sal
 
    void block_allocator::sync(sync_type st)
    {
-      if (_fd and sync_type::none != st)
+      if (_fd)  //and sync_type::none != st)
       {
-         // We can sync the entire mapped region at once
-         if (_mapped_base && _mapped_base != MAP_FAILED && _file_size > 0)
+#ifdef __APPLE__
+         if (fcntl(_fd, F_FULLFSYNC) < 0)
          {
-            ::msync(_mapped_base, _file_size, msync_flag(st));
+            SAL_ERROR("Failed to fsync file: {}", strerror(errno));
+            throw std::system_error(errno, std::generic_category());
          }
+#else
+         if (::fsync(_fd) < 0)
+         {
+            SAL_ERROR("Failed to fsync file: {}", strerror(errno));
+            throw std::system_error(errno, std::generic_category());
+         }
+#endif
       }
    }
 

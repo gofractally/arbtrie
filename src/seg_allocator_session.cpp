@@ -22,58 +22,6 @@ namespace arbtrie
       mv._session_num = -1;
    }
 
-   /*
-   seg_alloc_session& seg_alloc_session::operator=(seg_alloc_session&& mv)
-   {
-      // We can't really move-assign this class correctly because it contains references
-      // that cannot be reassigned. This implementation will just cleanup and mark invalid.
-
-      if (this != &mv)
-      {
-         // Clean up current resources if we have a valid session
-         if (_session_num != -1)
-         {
-            // Handle allocation segment cleanup
-            if (_alloc_seg_ptr)
-            {
-               if (segment_size - _alloc_seg_ptr->_alloc_pos >= sizeof(node_header))
-               {
-                  memset(((char*)_alloc_seg_ptr) + _alloc_seg_ptr->_alloc_pos, 0,
-                         sizeof(node_header));  // mark last object
-               }
-               if (_alloc_seg_meta)
-                  _alloc_seg_meta->free(segment_size - _alloc_seg_ptr->_alloc_pos);
-               _alloc_seg_ptr->_alloc_pos = uint32_t(-1);
-            }
-
-            // Release the session number back to the allocator
-            _sega.release_session_num(_session_num);
-         }
-
-         // Take over the transferable non-reference members
-         assert(_session_num == mv._session_num);
-         //_session_num      = mv._session_num;
-         _alloc_seg_num    = mv._alloc_seg_num;
-         _alloc_seg_ptr    = mv._alloc_seg_ptr;
-         _alloc_seg_meta   = mv._alloc_seg_meta;
-         _in_alloc         = mv._in_alloc;
-         _nested_read_lock = mv._nested_read_lock;
-         _session_rng      = mv._session_rng;
-         // Reference members can't be reassigned, so just making sure we're
-         // consistent with expectations, but not moving them
-         // (_session_rlock and _rcache_queue remain unchanged)
-
-         // Clear resources in the moved-from object
-         mv._alloc_seg_ptr  = nullptr;
-         mv._alloc_seg_num  = -1ull;
-         mv._alloc_seg_meta = nullptr;
-         // Set session_num to -1 to mark as moved-from and prevent double-release
-         mv._session_num = -1;
-      }
-      return *this;
-   }
-   */
-
    seg_alloc_session::seg_alloc_session(seg_allocator& a, uint32_t ses_num)
        : _session_num(ses_num),
          _alloc_seg_num(-1ull),
@@ -271,12 +219,12 @@ namespace arbtrie
          // sync() will write an allocation_header, and this header is space that
          // can be reclaimed if compacted, so we need to record it in the meta data
          // for easy access by the compactor
-         seg->sync(st, top_root_index, top_root);
+         _sega.record_session_write(_session_num, seg->sync(st, top_root_index, top_root));
          auto ahead = seg->get_last_aheader();
          //   ARBTRIE_INFO("sync: segment: ", seg_num, " free_space: ", seg->free_space(),
          //                " ahead: ", ahead->_nsize);
 
-         _sega.record_freed_space(seg_num, ahead);
+         _sega.record_freed_space(_session_num, seg_num, ahead);
 
          /// if the segment is entirely read only (because sync() just moved _last_writable_pos
          /// to the end of the segment) then we can set the segment meta data to indicate that
@@ -286,6 +234,8 @@ namespace arbtrie
             _sega._mapped_state->_segment_data.prepare_for_compaction(
                 seg_num, seg->_vage_accumulator.average_age());
          seg_num = _dirty_segments.pop();
+
+         _sega.sync(st);
       }
    }
 

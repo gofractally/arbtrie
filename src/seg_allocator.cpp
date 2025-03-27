@@ -331,12 +331,12 @@ namespace arbtrie
             if (obj_ref.compare_exchange_location(start_loc, new_loc))
             {
                _mapped_state->_cache_difficulty_state.compactor_promote_bytes(header->size());
-               record_freed_space(get_segment_num(start_loc), header);
+               ses.record_freed_space(get_segment_num(start_loc), header);
             }
             else
             {
                if (not ses.unalloc(header->size()))
-                  record_freed_space(get_segment_num(new_loc), new_header);
+                  ses.record_freed_space(get_segment_num(new_loc), new_header);
             }
          }
       }
@@ -370,7 +370,7 @@ namespace arbtrie
          if (not seg_data.is_read_only(i) or not seg_data.is_pinned(i))
             continue;
          const auto freed_space = seg_data.get_freed_space(i);
-         if (freed_space < segment_size / 8)
+         if (freed_space < segment_size / 2)
             continue;
 
          int64_t vage = seg_data.get_vage(i);
@@ -516,7 +516,7 @@ namespace arbtrie
 
          if (not obj_ref.compare_exchange_location(expect_loc, loc))
             if (not ses.unalloc(nh->size()))
-               record_freed_space(get_segment_num(loc), head);
+               ses.record_freed_space(get_segment_num(loc), head);
       };  /// end try_copy_node lambda
 
       uint32_t src_vage = s->_vage_accumulator.average_age();
@@ -625,24 +625,30 @@ namespace arbtrie
       // Gather session information
       result.active_sessions = _mapped_state->_session_data.active_session_count();
 
-      /*
       auto fs = _mapped_state->_session_data.free_session_bitmap();
-      for (uint32_t i = 0; i < max_session_count; ++i)
+      for (uint32_t i = 0; i < _mapped_state->_session_data.session_capacity(); ++i)
       {
-         if (fs & (1ull << i))
+         // Check if this bit is not free (0 bit means in use)
+         //if ((fs & (1ull << i)) == 0)
          {
             seg_alloc_dump::session_info session;
-            session.session_num = i;
-            auto p              = _mapped_state->_read_lock_queue.session_lock_ptr(i);
-            session.is_locked   = (uint32_t(p) != uint32_t(-1));
-            session.read_ptr    = uint32_t(p);
-            result.sessions.push_back(session);
+            session.session_num   = i;
+            auto&    session_lock = _mapped_state->_read_lock_queue.get_session_lock(i);
+            uint64_t lock_value   = session_lock.load();
+            session.is_locked     = (uint32_t(lock_value) != uint32_t(-1));
+            session.read_ptr      = uint32_t(lock_value);
+
+            // Get the total bytes written by this session
+            session.total_bytes_written = _mapped_state->_session_data.total_bytes_written(i);
+
+            // Only add sessions with more than 0 bytes written
+            if (session.total_bytes_written > 0)
+               result.sessions.push_back(session);
          }
       }
-      */
 
-      // Gather pending segments information
       /*
+      // Gather pending segments information
       for (auto x = _mapped_state->alloc_ptr.load(); x < _mapped_state->end_ptr.load(); ++x)
       {
          seg_alloc_dump::pending_segment pending;

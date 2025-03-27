@@ -60,7 +60,7 @@ namespace arbtrie
    template <typename T>
    inline void seg_alloc_session::record_freed_space(segment_number seg, T* obj)
    {
-      _sega.record_freed_space(seg, obj);
+      _sega.record_freed_space(_session_num, seg, obj);
    }
 
    /**
