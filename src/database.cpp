@@ -554,15 +554,17 @@ namespace arbtrie
          {
             if (not binary_node::can_inline(vn->value_size()))
             {
+               /// we have to use any hint here because this is a new region
                v1 = value_type::make_value_node(
-                   make<value_node>(new_reg, hint, state, v1).address());
+                   make<value_node>(new_reg, alloc_hint::any(), state, v1).address());
                t1 = binary_node::key_index::obj_id;
             }
 
             if (not binary_node::can_inline(v2.size()))
             {
+               /// we have to use any hint here because this is a new region
                v2 = value_type::make_value_node(
-                   make<value_node>(new_reg, hint, state, v2).address());
+                   make<value_node>(new_reg, alloc_hint::any(), state, v2).address());
                t2 = binary_node::key_index::obj_id;
             }
 
@@ -777,7 +779,7 @@ namespace arbtrie
       id_index   branches_index[nbranch - has_eof_value];
       auto*      next_branch_byte  = branches_byte;
       auto*      next_branch_index = branches_index;
-      alloc_hint hint(next_branch_index, 0);
+      alloc_hint hint(bregion, next_branch_index, 0);
 
       for (int from = has_eof_value; from < numb;)
       {
@@ -844,9 +846,9 @@ namespace arbtrie
       //ARBTRIE_WARN( "next - start: ", next_branch - branches, "  nb: ", nbranch );
       id_address eof_val;
       if (has_eof_value) [[unlikely]]
-         eof_val = root->is_obj_id(0)
-                       ? root->get_key_val_ptr(0)->value_id()
-                       : make_value(bregion, hint, r.rlock(), root->get_key_val_ptr(0)->value());
+         eof_val = root->is_obj_id(0) ? root->get_key_val_ptr(0)->value_id()
+                                      : make_value(bregion, alloc_hint::any(), r.rlock(),
+                                                   root->get_key_val_ptr(0)->value());
 
       // this branch requires many small keys and small values
       if (nbranch > 128)
@@ -1026,7 +1028,8 @@ namespace arbtrie
          //   ARBTRIE_DEBUG("  value is on the node (EOF)");
          _delta_keys = 1;
          /// alloc_hint should be the same as child_id.index...
-         auto v = make_value(child_id.region, alloc_hint(&child_id.index), state, _cur_val);
+         auto v = make_value(child_id.region, alloc_hint(child_id.region, &child_id.index), state,
+                             _cur_val);
          // must be same region as r because we can't cange the region our parent
          // put this node in.
          return make<setlist_node>(r.address().region, parent_hint, state,
@@ -1046,8 +1049,8 @@ namespace arbtrie
          //                     " rpre: ", to_hex(rootpre));
          //
          // NOTE: make_binary with 1 key currently makes a value_node.. TODO: rename
-         auto abx    = make_binary(child_id.region, alloc_hint(&child_id.index), state,
-                                   key.substr(cpre.size() + 1), _cur_val);
+         auto abx    = make_binary(child_id.region, alloc_hint(child_id.region, &child_id.index),
+                                   state, key.substr(cpre.size() + 1), _cur_val);
          _delta_keys = 1;
          return make<setlist_node>(r.address().region, parent_hint, state,
                                    {.branch_cap = 2, .set_prefix = cpre},
@@ -1405,7 +1408,7 @@ namespace arbtrie
       {
          // NOTE: make_binary with one key is currently implimented
          // as making a value node
-         auto new_bin = make_binary(fn->branch_region(), parent_hint, state,
+         auto new_bin = make_binary(fn->branch_region(), fn->get_branch_alloc_hint(), state,
                                     key.substr(cpre.size() + 1), _cur_val);
          _delta_keys  = 1;
          if constexpr (mode.is_unique())
@@ -1493,10 +1496,9 @@ namespace arbtrie
       // on any given node there is a 256/257 chance this is false
       // on any given path this will be false for all parent nodes
       if (not br) [[unlikely]]  // for the top of the tree
-         return upsert_inner_new_br<mode>(r, key, fn, cpre, bidx, br, fn->get_branch_alloc_hint());
+         return upsert_inner_new_br<mode>(r, key, fn, cpre, bidx, br, parent_hint);
 
-      return upsert_inner_existing_br<mode>(r, key, fn, cpre, bidx, br,
-                                            fn->get_branch_alloc_hint());
+      return upsert_inner_existing_br<mode>(r, key, fn, cpre, bidx, br, parent_hint);
    }  // end upsert_inner<T>
 
    template <upsert_mode mode>
@@ -1585,9 +1587,13 @@ namespace arbtrie
             }
             else  // definite obj_id (aka value node)
             {
-               id_index mem[256];
-               auto     val = make_value(bn->branch_region(), bn->get_branch_alloc_hint(mem, 256),
-                                         root.rlock(), _cur_val);
+               //id_index mem[256];
+               /// TODO: to use hints we must make sure there is alignment between branch_region and
+               /// the indicies... if binary node doesn't honor the branch region when allocating
+               /// its children, then the indicies we get back will be for he wrong region
+               auto val = make_value(bn->branch_region(),
+                                     alloc_hint::any() /*bn->get_branch_alloc_hint(mem, 256)*/,
+                                     root.rlock(), _cur_val);
                root.modify().as<binary_node>()->insert(kv_index(lb_idx, kv_type::obj_id), key,
                                                        value_type::make_value_node(val));
             }
@@ -1621,13 +1627,18 @@ namespace arbtrie
                                 key, _cur_val))
              .address();
 
+      /*
+      because binary node children don't keep all children in the same region,
+      to prevent over concentration in a region and because it has room to store
+      the full address without compress, we cannot use hints here.
       id_index mem[256];
       auto     hint = bn->get_branch_alloc_hint(mem, 256);
-      return clone<mode>(
-                 parent_hint, root, bn, {},
-                 binary_node::clone_insert(kv_index(lb_idx, kv_type::obj_id), key,
-                                           value_type::make_value_node(make_value(
-                                               bn->branch_region(), hint, root.rlock(), _cur_val))))
+      */
+      return clone<mode>(parent_hint, root, bn, {},
+                         binary_node::clone_insert(
+                             kv_index(lb_idx, kv_type::obj_id), key,
+                             value_type::make_value_node(make_value(
+                                 bn->branch_region(), alloc_hint::any(), root.rlock(), _cur_val))))
           .address();
    }  // upsert_binary
 
@@ -1775,9 +1786,11 @@ namespace arbtrie
             }
             else  // value node -> updated value node
             {
+               /*
                id_index mem[256];
                auto     hint = bn->get_branch_alloc_hint(mem, 256);
-               auto     nv   = upsert_value<mode>(cval, cval.as<value_node>(), {}, hint);
+               */
+               auto nv = upsert_value<mode>(cval, cval.as<value_node>(), {}, parent_hint);
                if (nv != kvp->value_id())
                   root.modify().as<binary_node>()->set_value(kv_index(lb_idx, kv_type::obj_id),
                                                              value_type::make_value_node(nv));
@@ -1812,10 +1825,13 @@ namespace arbtrie
                }
                else  // inline -> value_node
                {
+                  /**
                   id_index mem[256];
                   auto     hint = bn->get_branch_alloc_hint(mem, 256);
-                  auto     nval = make_value(bn->branch_region(), hint, root.rlock(), _cur_val);
-                  auto     vval = value_type::make_value_node(nval);
+                  */
+                  auto nval =
+                      make_value(bn->branch_region(), alloc_hint::any(), root.rlock(), _cur_val);
+                  auto vval = value_type::make_value_node(nval);
                   // TODO kidx is irrelevant now that value_node is encoded in value_type
                   kv_index kidx(lb_idx, kv_type::obj_id);
 
@@ -1886,12 +1902,18 @@ namespace arbtrie
             }
             else
             {
+               /*
+               because binary node children don't keep all children in the same region,
+               to prevent over concentration in a region and because it has room to store
+               the full address without compress, we cannot use hints here.
                id_index mem[256];
                auto     hint = bn->get_branch_alloc_hint(mem, 256);
-               auto     nval = make_value(bn->branch_region(), hint, root.rlock(), _cur_val);
-               auto     r    = clone<mode>(parent_hint, root, bn, {},
-                                           binary_node::clone_update(kv_index(lb_idx, kv_type::obj_id),
-                                                                     value_type::make_value_node(nval)));
+               */
+               auto nval =
+                   make_value(bn->branch_region(), alloc_hint::any(), root.rlock(), _cur_val);
+               auto r = clone<mode>(parent_hint, root, bn, {},
+                                    binary_node::clone_update(kv_index(lb_idx, kv_type::obj_id),
+                                                              value_type::make_value_node(nval)));
                release_node(cval);  // because clone retained a copy
                return r.address();
             }
@@ -1911,9 +1933,12 @@ namespace arbtrie
             }
             else
             {
+               /**
                id_index mem[256];
                auto     hint = bn->get_branch_alloc_hint(mem, 256);
-               auto     nval = make_value(bn->branch_region(), hint, root.rlock(), _cur_val);
+               */
+               auto nval =
+                   make_value(bn->branch_region(), alloc_hint::any(), root.rlock(), _cur_val);
                return clone<mode>(parent_hint, root, bn, {},
                                   binary_node::clone_update(kv_index(lb_idx, kv_type::obj_id),
                                                             value_type::make_value_node(nval)))

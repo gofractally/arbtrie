@@ -801,11 +801,14 @@ namespace arbtrie
        */
       inline sal::alloc_hint get_branch_alloc_hint(id_index* mem, uint32_t size) const
       {
-         sal::alloc_hint hint(mem, 0);
-         auto*           mem_pos = mem;
-         auto            start   = key_offsets();
-         auto            pos     = start;
-         const auto      end     = start + num_branches();
+         return sal::alloc_hint::any();
+         //ARBTRIE_WARN("this method shouldn't be called");
+         sal::alloc_hint hint(branch_region(), mem, num_branches());
+         return hint;
+         auto*      mem_pos = mem;
+         auto       start   = key_offsets();
+         auto       pos     = start;
+         const auto end     = start + num_branches();
          while (pos != end and hint.count < size)
          {
             if (pos->type & key_index::obj_id)  // object_id or subtree

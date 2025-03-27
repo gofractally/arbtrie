@@ -82,13 +82,19 @@ namespace sal
     */
    struct alloc_hint
    {
-      alloc_hint(const ptr_address::index_type* hints, uint16_t count = 1)
-          : hints(hints), count(count)
+      alloc_hint(ptr_address::region_type       region,
+                 const ptr_address::index_type* hints,
+                 uint16_t                       count = 1)
+          : region(region), hints(hints), count(count)
       {
       }
-      static constexpr alloc_hint    any() { return alloc_hint{nullptr, 0}; }
-      const ptr_address::index_type* hints = nullptr;
-      uint16_t                       count = 0;
+      static constexpr alloc_hint any()
+      {
+         return alloc_hint{ptr_address::region_type(0), nullptr, 0};
+      }
+      ptr_address::region_type       region = ptr_address::region_type(0);
+      const ptr_address::index_type* hints  = nullptr;
+      uint16_t                       count  = 0;
    };
 
    namespace detail
@@ -266,6 +272,7 @@ namespace sal
        *  @return an the address of the allocated ptr and a pointer to the shared_ptr
        */
       allocation alloc(ptr_address::region_type region, const alloc_hint& hint = alloc_hint::any());
+      allocation first_avail_alloc(ptr_address::region_type region);
 
       /// @pre address is a valid pointer address
       void free(ptr_address address);
@@ -368,7 +375,10 @@ namespace sal
        * @throw std::runtime_error if no ptrs are available
        * @return an allocation if successful, std::nullopt if transient inconsitency detected
        */
-      std::optional<allocation> try_alloc(ptr_address::region_type region, const hint& h);
+      std::optional<allocation> try_alloc(ptr_address::region_type region);
+      std::optional<allocation> try_alloc(detail::region&          reg,
+                                          ptr_address::region_type reg_num,
+                                          ptr_address::index_type  index);
 
       detail::page_number address_index_to_page(ptr_address::index_type address_index)
       {

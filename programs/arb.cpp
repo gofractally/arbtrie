@@ -393,7 +393,7 @@ int  main(int argc, char** argv)
    std::vector<std::string> v;
    std::string              str;
 
-   int64_t batch_size = 100;
+   int64_t batch_size = 10000;
 
    // Read the next line from File until it reaches the
    // end.
@@ -427,7 +427,8 @@ int  main(int argc, char** argv)
             ("big-endian-seq", po::bool_switch()->default_value(true), "Run big endian sequential insert test")
             ("big-endian-rev", po::bool_switch()->default_value(true), "Run big endian reverse sequential insert test")
             ("rand-string", po::bool_switch()->default_value(true), "Run random string insert test")
-            ("count", po::value<int>()->default_value(1000000), "Number of items to insert");
+            ("count", po::value<int>()->default_value(1000000), "Number of items to insert")
+            ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch");
          // clang-format on
 
          po::variables_map vm;
@@ -435,6 +436,9 @@ int  main(int argc, char** argv)
          po::notify(vm);
 
          const int count = vm["count"].as<int>();
+         batch_size      = vm["batch-size"].as<int>();
+         ARBTRIE_WARN("count: ", count);
+         ARBTRIE_WARN("batch size: ", batch_size);
 
          auto tx = ws->start_transaction(0);
 
@@ -798,8 +802,8 @@ int  main(int argc, char** argv)
          for (auto& r : rthreads)
             r->join();
 
-         ARBTRIE_WARN("sleeping for 15 seconds");
-         std::this_thread::sleep_for(std::chrono::seconds(15));
+         ARBTRIE_WARN("sleeping for 1 seconds");
+         std::this_thread::sleep_for(std::chrono::seconds(1));
          db.print_stats(std::cout);
 
          if (sync_compact)

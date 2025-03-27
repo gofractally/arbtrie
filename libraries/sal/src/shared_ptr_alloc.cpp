@@ -98,13 +98,12 @@ namespace sal
     * @throw std::runtime_error if no ptrs are available
     * @return an allocation if successful, std::nullopt if transient inconsitency detected
     */
-   std::optional<allocation> shared_ptr_alloc::try_alloc(ptr_address::region_type region,
-                                                         const hint&              h)
+   std::optional<allocation> shared_ptr_alloc::try_alloc(ptr_address::region_type region)
    {
-      (void)h;
       auto& reg = get_page_table().regions[*region];
 
       uint64_t free_pages = reg.free_pages[0].load(std::memory_order_acquire);
+
       // SAL_INFO("free_pages[0]: {}", std::bitset<64>(free_pages));
       int free_pages_idx = 0;
       if (not free_pages)
@@ -124,6 +123,7 @@ namespace sal
 
       // Find first free cacheline by checking free_cachelines bitmap
       uint64_t free_cachelines = pg.free_cachelines.load(std::memory_order_acquire);
+
       if (!free_cachelines) [[unlikely]]
       {
          //         SAL_ERROR("inconsitency detected: free_cachelines: {}", std::bitset<64>(free_cachelines));
@@ -192,10 +192,32 @@ namespace sal
       return std::nullopt;
    }
 
-   allocation shared_ptr_alloc::alloc(ptr_address::region_type region, const alloc_hint& /*ahint*/)
+   allocation shared_ptr_alloc::alloc(ptr_address::region_type region, const alloc_hint& ahint)
    {
-      hint                      h     = hint::any();
-      std::optional<allocation> alloc = try_alloc(region, h);
+      if (ahint.count > 0 && ahint.region != region)
+      {
+         SAL_ERROR("alloc hint region mismatch: {} != {}", ahint.region, region);
+         abort();
+      }
+      if constexpr (false /*use_alloc_hints*/)
+      {
+         auto&       reg = get_page_table().regions[*region];
+         const auto* end = ahint.hints + ahint.count;
+         for (auto h = ahint.hints; h < end; ++h)
+         {
+            if (not*h)
+               continue;
+            auto alloc = try_alloc(reg, region, *h);
+            if (alloc)
+               return *alloc;
+         }
+      }
+      return first_avail_alloc(region);
+   }
+
+   allocation shared_ptr_alloc::first_avail_alloc(ptr_address::region_type region)
+   {
+      std::optional<allocation> alloc = try_alloc(region);
       int                       count = 0;
       while (!alloc)
       {
@@ -209,13 +231,80 @@ namespace sal
             throw std::runtime_error(
                 "shared_ptr_alloc: *contention* no pointers available after "
                 "1 mega attempts");
-         alloc = try_alloc(region, h);
+         alloc = try_alloc(region);
          count++;
       }
       if (count > 1024)
          SAL_WARN("shared_ptr_alloc: *contention* took {} attempts", count);
       // Sequence number is now assigned in try_alloc
       return *alloc;
+   }
+
+   inline std::optional<allocation> shared_ptr_alloc::try_alloc(detail::region&          reg,
+                                                                ptr_address::region_type reg_num,
+                                                                ptr_address::index_type  index)
+   {
+      auto     page_idx            = address_index_to_page(index);
+      auto     page_offset         = reg.get_page_offset(page_idx);
+      auto&    pg                  = get_page(page_offset);
+      auto     index_on_page       = *index % ptrs_per_page;
+      auto     hint_slot_cacheline = index_on_page / 8;
+      uint64_t free_cachelines     = pg.free_cachelines.load(std::memory_order_relaxed);
+
+      const uint64_t hint_cacheline_slot_bit = 1ULL << hint_slot_cacheline;
+      if (not(free_cachelines & hint_cacheline_slot_bit))
+         return std::nullopt;
+
+      uint64_t index_in_free_ptrs = hint_slot_cacheline * 8 / 64;
+      auto&    free_ptrs          = pg.free_ptrs[index_in_free_ptrs];
+      uint64_t free_ptrs_bitmap   = free_ptrs.load(std::memory_order_relaxed);
+
+      auto cacheline_hint_idx      = (*index % 64) / 8;
+      auto cacheline_hint_mask     = uint64_t(0xff) << (cacheline_hint_idx * 8);
+      auto masked_free_ptrs_bitmap = free_ptrs_bitmap & cacheline_hint_mask;
+
+      while (masked_free_ptrs_bitmap) [[likely]]
+      {
+         uint64_t first_free_ptr = std::countr_zero(masked_free_ptrs_bitmap);
+         uint64_t cleared_bit    = 1ULL << first_free_ptr;
+
+         uint64_t expected = free_ptrs_bitmap;
+         uint64_t desired  = expected & ~cleared_bit;
+         if (not free_ptrs.compare_exchange_strong(free_ptrs_bitmap, desired,
+                                                   std::memory_order_acq_rel))
+         {
+            masked_free_ptrs_bitmap = free_ptrs_bitmap & cacheline_hint_mask;
+            //   SAL_WARN("contention detected: free_ptrs_bitmap: {}",
+            //            std::bitset<64>(free_ptrs_bitmap));
+            continue;
+         }
+         auto ptr_index = ptr_address::index_type(index_in_free_ptrs * 64 + first_free_ptr);
+         // was this the last bit in the cacheline?  1 in 8 chance
+         if ((free_ptrs_bitmap & cacheline_hint_mask) == cleared_bit) [[unlikely]]
+         {
+            // we claimed the last ptr in the cacheline, clear the bit in the cacheline
+            auto prev =
+                pg.free_cachelines.fetch_xor(hint_cacheline_slot_bit, std::memory_order_release);
+            if (prev == hint_cacheline_slot_bit) [[unlikely]]  // 1 in 64
+               // we allocated the last pointer in the page.
+               reg.free_pages[page_idx >= 64].fetch_xor(1ULL << (*page_idx % 64),
+                                                        std::memory_order_release);
+         }
+         auto& ptr = pg.get_ptr(ptr_index);
+         // SAL_INFO("index_in_free_ptrs: {}", index_in_free_ptrs);
+         // SAL_INFO("first_free_ptr: {}", first_free_ptr);
+         // SAL_INFO("ptr_index: {}", ptr_index);
+         auto alloc_index = *page_idx * ptrs_per_page + *ptr_index;
+         // SAL_WARN("alloc: {}", ptr_address{region, ptr_address::index_type(alloc_index)});
+
+         // Increment the region use count
+         get_page_table().inc_region(reg_num);
+
+         // SAL_INFO("alloc_index: {}", alloc_index);
+         return allocation{ptr_address{reg_num, ptr_address::index_type(alloc_index)}, &ptr,
+                           get_page_table()._sequence.fetch_add(1, std::memory_order_relaxed)};
+      }
+      return std::nullopt;
    }
 
    /// @pre address is a valid pointer address

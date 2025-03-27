@@ -115,7 +115,7 @@ namespace arbtrie
 
       sal::alloc_hint get_branch_alloc_hint() const
       {
-         return sal::alloc_hint(get_branch_ptr(), num_branches());
+         return sal::alloc_hint(branch_region(), get_branch_ptr(), num_branches());
       }
 
       constexpr local_index begin_index() const { return local_index(-1); }

@@ -333,7 +333,7 @@ namespace arbtrie
 
       sal::alloc_hint get_branch_alloc_hint() const
       {
-         return sal::alloc_hint(branches(), branch_count);
+         return sal::alloc_hint(branch_region(), branches(), branch_count);
       }
 
       //private:
