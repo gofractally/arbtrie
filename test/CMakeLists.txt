@@ -9,6 +9,7 @@ add_executable(arbtrie-tests
     cache_difficulty_state_tests.cpp
     mapped_memory_tests.cpp
     poly_buffer_test.cpp
+    find_byte_tests.cpp
 )
 
 target_link_libraries(arbtrie-tests 

@@ -153,7 +153,7 @@ namespace sal
       }
 
       // ensures that at least the desired number of blocks are present
-      uint32_t reserve(uint32_t desired_num_blocks);
+      uint32_t reserve(uint32_t desired_num_blocks, bool mlock = false);
 
       /**
        * Allocate a new block and return both the block number and offset pointer to it

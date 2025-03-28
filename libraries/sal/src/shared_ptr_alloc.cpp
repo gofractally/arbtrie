@@ -63,7 +63,7 @@ namespace sal
       if (nblocks * _page_allocator->block_size() <= np * sizeof(detail::page))
       {
          _page_allocator->reserve(
-             1 + ((np + 1) * sizeof(detail::page) / _page_allocator->block_size()));
+             1 + ((np + 1) * sizeof(detail::page) / _page_allocator->block_size()), true);
       }
       detail::page_offset offset(sizeof(detail::page) * np);
       auto                pg = new (&get_page(offset)) detail::page();

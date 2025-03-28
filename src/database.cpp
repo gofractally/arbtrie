@@ -1489,7 +1489,7 @@ namespace arbtrie
 
       // if true, the key ends on this node, store value here
       if (cpre.size() >= key.size()) [[unlikely]]
-         return upsert_eof<mode, NodeType>(fn->get_branch_alloc_hint(), r, fn);
+         return upsert_eof<mode, NodeType>(parent_hint, r, fn);
 
       const auto bidx = char_to_branch(key[cpre.size()]);
       auto       br   = fn->get_branch(bidx);

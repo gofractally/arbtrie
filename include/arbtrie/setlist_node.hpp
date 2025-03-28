@@ -1,6 +1,7 @@
 #pragma once
 #include <arbtrie/concepts.hpp>
 #include <arbtrie/debug.hpp>
+#include <arbtrie/find_byte.hpp>
 #include <arbtrie/inner_node.hpp>
 #include <concepts>
 
@@ -144,6 +145,9 @@ namespace arbtrie
          if (k.empty())
             return local_index(-1 + has_eof_value());
 
+         auto pos = arbtrie::lower_bound((const uint8_t*)get_setlist_ptr(), uint8_t(k.front()),
+                                         num_branches());
+         /*
          auto sl  = get_setlist_ptr();
          auto slp = sl;
          auto sle = slp + num_branches();
@@ -151,6 +155,9 @@ namespace arbtrie
          while (slp != sle && uint8_t(*slp) < uint8_t(k.front()))
             ++slp;
          return local_index(slp - sl + has_eof_value());
+         */
+
+         return local_index(pos + has_eof_value());
       }
       local_index upper_bound_index(key_view k) const
       {

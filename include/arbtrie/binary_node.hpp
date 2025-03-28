@@ -1,5 +1,6 @@
 #pragma once
 #include <arbtrie/concepts.hpp>
+#include <arbtrie/find_byte.hpp>
 #include <arbtrie/node_header.hpp>
 #include <arbtrie/value_type.hpp>
 
@@ -639,9 +640,31 @@ namespace arbtrie
 
       local_index get_index(key_view key) const
       {
-         auto     khash  = key_hash(key);
+         auto           khash   = key_hash(key);
+         auto           khh     = key_header_hash(khash);
+         const uint8_t* hashes  = key_hashes();
+         int            nhashes = num_branches();
+
+         int base = 0;
+         while (true)
+         {
+            auto idx = arbtrie::find_byte(hashes, khh, nhashes);
+
+            if (idx == nhashes)
+               return local_end_index;
+
+            auto bidx = base + idx;
+            auto kvp  = get_key_val_ptr(bidx);
+            if (kvp->key() == key)
+               return local_index(bidx);
+
+            auto idx_p1 = idx + 1;
+            hashes += idx_p1;
+            nhashes -= idx_p1;
+            base = bidx + 1;
+         }
+         /*
          key_view hashes = to_key(key_hashes(), num_branches());
-         auto     khh    = key_header_hash(khash);
 
          int base = 0;
          while (true)
@@ -656,6 +679,7 @@ namespace arbtrie
             hashes = hashes.substr(idx + 1);
             base   = bidx + 1;
          }
+         */
       }
 
       int find_key_idx(key_view key, uint64_t khash) const

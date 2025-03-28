@@ -416,9 +416,9 @@ int  main(int argc, char** argv)
       {
          std::optional<node_handle> last_root;
          std::optional<node_handle> last_root2;
-         const int                  rounds = 3;
-
-         namespace po = boost::program_options;
+         int                        rounds             = 3;
+         int                        multithread_rounds = 20;
+         namespace po                                  = boost::program_options;
          // clang-format off
          po::options_description desc("Test options");
          desc.add_options()
@@ -428,17 +428,22 @@ int  main(int argc, char** argv)
             ("big-endian-rev", po::bool_switch()->default_value(true), "Run big endian reverse sequential insert test")
             ("rand-string", po::bool_switch()->default_value(true), "Run random string insert test")
             ("count", po::value<int>()->default_value(1000000), "Number of items to insert")
-            ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch");
+            ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch")
+            ("rounds", po::value<int>()->default_value(3), "Number of rounds to run")
+            ("multithread-rounds", po::value<int>()->default_value(20), "Number of multi-thread rounds to run");
          // clang-format on
 
          po::variables_map vm;
          po::store(po::parse_command_line(argc, argv, desc), vm);
          po::notify(vm);
 
-         const int count = vm["count"].as<int>();
-         batch_size      = vm["batch-size"].as<int>();
+         const int count    = vm["count"].as<int>();
+         batch_size         = vm["batch-size"].as<int>();
+         rounds             = vm["rounds"].as<int>();
+         multithread_rounds = vm["multithread-rounds"].as<int>();
          ARBTRIE_WARN("count: ", count);
          ARBTRIE_WARN("batch size: ", batch_size);
+         ARBTRIE_WARN("rounds: ", rounds);
 
          auto tx = ws->start_transaction(0);
 
@@ -768,8 +773,9 @@ int  main(int argc, char** argv)
          }
 
          std::cout << "insert dense rand while reading " << rthreads.size()
-                   << " threads  batch size: " << batch_size << "\n";
-         for (int ro = 0; ro < 20; ++ro)
+                   << " threads  batch size: " << batch_size << " for " << multithread_rounds
+                   << " rounds\n";
+         for (int ro = 0; ro < multithread_rounds; ++ro)
          {
             auto start = std::chrono::steady_clock::now();
             for (int i = 0; i < count; ++i)

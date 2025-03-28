@@ -271,7 +271,7 @@ namespace sal
       }
    }
 
-   void block_allocator::sync(sync_type st)
+   void block_allocator::sync(sync_type)
    {
       if (_fd)  //and sync_type::none != st)
       {
@@ -291,7 +291,7 @@ namespace sal
       }
    }
 
-   uint32_t block_allocator::reserve(uint32_t desired_num_blocks)
+   uint32_t block_allocator::reserve(uint32_t desired_num_blocks, bool mlock)
    {
       if (desired_num_blocks > _max_blocks)
          throw std::runtime_error("unable to reserve, maximum block would be reached");
@@ -333,6 +333,13 @@ namespace sal
 
       if (addr != MAP_FAILED)
       {
+         if (mlock)
+         {
+            if (::mlock(addr, map_size) != 0)
+            {
+               SAL_ERROR("Failed to mlock file: {}", strerror(errno));
+            }
+         }
          // Successfully mapped the file
          if (capacity == 0)
          {
