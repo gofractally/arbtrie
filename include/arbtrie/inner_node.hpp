@@ -14,39 +14,17 @@ namespace arbtrie
           requires std::same_as<decltype(T::type), const node_type>;
 
           // Required member functions
-          {
-             node.add_branch(br, addr)
-          } -> std::same_as<T&>;
-          {
-             node.remove_branch(br)
-          } -> std::same_as<T&>;
-          {
-             node.set_branch(br, addr)
-          } -> std::same_as<T&>;
-          {
-             const_node.get_branch(br)
-          } -> std::same_as<id_address>;
-          {
-             const_node.lower_bound(br)
-          } -> std::same_as<std::pair<branch_index_type, id_address>>;
-          {
-             const_node.can_add_branch()
-          } -> std::same_as<bool>;
-          {
-             const_node.get_prefix()
-          } -> std::same_as<key_view>;
-          {
-             const_node.has_eof_value()
-          } -> std::same_as<bool>;
-          {
-             const_node.get_eof_address()
-          } -> std::same_as<id_address>;
-          {
-             const_node.get_eof_value()
-          } -> std::same_as<value_type>;
-          {
-             const_node.is_eof_subtree()
-          } -> std::same_as<bool>;
+          { node.add_branch(br, addr) } -> std::same_as<T&>;
+          { node.remove_branch(br) } -> std::same_as<T&>;
+          { node.set_branch(br, addr) } -> std::same_as<T&>;
+          { const_node.get_branch(br) } -> std::same_as<id_address>;
+          { const_node.lower_bound(br) } -> std::same_as<std::pair<branch_index_type, id_address>>;
+          { const_node.can_add_branch() } -> std::same_as<bool>;
+          { const_node.get_prefix() } -> std::same_as<key_view>;
+          { const_node.has_eof_value() } -> std::same_as<bool>;
+          { const_node.get_eof_address() } -> std::same_as<id_address>;
+          { const_node.get_eof_value() } -> std::same_as<value_type>;
+          { const_node.is_eof_subtree() } -> std::same_as<bool>;
 
           // Required from inner_node base
           requires std::derived_from<T, inner_node<T>>;

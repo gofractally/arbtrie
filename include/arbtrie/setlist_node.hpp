@@ -145,19 +145,9 @@ namespace arbtrie
          if (k.empty())
             return local_index(-1 + has_eof_value());
 
-         auto pos = arbtrie::lower_bound((const uint8_t*)get_setlist_ptr(), uint8_t(k.front()),
-                                         num_branches());
-         /*
-         auto sl  = get_setlist_ptr();
-         auto slp = sl;
-         auto sle = slp + num_branches();
-
-         while (slp != sle && uint8_t(*slp) < uint8_t(k.front()))
-            ++slp;
-         return local_index(slp - sl + has_eof_value());
-         */
-
-         return local_index(pos + has_eof_value());
+         auto lb = arbtrie::lower_bound((const uint8_t*)get_setlist_ptr(), num_branches(),
+                                        uint8_t(k.front()));
+         return local_index(lb + has_eof_value());
       }
       local_index upper_bound_index(key_view k) const
       {

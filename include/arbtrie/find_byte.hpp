@@ -8,13 +8,6 @@
 
 namespace arbtrie
 {
-   /**
-    * @return the index of the byte in the unsorted array, or size if not found
-    */
-   inline const uint8_t* find_byte(const uint8_t* data, uint32_t size, uint8_t byte)
-   {
-      return std::find(data, data + size, byte);
-   }
 
    /**
     * This was benchmarked to be the fastest implementation for small arrays
@@ -35,7 +28,7 @@ namespace arbtrie
       return (arr[0] < value) + (arr[1] < value) + (arr[2] < value) + (arr[3] < value) +
              (arr[4] < value) + (arr[5] < value) + (arr[6] < value) + (arr[7] < value);
    }
-   inline int lower_bound_small(const uint8_t* arr, uint8_t value, size_t size)
+   inline int lower_bound_small(const uint8_t* arr, size_t size, uint8_t value)
    {
       auto sl  = arr;
       auto slp = sl;
@@ -47,7 +40,7 @@ namespace arbtrie
    }
 #if defined(__ARM_NEON)
    // NEON variable-length implementation
-   inline int lower_bound_neon(const uint8_t* arr, uint8_t value, int size)
+   inline int lower_bound_neon(const uint8_t* arr, size_t size, uint8_t value)
    {
       int offset      = 0;
       int total_count = 0;
@@ -86,7 +79,7 @@ namespace arbtrie
       if (offset == size)
          return size;
 
-      return total_count + lower_bound_small(arr + offset, value, size - offset);
+      return total_count + lower_bound_small(arr + offset, size - offset, value);
 
       /*
       // Create temporary buffer aligned to 16 bytes
@@ -115,7 +108,7 @@ namespace arbtrie
 #endif
 
    // Using find_byte_unroll in a loop to support any size
-   inline int lower_bound_scalar(const uint8_t* arr, uint8_t value, size_t size)
+   inline int lower_bound_scalar(const uint8_t* arr, size_t size, uint8_t value)
    {
       int       offset    = 0;
       const int size_min8 = int(size) - 8;
@@ -135,7 +128,7 @@ namespace arbtrie
 
          offset += 8;
       }
-      return offset + lower_bound_small(arr + offset, value, size - offset);
+      return offset + lower_bound_small(arr + offset, size - offset, value);
       /*
       while (offset < size)
       {
@@ -153,17 +146,17 @@ namespace arbtrie
    inline uint8_t lower_bound(const uint8_t* data, uint32_t size, uint8_t byte)
    {
       if (size < 8)
-         return lower_bound_small(data, byte, size);
+         return lower_bound_small(data, size, byte);
       else if (size < 16)
-         return lower_bound_scalar(data, byte, size);
+         return lower_bound_scalar(data, size, byte);
 #if defined(__ARM_NEON)
-      return lower_bound_neon(data, byte, size);
+      return lower_bound_neon(data, size, byte);
 #else
-      return lower_bound_scalar(data, byte, size);
+      return lower_bound_scalar(data, size, byte);
 #endif
    }
 
-   inline int find_byte(const uint8_t* arr, uint8_t value, size_t size)
+   inline int find_byte(const uint8_t* arr, size_t size, uint8_t value)
    {
       uint64_t       target   = value * 0x0101010101010101ULL;  // Broadcast value to all bytes
       const uint8_t* end      = arr + size;
