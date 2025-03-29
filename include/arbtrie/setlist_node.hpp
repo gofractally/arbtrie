@@ -43,11 +43,11 @@ namespace arbtrie
     *  
     *  // inner_node<setlist_node> fields - 12 bytes
     *  uint32_t _descendants;         // 4 bytes for descendant count
+    *  id_address _eof_value;         // 8 bytes for EOF value pointer
+    *  uint32_t _eof_subtree:1;       // whether EOF is a subtree
     *  uint32_t _prefix_capacity:10;  // size of prefix buffer
     *  uint32_t _prefix_size:10;      // actual prefix length
     *  uint32_t _unused:11;           // unused bits
-    *  uint32_t _eof_subtree:1;       // whether EOF is a subtree
-    *  id_address _eof_value;         // 8 bytes for EOF value pointer
     *  
     *  // setlist_node has no additional fixed fields
     *  
@@ -70,22 +70,8 @@ namespace arbtrie
     * | 448  |   416     |    0     |  138    |    2     |     2      |
     * | 512  |   480     |    0     |  160    |    0     |     0      |
     * 
-    * TODO: reorganize fields so that _unused:11 becomes last field and 
-    * _prefix_capacity:10 becomes a function(prefix_size + _nsize), leaving us
-    * with 2 extra bytes for the prefix and unused:5 bits. 
     * 
-    * | Size | Available | 1-byte Alignment | 2-byte Alignment | 16-byte Alignment |
-    * |      | Space     | Branch | Prefix  | Branch | Prefix  | Branch | Prefix   |
-    * |------|-----------|--------|---------|--------|---------|--------|----------|
-    * |  64  |    38     |   12   |    2    |   12   |    2    |   10   |    8     |
-    * | 128  |   102     |   34   |    0    |   34   |    0    |   32   |    6     |
-    * | 192  |   166     |   55   |    1    |   55   |    1    |   54   |    4     |
-    * | 256  |   230     |   76   |    2    |   76   |    2    |   74   |    8     |
-    * | 320  |   294     |   98   |    0    |   98   |    0    |   96   |    6     |
-    * | 384  |   358     |  119   |    1    |  119   |    1    |  118   |    4     |
-    * | 448  |   422     |  140   |    2    |  140   |    2    |  138   |    8     |
-    * 
-    *    */
+    */
    class setlist_node : public inner_node<setlist_node>
    {
      public:
@@ -98,7 +84,7 @@ namespace arbtrie
          return (_nsize - sizeof(setlist_node) - prefix_capacity());
       }
       // the max number of branches
-      uint8_t        branch_capacity() const { return branch_data_cap() / (1 + sizeof(id_index)); }
+      uint8_t        branch_capacity() const { return _setlist_branch_capacity; }
       uint8_t*       get_setlist_ptr() { return end_prefix(); }
       const uint8_t* get_setlist_ptr() const { return end_prefix(); }
       int            get_setlist_size() const { return num_branches(); }

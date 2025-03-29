@@ -205,9 +205,10 @@ namespace arbtrie
       return true;
    }
 
-   void seg_alloc_session::sync(sync_type st, int top_root_index, id_address top_root)
+   void seg_alloc_session::sync(int top_root_index, id_address top_root)
    {
-      int seg_num = _alloc_seg_num;
+      auto st      = _sega._mapped_state->_config.sync_mode;
+      int  seg_num = _alloc_seg_num;
       if (seg_num != -1)
          seg_num = _dirty_segments.pop();
       //ARBTRIE_WARN("sync: pop() => seg_num: ", seg_num);

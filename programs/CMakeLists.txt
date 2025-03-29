@@ -33,3 +33,6 @@ if(ENABLE_COVERAGE)
     target_compile_options(arbtrie-benchmark PUBLIC --coverage)
     target_link_options(arbtrie-benchmark PUBLIC --coverage)
 endif()
+
+# Add the arbtrie_sql program subdirectory
+add_subdirectory(arbtrie_sql)

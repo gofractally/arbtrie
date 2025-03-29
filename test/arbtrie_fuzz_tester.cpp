@@ -80,9 +80,7 @@ namespace
          std::cout << "Creating database at " << db_path << std::endl;
          std::filesystem::create_directories(db_path);
 
-         // Configure the database
-         config cfg;
-         cfg.cache_on_read = true;  // Enable cache
+         runtime_config cfg;
 
          // Create and open the database
          database::create(db_path, cfg);
@@ -1447,8 +1445,7 @@ struct TestEnv
       std::filesystem::create_directories(db_path);
 
       // Configure and open the database
-      config cfg;
-      cfg.cache_on_read = true;  // Enable cache
+      runtime_config cfg;
 
       database::create(db_path, cfg);
       db = new database(db_path, cfg);

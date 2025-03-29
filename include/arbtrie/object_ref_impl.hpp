@@ -66,7 +66,9 @@ namespace arbtrie
       }
       if (_rlock.should_cache(size) and _rlock.is_read_only(_cached.loc()) and
           _meta.try_inc_activity())
+      {
          _rlock._session._rcache_queue.push(address());
+      }
    }
 
    inline const node_header* object_ref::release()

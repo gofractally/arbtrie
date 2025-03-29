@@ -47,13 +47,18 @@ namespace arbtrie
    template <typename Derived>
    struct inner_node : node_header
    {
+      uint16_t setlist_branch_data_cap() const
+      {
+         return (_nsize - sizeof(Derived) - prefix_capacity());
+      }
       inline inner_node(uint32_t            size,
                         id_address_seq      nid,
                         const clone_config& cfg,
                         uint16_t            num_branch = 0)
           : node_header(size, nid, Derived::type, num_branch)
       {
-         _prefix_capacity = cfg.prefix_capacity();
+         _prefix_capacity         = cfg.prefix_capacity();
+         _setlist_branch_capacity = setlist_branch_data_cap() / (1 + sizeof(id_index));
          if (cfg.set_prefix)
             set_prefix(*cfg.set_prefix);
       }
@@ -70,12 +75,14 @@ namespace arbtrie
 
          if (cfg.set_prefix)
          {
-            _prefix_capacity = cfg.prefix_capacity();
+            _prefix_capacity         = cfg.prefix_capacity();
+            _setlist_branch_capacity = setlist_branch_data_cap() / (1 + sizeof(id_index));
             set_prefix(*cfg.set_prefix);
          }
          else
          {
-            _prefix_capacity = std::max<int>(cfg.prefix_cap, src->prefix_size());
+            _prefix_capacity         = std::max<int>(cfg.prefix_cap, src->prefix_size());
+            _setlist_branch_capacity = setlist_branch_data_cap() / (1 + sizeof(id_index));
             set_prefix(src->get_prefix());
          }
       }
@@ -98,11 +105,11 @@ namespace arbtrie
       uint32_t descendants() const { return _descendants; }
 
       uint32_t   _descendants = 0;
+      id_address _eof_value;
+      uint32_t   _eof_subtree : 1 = false;
       uint32_t   _prefix_capacity : 10;
       uint32_t   _prefix_size : 10;
-      uint32_t   _unused : 11;  // TODO: this could be used extend range of _descendants
-      uint32_t   _eof_subtree : 1 = false;
-      id_address _eof_value;
+      uint32_t   _setlist_branch_capacity : 8;
 
       void set_eof(id_address e)
       {

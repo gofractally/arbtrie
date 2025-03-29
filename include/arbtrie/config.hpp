@@ -201,7 +201,7 @@ namespace arbtrie
 
    // designed to fit within 4096 bytes with other header information
    // so msync the page doesn't waste data.
-   static constexpr const uint32_t num_top_roots = 510;
+   static constexpr const uint32_t num_top_roots = 1024;
 
    /**
     * This will slow down performance, but ensures the checksum should

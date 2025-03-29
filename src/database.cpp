@@ -227,8 +227,8 @@ namespace arbtrie
           *this, id_address::from_int(_db->_dbm->top_root[index].load(std::memory_order_relaxed)));
    }
 
-   database::database(std::filesystem::path dir, config cfg, access_mode mode)
-       : _sega{dir}, _dbfile{dir / "db", mode}, _config(cfg)
+   database::database(std::filesystem::path dir, runtime_config cfg, access_mode mode)
+       : _sega(dir, cfg), _dbfile{dir / "db", mode}
    {
       if (_dbfile.size() == 0)
       {
@@ -264,6 +264,7 @@ namespace arbtrie
             }
          }
       }
+      _dbm->config         = cfg;
       _dbm->clean_shutdown = false;
    }
 
@@ -273,7 +274,7 @@ namespace arbtrie
       _dbfile.sync(sync_type::sync);
    }
 
-   void database::create(std::filesystem::path dir, config cfg)
+   void database::create(std::filesystem::path dir, runtime_config cfg)
    {
       if (std::filesystem::exists(std::filesystem::symlink_status(dir / "db")) ||
           std::filesystem::exists(std::filesystem::symlink_status(dir / "data")))
@@ -412,7 +413,7 @@ namespace arbtrie
    id_address write_session::remove(session_rlock& state, id_address root, key_view key)
    {
       if (not root) [[unlikely]]
-         throw std::runtime_error("cannot remove key that doesn't exist");
+         return root;  //throw std::runtime_error("cannot remove key that doesn't exist");
       return upsert<upsert_mode::unique_remove>(state.get(root), key, alloc_hint::any());
    }
 
@@ -1966,7 +1967,7 @@ namespace arbtrie
       return make<value_node>(reg, parent_hint, state, key, val).address();
    }
 
-   write_transaction write_session::start_transaction(int top_root_node)
+   write_transaction write_session::start_write_transaction(int top_root_node)
    {
       // Use shared_from_this() to get a shared_ptr to this session
       return write_transaction(
@@ -1980,7 +1981,7 @@ namespace arbtrie
                 // corrupted by bad memory access patterns in the same
                 // process.
                 /// TODO: use configured sync type instead of hardcoding async
-                _segas->sync(sync_type::async, top_root_node, commit.address());
+                _segas->sync(top_root_node, commit.address());
 
                 set_root(std::move(commit), top_root_node);
                 // give other writers a chance to grab the lock

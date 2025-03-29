@@ -27,9 +27,8 @@ struct TestEnv
       std::filesystem::create_directories(db_path);
 
       // Configure and open the database
-      config cfg;
+      runtime_config cfg;
       // Compaction is now managed internally by the database
-      cfg.cache_on_read = true;  // Enable cache
 
       // Create and open the database
       database::create(db_path, cfg);

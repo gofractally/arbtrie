@@ -640,15 +640,16 @@ namespace arbtrie
 
       local_index get_index(key_view key) const
       {
-         auto           khash   = key_hash(key);
-         auto           khh     = key_header_hash(khash);
-         const uint8_t* hashes  = key_hashes();
-         int            nhashes = num_branches();
+         auto khash = key_hash(key);
+         auto khh   = key_header_hash(khash);
+         //const uint8_t* hashes  = key_hashes();
+         //int            nhashes = num_branches();
 
+         /**
          int base = 0;
          while (true)
          {
-            auto idx = arbtrie::find_byte(hashes, khh, nhashes);
+            auto idx = arbtrie::find_byte(hashes, nhashes, khh);
 
             if (idx == nhashes)
                return local_end_index;
@@ -663,7 +664,8 @@ namespace arbtrie
             nhashes -= idx_p1;
             base = bidx + 1;
          }
-         /*
+         */
+
          key_view hashes = to_key(key_hashes(), num_branches());
 
          int base = 0;
@@ -671,7 +673,7 @@ namespace arbtrie
          {
             auto idx = hashes.find(khh);
             if (idx == key_view::npos)
-               return local_end_index;
+               return local_index(num_branches());
             auto bidx = base + idx;
             auto kvp  = get_key_val_ptr(bidx);
             if (kvp->key() == key)
@@ -679,7 +681,6 @@ namespace arbtrie
             hashes = hashes.substr(idx + 1);
             base   = bidx + 1;
          }
-         */
       }
 
       int find_key_idx(key_view key, uint64_t khash) const

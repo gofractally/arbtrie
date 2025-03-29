@@ -66,41 +66,6 @@ namespace arbtrie
       uint32_t flags;
    };
 
-   struct config
-   {
-      /**
-          *  Read threads can move the accessed data into
-          *  a warm cache to improve cache locality and separate
-          *  infrequently used data from frequently used data.
-          *
-          *  If used with anything other than sync_type::none, this
-          *  will produce write amplification somewhat less than
-          *  the total data read because on sync() the moved cache
-          *  values must be flushed to disk.
-          */
-      bool cache_on_read = false;
-
-      /**
-          * The max amount of a segment that is allowed to be empty
-          * before the compactor thread will move the remaining contents
-          * to a new segment. 
-          *
-          * Lower values save space, but produce more write amplification when
-          * using sync_type other than none.  Lower values improve cache
-          * locality and reduce page misses by keeping the data denser.
-          */
-      int compact_empty_threshold_percent = 20;
-
-      /**
-          * Triedent will discourage the OS from swapping out 
-          * the most recently used segments by using mlock(),
-          * may want a higher compaction threshold if using mlock()
-          */
-      uint64_t max_pinnable_segments = 64;
-
-      sync_type sync_mode = sync_type::none;
-   };
-
    class read_session
    {
      protected:
@@ -115,10 +80,6 @@ namespace arbtrie
 
       database* _db;
       read_session(database* db);
-
-      // Move operations can now be enabled with pointer members
-      read_session(read_session&&)            = default;
-      read_session& operator=(read_session&&) = default;
 
       int get(object_ref& root, key_view key, std::invocable<bool, value_type> auto&& callback);
       int get(object_ref&                             root,
@@ -140,6 +101,10 @@ namespace arbtrie
 
      public:
       ~read_session();
+      // Move operations can now be enabled with pointer members
+      read_session(read_session&&)            = default;
+      read_session& operator=(read_session&&) = default;
+
       std::unique_ptr<seg_alloc_session> _segas;
 
       uint64_t count_ids_with_refs() { return _segas->count_ids_with_refs(); }
@@ -150,6 +115,13 @@ namespace arbtrie
          return iterator<CacheMode>(*this, std::move(h));
       }
 
+      read_transaction start_read_transaction(int top_root_node = 0)
+      {
+         if (top_root_node == -1)
+            return read_transaction(*this, create_root());
+         return read_transaction(*this, get_root(top_root_node));
+      }
+      /// @deprecated Use start_read_transaction() instead, conflicts with write_transaction::start_transaction()
       read_transaction start_transaction(int top_root_node = 0)
       {
          if (top_root_node == -1)
@@ -309,7 +281,7 @@ namespace arbtrie
       id_address remove(session_rlock& state, id_address root, key_view key);
 
       value_type _cur_val;
-      bool       _sync_lock = false;
+      // bool       _sync_lock = false;
 
       // when a new key is inserted this is set to 1 and the and
       // when a key is removed this is set to -1
@@ -334,7 +306,6 @@ namespace arbtrie
       //
       // @returns the prior root so caller can choose when/where
       // to release it, if ignored it will be released immediately
-      template <sync_type stype = sync_type::none>
       node_handle set_root(node_handle r, int index = 0);
 
       // Designed to only be called by write_transaction objects
@@ -376,9 +347,16 @@ namespace arbtrie
        * @param top_root_node The index of the root node to use, or -1 for a temporary root
        * @return write_transaction A new transaction object
        */
-      write_transaction start_transaction(int top_root_node = 0);
+      write_transaction start_write_transaction(int top_root_node = 0);
 
-      template <sync_type stype = sync_type::sync>
+      /**
+       * @deprecated Use start_write_transaction() instead, conflicts with read_transaction::start_transaction()
+       */
+      write_transaction start_transaction(int top_root_node = 0)
+      {
+         return start_write_transaction(top_root_node);
+      }
+
       void sync();
 
       /**
@@ -517,10 +495,10 @@ namespace arbtrie
       static constexpr auto read_write = access_mode::read_write;
       static constexpr auto read_only  = access_mode::read_only;
 
-      database(std::filesystem::path dir, config = {}, access_mode = read_write);
+      database(std::filesystem::path dir, runtime_config = {}, access_mode = read_write);
       ~database();
 
-      static void create(std::filesystem::path dir, config = {});
+      static void create(std::filesystem::path dir, runtime_config = {});
 
       /**
        * @brief Start a new write session for modifying the database
@@ -559,22 +537,15 @@ namespace arbtrie
          uint32_t          magic          = file_magic;
          uint32_t          flags          = file_type_database_root;
          std::atomic<bool> clean_shutdown = true;
+         runtime_config    config;
          // top_root is protected by _root_change_mutex to prevent race conditions
          // which involve loading or storing top_root, bumping refcounts, decrementing
          // refcounts, cloning, and cleaning up node children when the refcount hits 0.
          // Since it's protected by a mutex, it normally wouldn't need to be atomic.
          // However, making it atomic hopefully aids SIGKILL behavior, which is impacted
          // by instruction reordering and multi-instruction non-atomic writes.
-         //
-         // There are 488 top roots because database_memory should be no larger than
-         // a page size (the min memsync unit) and therefore there is no extra overhead
-         // for syncing 4096 bytes vs 64 bytes.  Having more than one top-root allows
-         // different trees to be versioned and maintained independently. If all trees
-         // were implemented as values on keys of a root tree then they could not be
-         // operated on in parallel.
          std::atomic<uint64_t> top_root[num_top_roots];
       };
-      static_assert(sizeof(database_memory) == 4096);
 
       mutable std::mutex _sync_mutex;
       mutable std::mutex _root_change_mutex[num_top_roots];
@@ -585,12 +556,6 @@ namespace arbtrie
       seg_allocator    _sega;
       mapping          _dbfile;
       database_memory* _dbm;
-      config           _config;
-
-      /**
-       *  At most one write session may have the sync lock
-       */
-      std::atomic<int64_t> _sync_lock;
    };
 
    template <typename NodeType>
@@ -842,8 +807,7 @@ namespace arbtrie
     *        returned so that the caller can control when it
     *        goes out of scope and resources are freed.
     */
-   template <sync_type stype>
-   node_handle write_session::set_root(node_handle r, int index)
+   inline node_handle write_session::set_root(node_handle r, int index)
    {
       assert(index < num_top_roots);
       assert(index >= 0);
@@ -855,11 +819,11 @@ namespace arbtrie
             std::unique_lock lock(_db->_root_change_mutex[index]);
             old_r = _db->_dbm->top_root[index].exchange(new_r, std::memory_order_relaxed);
          }
-         if constexpr (stype != sync_type::none)
+         if (_db->_dbm->config.sync_mode != sync_type::none)
          {
             if (old_r != new_r)
             {
-               _db->_dbfile.sync(stype);
+               _db->_dbfile.sync(_db->_dbm->config.sync_mode);
             }
          }
       }
@@ -872,14 +836,12 @@ namespace arbtrie
     * only one thread may call this method at a time and it will
     * block until all msync() calls have returned. 
     */
-   template <sync_type stype>
-   void write_session::sync()
+   inline void write_session::sync()
    {
-      if constexpr (stype != sync_type::none)
+      if (_db->_dbm->config.sync_mode != sync_type::none)
       {
-         std::unique_lock lock(_db->_root_change_mutex);
-         _db->_sega.sync(stype);
-         _db->_dbfile.sync(stype);
+         _db->_sega.sync(_db->_dbm->config.sync_mode);
+         _db->_dbfile.sync(_db->_dbm->config.sync_mode);
       }
    }
 

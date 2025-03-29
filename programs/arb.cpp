@@ -405,12 +405,12 @@ int  main(int argc, char** argv)
    }
    std::cout << "loaded " << v.size() << " keys from " << filename << "\n";
 
+   arbtrie::runtime_config cfg;
+
    uint64_t seq = 0;
    try
    {
       ARBTRIE_WARN("starting arbtrie...");
-      database db("arbtriedb");
-      auto     ws = db.start_write_session();
 
       do
       {
@@ -422,28 +422,61 @@ int  main(int argc, char** argv)
          // clang-format off
          po::options_description desc("Test options");
          desc.add_options()
+            ("help,h", "Print help message")
             ("dense-rand", po::bool_switch()->default_value(true), "Run dense random insert test")
             ("little-endian-seq", po::bool_switch()->default_value(true), "Run little endian sequential insert test")
             ("big-endian-seq", po::bool_switch()->default_value(true), "Run big endian sequential insert test")
             ("big-endian-rev", po::bool_switch()->default_value(true), "Run big endian reverse sequential insert test")
             ("rand-string", po::bool_switch()->default_value(true), "Run random string insert test")
+            ("sync", po::value<bool>()->default_value(true), "Enable synchronous mode")
+            ("enable-read-cache", po::bool_switch()->default_value(true), "Read threads will promote data to pinned memory")
             ("count", po::value<int>()->default_value(1000000), "Number of items to insert")
             ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch")
+            ("compacted-pinned-threshold-mb", po::value<int>()->default_value(16), 
+                      "How much unused space is tolerated before compacting pinned segments, "
+                      "increases SSD wear if in sync mode and this is low, but boosts performance "
+                      " if you can keep more pinned memory doing useful stuff, max 32MB")
+            ("compacted-unpinned-threshold-mb", po::value<int>()->default_value(16), 
+                      "How much unused space is tolerated before compacting unpinned segments, "
+                      "increases SSD wear, but reduces space used if low, if high it will save your "
+                      " SSD from wear but consume more storage, max 32MB")
             ("rounds", po::value<int>()->default_value(3), "Number of rounds to run")
-            ("multithread-rounds", po::value<int>()->default_value(20), "Number of multi-thread rounds to run");
+            ("multithread-rounds", po::value<int>()->default_value(20), "Number of multi-thread rounds to run")
+            ("max-pinned-cache-size-mb", po::value<int>()->default_value(1024), "Amount of RAM to pin in memory, multiple of 32 MB");
          // clang-format on
 
          po::variables_map vm;
          po::store(po::parse_command_line(argc, argv, desc), vm);
          po::notify(vm);
 
-         const int count    = vm["count"].as<int>();
-         batch_size         = vm["batch-size"].as<int>();
-         rounds             = vm["rounds"].as<int>();
-         multithread_rounds = vm["multithread-rounds"].as<int>();
+         if (vm.count("help"))
+         {
+            std::cout << desc << "\n";
+            return 0;
+         }
+
+         const int count                          = vm["count"].as<int>();
+         batch_size                               = vm["batch-size"].as<int>();
+         rounds                                   = vm["rounds"].as<int>();
+         multithread_rounds                       = vm["multithread-rounds"].as<int>();
+         cfg.max_pinned_cache_size_mb             = vm["max-pinned-cache-size-mb"].as<int>();
+         cfg.compact_pinned_unused_threshold_mb   = vm["compacted-pinned-threshold-mb"].as<int>();
+         cfg.compact_unpinned_unused_threshold_mb = vm["compacted-unpinned-threshold-mb"].as<int>();
+         cfg.sync_mode         = vm["sync"].as<bool>() ? sync_type::sync : sync_type::none;
+         cfg.enable_read_cache = vm["enable-read-cache"].as<bool>();
+
          ARBTRIE_WARN("count: ", count);
          ARBTRIE_WARN("batch size: ", batch_size);
          ARBTRIE_WARN("rounds: ", rounds);
+         ARBTRIE_WARN("multithread rounds: ", multithread_rounds);
+         ARBTRIE_WARN("max pinned cache size: ", cfg.max_pinned_cache_size_mb);
+         ARBTRIE_WARN("compact pinned unused threshold: ", cfg.compact_pinned_unused_threshold_mb);
+         ARBTRIE_WARN("compact unpinned unused threshold: ",
+                      cfg.compact_unpinned_unused_threshold_mb);
+         ARBTRIE_WARN("sync mode: ", cfg.sync_mode);
+
+         database db("arbtriedb", cfg);
+         auto     ws = db.start_write_session();
 
          auto tx = ws->start_transaction(0);
 

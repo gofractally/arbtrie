@@ -79,7 +79,7 @@ namespace arbtrie
 
    }  // namespace mapped_memory
 
-   seg_allocator::seg_allocator(std::filesystem::path dir)
+   seg_allocator::seg_allocator(std::filesystem::path dir, runtime_config cfg)
        : _id_alloc(dir / "ids"),
          _block_alloc(dir / "segs", segment_size, max_segment_count),
          _seg_alloc_state_file(dir / "header", access_mode::read_write, true)
@@ -91,6 +91,7 @@ namespace arbtrie
       }
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
+      _mapped_state->_config = cfg;
 
       mlock_pinned_segments();
 
@@ -370,7 +371,7 @@ namespace arbtrie
          if (not seg_data.is_read_only(i) or not seg_data.is_pinned(i))
             continue;
          const auto freed_space = seg_data.get_freed_space(i);
-         if (freed_space < segment_size / 2)
+         if (freed_space < _mapped_state->_config.compact_pinned_unused_threshold_mb * 1024 * 1024)
             continue;
 
          int64_t vage = seg_data.get_vage(i);
@@ -420,7 +421,8 @@ namespace arbtrie
             pinned++;
             continue;
          }
-         if (freed_space < segment_size / 2)
+         if (freed_space <
+             _mapped_state->_config.compact_unpinned_unused_threshold_mb * 1024 * 1024)
          {
             insufficient_space++;
             continue;
@@ -537,7 +539,7 @@ namespace arbtrie
       // Reset appropriate state fields while preserving pinned state and other flags
       // _mapped_state->_segment_data.meta[seg_num].finalize_compaction();
 
-      ses.sync(sync_type::none, 0, id_address());
+      ses.sync(0, id_address());
 
       // ensures that the segment will not get selected for compaction again until
       // after it is reused by the provider thread.

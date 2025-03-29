@@ -47,7 +47,7 @@ namespace arbtrie
       // only really require 1 per thread
       static const uint32_t max_session_count = 64;
 
-      seg_allocator(std::filesystem::path dir);
+      seg_allocator(std::filesystem::path dir, runtime_config cfg);
       ~seg_allocator();
 
       /**

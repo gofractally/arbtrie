@@ -18,6 +18,9 @@ namespace arbtrie
 
       using node_header::get_type;
 
+      // full_node does not have a branch data capacity, because it is always 256
+      int branch_data_cap() const { return 0; }
+
       /**
        * Returns the index of the first branch that is >= the given key.
        * 
