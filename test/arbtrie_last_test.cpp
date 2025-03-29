@@ -48,24 +48,24 @@ TEST_CASE("Last operation test", "[last]")
    TestEnv env;
 
    // Start a transaction
-   auto tx = env.ws->start_transaction();
+   auto tx = env.ws->start_write_transaction();
 
    // Insert some test keys
    std::cout << "Inserting test keys" << std::endl;
-   tx.insert("key1", "value1");
-   tx.insert("key2", "value2");
-   tx.insert("key3", "value3");
+   tx->insert("key1", "value1");
+   tx->insert("key2", "value2");
+   tx->insert("key3", "value3");
 
    // Commit the inserts
-   tx.commit_and_continue();
+   tx->commit_and_continue();
 
    SECTION("Test last() after insert")
    {
       std::cout << "Starting transaction and calling last()" << std::endl;
-      tx.start();
+      tx->start();
 
-      REQUIRE(tx.last());
-      std::string key(tx.key().data(), tx.key().size());
+      REQUIRE(tx->last());
+      std::string key(tx->key().data(), tx->key().size());
       std::cout << "Last key: " << key << std::endl;
       REQUIRE(key == "key3");
    }
@@ -73,17 +73,17 @@ TEST_CASE("Last operation test", "[last]")
    SECTION("Test last() after commit_and_continue")
    {
       // Insert another key
-      tx.insert("key4", "value4");
+      tx->insert("key4", "value4");
 
       // Commit and continue
-      tx.commit_and_continue();
+      tx->commit_and_continue();
 
       // Start the transaction
-      tx.start();
+      tx->start();
 
       // Call last()
-      REQUIRE(tx.last());
-      std::string key(tx.key().data(), tx.key().size());
+      REQUIRE(tx->last());
+      std::string key(tx->key().data(), tx->key().size());
       std::cout << "Last key after commit_and_continue: " << key << std::endl;
       REQUIRE(key == "key4");
    }
@@ -91,16 +91,64 @@ TEST_CASE("Last operation test", "[last]")
    SECTION("Test last() with prefix")
    {
       // Start the transaction
-      tx.start();
+      tx->start();
 
       // Call last() with prefix
-      REQUIRE(tx.last("key"));
-      std::string key(tx.key().data(), tx.key().size());
+      REQUIRE(tx->last("key"));
+      std::string key(tx->key().data(), tx->key().size());
       std::cout << "Last key with prefix 'key': " << key << std::endl;
       REQUIRE(key == "key3");
 
       // Call last() with prefix that doesn't exist
-      REQUIRE_FALSE(tx.last("nonexistent"));
-      REQUIRE_FALSE(tx.valid());
+      REQUIRE_FALSE(tx->last("nonexistent"));
+      REQUIRE_FALSE(tx->valid());
+   }
+}
+
+TEST_CASE("Iterator operations bug test", "[bug]")
+{
+   TestEnv env;
+   auto    tx = env.ws->start_write_transaction();
+
+   // Insert some test keys
+   std::cout << "Inserting test keys..." << std::endl;
+   tx->insert("key1", "value1");
+   tx->insert("key2", "value2");
+   tx->insert("key3", "value3");
+
+   // Commit the transaction and continue
+   std::cout << "Committing transaction and continuing..." << std::endl;
+   tx->commit_and_continue();
+
+   SECTION("Basic last() operation")
+   {
+      // Start transaction
+      tx->start();
+
+      std::cout << "Testing last()..." << std::endl;
+      REQUIRE(tx->last());
+      std::string key(tx->key().data(), tx->key().size());
+      REQUIRE(key == "key3");
+      std::cout << "Last key: " << key << std::endl;
+   }
+
+   SECTION("Operations that might cause the last() bug")
+   {
+      // Insert another key
+      tx->insert("key4", "value4");
+
+      // Commit the transaction and continue
+      std::cout << "Committing transaction and continuing..." << std::endl;
+      tx->commit_and_continue();
+
+      // Start transaction
+      tx->start();
+
+      // Call last() which might crash
+      std::cout << "Calling last() after operations..." << std::endl;
+      REQUIRE(tx->last());
+      std::string key(tx->key().data(), tx->key().size());
+      REQUIRE(key == "key4");
+      std::cout << "Last key: " << key << std::endl;
    }
 }

@@ -128,9 +128,9 @@ std::vector<int> insert_test(benchmark_config   cfg,
    std::vector<int> result;
    result.reserve(cfg.rounds);
 
-   auto tx = ws->start_transaction(0);
+   auto tx = ws->start_write_transaction(0);
    if constexpr (not mode.is_update() or mode.is_insert())
-      tx.set_root(ws->create_root());
+      tx->set_root(ws->create_root());
 
    uint64_t          seq = 0;
    std::vector<char> key;
@@ -149,14 +149,14 @@ std::vector<int> insert_test(benchmark_config   cfg,
             make_key(seq++, key);
             key_view kstr(key.data(), key.size());
             if constexpr (mode.is_upsert())
-               tx.upsert(kstr, vv);
+               tx->upsert(kstr, vv);
             else if constexpr (mode.is_insert())
-               tx.insert(kstr, vv);
+               tx->insert(kstr, vv);
             else
-               tx.update(kstr, vv);
+               tx->update(kstr, vv);
             ++inserted;
          }
-         tx.commit_and_continue();
+         tx->commit_and_continue();
       }
 
       auto end   = std::chrono::steady_clock::now();

@@ -478,7 +478,7 @@ int  main(int argc, char** argv)
          database db("arbtriedb", cfg);
          auto     ws = db.start_write_session();
 
-         auto tx = ws->start_transaction(0);
+         auto tx = ws->start_write_transaction(0);
 
          auto iterate_all = [&]()
          {
@@ -488,16 +488,16 @@ int  main(int argc, char** argv)
 
                std::vector<char> data;
                auto              start = std::chrono::steady_clock::now();
-               tx.start();
-               while (tx.next())
+               tx->start();
+               while (tx->next())
                {
-                  tx.key();
-                  tx.value(data);
+                  tx->key();
+                  tx->value(data);
                   ++item_count;
                }
                auto end   = std::chrono::steady_clock::now();
                auto delta = end - start;
-               auto kc    = tx.count_keys();
+               auto kc    = tx->count_keys();
                std::cout << "iterated " << std::setw(12)
                          << add_comma(
                                 int64_t(item_count) /
@@ -526,17 +526,17 @@ int  main(int argc, char** argv)
                   uint64_t val = rand64();
                   ++seq;
                   key_view kstr((char*)&val, sizeof(val));
-                  tx.insert(kstr, kstr);
-                  assert(tx.valid());
+                  tx->insert(kstr, kstr);
+                  assert(tx->valid());
 
                   if ((seq % batch_size) == (batch_size - 1))
                   {
-                     tx.commit_and_continue();
-                     assert(tx.valid());
+                     tx->commit_and_continue();
+                     assert(tx->valid());
                   }
                }
-               tx.commit_and_continue();
-               assert(tx.valid());
+               tx->commit_and_continue();
+               assert(tx->valid());
 
                auto end   = std::chrono::steady_clock::now();
                auto delta = end - start;
@@ -566,15 +566,15 @@ int  main(int argc, char** argv)
                   uint64_t val = ++seq3;
                   seq++;
                   key_view kstr((char*)&val, sizeof(val));
-                  tx.insert(kstr, kstr);
+                  tx->insert(kstr, kstr);
                   if ((i % batch_size) == (batch_size - 1))
                   {
-                     assert(tx.valid());
-                     tx.commit_and_continue();
-                     assert(tx.valid());
+                     assert(tx->valid());
+                     tx->commit_and_continue();
+                     assert(tx->valid());
                   }
                }
-               tx.commit_and_continue();
+               tx->commit_and_continue();
                auto end   = std::chrono::steady_clock::now();
                auto delta = end - start;
 
@@ -598,13 +598,13 @@ int  main(int argc, char** argv)
                   uint64_t val = bswap(seq3++);
                   ++seq;
                   key_view kstr((char*)&val, sizeof(val));
-                  tx.insert(kstr, kstr);
+                  tx->insert(kstr, kstr);
                   if ((i % batch_size) == (batch_size - 1))
                   {
-                     tx.commit_and_continue();
+                     tx->commit_and_continue();
                   }
                }
-               tx.commit_and_continue();
+               tx->commit_and_continue();
                auto end   = std::chrono::steady_clock::now();
                auto delta = end - start;
 
@@ -629,13 +629,13 @@ int  main(int argc, char** argv)
                   uint64_t val = bswap(seq4--);
                   ++seq;
                   key_view kstr((char*)&val, sizeof(val));
-                  tx.insert(kstr, kstr);
+                  tx->insert(kstr, kstr);
                   if ((i % batch_size) == 0)
                   {
-                     tx.commit_and_continue();
+                     tx->commit_and_continue();
                   }
                }
-               tx.commit_and_continue();
+               tx->commit_and_continue();
                auto end   = std::chrono::steady_clock::now();
                auto delta = end - start;
 
@@ -657,13 +657,13 @@ int  main(int argc, char** argv)
                {
                   ++seq;
                   auto kstr = std::to_string(rand64());
-                  tx.insert(to_key_view(kstr), to_value_view(kstr));
+                  tx->insert(to_key_view(kstr), to_value_view(kstr));
                   if ((i % batch_size) == 0)
                   {
-                     tx.commit_and_continue();
+                     tx->commit_and_continue();
                   }
                }
-               tx.commit_and_continue();
+               tx->commit_and_continue();
                auto end   = std::chrono::steady_clock::now();
                auto delta = end - start;
 
@@ -687,7 +687,7 @@ int  main(int argc, char** argv)
                {
                   uint64_t val = ++seq2;
                   key_view kstr((char*)&val, sizeof(val));
-                  auto     s = tx.get_size(kstr);
+                  auto     s = tx->get_size(kstr);
                   assert(s > 0);
                }
                auto end   = std::chrono::steady_clock::now();
@@ -710,7 +710,7 @@ int  main(int argc, char** argv)
                   uint64_t val  = (rnd % (seq2 - 1)) + 1;
                   uint64_t val2 = val;
                   key_view kstr((char*)&val, sizeof(val));
-                  auto     s = tx.get_size(kstr);
+                  auto     s = tx->get_size(kstr);
                   assert(s > 0);
                }
                auto end   = std::chrono::steady_clock::now();
@@ -731,7 +731,7 @@ int  main(int argc, char** argv)
             {
                uint64_t val = bswap(start_big_end++);
                key_view kstr((char*)&val, sizeof(val));
-               auto     s = tx.get_size(kstr);
+               auto     s = tx->get_size(kstr);
                assert(s > 0);
             }
             auto end   = std::chrono::steady_clock::now();
@@ -752,7 +752,7 @@ int  main(int argc, char** argv)
             {
                uint64_t val = rand64();
                key_view kstr((char*)&val, sizeof(val));
-               tx.lower_bound(kstr);
+               tx->lower_bound(kstr);
             }
             auto end   = std::chrono::steady_clock::now();
             auto delta = end - start;
@@ -784,14 +784,14 @@ int  main(int argc, char** argv)
                {
                   int  roundc = 100000;
                   int  added  = 0;
-                  auto rtx    = rs.start_transaction(0);
+                  auto rtx    = rs.start_read_transaction(0);
                   for (int i = 0; i < batch_size; ++i)
                   {
                      ++added;
                      // uint64_t val = XXH64(&i, sizeof(i), 0);
                      uint64_t val = rand64();
                      key_view kstr((char*)&val, sizeof(val));
-                     rtx.lower_bound(kstr);
+                     rtx->lower_bound(kstr);
                      if ((i & 0x4ff) == 0)
                      {
                         read_count.fetch_add(added, std::memory_order_relaxed);
@@ -817,14 +817,14 @@ int  main(int argc, char** argv)
                auto     str = std::to_string(val);
                ++seq;
                key_view kstr((char*)&val, sizeof(val));
-               tx.insert(kstr, kstr);
+               tx->insert(kstr, kstr);
                if (i % batch_size == 0)
-                  tx.commit_and_continue();
+                  tx->commit_and_continue();
             }
             auto end   = std::chrono::steady_clock::now();
             auto delta = end - start;
 
-            tx.commit_and_continue();
+            tx->commit_and_continue();
 
             std::cout << ro << "] " << std::setw(12)
                       << add_comma(int64_t(

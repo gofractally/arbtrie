@@ -115,18 +115,12 @@ namespace arbtrie
          return iterator<CacheMode>(*this, std::move(h));
       }
 
-      read_transaction start_read_transaction(int top_root_node = 0)
+      read_transaction::ptr start_read_transaction(int top_root_node = 0)
       {
-         if (top_root_node == -1)
-            return read_transaction(*this, create_root());
-         return read_transaction(*this, get_root(top_root_node));
-      }
-      /// @deprecated Use start_read_transaction() instead, conflicts with write_transaction::start_transaction()
-      read_transaction start_transaction(int top_root_node = 0)
-      {
-         if (top_root_node == -1)
-            return read_transaction(*this, create_root());
-         return read_transaction(*this, get_root(top_root_node));
+         node_handle root = (top_root_node == -1) ? create_root() : get_root(top_root_node);
+         // Use make_shared with the private token
+         return std::make_shared<read_transaction>(read_transaction::private_token{}, *this,
+                                                   std::move(root));
       }
 
       /**
@@ -347,15 +341,7 @@ namespace arbtrie
        * @param top_root_node The index of the root node to use, or -1 for a temporary root
        * @return write_transaction A new transaction object
        */
-      write_transaction start_write_transaction(int top_root_node = 0);
-
-      /**
-       * @deprecated Use start_write_transaction() instead, conflicts with read_transaction::start_transaction()
-       */
-      write_transaction start_transaction(int top_root_node = 0)
-      {
-         return start_write_transaction(top_root_node);
-      }
+      write_transaction::ptr start_write_transaction(int top_root_node = 0);
 
       void sync();
 
@@ -814,6 +800,7 @@ namespace arbtrie
 
       uint64_t old_r;
       uint64_t new_r = r.take().to_int();
+      ARBTRIE_INFO("set_root: new_root = ", new_r);
       {
          {  // lock scope
             std::unique_lock lock(_db->_root_change_mutex[index]);

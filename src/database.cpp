@@ -1967,12 +1967,14 @@ namespace arbtrie
       return make<value_node>(reg, parent_hint, state, key, val).address();
    }
 
-   write_transaction write_session::start_write_transaction(int top_root_node)
+   write_transaction::ptr write_session::start_write_transaction(int top_root_node)
    {
       // Use shared_from_this() to get a shared_ptr to this session
-      return write_transaction(
-          shared_from_this(), top_root_node >= 0 ? get_mutable_root(top_root_node) : create_root(),
-          [this, top_root_node](node_handle commit, bool resume)
+      auto self = shared_from_this();
+      return std::make_shared<write_transaction>(
+          write_transaction::private_token{}, self,
+          top_root_node >= 0 ? get_mutable_root(top_root_node) : create_root(),
+          [this, self, top_root_node](node_handle commit, bool resume)
           {
              if (top_root_node >= 0)
              {
@@ -1980,7 +1982,6 @@ namespace arbtrie
                 // read-only, this protects what has been written from being
                 // corrupted by bad memory access patterns in the same
                 // process.
-                /// TODO: use configured sync type instead of hardcoding async
                 _segas->sync(top_root_node, commit.address());
 
                 set_root(std::move(commit), top_root_node);

@@ -1,5 +1,6 @@
 #define CATCH_CONFIG_MAIN
 #include <sqlite3.h>
+#include <arbtrie/debug.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdio>
 #include <filesystem>
@@ -47,6 +48,7 @@ struct TestFixture
       // Clean up any previous test DB directory
       std::filesystem::remove_all(text_db_path);
       std::filesystem::remove_all(blob_db_path);
+      std::filesystem::remove_all(text_db_path + "_tx");  // Clean up TX test DB path
       // Directories will be created by arbtrie::database::create if needed
 
       // Open SQLite in-memory DB
@@ -75,6 +77,7 @@ struct TestFixture
       // Clean up the test DB directory
       std::filesystem::remove_all(text_db_path);
       std::filesystem::remove_all(blob_db_path);
+      std::filesystem::remove_all(text_db_path + "_tx");  // Clean up TX test DB path
    }
 
    // Disable copy/move
@@ -87,6 +90,7 @@ struct TestFixture
             int (*callback)(void*, int, char**, char**) = nullptr,
             void* callback_arg                          = nullptr)
    {
+      ARBTRIE_INFO("Executing SQL: " + sql);
       errMsg.clear();
       return exec_sql(db, sql, callback, callback_arg, &errMsg);
    }
@@ -288,5 +292,141 @@ TEST_CASE_METHOD(TestFixture, "Arbtrie SQL Virtual Table Operations", "[arbtrie_
       REQUIRE(results.rows[1][1] == "2");
       REQUIRE(results.rows[2][0] == "c");
       REQUIRE(results.rows[2][1] == "3");
+   }
+
+   SECTION("COUNT(*) Operation")
+   {
+      REQUIRE(exec("CREATE VIRTUAL TABLE kv_text_count USING arbtrie(path='" + text_db_path +
+                   "', key TEXT PRIMARY KEY, value TEXT);") == SQLITE_OK);
+
+      // Test empty table
+      SelectResultCollector count_results_empty;
+      REQUIRE(exec("SELECT COUNT(*) FROM kv_text_count;", SelectResultCollector::callback,
+                   &count_results_empty) == SQLITE_OK);
+      REQUIRE(count_results_empty.rows.size() == 1);
+      REQUIRE(count_results_empty.rows[0].size() == 1);
+      REQUIRE(count_results_empty.rows[0][0] == "0");
+
+      // Insert some rows
+      REQUIRE(exec("INSERT INTO kv_text_count (key, value) VALUES ('one', '1');") == SQLITE_OK);
+      REQUIRE(exec("INSERT INTO kv_text_count (key, value) VALUES ('two', '2');") == SQLITE_OK);
+      REQUIRE(exec("INSERT INTO kv_text_count (key, value) VALUES ('three', '3');") == SQLITE_OK);
+
+      // Test non-empty table
+      SelectResultCollector count_results_nonempty;
+      REQUIRE(exec("SELECT COUNT(*) FROM kv_text_count;", SelectResultCollector::callback,
+                   &count_results_nonempty) == SQLITE_OK);
+      REQUIRE(count_results_nonempty.rows.size() == 1);
+      REQUIRE(count_results_nonempty.rows[0].size() == 1);
+      REQUIRE(count_results_nonempty.rows[0][0] == "3");
+
+      // Test count with a WHERE clause (should NOT use the optimization)
+      SelectResultCollector count_results_where;
+      REQUIRE(exec("SELECT COUNT(*) FROM kv_text_count WHERE key = 'two';",
+                   SelectResultCollector::callback, &count_results_where) == SQLITE_OK);
+      REQUIRE(count_results_where.rows.size() == 1);
+      REQUIRE(count_results_where.rows[0].size() == 1);
+      REQUIRE(count_results_where.rows[0][0] == "1");  // Expect 1 row matching 'two'
+   }
+
+   SECTION("Transaction Handling")
+   {
+      REQUIRE(exec("CREATE VIRTUAL TABLE kv_text_tx USING arbtrie(path='" + text_db_path +
+                   "_tx', key TEXT PRIMARY KEY, value TEXT);") == SQLITE_OK);
+
+      SelectResultCollector results;
+
+      // --- Test 1: Basic COMMIT ---
+      REQUIRE(exec("BEGIN;") == SQLITE_OK);
+      REQUIRE(
+          exec("INSERT INTO kv_text_tx (key, value) VALUES ('tx_commit_key', 'tx_commit_val');") ==
+          SQLITE_OK);
+      // Optionally: SELECT within the transaction (might not reflect unless committed depending on isolation)
+      REQUIRE(exec("COMMIT;") == SQLITE_OK);
+
+      results.rows.clear();
+      REQUIRE(exec("SELECT value FROM kv_text_tx WHERE key = 'tx_commit_key';",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.size() == 1);
+      REQUIRE(results.rows[0][0] == "tx_commit_val");
+
+      // --- Test 2: Basic ROLLBACK ---
+      REQUIRE(exec("BEGIN;") == SQLITE_OK);
+      REQUIRE(exec("INSERT INTO kv_text_tx (key, value) VALUES ('tx_rollback_key', "
+                   "'tx_rollback_val');") == SQLITE_OK);
+      REQUIRE(exec("ROLLBACK;") == SQLITE_OK);
+
+      results.rows.clear();
+      REQUIRE(exec("SELECT value FROM kv_text_tx WHERE key = 'tx_rollback_key';",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.empty());  // Should not exist after rollback
+
+      // Verify previous committed key still exists
+      results.rows.clear();
+      REQUIRE(exec("SELECT value FROM kv_text_tx WHERE key = 'tx_commit_key';",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.size() == 1);
+
+      // --- Test 3: SAVEPOINT and RELEASE ---
+      REQUIRE(exec("BEGIN;") == SQLITE_OK);
+      REQUIRE(
+          exec("INSERT INTO kv_text_tx (key, value) VALUES ('tx_sp_release_base', 'val_base');") ==
+          SQLITE_OK);
+      REQUIRE(exec("SAVEPOINT sp1;") == SQLITE_OK);
+      REQUIRE(
+          exec("INSERT INTO kv_text_tx (key, value) VALUES ('tx_sp_release_sp1', 'val_sp1');") ==
+          SQLITE_OK);
+      REQUIRE(exec("RELEASE sp1;") == SQLITE_OK);
+      REQUIRE(exec("COMMIT;") == SQLITE_OK);
+
+      results.rows.clear();
+      REQUIRE(exec("SELECT key FROM kv_text_tx WHERE key LIKE 'tx_sp_release_%' ORDER BY key;",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.size() == 2);
+      REQUIRE(results.rows[0][0] == "tx_sp_release_base");
+      REQUIRE(results.rows[1][0] == "tx_sp_release_sp1");
+
+      // --- Test 4: SAVEPOINT and ROLLBACK TO ---
+      REQUIRE(exec("BEGIN;") == SQLITE_OK);
+      REQUIRE(exec("INSERT INTO kv_text_tx (key, value) VALUES ('tx_sp_rb_base', 'val_base');") ==
+              SQLITE_OK);
+      REQUIRE(exec("SAVEPOINT sp2;") == SQLITE_OK);
+      REQUIRE(exec("INSERT INTO kv_text_tx (key, value) VALUES ('tx_sp_rb_sp2', "
+                   "'val_sp2_tobe_rolled_back');") == SQLITE_OK);
+      REQUIRE(exec("ROLLBACK TO sp2;") == SQLITE_OK);
+      REQUIRE(
+          exec("INSERT INTO kv_text_tx (key, value) VALUES ('tx_sp_rb_after', 'val_after_rb');") ==
+          SQLITE_OK);
+      REQUIRE(exec("COMMIT;") == SQLITE_OK);
+
+      results.rows.clear();
+      REQUIRE(exec("SELECT key, value FROM kv_text_tx WHERE key LIKE 'tx_sp_rb_%' ORDER BY key;",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.size() == 2);  // Base and 'after', but not 'sp2'
+      REQUIRE(results.rows[0][0] == "tx_sp_rb_after");
+      REQUIRE(results.rows[0][1] == "val_after_rb");
+      REQUIRE(results.rows[1][0] == "tx_sp_rb_base");
+      REQUIRE(results.rows[1][1] == "val_base");
+
+      // Check the rolled-back key doesn't exist
+      results.rows.clear();
+      REQUIRE(exec("SELECT value FROM kv_text_tx WHERE key = 'tx_sp_rb_sp2';",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.empty());
+
+      // --- Test 5: Autocommit INSERT/DELETE (Implicit) ---
+      REQUIRE(exec("INSERT INTO kv_text_tx (key, value) VALUES ('auto_commit_key', 'auto_val');") ==
+              SQLITE_OK);
+      results.rows.clear();
+      REQUIRE(exec("SELECT value FROM kv_text_tx WHERE key = 'auto_commit_key';",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.size() == 1);
+      REQUIRE(results.rows[0][0] == "auto_val");
+
+      REQUIRE(exec("DELETE FROM kv_text_tx WHERE key = 'auto_commit_key';") == SQLITE_OK);
+      results.rows.clear();
+      REQUIRE(exec("SELECT value FROM kv_text_tx WHERE key = 'auto_commit_key';",
+                   SelectResultCollector::callback, &results) == SQLITE_OK);
+      REQUIRE(results.rows.empty());
    }
 }

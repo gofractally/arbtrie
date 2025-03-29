@@ -53,10 +53,10 @@ namespace
    // Structure to hold the test environment
    struct FuzzTestEnvironment
    {
-      std::filesystem::path          db_path;
-      database*                      db = nullptr;
-      std::shared_ptr<write_session> ws = nullptr;
-      std::vector<write_transaction> transactions;
+      std::filesystem::path               db_path;
+      database*                           db = nullptr;
+      std::shared_ptr<write_session>      ws;
+      std::vector<write_transaction::ptr> transactions;
 
       // Reference map to verify results
       std::unordered_map<std::string, std::string> reference_map;
@@ -88,7 +88,7 @@ namespace
          ws = db->start_write_session();
 
          // Initialize the first transaction
-         auto tx = ws->start_transaction();
+         auto tx = ws->start_write_transaction();
          transactions.push_back(std::move(tx));
          pending_changes.push_back({});
       }
@@ -105,12 +105,12 @@ namespace
       }
 
       // Get a reference to the current transaction
-      write_transaction& current_transaction() { return transactions[current_transaction_idx]; }
+      write_transaction::ptr current_transaction() { return transactions[current_transaction_idx]; }
 
       // Get a reference to the current transaction's pending changes
       auto& current_pending_changes() { return pending_changes[current_transaction_idx]; }
 
-      // Record a pending insert/update
+      // Record a pending insert
       void record_pending_insert(const std::string& key, const std::string& value)
       {
          current_pending_changes()[key] = value;
@@ -211,10 +211,11 @@ namespace
    {
       auto key   = env.random_key();
       auto value = env.random_value();
+      auto tx    = env.current_transaction();
 
       try
       {
-         env.current_transaction().insert(key, value);
+         tx->insert(key, value);
          // Record the pending insert instead of updating reference map directly
          env.record_pending_insert(key, value);
          std::cout << "Inserted key: " << key << " with value of length: " << value.size()
@@ -231,9 +232,10 @@ namespace
    void perform_get(FuzzTestEnvironment& env)
    {
       auto key = env.random_existing_key();
+      auto tx  = env.current_transaction();
 
       std::vector<char> buffer;
-      int32_t           result = env.current_transaction().get(key, &buffer);
+      int32_t           result = tx->get(key, &buffer);
 
       bool exists_in_ref = env.reference_map.find(key) != env.reference_map.end();
 
@@ -281,10 +283,11 @@ namespace
    {
       auto key   = env.random_existing_key();
       auto value = env.random_value();
+      auto tx    = env.current_transaction();
 
       try
       {
-         int result = env.current_transaction().update(key, value);
+         int result = tx->update(key, value);
          if (result >= 0)
          {
             // Record the pending update instead of updating reference map directly
@@ -316,10 +319,11 @@ namespace
    void perform_remove(FuzzTestEnvironment& env)
    {
       auto key = env.random_existing_key();
+      auto tx  = env.current_transaction();
 
       try
       {
-         int result = env.current_transaction().remove(key);
+         int result = tx->remove(key);
          if (result >= 0)
          {
             // Record the pending remove instead of updating reference map directly
@@ -349,20 +353,20 @@ namespace
    // Iterate to the next key
    void perform_iterate_next(FuzzTestEnvironment& env)
    {
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       try
       {
          // Check if we have any keys in the database by trying to insert a test key
          std::string test_key   = "test_key_" + std::to_string(env.rng());
          std::string test_value = "test_value";
-         tx.insert(test_key, test_value);
+         tx->insert(test_key, test_value);
 
          // Now we know we have at least one key
-         tx.start();
+         tx->start();
 
          // Check if we have at least one key
-         if (!tx.begin())
+         if (!tx->begin())
          {
             std::cout << "No keys in database" << std::endl;
             return;
@@ -370,21 +374,21 @@ namespace
 
          // Start at a random position
          size_t steps = env.rng() % 5;
-         for (size_t i = 0; i < steps && !tx.is_end(); ++i)
+         for (size_t i = 0; i < steps && !tx->is_end(); ++i)
          {
-            tx.next();
+            tx->next();
          }
 
-         if (!tx.is_end())
+         if (!tx->is_end())
          {
             // Convert key_view to std::string
-            std::string key(tx.key().data(), tx.key().size());
+            std::string key(tx->key().data(), tx->key().size());
             std::cout << "Iterator at key: " << key << std::endl;
 
             // Try to move next
-            if (tx.next())
+            if (tx->next())
             {
-               std::string next_key(tx.key().data(), tx.key().size());
+               std::string next_key(tx->key().data(), tx->key().size());
                std::cout << "  Moved to next: " << next_key << std::endl;
             }
             else
@@ -406,42 +410,42 @@ namespace
    // Iterate to the previous key
    void perform_iterate_prev(FuzzTestEnvironment& env)
    {
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       try
       {
          // Check if we have any keys in the database by trying to insert a test key
          std::string test_key   = "test_key_" + std::to_string(env.rng());
          std::string test_value = "test_value";
-         tx.insert(test_key, test_value);
+         tx->insert(test_key, test_value);
 
          // Now we know we have at least one key
-         tx.start();
+         tx->start();
 
          // Start at end and move to last element
-         if (!tx.end() || !tx.prev())
+         if (!tx->end() || !tx->prev())
          {
             std::cout << "No keys in database" << std::endl;
             return;
          }
 
          // Now we're at the last key
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Iterator at last key: " << key << std::endl;
 
          // Move to a random previous position
          size_t steps = env.rng() % 5;
-         for (size_t i = 0; i < steps && !tx.is_start(); ++i)
+         for (size_t i = 0; i < steps && !tx->is_start(); ++i)
          {
-            if (!tx.prev())
+            if (!tx->prev())
             {
                break;
             }
          }
 
-         if (!tx.is_start())
+         if (!tx->is_start())
          {
-            std::string prev_key(tx.key().data(), tx.key().size());
+            std::string prev_key(tx->key().data(), tx->key().size());
             std::cout << "  Moved to previous: " << prev_key << std::endl;
          }
          else
@@ -458,24 +462,23 @@ namespace
    // Move iterator to first key
    void perform_iterate_first(FuzzTestEnvironment& env)
    {
-      // Get a fresh transaction for this operation
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       try
       {
          // Insert a test key to ensure we have at least one key in the database
          std::string test_key   = "test_key_" + std::to_string(env.rng());
          std::string test_value = "test_value";
-         tx.insert(test_key, test_value);
+         tx->insert(test_key, test_value);
 
          // Start iteration on the transaction
          std::cout << "  Starting transaction for iterate_first" << std::endl;
-         tx.start();
+         tx->start();
 
          std::cout << "  Calling tx.first()" << std::endl;
-         if (tx.first())
+         if (tx->first())
          {
-            std::string key(tx.key().data(), tx.key().size());
+            std::string key(tx->key().data(), tx->key().size());
             std::cout << "Iterator at first key: " << key << std::endl;
          }
          else
@@ -492,30 +495,29 @@ namespace
    // Move iterator to last key
    void perform_iterate_last(FuzzTestEnvironment& env)
    {
-      // Get a fresh transaction for this operation
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       try
       {
          // Insert a test key to ensure we have at least one key in the database
          std::string test_key   = "test_key_" + std::to_string(env.rng());
          std::string test_value = "test_value";
-         tx.insert(test_key, test_value);
+         tx->insert(test_key, test_value);
 
          // Commit the insert to ensure the transaction is valid
-         tx.commit_and_continue();
+         tx->commit_and_continue();
 
          // Start iteration on the transaction
          std::cout << "  Starting transaction for iterate_last" << std::endl;
 
          // Instead of using start(), use begin() to position at the first key
          // This ensures we have a valid iterator state before calling last()
-         if (tx.begin())
+         if (tx->begin())
          {
             std::cout << "  Iterator positioned at first key, now calling tx.last()" << std::endl;
-            if (tx.last())
+            if (tx->last())
             {
-               std::string key(tx.key().data(), tx.key().size());
+               std::string key(tx->key().data(), tx->key().size());
                std::cout << "Iterator at last key: " << key << std::endl;
             }
             else
@@ -537,25 +539,24 @@ namespace
    // Move iterator to lower bound of key
    void perform_iterate_lower_bound(FuzzTestEnvironment& env)
    {
-      // Get a fresh transaction for this operation
-      auto& tx  = env.current_transaction();
-      auto  key = env.random_key();
+      auto tx  = env.current_transaction();
+      auto key = env.random_key();
 
       try
       {
          // Insert a test key to ensure we have at least one key in the database
          std::string test_key   = "test_key_" + std::to_string(env.rng());
          std::string test_value = "test_value";
-         tx.insert(test_key, test_value);
+         tx->insert(test_key, test_value);
 
          // Start iteration on the transaction
          std::cout << "  Starting transaction for lower_bound" << std::endl;
-         tx.start();
+         tx->start();
 
          std::cout << "  Calling tx.lower_bound('" << key << "')" << std::endl;
-         if (tx.lower_bound(key))
+         if (tx->lower_bound(key))
          {
-            std::string found_key(tx.key().data(), tx.key().size());
+            std::string found_key(tx->key().data(), tx->key().size());
             std::cout << "Lower bound of '" << key << "': " << found_key << std::endl;
          }
          else
@@ -572,25 +573,24 @@ namespace
    // Find upper bound of a random key
    void perform_iterate_upper_bound(FuzzTestEnvironment& env)
    {
-      // Get a fresh transaction for this operation
-      auto& tx  = env.current_transaction();
-      auto  key = env.random_key();
+      auto tx  = env.current_transaction();
+      auto key = env.random_key();
 
       try
       {
          // Insert a test key to ensure we have at least one key in the database
          std::string test_key   = "test_key_" + std::to_string(env.rng());
          std::string test_value = "test_value";
-         tx.insert(test_key, test_value);
+         tx->insert(test_key, test_value);
 
          // Start iteration on the transaction
          std::cout << "  Starting transaction for upper_bound" << std::endl;
-         tx.start();
+         tx->start();
 
          std::cout << "  Calling tx.upper_bound('" << key << "')" << std::endl;
-         if (tx.upper_bound(key))
+         if (tx->upper_bound(key))
          {
-            std::string found_key(tx.key().data(), tx.key().size());
+            std::string found_key(tx->key().data(), tx->key().size());
             std::cout << "Upper bound of '" << key << "': " << found_key << std::endl;
          }
          else
@@ -613,7 +613,7 @@ namespace
          // Apply pending changes before committing
          env.apply_pending_changes(env.current_transaction_idx);
 
-         env.current_transaction().commit();
+         env.current_transaction()->commit();
          env.transactions.erase(env.transactions.begin() + env.current_transaction_idx);
          env.pending_changes.erase(env.pending_changes.begin() + env.current_transaction_idx);
 
@@ -623,7 +623,7 @@ namespace
          }
       }
 
-      auto tx = env.ws->start_transaction();
+      auto tx = env.ws->start_write_transaction();
       env.transactions.push_back(std::move(tx));
       env.pending_changes.push_back({});  // Initialize pending changes for the new transaction
       env.current_transaction_idx = env.transactions.size() - 1;
@@ -645,7 +645,7 @@ namespace
       // Apply pending changes to the reference map before committing
       env.apply_pending_changes(env.current_transaction_idx);
 
-      env.current_transaction().commit();
+      env.current_transaction()->commit();
       std::cout << "Committed transaction (idx=" << env.current_transaction_idx << ")" << std::endl;
 
       env.transactions.erase(env.transactions.begin() + env.current_transaction_idx);
@@ -670,7 +670,7 @@ namespace
       // Discard pending changes for this transaction
       env.discard_pending_changes(env.current_transaction_idx);
 
-      env.current_transaction().abort();
+      env.current_transaction()->abort();
       std::cout << "Aborted transaction (idx=" << env.current_transaction_idx << ")" << std::endl;
 
       env.transactions.erase(env.transactions.begin() + env.current_transaction_idx);
@@ -685,7 +685,7 @@ namespace
    // Count keys in a range
    void perform_count_keys(FuzzTestEnvironment& env)
    {
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       // Generate two random keys
       auto key1 = env.random_key();
@@ -697,36 +697,35 @@ namespace
          std::swap(key1, key2);
       }
 
-      uint32_t count = tx.count_keys(key1, key2);
+      uint32_t count = tx->count_keys(key1, key2);
       std::cout << "Count keys in range [" << key1 << ", " << key2 << "): " << count << std::endl;
    }
 
    // Iterate from the beginning of the database
    void perform_iterate_begin(FuzzTestEnvironment& env)
    {
-      // Get a fresh transaction for this operation
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       try
       {
          // Insert a test key to ensure we have at least one key in the database
          std::string test_key   = "test_key_" + std::to_string(env.rng());
          std::string test_value = "test_value";
-         tx.insert(test_key, test_value);
+         tx->insert(test_key, test_value);
 
          // Start iteration on the transaction
          std::cout << "  Starting transaction for begin" << std::endl;
-         tx.start();
+         tx->start();
 
          std::cout << "  Calling tx.begin()" << std::endl;
-         if (tx.begin())
+         if (tx->begin())
          {
-            std::string found_key(tx.key().data(), tx.key().size());
+            std::string found_key(tx->key().data(), tx->key().size());
             std::cout << "First key: " << found_key << std::endl;
          }
          else
          {
-            std::cout << "No keys found in database" << std::endl;
+            std::cout << "No keys in database" << std::endl;
          }
       }
       catch (const std::exception& e)
@@ -832,7 +831,7 @@ namespace
             // Apply pending changes for the last transaction before committing
             env.apply_pending_changes(env.transactions.size() - 1);
 
-            env.transactions.back().commit();
+            env.transactions.back()->commit();
             std::cout << "Committed pending transaction" << std::endl;
          }
          catch (const std::exception& e)
@@ -842,7 +841,7 @@ namespace
       }
 
       // Start a new read-only transaction for verification
-      auto tx = env.ws->start_transaction();
+      auto tx = env.ws->start_read_transaction();
       std::cout << "Started verification transaction" << std::endl;
 
       try
@@ -854,7 +853,7 @@ namespace
             std::vector<char> buffer;
             try
             {
-               int32_t result = tx.get(key, &buffer);
+               int32_t result = tx->get(key, &buffer);
 
                if (result >= 0)
                {
@@ -888,12 +887,12 @@ namespace
          try
          {
             // Start at first key and iterate through all
-            if (tx.begin())
+            if (tx->begin())
             {
                do
                {
                   total_keys++;
-               } while (tx.next());
+               } while (tx->next());
             }
 
             std::cout << "Total keys in database: " << total_keys << std::endl;
@@ -981,37 +980,37 @@ TEST_CASE("Edge cases for arbtrie Database API", "[fuzz][edge_cases]")
    SECTION("Empty key handling")
    {
       // Test empty key
-      auto&       tx        = env.current_transaction();
+      auto        tx        = env.current_transaction();
       std::string empty_key = "";
       std::string value     = "value for empty key";
 
-      tx.insert(empty_key, value);
+      tx->insert(empty_key, value);
 
       std::vector<char> buffer;
-      int32_t           result = tx.get(empty_key, &buffer);
+      int32_t           result = tx->get(empty_key, &buffer);
       REQUIRE(result >= 0);
       REQUIRE(std::string(buffer.data(), buffer.size()) == value);
    }
 
    SECTION("Very long keys and values")
    {
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       // Create a very long key
       std::string long_key   = env.random_string(MAX_KEY_LENGTH);
       std::string long_value = env.random_string(MAX_VALUE_LENGTH);
 
-      tx.insert(long_key, long_value);
+      tx->insert(long_key, long_value);
 
       std::vector<char> buffer;
-      int32_t           result = tx.get(long_key, &buffer);
+      int32_t           result = tx->get(long_key, &buffer);
       REQUIRE(result >= 0);
       REQUIRE(std::string(buffer.data(), buffer.size()) == long_value);
    }
 
    SECTION("Keys with special characters")
    {
-      auto& tx = env.current_transaction();
+      auto tx = env.current_transaction();
 
       // Create keys with various special characters
       std::vector<std::string> special_keys = {"key\nwith\nnewlines", "key\twith\ttabs",
@@ -1023,10 +1022,10 @@ TEST_CASE("Edge cases for arbtrie Database API", "[fuzz][edge_cases]")
 
          try
          {
-            tx.insert(key, value);
+            tx->insert(key, value);
 
             std::vector<char> buffer;
-            int32_t           result = tx.get(key, &buffer);
+            int32_t           result = tx->get(key, &buffer);
             REQUIRE(result >= 0);
             REQUIRE(std::string(buffer.data(), buffer.size()) == value);
          }
@@ -1046,7 +1045,7 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
 
    // Create multiple write transactions
    std::vector<std::shared_ptr<write_session>> sessions;  // Store sessions as shared pointers
-   std::vector<write_transaction>              txs;
+   std::vector<write_transaction::ptr>         txs;
    std::vector<std::set<std::string>>          committed_keys;
    const int                                   num_transactions     = 3;
    const int                                   keys_per_transaction = 5;
@@ -1062,7 +1061,7 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
    for (int i = 0; i < num_transactions; i++)
    {
       // Use a different root index for each transaction
-      txs.push_back(sessions[i]->start_transaction(i));
+      txs.push_back(sessions[i]->start_write_transaction(i));
       committed_keys.push_back({});
 
       std::cout << "Started transaction " << i << " with root index " << i << std::endl;
@@ -1073,14 +1072,14 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
          std::string key   = "tx" + std::to_string(i) + "_key" + std::to_string(j);
          std::string value = "value_" + key;
 
-         txs[i].insert(key, value);
+         txs[i]->insert(key, value);
          committed_keys[i].insert(key);
 
          std::cout << "Inserted key " << key << " in transaction " << i << std::endl;
 
          // Verify the key was inserted correctly
          std::vector<char> check_buffer;
-         int32_t           check_result = txs[i].get(key, &check_buffer);
+         int32_t           check_result = txs[i]->get(key, &check_buffer);
          if (check_result < 0)
          {
             std::cout << "ERROR: Inserted key " << key << " but get returned " << check_result
@@ -1092,7 +1091,7 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
    // Verify that each transaction can see its own keys but not others' keys
    for (int tx_idx = 0; tx_idx < txs.size(); tx_idx++)
    {
-      auto& tx = txs[tx_idx];
+      auto tx = txs[tx_idx];
       std::cout << "Verifying visibility in transaction " << tx_idx << " before commit"
                 << std::endl;
 
@@ -1100,7 +1099,7 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
       for (const auto& key : committed_keys[tx_idx])
       {
          std::vector<char> buffer;
-         int32_t           result = tx.get(key, &buffer);
+         int32_t           result = tx->get(key, &buffer);
          if (result < 0)
          {
             std::cout << "ERROR: Transaction " << tx_idx << " cannot see its own key: " << key
@@ -1118,7 +1117,7 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
          for (const auto& key : committed_keys[other_tx])
          {
             std::vector<char> buffer;
-            int32_t           result = tx.get(key, &buffer);
+            int32_t           result = tx->get(key, &buffer);
             if (result >= 0)
             {
                std::cout << "ERROR: Transaction " << tx_idx << " can see transaction " << other_tx
@@ -1133,13 +1132,13 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
    for (int tx_idx = 0; tx_idx < txs.size(); tx_idx++)
    {
       std::cout << "Committing transaction " << tx_idx << std::endl;
-      txs[tx_idx].commit();
+      txs[tx_idx]->commit();
       std::cout << "Transaction " << tx_idx << " committed" << std::endl;
 
       // Start a new read transaction to see the updated state
       auto rs = env.db->start_read_session();
       // Use the same root index as the transaction we just committed
-      auto read_tx = rs.start_transaction(tx_idx);
+      auto read_tx = rs.start_read_transaction(tx_idx);
       std::cout << "Started read transaction with root index " << tx_idx << " to verify commit "
                 << tx_idx << std::endl;
 
@@ -1148,7 +1147,7 @@ TEST_CASE("Stress test transaction isolation", "[stress]")
       {
          std::cout << "Checking key: " << key << " from transaction " << tx_idx << std::endl;
          std::vector<char> buffer;
-         int32_t           result = read_tx.get(key, &buffer);
+         int32_t           result = read_tx->get(key, &buffer);
          if (result < 0)
          {
             std::cout << "ERROR: Key " << key << " should be visible but result is " << result
@@ -1177,17 +1176,17 @@ TEST_CASE("Identify which operation in the sequence causes the bug", "[fuzz][bug
       {
          std::string test_key   = "test_key_" + std::to_string(i);
          std::string test_value = "test_value_" + std::to_string(i);
-         env.current_transaction().insert(test_key, test_value);
+         env.current_transaction()->insert(test_key, test_value);
       }
 
-      auto& tx = env.current_transaction();
-      tx.start();
+      auto tx = env.current_transaction();
+      tx->start();
 
       // Call last() directly
       std::cout << "Calling last() without other operations" << std::endl;
-      if (tx.last())
+      if (tx->last())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -1202,25 +1201,25 @@ TEST_CASE("Identify which operation in the sequence causes the bug", "[fuzz][bug
       {
          std::string test_key   = "test_key_" + std::to_string(i);
          std::string test_value = "test_value_" + std::to_string(i);
-         env.current_transaction().insert(test_key, test_value);
+         env.current_transaction()->insert(test_key, test_value);
       }
 
-      auto& tx = env.current_transaction();
-      tx.start();
+      auto tx = env.current_transaction();
+      tx->start();
 
       // Call upper_bound
       std::cout << "Calling upper_bound" << std::endl;
-      if (tx.upper_bound("m"))
+      if (tx->upper_bound("m"))
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Upper bound result: " << key << std::endl;
       }
 
       // Call last()
       std::cout << "Calling last() after upper_bound" << std::endl;
-      if (tx.last())
+      if (tx->last())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -1235,33 +1234,33 @@ TEST_CASE("Identify which operation in the sequence causes the bug", "[fuzz][bug
       {
          std::string test_key   = "test_key_" + std::to_string(i);
          std::string test_value = "test_value_" + std::to_string(i);
-         env.current_transaction().insert(test_key, test_value);
+         env.current_transaction()->insert(test_key, test_value);
       }
 
-      auto& tx = env.current_transaction();
-      tx.start();
+      auto tx = env.current_transaction();
+      tx->start();
 
       // Call upper_bound
       std::cout << "Calling upper_bound" << std::endl;
-      if (tx.upper_bound("m"))
+      if (tx->upper_bound("m"))
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Upper bound result: " << key << std::endl;
       }
 
       // Call next
       std::cout << "Calling next" << std::endl;
-      if (tx.next())
+      if (tx->next())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Next result: " << key << std::endl;
       }
 
       // Call last()
       std::cout << "Calling last() after upper_bound and next" << std::endl;
-      if (tx.last())
+      if (tx->last())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -1276,41 +1275,41 @@ TEST_CASE("Identify which operation in the sequence causes the bug", "[fuzz][bug
       {
          std::string test_key   = "test_key_" + std::to_string(i);
          std::string test_value = "test_value_" + std::to_string(i);
-         env.current_transaction().insert(test_key, test_value);
+         env.current_transaction()->insert(test_key, test_value);
       }
 
-      auto& tx = env.current_transaction();
-      tx.start();
+      auto tx = env.current_transaction();
+      tx->start();
 
       // Call upper_bound
       std::cout << "Calling upper_bound" << std::endl;
-      if (tx.upper_bound("m"))
+      if (tx->upper_bound("m"))
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Upper bound result: " << key << std::endl;
       }
 
       // Call next
       std::cout << "Calling next" << std::endl;
-      if (tx.next())
+      if (tx->next())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Next result: " << key << std::endl;
       }
 
       // Insert and remove a key
       std::string temp_key = "temp_key";
       std::cout << "Insert temp key" << std::endl;
-      tx.insert(temp_key, "temp_value");
+      tx->insert(temp_key, "temp_value");
 
       std::cout << "Remove temp key" << std::endl;
-      tx.remove(temp_key);
+      tx->remove(temp_key);
 
       // Call last()
       std::cout << "Calling last() after all operations" << std::endl;
-      if (tx.last())
+      if (tx->last())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -1331,34 +1330,35 @@ TEST_CASE("Basic iterator operations test", "[fuzz][bug][basic]")
       {
          std::string test_key   = "test_key_" + std::to_string(i);
          std::string test_value = "test_value_" + std::to_string(i);
-         env->current_transaction().insert(test_key, test_value);
+         env->current_transaction()->insert(test_key, test_value);
       }
       keys_inserted = true;
    }
 
    // Get a fresh transaction for each test section
-   auto tx = env->ws->start_transaction();
+   auto tx = env->ws->start_write_transaction();
 
    SECTION("Test first()")
    {
       std::cout << "Starting transaction and calling first()" << std::endl;
 
       // Check if transaction is valid
-      std::cout << "Transaction valid: " << (tx.valid() ? "yes" : "no") << std::endl;
+      std::cout << "Transaction valid: " << (tx->valid() ? "yes" : "no") << std::endl;
 
       // Insert a test key to ensure we have at least one key in the database
       std::string test_key   = "test_key_first";
       std::string test_value = "test_value";
-      tx.insert(test_key, test_value);
+      tx->insert(test_key, test_value);
 
       // Start the transaction
-      tx.start();
+      tx->start();
 
-      std::cout << "After start(), transaction valid: " << (tx.valid() ? "yes" : "no") << std::endl;
+      std::cout << "After start(), transaction valid: " << (tx->valid() ? "yes" : "no")
+                << std::endl;
 
-      if (tx.first())
+      if (tx->first())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "First key: " << key << std::endl;
       }
       else
@@ -1372,21 +1372,22 @@ TEST_CASE("Basic iterator operations test", "[fuzz][bug][basic]")
       std::cout << "Starting transaction and calling begin()" << std::endl;
 
       // Check if transaction is valid
-      std::cout << "Transaction valid: " << (tx.valid() ? "yes" : "no") << std::endl;
+      std::cout << "Transaction valid: " << (tx->valid() ? "yes" : "no") << std::endl;
 
       // Insert a test key to ensure we have at least one key in the database
       std::string test_key   = "test_key_begin";
       std::string test_value = "test_value";
-      tx.insert(test_key, test_value);
+      tx->insert(test_key, test_value);
 
       // Start the transaction
-      tx.start();
+      tx->start();
 
-      std::cout << "After start(), transaction valid: " << (tx.valid() ? "yes" : "no") << std::endl;
+      std::cout << "After start(), transaction valid: " << (tx->valid() ? "yes" : "no")
+                << std::endl;
 
-      if (tx.begin())
+      if (tx->begin())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Begin key: " << key << std::endl;
       }
       else
@@ -1400,24 +1401,24 @@ TEST_CASE("Basic iterator operations test", "[fuzz][bug][basic]")
       std::cout << "Starting transaction with restart before calling last()" << std::endl;
 
       // Check if transaction is valid
-      std::cout << "Transaction valid: " << (tx.valid() ? "yes" : "no") << std::endl;
+      std::cout << "Transaction valid: " << (tx->valid() ? "yes" : "no") << std::endl;
 
       // Insert a test key to ensure we have at least one key in the database
       std::string test_key   = "test_key_last";
       std::string test_value = "test_value";
-      tx.insert(test_key, test_value);
+      tx->insert(test_key, test_value);
 
       // Commit the insert to ensure the transaction is valid
-      tx.commit_and_continue();
+      tx->commit_and_continue();
 
-      std::cout << "After commit_and_continue(), transaction valid: " << (tx.valid() ? "yes" : "no")
-                << std::endl;
+      std::cout << "After commit_and_continue(), transaction valid: "
+                << (tx->valid() ? "yes" : "no") << std::endl;
 
       // Call last() directly without using begin() first
       std::cout << "Calling last() directly" << std::endl;
-      if (tx.last())
+      if (tx->last())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
       else
@@ -1459,7 +1460,7 @@ struct TestEnv
       std::filesystem::remove_all(db_path);
    }
 
-   write_transaction start_transaction() { return ws->start_transaction(); }
+   write_transaction::ptr start_transaction() { return ws->start_write_transaction(); }
 };
 
 // Tests for the arbtrie database
@@ -1474,27 +1475,27 @@ TEST_CASE("Iterator operations bug test", "[bug]")
    {
       std::string key   = "test_key_" + std::to_string(i);
       std::string value = "test_value_" + std::to_string(i);
-      tx.insert(key, value);
+      tx->insert(key, value);
    }
 
    SECTION("Basic first() operation")
    {
-      tx.start();
+      tx->start();
       std::cout << "Testing first()..." << std::endl;
-      if (tx.first())
+      if (tx->first())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "First key: " << key << std::endl;
       }
    }
 
    SECTION("Basic last() operation")
    {
-      tx.start();
+      tx->start();
       std::cout << "Testing last()..." << std::endl;
-      if (tx.last())
+      if (tx->last())
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -1502,30 +1503,30 @@ TEST_CASE("Iterator operations bug test", "[bug]")
    SECTION("Operations that might cause the last() bug")
    {
       // Start transaction
-      tx.start();
+      tx->start();
 
       // Call upper_bound
       std::cout << "Calling upper_bound..." << std::endl;
-      if (tx.upper_bound("m"))
+      if (tx->upper_bound("m"))
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Upper bound result: " << key << std::endl;
       }
 
       // Insert and remove a key
       std::string temp_key = "temp_key";
       std::cout << "Inserting and removing a temporary key..." << std::endl;
-      tx.insert(temp_key, "temp_value");
-      tx.remove(temp_key);
+      tx->insert(temp_key, "temp_value");
+      tx->remove(temp_key);
 
       // Call last() which might crash
       std::cout << "Calling last() after operations..." << std::endl;
-      bool result = tx.last();
+      bool result = tx->last();
       std::cout << "last() returned: " << (result ? "true" : "false") << std::endl;
 
       if (result)
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -1540,31 +1541,31 @@ TEST_CASE("Simplified transaction commit test", "[fuzz][commit]")
    std::cout << "Starting simplified transaction commit test" << std::endl;
 
    // Start a transaction with explicit index 0
-   auto        tx    = env.ws->start_transaction(0);
+   auto        tx    = env.ws->start_write_transaction(0);
    std::string key   = "test_key";
    std::string value = "test_value";
 
    std::cout << "Inserting key: " << key << std::endl;
-   tx.insert(key, value);
+   tx->insert(key, value);
 
    // Verify the key is visible in the transaction
    std::vector<char> buffer;
-   int32_t           result = tx.get(key, &buffer);
+   int32_t           result = tx->get(key, &buffer);
    std::cout << "Before commit, key visibility: " << (result >= 0 ? "visible" : "not visible")
              << std::endl;
    REQUIRE(result >= 0);
 
    // Commit the transaction
    std::cout << "Committing transaction" << std::endl;
-   tx.commit();
+   tx->commit();
 
    // Start a new read transaction with the same index
    auto rs      = env.db->start_read_session();
-   auto read_tx = rs.start_transaction(0);
+   auto read_tx = rs.start_read_transaction(0);
 
    // Verify the key is visible in the read transaction
    std::vector<char> read_buffer;
-   int32_t           read_result = read_tx.get(key, &read_buffer);
+   int32_t           read_result = read_tx->get(key, &read_buffer);
    std::cout << "After commit, key visibility: " << (read_result >= 0 ? "visible" : "not visible")
              << std::endl;
    REQUIRE(read_result >= 0);
@@ -1575,9 +1576,9 @@ TEST_CASE("Simplified transaction commit test", "[fuzz][commit]")
       std::cout << "Testing with different index..." << std::endl;
       for (int i = 0; i < 10; i++)
       {
-         auto              alt_read_tx = rs.start_transaction(i);
+         auto              alt_read_tx = rs.start_read_transaction(i);
          std::vector<char> buffer;
-         int32_t           alt_result = alt_read_tx.get(key, &buffer);
+         int32_t           alt_result = alt_read_tx->get(key, &buffer);
          std::cout << "Index " << i
                    << " key visibility: " << (alt_result >= 0 ? "visible" : "not visible")
                    << std::endl;
@@ -1594,23 +1595,23 @@ TEST_CASE("Transactions on same root index should block", "[transaction]")
 
    // Start a transaction on root index 0
    auto ws1 = env.db->start_write_session();
-   auto tx1 = ws1->start_transaction(0);
+   auto tx1 = ws1->start_write_transaction(0);
 
    // Insert a key
    std::string key   = "test_key";
    std::string value = "test_value";
-   tx1.insert(key, value);
+   tx1->insert(key, value);
 
    // Verify the key was inserted
    std::vector<char> buffer;
-   int32_t           result = tx1.get(key, &buffer);
+   int32_t           result = tx1->get(key, &buffer);
    REQUIRE(result >= 0);
 
    std::cout << "First transaction started and key inserted successfully" << std::endl;
 
    // Commit the first transaction
    std::cout << "Main thread: Committing first transaction..." << std::endl;
-   tx1.commit();
+   tx1->commit();
    std::cout << "Main thread: First transaction committed" << std::endl;
 
    // Create a second write session
@@ -1618,22 +1619,22 @@ TEST_CASE("Transactions on same root index should block", "[transaction]")
 
    // Now try to start a second transaction - this should work now
    std::cout << "Main thread: Starting second transaction after commit..." << std::endl;
-   auto tx2 = ws2->start_transaction(0);
+   auto tx2 = ws2->start_write_transaction(0);
    std::cout << "Main thread: Second transaction started successfully" << std::endl;
 
    // Insert another key in the second transaction
    std::string key2   = "another_key";
    std::string value2 = "another_value";
-   tx2.insert(key2, value2);
+   tx2->insert(key2, value2);
 
    // Verify the key was inserted
    std::vector<char> buffer2;
-   int32_t           result2 = tx2.get(key2, &buffer2);
+   int32_t           result2 = tx2->get(key2, &buffer2);
    REQUIRE(result2 >= 0);
 
    // Commit the second transaction
    std::cout << "Main thread: Committing second transaction..." << std::endl;
-   tx2.commit();
+   tx2->commit();
    std::cout << "Main thread: Second transaction committed" << std::endl;
 
    std::cout << "Test completed successfully" << std::endl;

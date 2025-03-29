@@ -38,6 +38,9 @@ namespace arbtrie
    {
      private:
       friend class write_session;
+      struct private_token
+      {
+      };
 
       write_transaction(std::shared_ptr<write_session>                ws,
                         node_handle                                   r,
@@ -51,8 +54,24 @@ namespace arbtrie
       }
 
      public:
+      /** this method is designed to only be called by the write_session */
+      write_transaction(private_token,
+                        std::shared_ptr<write_session>                ws,
+                        node_handle                                   r,
+                        std::function<node_handle(node_handle, bool)> commit_callback,
+                        std::function<void()>                         abort_callback = {})
+          : mutable_iterator<caching>(*ws, std::move(r)), _ws(std::move(ws))
+      {
+         assert(commit_callback);
+         _abort_callback  = abort_callback;
+         _commit_callback = commit_callback;
+      }
+
+      using ptr = std::shared_ptr<write_transaction>;
       ~write_transaction()
       {
+         ARBTRIE_WARN("write_transaction::~write_transaction()", _root.address().to_int(),
+                      " this: ", this);
          if (_abort_callback)
             _abort_callback();
       }
@@ -84,6 +103,7 @@ namespace arbtrie
          assert(_commit_callback);
          _commit_callback(std::move(_root), false);
          _commit_callback = {};
+         _abort_callback  = {};
       }
 
       /**
@@ -115,14 +135,19 @@ namespace arbtrie
        * creation of the sub-transaction will be lost if the
        * sub-transaction is committed. 
        */
-      write_transaction start_transaction()
+      write_transaction::ptr start_transaction()
       {
-         return write_transaction(_ws, get_root(),
-                                  [this](node_handle commit, bool resume)
-                                  {
-                                     set_root(resume ? commit : std::move(commit));
-                                     return commit;
-                                  });
+         ARBTRIE_INFO("start_transaction", get_root().address().to_int(), " this: ", this);
+         auto self = shared_from_this();
+         return std::make_shared<write_transaction>(
+             private_token{}, _ws, get_root(),
+             [self](node_handle commit, bool resume)
+             {
+                ARBTRIE_INFO("start_transaction callback", commit.address().to_int(),
+                             " this: ", self.get());
+                self->set_root(resume ? commit : std::move(commit));
+                return commit;
+             });
       }
 
      private:

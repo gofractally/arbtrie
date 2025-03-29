@@ -276,7 +276,6 @@ namespace sal
       if (_fd and sync_type::none != st)
       {
 #ifdef __APPLE__
-         SAL_ERROR("fsync");
          if (fcntl(_fd, F_FULLFSYNC) < 0)
          {
             SAL_ERROR("Failed to fsync file: {}", strerror(errno));
