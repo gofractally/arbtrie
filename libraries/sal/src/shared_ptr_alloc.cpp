@@ -833,34 +833,43 @@ namespace sal
 
       do
       {
-         // If the bit is already cleared, the pointer is already allocated
+         // If the bit is already cleared (0), the pointer is already allocated
          if (!(expected_bitmap & (1ULL << bit_idx)))
          {
             // Pointer is already allocated, just return it
             return page.get_ptr(address.index);
          }
 
-         // Clear the bit to mark it as allocated
+         // Re-calculate desired_bitmap inside the loop based on the current expected_bitmap
          desired_bitmap = expected_bitmap & ~(1ULL << bit_idx);
 
+         // Try to perform the atomic update
       } while (!page.free_ptrs[slot_idx].compare_exchange_weak(
-          expected_bitmap, desired_bitmap, std::memory_order_release, std::memory_order_relaxed));
+          expected_bitmap, desired_bitmap,
+          std::memory_order_release,  // Success memory order
+          std::memory_order_relaxed));  // Failure memory order (expected_bitmap gets updated)
 
-      // Update half-free and free cachelines bits as needed
-      // Similar to the logic in the try_alloc method
+      // --- Update higher-level bitmaps (This part seems less critical now, but keep for completeness) ---
+      // Check if the cacheline became half-free or full based on the state *after* successful CAS
+      // Note: 'desired_bitmap' now holds the state *after* our bit was cleared.
+      uint64_t cacheline_bits_mask    = 0xFFULL << ((bit_idx / 8) * 8);
+      uint64_t cacheline_current_bits = desired_bitmap & cacheline_bits_mask;
+      uint32_t cacheline_idx          = bit_idx / 8;
 
-      // For simplicity, we also update the bitmap of free cachelines
-      if (std::popcount(desired_bitmap) <= 4)
+      // Logic for half_free - simplified: if popcount in the cacheline is <=4, set the bit.
+      // This might slightly over-set half_free during recovery but is safer.
+      if (std::popcount(cacheline_current_bits) <= 4)
       {
-         // This cacheline is now half-free or less
-         page.half_free_cachelines.fetch_or(1ULL << slot_idx, std::memory_order_relaxed);
+         page.half_free_cachelines.fetch_or(1ULL << cacheline_idx, std::memory_order_relaxed);
       }
 
-      if (desired_bitmap == 0)
+      // Logic for free_cachelines: If the cacheline has NO free bits left after our update, clear the bit.
+      if (cacheline_current_bits == 0)
       {
-         // No more free pointers in this cacheline
-         page.free_cachelines.fetch_and(~(1ULL << slot_idx), std::memory_order_relaxed);
+         page.free_cachelines.fetch_and(~(1ULL << cacheline_idx), std::memory_order_relaxed);
+         // Note: We are NOT updating region.free_pages here. That's handled by restore_bitmap_consistency.
       }
+      // --- End of higher-level bitmap update ---
 
       // Increment the region use count
       get_page_table().inc_region(address.region);

@@ -35,6 +35,4 @@ if(ENABLE_COVERAGE)
 endif()
 
 # Add the arbtrie_sql program subdirectory
-if(BUILD_SQLITE_TOOLS)
-    add_subdirectory(arbtrie_sql)
-endif()
+add_subdirectory(arbtrie_sql)

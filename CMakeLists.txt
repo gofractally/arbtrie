@@ -53,10 +53,10 @@ option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_VISUALIZER "Build segment visualizer" )
-option(BUILD_SQLITE_TOOLS "Build SQLite related tools and tests" OFF)
 
 # Find required packages
 find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 # Find Boost
 set(Boost_NO_WARN_NEW_VERSIONS ON)
@@ -75,6 +75,7 @@ endif()
 
 # SAL library setup - required by arbtrie
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
+option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
 
 # Add the SAL library
 add_subdirectory(libraries/sal)
