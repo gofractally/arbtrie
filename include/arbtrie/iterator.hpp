@@ -140,7 +140,7 @@ namespace arbtrie
        *   
        *   Iterators should be long-lived and not recreated for each query.
        */
-   template <iterator_caching_mode CacheMode = noncaching>
+   template <iterator_caching_mode CacheMode = caching>
    class iterator : public std::enable_shared_from_this<iterator<CacheMode>>
    {
       friend class arbtrie::read_session;

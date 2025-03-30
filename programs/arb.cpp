@@ -784,7 +784,7 @@ int  main(int argc, char** argv)
                {
                   int  roundc = 100000;
                   int  added  = 0;
-                  auto rtx    = rs.start_read_transaction(0);
+                  auto rtx    = rs.start_caching_read_transaction(0);
                   for (int i = 0; i < batch_size; ++i)
                   {
                      ++added;

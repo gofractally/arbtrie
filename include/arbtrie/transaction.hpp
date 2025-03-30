@@ -6,8 +6,8 @@
 namespace arbtrie
 {
 
-   using read_transaction = iterator<iterator_caching_mode::noncaching>;
-
+   using read_transaction         = iterator<iterator_caching_mode::noncaching>;
+   using caching_read_transaction = iterator<iterator_caching_mode::caching>;
    /**
     * A write transaction is a mutable iterator that knows how
     * to commit and abort the node_handle that it manages. 

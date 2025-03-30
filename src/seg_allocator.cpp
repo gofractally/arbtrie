@@ -341,6 +341,7 @@ namespace arbtrie
             }
          }
       }
+      _mapped_state->_cache_difficulty_state.compactor_promote_bytes(0);
       return more_work;
    }
 

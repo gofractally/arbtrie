@@ -109,7 +109,7 @@ namespace arbtrie
 
       uint64_t count_ids_with_refs() { return _segas->count_ids_with_refs(); }
 
-      template <iterator_caching_mode CacheMode = noncaching>
+      template <iterator_caching_mode CacheMode = caching>
       auto create_iterator(node_handle h)
       {
          return iterator<CacheMode>(*this, std::move(h));
@@ -121,6 +121,13 @@ namespace arbtrie
          // Use make_shared with the private token
          return std::make_shared<read_transaction>(read_transaction::private_token{}, *this,
                                                    std::move(root));
+      }
+      caching_read_transaction::ptr start_caching_read_transaction(int top_root_node = 0)
+      {
+         node_handle root = (top_root_node == -1) ? create_root() : get_root(top_root_node);
+         // Use make_shared with the private token
+         return std::make_shared<caching_read_transaction>(
+             caching_read_transaction::private_token{}, *this, std::move(root));
       }
 
       /**
@@ -814,7 +821,6 @@ namespace arbtrie
 
       uint64_t old_r;
       uint64_t new_r = r.take().to_int();
-      ARBTRIE_INFO("set_root: new_root = ", new_r);
       {
          {  // lock scope
             std::unique_lock lock(_db->_root_change_mutex[index]);
