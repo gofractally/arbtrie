@@ -72,6 +72,16 @@ namespace arbtrie
    struct runtime_config
    {
       /**
+       * The point at which a binary node will get converted into
+       * a full node or setlist node (depending on keys).
+       */
+      uint32_t binary_refactor_threshold      = 4096;
+      uint32_t binary_node_max_size           = 4096;
+      uint32_t binary_node_max_keys           = 254;
+      uint32_t binary_node_initial_size       = 4096;
+      uint32_t binary_node_initial_branch_cap = 64;
+
+      /**
        * The default is 1 GB, this gives 32 segments,
        * if you have a lot of write threads you may want to 
        * increase this to 64 MB per thread or more. The
@@ -343,7 +353,7 @@ namespace arbtrie
    // initial space reserved for growth in place, larger values
    // support faster insertion, but have much wasted space if your
    // keys are not dense.
-   static constexpr const int binary_node_initial_size = 2048;
+   static constexpr const int binary_node_initial_size = 3072;
 
    // extra space reserved for growth in place
    static constexpr const int binary_node_initial_branch_cap = 64;

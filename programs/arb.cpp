@@ -492,7 +492,7 @@ int  main(int argc, char** argv)
                while (tx->next())
                {
                   tx->key();
-                  tx->value(data);
+                  //  tx->value([](auto&&) { return 0; });
                   ++item_count;
                }
                auto end   = std::chrono::steady_clock::now();

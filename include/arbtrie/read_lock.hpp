@@ -30,7 +30,8 @@ namespace arbtrie
       void release();
 
      private:
-      void         unlock();
+      void unlock();
+      template <typename T>
       node_header* copy_on_write(temp_meta_type meta);
 
       // it starts out true because lock isn't acquired unless as() is called

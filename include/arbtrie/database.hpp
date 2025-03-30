@@ -505,6 +505,20 @@ namespace arbtrie
       void recover(recover_args args = recover_args());
       bool validate();
 
+      /**
+       * @brief Gets the current runtime configuration.
+       * @return A copy of the current runtime_config.
+       */
+      runtime_config get_runtime_config() const;
+
+      /**
+       * @brief Sets the runtime configuration.
+       * @param cfg The new runtime_config to apply.
+       * @note Modifying configuration on a live database might have unintended consequences
+       *       depending on the specific setting changed. Use with caution.
+       */
+      void set_runtime_config(const runtime_config& cfg);
+
      private:
       friend class read_session;
       friend class write_session;

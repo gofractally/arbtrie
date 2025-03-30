@@ -953,10 +953,28 @@ namespace arbtrie
    template <iterator_caching_mode CacheMode>
    void iterator<CacheMode>::update_branch(key_view new_branch, local_index new_index)
    {
-      // Adjust size of branches to remove old key and make space for new key
+      // note... we know that the data pointed at by new_branch and _branches_end is
+      // safe to read and write even though we go beyond the end of the buffer...  so
+      // we can attempt to use faster 8 byte copy of the data...
+
+#if 1 /* safe path */
       _branches_end -= _path_back->branch_size;
       std::copy(new_branch.begin(), new_branch.end(), _branches_end);
       _branches_end += new_branch.size();
+#else /* safe but sketchy fast path */
+      // Adjust size of branches to remove old key and make space for new key
+      _branches_end -= _path_back->branch_size;
+      uint64_t* bend = (uint64_t*)_branches_end;
+      _branches_end += new_branch.size();
+      uint64_t*       nend = (uint64_t*)_branches_end;
+      const uint64_t* nbr  = (const uint64_t*)new_branch.data();
+      while (bend < nend)
+      {
+         *bend = *nbr;
+         bend++;
+         nbr++;
+      }
+#endif
 
       _path_back->branch_size = new_branch.size();
       _path_back->index       = new_index.to_int();

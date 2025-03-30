@@ -4,6 +4,7 @@
 #include <arbtrie/file_fwd.hpp>
 #include <arbtrie/transaction.hpp>
 
+#include <cassert>
 #include <iostream>
 #include <utility>
 
@@ -2000,6 +2001,32 @@ namespace arbtrie
              if (top_root_node >= 0)
                 _db->modify_lock(top_root_node).unlock();
           });
+   }
+
+   runtime_config database::get_runtime_config() const
+   {
+      // It's generally safer to return by value if runtime_config is small,
+      // or if we want to prevent external modification of the internal state.
+      return _dbm->config;
+   }
+
+   void database::set_runtime_config(const runtime_config& cfg)
+   {
+      // Add potential locks here if modifying config needs synchronization
+      // with other operations (e.g., sync operations).
+      // For now, assuming direct modification is acceptable based on current usage.
+
+      // Update config in database's memory
+      _dbm->config = cfg;
+
+      // Propagate the config update to the seg_allocator's mapped state
+      // Assert that _mapped_state is valid
+      assert(_sega._mapped_state && "seg_allocator's mapped_state must be valid");
+      _sega._mapped_state->_config = cfg;
+
+      // Potentially need to signal or update other components (like seg_allocator)
+      // if they depend on these config values.
+      // _sega.update_config(cfg); // Example if sega needed updating
    }
 
 }  // namespace arbtrie

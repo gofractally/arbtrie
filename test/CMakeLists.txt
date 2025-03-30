@@ -176,4 +176,29 @@ target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
 # Add the min_index subdirectory with its tests
 add_subdirectory(min_index)
 
+# Add SQLite benchmark test executable only if enabled
+if(BUILD_SQLITE_TOOLS)
+    find_package(SQLite3 REQUIRED)
+    add_executable(sqlite-arb-test sqlite_arb_test.cpp)
+
+    # Link libraries for sqlite-arb-test
+    target_link_libraries(sqlite-arb-test
+        PRIVATE
+            Boost::program_options
+            SQLite::SQLite3
+    )
+
+    # Set output directory for sqlite-arb-test
+    set_target_properties(sqlite-arb-test
+        PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+
+    # Add test to CTest (optional, uncomment if you want 'ctest' to run it)
+    # add_test(
+    #     NAME sqlite-arb-test
+    #     COMMAND sqlite-arb-test
+    # )
+endif()
+
 

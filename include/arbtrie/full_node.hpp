@@ -18,9 +18,6 @@ namespace arbtrie
 
       using node_header::get_type;
 
-      // full_node does not have a branch data capacity, because it is always 256
-      int branch_data_cap() const { return 0; }
-
       /**
        * Returns the index of the first branch that is >= the given key.
        * 
@@ -65,19 +62,58 @@ namespace arbtrie
       // idx 1..255 = branches
       constexpr local_index next_index(local_index idx) const
       {
-         if (idx == begin_index())
+         if (idx == begin_index()) [[unlikely]]
          {
             if (has_eof_value())
                return local_index(0);
             idx = local_index(0);
          }
 
+#if 1
+         // this branch
          const auto* br  = branches();
          const auto* bre = br + branch_count;
          const auto* b   = br + idx.to_int();  // this is next when you factor in the eof_value
          while (b < bre and not*b)
             ++b;
          return local_index(b - br + 1);
+#else
+         // since full nodes are at least 50% full, every 8 bytes has a 2 in 4 chance of
+         // containing a non-zero value.  We can scan 4 indices at a time to find the next
+         // non-zero value and in most cases this will be branchless or correctly predicited.
+
+         const auto*     br  = branches();
+         const uint64_t* bre = (const uint64_t*)(br + branch_count);
+
+         const auto*     start     = br + idx.to_int();
+         const uint64_t* aligned_b = (const uint64_t*)((uintptr_t)start & ~7ULL);
+         int             overlap   = (start - (const id_index*)aligned_b);  // 0–3
+
+         const uint64_t* b       = aligned_b;
+         uint64_t        current = *b;
+
+         // Branchless masking: apply mask only if overlap > 0, else all-ones
+         uint64_t mask = (~0ULL) << (overlap * 16);
+         mask |= -(uint64_t)(overlap == 0);  // 0xFFFF... if overlap = 0, 0 otherwise
+         current &= mask;
+
+         // Main loop: scan 64-bit chunks, 5% chance 1 in 4 itera1tions
+         // 12% chance 1 in 4 iterations, 25% chance or 50% chance
+         while (current == 0) [[unlikely]]
+         {
+            ++b;
+            if (b >= bre) [[unlikely]]
+               return end_index();
+            current = *b;
+         }
+
+         // Refine position: tz is guaranteed to be >= overlap in first chunk
+         int             tz = __builtin_ctzll(current) / 16;
+         const id_index* b2 = (const id_index*)b + tz;
+
+         int offset = (b2 - br) + 1;
+         return local_index(offset);
+#endif
       }
       constexpr local_index prev_index(local_index idx) const
       {

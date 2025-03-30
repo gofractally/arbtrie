@@ -1,4 +1,5 @@
 #pragma once
+#include <arbtrie/concepts.hpp>
 #include <arbtrie/fast_memcpy.hpp>
 #include <arbtrie/read_lock.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
@@ -175,9 +176,10 @@ namespace arbtrie
       if (_rlock.can_modify(loc))
          return (T*)(_observed_ptr = _rlock.get_node_pointer(loc));
 
-      return (T*)(_observed_ptr = copy_on_write(val));
+      return (T*)(_observed_ptr = copy_on_write<T>(val));
    }
 
+   template <typename T>
    inline node_header* modify_lock::copy_on_write(temp_meta_type meta)
    {
       auto loc = meta.loc();
@@ -186,9 +188,24 @@ namespace arbtrie
       auto old_oref = _rlock.get(cur_ptr->address());
       assert(cur_ptr->address() == old_oref.address());
 
-      auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
-                                 { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
-      return _rlock.get_node_pointer(oref.meta_data().loc());
+      if constexpr (is_binary_node<T>)
+      {
+         /// expand to the maximum size of a binary node to make room for new data,
+         /// the compactor will shirnk this back down to the correct size after the
+         /// transaction is committed and the state is "read only", this will minimize
+         /// the number of times we have to copy the node data during a transaction.
+         /// TODO: calculate the the new size, and do an efficient copy. skipping the
+         /// dead space that we are reserving.
+         auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
+                                    { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
+         return _rlock.get_node_pointer(oref.meta_data().loc());
+      }
+      else
+      {
+         auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
+                                    { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
+         return _rlock.get_node_pointer(oref.meta_data().loc());
+      }
    }
 
    template <typename T>

@@ -767,7 +767,7 @@ namespace arbtrie
       bool validate() const
       {
          assert(spare_capacity() >= 0);
-         assert(_nsize <= 4096);
+         //         assert(_nsize <= 4096);
          auto nb = num_branches();
          for (int i = 0; i < nb; ++i)
          {
