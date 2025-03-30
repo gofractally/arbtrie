@@ -70,8 +70,6 @@ namespace arbtrie
       using ptr = std::shared_ptr<write_transaction>;
       ~write_transaction()
       {
-         ARBTRIE_WARN("write_transaction::~write_transaction()", _root.address().to_int(),
-                      " this: ", this);
          if (_abort_callback)
             _abort_callback();
       }

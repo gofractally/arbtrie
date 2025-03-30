@@ -64,7 +64,7 @@ namespace arbtrie
          uint64_t           free_session_bitmap() const;
          uint32_t           session_segment_seq(uint32_t session_num) const;
          uint32_t           next_session_segment_seq(uint32_t session_num);
-         void               add_bytes_written(uint32_t session_num, uint64_t bytes)
+         void               add_bytes_written(uint32_t session_num, uint64_t bytes) noexcept
          {
             _total_bytes_written[session_num] += bytes;
          }
