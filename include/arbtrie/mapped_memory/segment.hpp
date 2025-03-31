@@ -126,7 +126,7 @@ namespace arbtrie
        */
       struct segment
       {
-         uint32_t get_alloc_pos() const { return _alloc_pos.load(std::memory_order_relaxed); }
+         uint32_t get_alloc_pos() const { return _alloc_pos; }
 
          /// @brief  the amount of space available for allocation
          uint32_t free_space() const { return end() - alloc_ptr(); }
@@ -152,7 +152,7 @@ namespace arbtrie
          void set_alloc_pos(uint32_t pos)
          {
             assert(pos <= end_pos());
-            _alloc_pos.store(pos, std::memory_order_relaxed);
+            _alloc_pos = pos;  //.store(pos, std::memory_order_relaxed);
          }
 
          /// @brief  helper to convert ptr to pos
@@ -180,16 +180,17 @@ namespace arbtrie
          T* alloc(uint32_t size, auto&&... args)
          {
             assert(can_alloc(size));
-            auto prev = _alloc_pos.fetch_add(size, std::memory_order_relaxed);
-            return new (data + prev) T(size, std::forward<decltype(args)>(args)...);
+            auto result = new (data + _alloc_pos) T(size, std::forward<decltype(args)>(args)...);
+            _alloc_pos += size;
+            return result;
          }
          void unalloc(uint32_t size)
          {
             assert(size == round_up_multiple<64>(size));
             assert(size <= get_alloc_pos());
 
-            auto prev = _alloc_pos.fetch_sub(size, std::memory_order_relaxed);
-            assert(prev >= size);
+            assert(_alloc_pos >= size);
+            _alloc_pos -= size;
          }
 
          /**
@@ -202,20 +203,24 @@ namespace arbtrie
             //const auto page = pos / system_config::os_page_size();
             assert(pos / system_config::os_page_size() == pos >> system_config::os_page_size_log2);
             const auto page = pos >> system_config::os_page_size_log2;
-            if (page < _first_writable_page)
+            if (page < _first_writable_page.load(std::memory_order_relaxed))
                return false;
             return pos < (segment_size - segment_footer_size);
          }
 
          inline uint32_t get_first_write_pos() const
          {
-            return _first_writable_page * system_config::os_page_size();
+            return _first_writable_page.load(std::memory_order_relaxed) *
+                   system_config::os_page_size();
          }
 
          /**
           * Returns true if the entire segment is read only
           */
-         bool is_read_only() const { return _first_writable_page == pages_per_segment; }
+         bool is_read_only() const
+         {
+            return _first_writable_page.load(std::memory_order_relaxed) == pages_per_segment;
+         }
 
          /// @return the total bytes synced/written by this session
          uint64_t sync(sync_type st, int top_root_index, id_address top_root)
@@ -252,10 +257,12 @@ namespace arbtrie
             ahead->_nsize    = new_alloc_pos - alloc_pos;
             ahead->_checksum = XXH3_64bits(data + ahead->_start_checksum_pos, cheksum_size);
 
-            auto old_first_writable_page_pos = uint32_t(_first_writable_page)
-                                               << system_config::os_page_size_log2;
+            auto old_first_writable_page_pos =
+                uint32_t(_first_writable_page.load(std::memory_order_relaxed))
+                << system_config::os_page_size_log2;
 
-            _first_writable_page  = next_page_pos >> system_config::os_page_size_log2;
+            _first_writable_page.store(next_page_pos >> system_config::os_page_size_log2,
+                                       std::memory_order_relaxed);
             uint64_t protect_size = next_page_pos - old_first_writable_page_pos;
             assert(protect_size > 0);
             set_alloc_pos(new_alloc_pos);
@@ -264,14 +271,22 @@ namespace arbtrie
                 " old_first_writable_page_pos: ", old_first_writable_page_pos,
                 " next_page_pos: ", next_page_pos);
                 */
+            if (st == sync_type::none)
+               return protect_size;
+
             if (mprotect(data + old_first_writable_page_pos, protect_size, PROT_READ))
             {
                ARBTRIE_ERROR("mprotect failed: ", strerror(errno));
                throw std::runtime_error("mprotect failed");
             }
-            if (msync(data + old_first_writable_page_pos, protect_size, MS_SYNC))
+            if (st >= sync_type::msync_async)
             {
-               ARBTRIE_ERROR("msync failed: ", strerror(errno));
+               int mode = st == sync_type::msync_async ? MS_ASYNC : MS_SYNC;
+               if (msync(data + old_first_writable_page_pos, protect_size, mode))
+               {
+                  ARBTRIE_ERROR("msync (", st, ") failed: ", strerror(errno));
+                  throw std::runtime_error("msync failed");
+               }
             }
             assert(is_finalized() ? is_read_only() : true);
             return protect_size;
@@ -285,14 +300,18 @@ namespace arbtrie
          // thread must check _first_writable_page before before using
          // _alloc_pos.
         private:
-         std::atomic<uint32_t> _alloc_pos = 0;  /// number of bytes allocated from data
+         uint32_t _alloc_pos = 0;  /// number of bytes allocated from data
         public:
          /// The os_page number of the first page that can be written to
          /// advanced by the sync() thread... sync thread waits until all
          /// modifying threads are done before enforcing the write protection
-         uint16_t _first_writable_page = 0;
-         uint16_t _session_id          = -1;  ///< the session id that allocated this segment
-         uint32_t _seg_sequence        = 0;  ///< the sequence number of this sessions segment alloc
+         std::atomic<uint16_t> _first_writable_page = 0;
+         static_assert(std::atomic<uint16_t>::is_always_lock_free,
+                       "std::atomic<uint16_t> must be lock free");
+         static_assert(sizeof(std::atomic<uint16_t>) == sizeof(uint16_t),
+                       "std::atomic<uint16_t> must not add overhead");
+         uint16_t _session_id      = -1;  ///< the session id that allocated this segment
+         uint32_t _seg_sequence    = 0;   ///< the sequence number of this sessions segment alloc
          uint64_t _open_time_usec  = 0;  ///< unix time in microseconds this segment started writing
          uint64_t _close_time_usec = 0;  ///< unix time in microseconds this segment was closed
 

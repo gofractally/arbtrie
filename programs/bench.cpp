@@ -67,19 +67,19 @@ int64_t get_test(benchmark_config   cfg,
                  std::string        name,
                  auto               make_key)
 {
-   std::cerr << "---------------------  " << name
+   std::cout << "---------------------  " << name
              << "  "
                 "--------------------------------------------------\n";
-   std::cerr << get_current_time_and_date() << "\n";
+   std::cout << get_current_time_and_date() << "\n";
    if constexpr (debug_memory)
-      std::cerr << "debug memory enabled\n";
+      std::cout << "debug memory enabled\n";
    if constexpr (update_checksum_on_modify)
-      std::cerr << "update checksum on modify\n";
+      std::cout << "update checksum on modify\n";
    else if constexpr (update_checksum_on_compact)
-      std::cerr << "update checksum on compact\n";
-   std::cerr << "rounds: " << cfg.rounds << "  items: " << format_comma(cfg.items)
+      std::cout << "update checksum on compact\n";
+   std::cout << "rounds: " << cfg.rounds << "  items: " << format_comma(cfg.items)
              << " batch: " << format_comma(cfg.batch_size) << "\n";
-   std::cerr << "-----------------------------------------------------------------------\n";
+   std::cout << "-----------------------------------------------------------------------\n";
 
    std::vector<char> key;
    auto              root  = ws->get_root();
@@ -101,7 +101,7 @@ int64_t get_test(benchmark_config   cfg,
    auto   end    = std::chrono::steady_clock::now();
    auto   delta  = end - start;
    double result = cfg.items / (std::chrono::duration<double, std::milli>(delta).count() / 1000);
-   std::cerr << format_comma(uint64_t(result)) << " get/sec\n";
+   std::cout << format_comma(uint64_t(result)) << " get/sec\n";
    return result;
 }
 
@@ -112,19 +112,19 @@ std::vector<int> insert_test(benchmark_config   cfg,
                              std::string        name,
                              auto               make_key)
 {
-   std::cerr << "---------------------  " << name
+   std::cout << "---------------------  " << name
              << "  "
                 "--------------------------------------------------\n";
-   std::cerr << get_current_time_and_date() << "\n";
+   std::cout << get_current_time_and_date() << "\n";
    if constexpr (debug_memory)
-      std::cerr << "debug memory enabled\n";
+      std::cout << "debug memory enabled\n";
    if constexpr (update_checksum_on_modify)
-      std::cerr << "update checksum on modify\n";
+      std::cout << "update checksum on modify\n";
    else if constexpr (update_checksum_on_compact)
-      std::cerr << "update checksum on compact\n";
-   std::cerr << "rounds: " << cfg.rounds << "  items: " << format_comma(cfg.items)
+      std::cout << "update checksum on compact\n";
+   std::cout << "rounds: " << cfg.rounds << "  items: " << format_comma(cfg.items)
              << " batch: " << format_comma(cfg.batch_size) << "\n";
-   std::cerr << "-----------------------------------------------------------------------\n";
+   std::cout << "-----------------------------------------------------------------------\n";
    std::vector<int> result;
    result.reserve(cfg.rounds);
 
@@ -163,7 +163,7 @@ std::vector<int> insert_test(benchmark_config   cfg,
       auto delta = end - start;
       result.push_back(inserted /
                        (std::chrono::duration<double, std::milli>(delta).count() / 1000));
-      std::cerr << std::setw(4) << std::left << r << " " << std::setw(10) << std::right
+      std::cout << std::setw(4) << std::left << r << " " << std::setw(10) << std::right
                 << format_comma(seq) << sepearator << "  " << std::setw(10) << std::right
                 << format_comma(result.back()) << sepearator << "  items/sec\n";
    }
@@ -176,8 +176,8 @@ void print_stat(auto& ws)
    auto stats = ws->get_node_stats(ws->get_root());
    auto end   = std::chrono::steady_clock::now();
 
-   std::cerr << stats << "\n";
-   std::cerr << std::fixed << std::setprecision(3)
+   std::cout << stats << "\n";
+   std::cout << std::fixed << std::setprecision(3)
              << std::chrono::duration<double, std::milli>(end - start).count() / 1000 << "  sec\n";
 }
 
@@ -207,7 +207,7 @@ int main(int argc, char** argv)
    opt("db-dir,d", po::value<std::string>(&db_dir)->default_value("./arbtriedb"), "database dir");
    opt("bench", po::value<std::string>(&bench)->default_value("all"), "benchmark to run");
    opt("reset", po::bool_switch(&reset), "reset database");
-   opt("stat", po::bool_switch(&stat), "print database stats");
+   opt("stat", po::bool_switch(&stat)->default_value(false), "print database stats");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -215,7 +215,7 @@ int main(int argc, char** argv)
 
    if (vm.count("help"))
    {
-      std::cerr << desc << "\n";
+      std::cout << desc << "\n";
       return 1;
    }
    if (vm.count("reset"))
@@ -224,20 +224,25 @@ int main(int argc, char** argv)
       std::filesystem::remove_all(db_dir);
       arbtrie::database::create(db_dir);
    }
-   if (vm.count("stat"))
+   if (stat)
    {
       database db(db_dir);
       auto     ws = db.start_write_session();
       print_stat(ws);
+      std::cout << "DEBUG: Finished stat." << std::endl;
       return 0;
    }
 
    database db(db_dir);
    auto     ws = db.start_write_session();
+   std::cout << "DEBUG: Database opened, session started." << std::endl;
 
    benchmark_config cfg = {rounds, items, batch, value_size};
 
+   std::cout << "DEBUG: Calling print_stat..." << std::endl;
    print_stat(ws);
+   std::cout << "DEBUG: Finished print_stat." << std::endl;
+   std::cout << "DEBUG: Calling insert_test (upsert)..." << std::endl;
    insert_test<upsert_mode::upsert>(cfg, db, ws, "big endian seq upsert",
                                     [](uint64_t seq, auto& v) { to_key(bswap(seq), v); });
    print_stat(ws);

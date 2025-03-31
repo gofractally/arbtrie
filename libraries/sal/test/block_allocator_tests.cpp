@@ -171,7 +171,7 @@ TEST_CASE("Block allocator basic operations", "[block_allocator]")
               static_cast<ptrdiff_t>(BLOCK_SIZE));
 
       // Sync blocks to disk
-      allocator.sync(sal::sync_type::async);
+      allocator.fsync();
    }
 
    SECTION("Reserve blocks with non-power-of-2 count")

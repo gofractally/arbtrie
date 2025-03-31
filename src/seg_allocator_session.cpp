@@ -235,9 +235,9 @@ namespace arbtrie
             _sega._mapped_state->_segment_data.prepare_for_compaction(
                 seg_num, seg->_vage_accumulator.average_age());
          seg_num = _dirty_segments.pop();
-
-         _sega.sync(st);
       }
+      if (st == sync_type::fsync)
+         _sega.fsync();
    }
 
    uint64_t seg_alloc_session::count_ids_with_refs()

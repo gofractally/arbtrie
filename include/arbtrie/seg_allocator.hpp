@@ -68,7 +68,7 @@ namespace arbtrie
       bool config_update_checksum_on_modify() const;
       ///@}
 
-      void sync(sync_type st = sync_type::sync) { _block_alloc.sync(sal::sync_type(st)); }
+      void fsync(bool full = false) { _block_alloc.fsync(full); }
 
       seg_alloc_session start_session() { return seg_alloc_session(*this, alloc_session_num()); }
 
@@ -246,7 +246,7 @@ namespace arbtrie
          _mapped_state->_segment_data.add_freed_space(seg, obj);
       }
 
-      inline void record_session_write(uint32_t session_num, uint64_t bytes)
+      inline void record_session_write(uint32_t session_num, uint64_t bytes) noexcept
       {
          _mapped_state->_session_data.add_bytes_written(session_num, bytes);
       }

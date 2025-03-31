@@ -272,7 +272,7 @@ namespace arbtrie
    database::~database()
    {
       _dbm->clean_shutdown = true;
-      _dbfile.sync(sync_type::sync);
+      _dbfile.sync(sync_type::full);
    }
 
    void database::create(std::filesystem::path dir, runtime_config cfg)

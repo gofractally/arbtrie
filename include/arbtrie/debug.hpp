@@ -177,6 +177,7 @@ namespace arbtrie
 
    namespace detail
    {
+      // RESTORED MUTEX
       static inline std::mutex& debug_mutex()
       {
          static std::mutex m;
@@ -263,15 +264,13 @@ namespace arbtrie
       std::string header = std::format("{:<{}}  {:<9}  {:<20}  {}", location, max_width, thread_str,
                                        func_str, indent);
 
-      // Append the message using ostringstream for compatibility with existing code
+      // Use ostringstream again
       std::ostringstream output;
       output << header;
-
-      // Append the actual message
       ((output << std::forward<Ts>(args)), ...);
       output << "\n";
 
-      // Only lock for the actual write to std::cerr
+      // Use lock_guard again
       std::lock_guard<std::mutex> lock(detail::debug_mutex());
       std::cerr << output.str();
    }

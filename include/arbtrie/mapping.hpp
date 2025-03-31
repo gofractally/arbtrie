@@ -1,4 +1,5 @@
 #pragma once
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <arbtrie/config.hpp>
 #include <atomic>
@@ -51,13 +52,34 @@ namespace arbtrie
       std::size_t           size() const { return _size; }
       bool                  pinned() const { return _pinned; }
       access_mode           mode() const { return _mode; }
-      void                  sync(sync_type st = sync_type::sync)
+      void                  sync(sync_type st = sync_type::msync_async)
       {
-         if (not msync_flag(st))
-            return;
-         if (msync(data(), size(), msync_flag(st)))
+         switch (st)
          {
-            throw std::runtime_error("mapping.hpp: msync returned -1");
+            case sync_type::msync_async:
+               if (msync(data(), size(), MS_ASYNC))
+                  throw std::runtime_error("mapping.hpp: msync ASYNC returned !0");
+               return;
+            case sync_type::msync_sync:
+               if (msync(data(), size(), MS_SYNC))
+                  throw std::runtime_error("mapping.hpp: msync SYNC returned !0");
+               return;
+            case sync_type::full:
+#ifdef __APPLE__
+               if (msync(data(), size(), MS_SYNC))
+                  throw std::runtime_error("mapping.hpp: msync SYNC returned !0");
+               if (fcntl(_fd, F_FULLFSYNC))
+                  throw std::runtime_error("mapping.hpp: fcntl F_FULLFSYNC returned !0");
+               return;
+#endif  // else fall through to msync_sync
+            case sync_type::fsync:
+               if (msync(data(), size(), MS_SYNC))
+                  throw std::runtime_error("mapping.hpp: msync SYNC returned -1");
+               if (fsync(_fd))
+                  throw std::runtime_error("mapping.hpp: fsync returned -1");
+               return;
+            default:
+               return;
          }
       }
 

@@ -144,6 +144,7 @@ namespace sal
 
    namespace detail
    {
+      // RESTORED MUTEX
       static inline std::mutex& debug_mutex()
       {
          static std::mutex m;
@@ -185,7 +186,7 @@ namespace sal
       inline constexpr const char* COLOR_ERROR = "\033[1;31m";  // Bold Red
       inline constexpr const char* COLOR_FATAL = "\033[1;35m";  // Bold Magenta
       inline constexpr const char* COLOR_RESET = "\033[0m";     // Reset to default
-   }                                                            // namespace detail
+   }  // namespace detail
 
    /**
     * Format and output a log message with std::format-style formatting.
@@ -336,7 +337,7 @@ namespace sal
          oss << fmt;
       }
 
-      // Finalize the output
+      // Finalize the output using lock_guard again
       std::lock_guard<std::mutex> lock(detail::debug_mutex());
       std::cerr << header << color_prefix << oss.str() << color_suffix << std::endl;
    }

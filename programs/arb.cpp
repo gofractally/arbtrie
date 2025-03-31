@@ -374,6 +374,49 @@ void test_refactor();
 int  main(int argc, char** argv)
 {
    arbtrie::thread_name("main");
+
+   std::optional<node_handle> last_root;
+   std::optional<node_handle> last_root2;
+   int                        rounds             = 3;
+   int                        multithread_rounds = 20;
+   namespace po                                  = boost::program_options;
+   // clang-format off
+   po::options_description desc("Test options");
+   desc.add_options()
+      ("help,h", "Print help message")
+      ("dense-rand", po::bool_switch()->default_value(true), "Run dense random insert test")
+      ("little-endian-seq", po::bool_switch()->default_value(true), "Run little endian sequential insert test")
+      ("big-endian-seq", po::bool_switch()->default_value(true), "Run big endian sequential insert test")
+      ("big-endian-rev", po::bool_switch()->default_value(true), "Run big endian reverse sequential insert test")
+      ("rand-string", po::bool_switch()->default_value(true), "Run random string insert test")
+      ("sync", po::value<sync_type>()->default_value(sync_type::mprotect), "none, mprotect, msync_async, msync_sync, fsync, full")
+      ("enable-read-cache", po::bool_switch()->default_value(true), "Read threads will promote data to pinned memory")
+      ("count", po::value<int>()->default_value(1000000), "Number of items to insert")
+      ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch")
+      ("compacted-pinned-threshold-mb", po::value<int>()->default_value(16), 
+                "How much unused space is tolerated before compacting pinned segments, "
+                "increases SSD wear if in sync mode and this is low, but boosts performance "
+                " if you can keep more pinned memory doing useful stuff, max 32MB")
+      ("compacted-unpinned-threshold-mb", po::value<int>()->default_value(16), 
+                "How much unused space is tolerated before compacting unpinned segments, "
+                "increases SSD wear, but reduces space used if low, if high it will save your "
+                " SSD from wear but consume more storage, max 32MB")
+      ("rounds", po::value<int>()->default_value(3), "Number of rounds to run")
+      ("multithread-rounds", po::value<int>()->default_value(20), "Number of multi-thread rounds to run")
+      ("max-pinned-cache-size-mb", po::value<int>()->default_value(1024), "Amount of RAM to pin in memory, multiple of 32 MB");
+   // clang-format on
+
+   po::variables_map vm;
+   po::store(po::parse_command_line(argc, argv, desc), vm);
+   po::notify(vm);
+
+   if (vm.count("help"))
+   {
+      std::cout << desc << "\n";
+      return 0;
+   }
+
+
    //test_binary_node();
    //   test_refactor();
    //   return 0;
@@ -414,47 +457,6 @@ int  main(int argc, char** argv)
 
       do
       {
-         std::optional<node_handle> last_root;
-         std::optional<node_handle> last_root2;
-         int                        rounds             = 3;
-         int                        multithread_rounds = 20;
-         namespace po                                  = boost::program_options;
-         // clang-format off
-         po::options_description desc("Test options");
-         desc.add_options()
-            ("help,h", "Print help message")
-            ("dense-rand", po::bool_switch()->default_value(true), "Run dense random insert test")
-            ("little-endian-seq", po::bool_switch()->default_value(true), "Run little endian sequential insert test")
-            ("big-endian-seq", po::bool_switch()->default_value(true), "Run big endian sequential insert test")
-            ("big-endian-rev", po::bool_switch()->default_value(true), "Run big endian reverse sequential insert test")
-            ("rand-string", po::bool_switch()->default_value(true), "Run random string insert test")
-            ("sync", po::value<bool>()->default_value(true), "Enable synchronous mode")
-            ("enable-read-cache", po::bool_switch()->default_value(true), "Read threads will promote data to pinned memory")
-            ("count", po::value<int>()->default_value(1000000), "Number of items to insert")
-            ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch")
-            ("compacted-pinned-threshold-mb", po::value<int>()->default_value(16), 
-                      "How much unused space is tolerated before compacting pinned segments, "
-                      "increases SSD wear if in sync mode and this is low, but boosts performance "
-                      " if you can keep more pinned memory doing useful stuff, max 32MB")
-            ("compacted-unpinned-threshold-mb", po::value<int>()->default_value(16), 
-                      "How much unused space is tolerated before compacting unpinned segments, "
-                      "increases SSD wear, but reduces space used if low, if high it will save your "
-                      " SSD from wear but consume more storage, max 32MB")
-            ("rounds", po::value<int>()->default_value(3), "Number of rounds to run")
-            ("multithread-rounds", po::value<int>()->default_value(20), "Number of multi-thread rounds to run")
-            ("max-pinned-cache-size-mb", po::value<int>()->default_value(1024), "Amount of RAM to pin in memory, multiple of 32 MB");
-         // clang-format on
-
-         po::variables_map vm;
-         po::store(po::parse_command_line(argc, argv, desc), vm);
-         po::notify(vm);
-
-         if (vm.count("help"))
-         {
-            std::cout << desc << "\n";
-            return 0;
-         }
-
          const int count                          = vm["count"].as<int>();
          batch_size                               = vm["batch-size"].as<int>();
          rounds                                   = vm["rounds"].as<int>();
@@ -462,8 +464,8 @@ int  main(int argc, char** argv)
          cfg.max_pinned_cache_size_mb             = vm["max-pinned-cache-size-mb"].as<int>();
          cfg.compact_pinned_unused_threshold_mb   = vm["compacted-pinned-threshold-mb"].as<int>();
          cfg.compact_unpinned_unused_threshold_mb = vm["compacted-unpinned-threshold-mb"].as<int>();
-         cfg.sync_mode         = vm["sync"].as<bool>() ? sync_type::sync : sync_type::none;
-         cfg.enable_read_cache = vm["enable-read-cache"].as<bool>();
+         cfg.sync_mode                            = vm["sync"].as<sync_type>();
+         cfg.enable_read_cache                    = vm["enable-read-cache"].as<bool>();
 
          ARBTRIE_WARN("count: ", count);
          ARBTRIE_WARN("batch size: ", batch_size);

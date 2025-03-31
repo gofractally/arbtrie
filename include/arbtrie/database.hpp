@@ -482,6 +482,48 @@ namespace arbtrie
                                    const alloc_hint&  parent_hint);
    };
 
+   /**
+    * @class database
+    * @brief A class for managing an Arbtrie database
+    * 
+    * This class provides a high-level interface for creating, opening, and managing
+    * an Arbtrie database. It supports read-only and read-write access modes,
+    * and provides methods for creating new databases, opening existing ones,
+    * 
+    * @example
+    * ```
+    * // Create a new database
+    * database::create("my_database");
+    * 
+    * // Open an existing database
+    * auto db = database::open("my_database");
+    * 
+    * // Create a read-only session
+    * auto read_session = db->start_read_session();
+    * 
+    * // Create a read-write session
+    * ```
+    * 
+    * ACID properties:
+    *   - every time transaction::commit is called, 
+    *     write_session::start_write_transaction::commit lambda
+    *     will call seg_alloc_session::sync() which will call
+    *     segment::sync() for every segment that has been modified since
+    *     the last sync. The segment will mprotect() and msync() the regions
+    *     that have been modified. 
+    *   - after all segments have msynced, seg_alloc_session will fsync() 
+    *     the segments file to tell the OS to push data to disk. 
+    *   - then start_write_transaction::commit lambda will call
+    *      write_session::set_root() and atomically update the root node
+    *      pointer in database header file. 
+    *   - lastly the database header file is msynced, fsynced or F_FULL_SYNC
+    *     according to the sync_mode in runtime_config.
+    *   - The F_FULL_SYNC flag forces everything from all processes to be
+    *     pushed to the disk and for the disk to flush everything from its
+    *     cache to the physical media. F_FULL_SYNC takes care of all files so
+    *     that fsync() is not needed on each individual file.
+    * 
+    */
    class database
    {
      public:
@@ -826,12 +868,9 @@ namespace arbtrie
             std::unique_lock lock(_db->_root_change_mutex[index]);
             old_r = _db->_dbm->top_root[index].exchange(new_r, std::memory_order_relaxed);
          }
-         if (_db->_dbm->config.sync_mode != sync_type::none)
+         if (old_r != new_r)
          {
-            if (old_r != new_r)
-            {
-               _db->_dbfile.sync(_db->_dbm->config.sync_mode);
-            }
+            _db->_dbfile.sync(_db->_dbm->config.sync_mode);
          }
       }
       _db->modify_lock(index).unlock();
@@ -842,15 +881,19 @@ namespace arbtrie
     * flushes state to disk according to sync_type,
     * only one thread may call this method at a time and it will
     * block until all msync() calls have returned. 
-    */
    inline void write_session::sync()
    {
-      if (_db->_dbm->config.sync_mode != sync_type::none)
+      switch (_db->_dbm->config.sync_mode)
       {
-         _db->_sega.sync(_db->_dbm->config.sync_mode);
-         _db->_dbfile.sync(_db->_dbm->config.sync_mode);
+         case sync_type::full:
+         case sync_type::fsync:
+            _db->_sega.fsync();
+            _db->_dbfile.sync(_db->_dbm->config.sync_mode);
+         default:
+            return;
       }
    }
+    */
 
    inline write_session::~write_session() {}
 }  // namespace arbtrie

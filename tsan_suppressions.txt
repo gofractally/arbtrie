@@ -9,3 +9,10 @@ race:std::__1::basic_ostream<char, std::__1::char_traits<char> >
 race:std::__1::ostream
 race:std::__1::ios_base
 race:std::__1::basic_ios<char, std::__1::char_traits<char> > 
+
+
+# this is a debug facility that accesses lots of state
+# that is not utitlized during operation and only gathers it
+# for printing purposes, making this thread-safe in all cases
+# would slowdown the non-debug paths.
+race:arbtrie::seg_allocator::dump 

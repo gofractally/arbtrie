@@ -93,6 +93,41 @@ if(SAL_BUILD_TESTS)
     )
 endif()
 
+# Check if the parent project enabled sanitizers
+if(ENABLE_SANITIZER)
+    message(STATUS "SAL: Enabling Thread Sanitizer")
+    target_compile_options(sal PUBLIC -fsanitize=thread -g)
+    target_link_options(sal PUBLIC -fsanitize=thread -g)
+
+    # Also apply to tests if they are built
+    if(TARGET sal-tests)
+        target_compile_options(sal-tests PUBLIC -fsanitize=thread -g)
+        target_link_options(sal-tests PUBLIC -fsanitize=thread -g)
+    endif()
+    if(TARGET reserve-limit-test)
+        target_compile_options(reserve-limit-test PUBLIC -fsanitize=thread -g)
+        target_link_options(reserve-limit-test PUBLIC -fsanitize=thread -g)
+    endif()
+endif()
+
+# Check if the parent project enabled coverage
+if(ENABLE_COVERAGE)
+    message(STATUS "SAL: Enabling Coverage Reporting")
+    # Apply coverage flags only for Debug builds, consistent with root CMakeLists
+    target_compile_options(sal PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
+    target_link_options(sal PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+
+    # Also apply to tests if they are built
+    if(TARGET sal-tests)
+        target_compile_options(sal-tests PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
+        target_link_options(sal-tests PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+    endif()
+    if(TARGET reserve-limit-test)
+        target_compile_options(reserve-limit-test PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
+        target_link_options(reserve-limit-test PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+    endif()
+endif()
+
 # Installation
 include(GNUInstallDirs)
 

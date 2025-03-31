@@ -22,8 +22,8 @@ namespace sal
    enum class sync_type
    {
       none  = 0,  // on program close or as OS chooses
-      async = 1,  // nonblocking, but write soon
-      sync  = 2   // block until changes are committed to disk
+      fsync = 1,  // nonblocking, but write soon
+      full  = 2   // block until changes are committed to disk
    };
 
    // none is implemented by specifying MS_ASYNC and MS_SYNC which will
@@ -68,6 +68,7 @@ namespace sal
       std::size_t           size() const { return _size; }
       bool                  pinned() const { return _pinned; }
       access_mode           mode() const { return _mode; }
+      /*
       void                  sync(sync_type st = sync_type::sync)
       {
          if (not msync_flag(st))
@@ -77,6 +78,7 @@ namespace sal
             throw std::runtime_error("mapping.hpp: msync returned -1");
          }
       }
+      */
 
       template <typename T>
       T* as()
