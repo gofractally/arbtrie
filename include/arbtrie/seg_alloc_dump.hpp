@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>           // Add include for std::sort
 #include <arbtrie/config.hpp>  // Include for segment_size constant
 #include <arbtrie/util.hpp>
 #include <cassert>  // Add include for assert
@@ -26,6 +27,8 @@ namespace arbtrie
          bool     is_alloc      = false;
          bool     is_pinned     = false;  // From segment metadata
          bool     bitmap_pinned = false;  // From mlock_segments bitmap
+         bool     is_read_only  = false;
+         bool     is_free       = false;
          int64_t  age           = 0;
          uint32_t read_nodes    = 0;  // Count of valid objects in segment
          uint64_t read_bytes    = 0;  // Total size of valid objects
@@ -35,9 +38,10 @@ namespace arbtrie
 
       struct session_info
       {
-         uint32_t session_num = 0;
-         uint32_t read_ptr    = 0;
-         bool     is_locked   = true;
+         uint32_t session_num         = 0;
+         uint32_t read_ptr            = 0;
+         bool     is_locked           = true;
+         uint64_t total_bytes_written = 0;  // Total bytes written by this session
       };
 
       struct pending_segment
@@ -127,10 +131,40 @@ namespace arbtrie
          return result.str();
       }
 
+      // Helper function to format bytes with appropriate units (GB, MB, KB)
+      static std::string format_bytes(uint64_t bytes)
+      {
+         std::ostringstream result;
+         result << std::fixed << std::setprecision(2);
+
+         const double GB = 1024.0 * 1024.0 * 1024.0;
+         const double MB = 1024.0 * 1024.0;
+         const double KB = 1024.0;
+
+         if (bytes >= GB)
+         {
+            result << (bytes / GB) << " GB";
+         }
+         else if (bytes >= MB)
+         {
+            result << (bytes / MB) << " MB";
+         }
+         else if (bytes >= KB)
+         {
+            result << (bytes / KB) << " KB";
+         }
+         else
+         {
+            result << bytes << " bytes";
+         }
+
+         return result.str();
+      }
+
       // Helper method to create a colored progress bar with Unicode block characters
-      static std::string create_colored_progress_bar(uint32_t           freed_percent,
-                                                     uint64_t           alloc_pos,
-                                                     uint64_t           freed_bytes,
+      static std::string create_colored_progress_bar(uint32_t           used_percent,
+                                                     uint32_t           free_percent,
+                                                     uint32_t           unalloc_percent,
                                                      const std::string& color,
                                                      int                width = 15)
       {
@@ -139,74 +173,33 @@ namespace arbtrie
          static const std::string MED_BLOCK   = "▒";  // Medium shade for freed space
          static const std::string LIGHT_BLOCK = "░";  // Light shade for unallocated space
 
-         // Handle special cases for alloc_pos
-         uint64_t actual_used;
-         uint32_t used_percent;
-         bool     is_special_case = false;
+         // Calculate the number of characters for each section based on percentages
+         int used_chars    = (used_percent * width + 50) / 100;     // Round to nearest
+         int freed_chars   = (free_percent * width + 50) / 100;     // Round to nearest
+         int unalloc_chars = (unalloc_percent * width + 50) / 100;  // Round to nearest
 
-         if (alloc_pos == 0)
+         // Adjust for rounding errors to ensure total width is correct
+         int total_chars = used_chars + freed_chars + unalloc_chars;
+         if (total_chars > width)
          {
-            // Empty segment
-            actual_used     = 0;
-            used_percent    = 0;
-            is_special_case = true;
+            // Remove excess characters in order of priority (unalloc, freed, used)
+            if (unalloc_chars > 0)
+               unalloc_chars -= std::min(total_chars - width, unalloc_chars);
+            if (total_chars > width && freed_chars > 0)
+               freed_chars -= std::min(total_chars - width, freed_chars);
+            if (total_chars > width && used_chars > 0)
+               used_chars -= std::min(total_chars - width, used_chars);
          }
-         else if (alloc_pos == 4294967295 || alloc_pos == (uint64_t)-1)
+         else if (total_chars < width)
          {
-            // Interpret this special value as segment_size with freed bytes subtracted
-            actual_used     = segment_size - freed_bytes;
-            used_percent    = static_cast<uint32_t>((actual_used * 100) / segment_size);
-            is_special_case = true;
+            // Add missing characters in order of priority (used, freed, unalloc)
+            if (used_percent > 0)
+               used_chars += std::min(width - total_chars, 1);
+            else if (free_percent > 0)
+               freed_chars += std::min(width - total_chars, 1);
+            else
+               unalloc_chars += width - total_chars;
          }
-         else if (alloc_pos == 64)
-         {
-            // PEND status (64 is the size of the segment header)
-            actual_used     = 0;
-            used_percent    = 0;
-            is_special_case = true;
-         }
-         else
-         {
-            // Normal case - calculate actual used space
-            // Avoid underflow if freed_bytes > alloc_pos
-            actual_used  = (alloc_pos > freed_bytes) ? (alloc_pos - freed_bytes) : 0;
-            used_percent = static_cast<uint32_t>((actual_used * 100) / segment_size);
-         }
-
-         // Calculate the alloc position percentage (how far the allocator has advanced)
-         uint32_t alloc_percent = 0;
-         if (!is_special_case)
-         {
-            alloc_percent = static_cast<uint32_t>((alloc_pos * 100) / segment_size);
-         }
-         else if (alloc_pos == 4294967295 || alloc_pos == (uint64_t)-1)
-         {
-            alloc_percent = 100;  // Full allocation
-         }
-
-         // Determine if this is a pinned segment (blue color indicates pinned)
-         bool is_pinned = (color == COLOR_BLUE);
-
-         // Define colors based on pinned status - staying within the green/yellow scale
-         const char* used_color  = is_pinned ? COLOR_DARK_GREEN : COLOR_GREEN;
-         const char* freed_color = is_pinned ? COLOR_DARK_YELLOW : COLOR_YELLOW;
-
-         // Precisely calculate how many characters of each type to show
-         int used_chars  = (used_percent * width + 50) / 100;   // Round to nearest
-         int alloc_chars = (alloc_percent * width + 50) / 100;  // Round to nearest
-
-         // Ensure values are in valid range
-         used_chars  = std::min(std::max(used_chars, 0), width);
-         alloc_chars = std::min(std::max(alloc_chars, 0), width);
-
-         // Ensure used doesn't exceed allocated
-         used_chars = std::min(used_chars, alloc_chars);
-
-         // Calculate freed space (space that was allocated but is now freed)
-         int freed_chars = alloc_chars - used_chars;
-
-         // Calculate unallocated space
-         int unalloc_chars = width - alloc_chars;
 
          // Assemble the progress bar with exact character counts
          std::string result;
@@ -219,7 +212,8 @@ namespace arbtrie
             {
                used_part += FULL_BLOCK;
             }
-            result += used_color + used_part + COLOR_RESET;
+            result +=
+                (color == COLOR_BLUE ? COLOR_DARK_GREEN : COLOR_GREEN) + used_part + COLOR_RESET;
          }
 
          // 2. Add allocated but freed space (yellow blocks)
@@ -230,7 +224,8 @@ namespace arbtrie
             {
                freed_part += MED_BLOCK;
             }
-            result += freed_color + freed_part + COLOR_RESET;
+            result +=
+                (color == COLOR_BLUE ? COLOR_DARK_YELLOW : COLOR_YELLOW) + freed_part + COLOR_RESET;
          }
 
          // 3. Add unallocated space (dark red blocks)
@@ -243,9 +238,6 @@ namespace arbtrie
             }
             result += COLOR_DARK_RED + unalloc_part + COLOR_RESET;
          }
-
-         // Sanity check: ensure the visible length is exactly the requested width
-         assert(used_chars + freed_chars + unalloc_chars == width);
 
          return result;
       }
@@ -446,7 +438,7 @@ namespace arbtrie
 
             // Calculate the values based on alloc_pos
             uint64_t actual_used = 0;
-            if (seg.alloc_pos == 0)
+            if (seg.alloc_pos == 0 || seg.is_free)
             {
                // Empty segment
                used_percent    = 0;
@@ -460,13 +452,6 @@ namespace arbtrie
                used_percent    = static_cast<int>((actual_used * 100) / segment_size);
                free_percent    = static_cast<int>((seg.freed_bytes * 100) / segment_size);
                unalloc_percent = 0;
-            }
-            else if (seg.alloc_pos == 64)
-            {
-               // PEND status (64 is the size of the segment header)
-               used_percent    = 0;
-               free_percent    = 0;
-               unalloc_percent = 100;
             }
             else
             {
@@ -572,9 +557,9 @@ namespace arbtrie
             if (seg.age != 4294967295 && seg.age > max_seq)
                max_seq = seg.age;
 
-            // Create progress bar with proper coloring (using the original function unchanged)
+            // Create progress bar with proper coloring using the same percentages as the table
             std::string progress_bar = create_colored_progress_bar(
-                seg.freed_percent, seg.alloc_pos, seg.freed_bytes, progress_bar_color);
+                used_percent, free_percent, unalloc_percent, progress_bar_color);
 
             // Calculate time difference in seconds with 1 decimal place
             double time_diff_seconds = 0.0;
@@ -880,6 +865,56 @@ namespace arbtrie
          }
          os << "--------------------------\n";
          os << "free release +/- = " << free_release_count << "\n";
+
+         // Print session information in a table format if there are any sessions with data
+         if (!sessions.empty())
+         {
+            os << "\n--- session bytes written ---\n";
+
+            // Define column widths for the table
+            const int sess_width      = 8;   // Session number
+            const int bytes_width     = 15;  // Total bytes written
+            const int formatted_width = 12;  // Formatted bytes
+
+            // Print table header
+            os << std::left << std::setw(sess_width) << "Session" << std::right
+               << std::setw(bytes_width) << "Bytes Written" << std::setw(formatted_width) << "Size"
+               << "\n";
+
+            // Add horizontal rule
+            os << std::string(sess_width + bytes_width + formatted_width, '-') << "\n";
+
+            // Sort sessions by total bytes written (descending)
+            std::vector<session_info> sorted_sessions = sessions;
+            std::sort(sorted_sessions.begin(), sorted_sessions.end(),
+                      [](const session_info& a, const session_info& b)
+                      { return a.total_bytes_written > b.total_bytes_written; });
+
+            // Calculate total bytes written across all sessions
+            uint64_t all_sessions_total = 0;
+            for (const auto& session : sorted_sessions)
+            {
+               all_sessions_total += session.total_bytes_written;
+            }
+
+            // Print each session
+            for (const auto& session : sorted_sessions)
+            {
+               std::string formatted_bytes = format_bytes(session.total_bytes_written);
+
+               os << std::left << std::setw(sess_width) << session.session_num << std::right
+                  << std::setw(bytes_width) << session.total_bytes_written
+                  << std::setw(formatted_width) << formatted_bytes << "\n";
+            }
+
+            // Add horizontal rule
+            os << std::string(sess_width + bytes_width + formatted_width, '-') << "\n";
+
+            // Print total
+            os << std::left << std::setw(sess_width) << "TOTAL" << std::right
+               << std::setw(bytes_width) << all_sessions_total << std::setw(formatted_width)
+               << format_bytes(all_sessions_total) << "\n";
+         }
       }
 
       // ostream operator now just calls print()

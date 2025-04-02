@@ -105,7 +105,7 @@ void validate_refcount(session_rlock& state, id_address i, const auto* in, int c
    in->visit_branches_with_br(
        [&](int br, id_address adr)
        {
-          if (in->branch_region().to_int() != adr.region().to_int())
+          if (in->branch_region() != adr.region)
              throw std::runtime_error("region refcount violated");
           validate_refcount(state, adr, c);
        });
@@ -153,78 +153,78 @@ TEST_CASE("update-size")
    environ env;
    {
       auto ws = env.db->start_write_session();
-      auto tx = ws->start_transaction();
+      auto tx = ws->start_write_transaction();
 
       std::string big_value;
 
-      auto old_key_size = tx.upsert(to_key_view("hello"), to_value_view("world"));
+      auto old_key_size = tx->upsert(to_key_view("hello"), to_value_view("world"));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("hello"), to_value_view("new world"));
+      old_key_size = tx->upsert(to_key_view("hello"), to_value_view("new world"));
       REQUIRE(old_key_size == 5);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("the old world"));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view("the old world"));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("world"));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view("world"));
       REQUIRE(old_key_size == 13);
-      old_key_size = tx.remove(to_key_view("goodbye"));
+      old_key_size = tx->remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 5);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.remove(to_key_view("goodbye"));
+      old_key_size = tx->remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 0);
       big_value.resize(10);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       big_value.resize(0);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 10);
       big_value.resize(1000);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 0);
       big_value.resize(500);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 1000);
       big_value.resize(50);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
       big_value.resize(300);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
-      old_key_size = tx.remove(to_key_view("goodbye"));
+      old_key_size = tx->remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 300);
 
       big_value.resize(60);
-      old_key_size = tx.upsert(to_key_view("afill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("afill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("bfill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("bfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("cfill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("cfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("dfill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("dfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("efill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("efill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("ffill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("ffill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       std::string key = "fill";
       for (int i = 0; i < 22; ++i)
       {
-         old_key_size = tx.upsert(to_key_view(key), to_value_view(big_value));
+         old_key_size = tx->upsert(to_key_view(key), to_value_view(big_value));
          key += 'a';
       }
 
       big_value.resize(500);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       big_value.resize(50);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
       big_value.resize(300);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
       big_value.resize(50);
       /// this will should change a key that is currely a 4 byte ptr to an inline 50 bytes
       /// but the existing binary node is unable to accomodate the extra space
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 300);
 
       env.db->print_stats(std::cerr);
@@ -236,99 +236,99 @@ TEST_CASE("update-size-shared")
    environ env;
    {
       auto ws = env.db->start_write_session();
-      auto tx = ws->start_transaction();
+      auto tx = ws->start_write_transaction();
 
       std::optional<node_handle> tmp;
       std::string                big_value;
 
-      auto old_key_size = tx.upsert(to_key_view("hello"), to_value_view("world"));
+      auto old_key_size = tx->upsert(to_key_view("hello"), to_value_view("world"));
       REQUIRE(old_key_size == -1);
-      tmp          = tx.get_root();
-      old_key_size = tx.upsert(to_key_view("hello"), to_value_view("new world"));
+      tmp          = tx->get_root();
+      old_key_size = tx->upsert(to_key_view("hello"), to_value_view("new world"));
       REQUIRE(old_key_size == 5);
-      tmp          = tx.get_root();
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("the old world"));
+      tmp          = tx->get_root();
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view("the old world"));
       REQUIRE(old_key_size == -1);
-      tmp          = tx.get_root();
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view("world"));
+      tmp          = tx->get_root();
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view("world"));
       REQUIRE(old_key_size == 13);
-      tmp          = tx.get_root();
-      old_key_size = tx.remove(to_key_view("goodbye"));
+      tmp          = tx->get_root();
+      old_key_size = tx->remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 5);
-      tmp          = tx.get_root();
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      tmp          = tx->get_root();
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      tmp          = tx.get_root();
-      old_key_size = tx.remove(to_key_view("goodbye"));
+      tmp          = tx->get_root();
+      old_key_size = tx->remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 0);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(10);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(0);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 10);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(1000);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 0);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(500);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 1000);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(50);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(300);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
-      tmp          = tx.get_root();
-      old_key_size = tx.remove(to_key_view("goodbye"));
+      tmp          = tx->get_root();
+      old_key_size = tx->remove(to_key_view("goodbye"));
       REQUIRE(old_key_size == 300);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
 
       big_value.resize(60);
-      old_key_size = tx.upsert(to_key_view("afill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("afill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("bfill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("bfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("cfill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("cfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("dfill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("dfill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("efill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("efill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      old_key_size = tx.upsert(to_key_view("ffill"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("ffill"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
       std::string key = "fill";
       for (int i = 0; i < 22; ++i)
       {
-         old_key_size = tx.upsert(to_key_view(key), to_value_view(big_value));
+         old_key_size = tx->upsert(to_key_view(key), to_value_view(big_value));
          key += 'a';
-         tmp = tx.get_root();
+         tmp = tx->get_root();
       }
 
       big_value.resize(500);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == -1);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(50);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 500);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(300);
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 50);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
       big_value.resize(50);
       /// this will should change a key that is currely a 4 byte ptr to an inline 50 bytes
       /// but the existing binary node is unable to accomodate the extra space
-      old_key_size = tx.upsert(to_key_view("goodbye"), to_value_view(big_value));
+      old_key_size = tx->upsert(to_key_view("goodbye"), to_value_view(big_value));
       REQUIRE(old_key_size == 300);
-      tmp = tx.get_root();
+      tmp = tx->get_root();
 
       env.db->print_stats(std::cerr);
       ARBTRIE_WARN("resetting temp");
@@ -361,7 +361,7 @@ TEST_CASE("insert-words")
    {
       environ env;
       auto    ws    = env.db->start_write_session();
-      auto    tx    = ws->start_transaction();
+      auto    tx    = ws->start_write_transaction();
       auto    start = std::chrono::steady_clock::now();
 
       int  count    = 0;
@@ -371,9 +371,9 @@ TEST_CASE("insert-words")
          if (i == 2560)
             std::cerr << "break\n";
 
-         REQUIRE(tx.count_keys() == i);
-         tx.upsert(to_key_view(keys[i]), to_value_view(values[i]));
-         auto buf = tx.get<std::string>(to_key_view(keys[i]));
+         REQUIRE(tx->count_keys() == i);
+         tx->upsert(to_key_view(keys[i]), to_value_view(values[i]));
+         auto buf = tx->get<std::string>(to_key_view(keys[i]));
          if (not buf)
          {
             ARBTRIE_WARN("failed to get key: ", keys[i], " i: ", i);
@@ -384,7 +384,7 @@ TEST_CASE("insert-words")
       }
       for (int i = 0; i < keys.size(); ++i)
       {
-         auto buf = tx.get<std::string>(to_key_view(keys[i]));
+         auto buf = tx->get<std::string>(to_key_view(keys[i]));
          REQUIRE(buf);
          REQUIRE(*buf == values[i]);
       }
@@ -407,13 +407,13 @@ TEST_CASE("insert-words")
             std::vector<char> data;
             auto              start = std::chrono::steady_clock::now();
             auto              fkeys = keys.begin();
-            tx.start();
-            while (tx.next())
+            tx->start();
+            while (tx->next())
             {
-               tx.key();
-               assert(tx.key().size() < 1024);
-               tx.value(data);
-               assert(tx.key().size() == data.size());
+               tx->key();
+               assert(tx->key().size() < 1024);
+               tx->value(data);
+               assert(tx->key().size() == data.size());
 
                /*
                if( fkeys->size() != data.size() or
@@ -438,14 +438,14 @@ TEST_CASE("insert-words")
             start = std::chrono::steady_clock::now();
 
             int rcount = 0;
-            tx.reverse_lower_bound();
+            tx->reverse_lower_bound();
             auto rkeys = keys.rbegin();
-            while (not tx.is_rend())
+            while (not tx->is_rend())
             {
                assert(rkeys != keys.rend());
                REQUIRE(rkeys != keys.rend());
                //      ARBTRIE_WARN( "checking ", *rkeys );
-               tx.value(data);
+               tx->value(data);
                /*
                if( rkeys->size() != data.size() or
                    0 != memcmp( rkeys->data(), data.data(), data.size() ) ) {
@@ -456,12 +456,12 @@ TEST_CASE("insert-words")
                */
 
                //              ARBTRIE_DEBUG( rcount, "] itr.key: ", to_str(itr.key()), " = ", std::string_view(data.data(),data.size()) );
-               REQUIRE(tx.key().size() == data.size());
+               REQUIRE(tx->key().size() == data.size());
                if (*rkeys == "zuccarino")
                {
                   ARBTRIE_WARN("break");
                }
-               tx.prev();
+               tx->prev();
                ++rcount;
                ++rkeys;
             }
@@ -478,16 +478,16 @@ TEST_CASE("insert-words")
       iterate_all();
       std::optional<node_handle> shared_handle;
       if (shared)
-         shared_handle = tx.get_root();
+         shared_handle = tx->get_root();
       ARBTRIE_WARN("removing for keys in order, shared: ", shared);
-      auto cnt = tx.count_keys();
+      auto cnt = tx->count_keys();
       REQUIRE(cnt == keys.size());
       for (int i = 0; i < keys.size(); ++i)
       {
          // ARBTRIE_DEBUG( "check before remove: ", keys[i], " i: ", i, " shared: ", shared );
          // ARBTRIE_DEBUG( "ws.count: ", ws->count_keys(root), " i: ", i );
-         REQUIRE(cnt - i == tx.count_keys());
-         auto buf = tx.get<std::string>(to_key_view(keys[i]));
+         REQUIRE(cnt - i == tx->count_keys());
+         auto buf = tx->get<std::string>(to_key_view(keys[i]));
          REQUIRE(buf);
          REQUIRE(*buf == values[i]);
          if (not buf)
@@ -497,18 +497,18 @@ TEST_CASE("insert-words")
          }
 
          //ARBTRIE_DEBUG( "before remove: ", keys[i] );
-         tx.remove(to_key_view(keys[i]));
+         tx->remove(to_key_view(keys[i]));
          //ARBTRIE_DEBUG( "after remove: ", keys[i] );
          /*{
          auto l = ws->_segas->lock();
          validate_refcount( l, root.address(), int(shared+1) );
          }
          */
-         buf = tx.get<std::string>(to_key_view(keys[i]));
+         buf = tx->get<std::string>(to_key_view(keys[i]));
          REQUIRE(not buf);
          //ARBTRIE_DEBUG("checking remove: ", keys[i]);
       }
-      REQUIRE(tx.count_keys() == 0);
+      REQUIRE(tx->count_keys() == 0);
       env.db->print_stats(std::cerr);
    };  // test_words
 
@@ -542,48 +542,48 @@ TEST_CASE("update")
 {
    environ env;
    auto    ws = env.db->start_write_session();
-   auto    tx = ws->start_transaction();
+   auto    tx = ws->start_write_transaction();
 
-   tx.upsert(to_key_view("hello"), to_value_view("world"));
-   tx.update(to_key_view("hello"), to_value_view("heaven"));
-   auto val = tx.get<std::string>(to_key_view("hello"));
+   tx->upsert(to_key_view("hello"), to_value_view("world"));
+   tx->update(to_key_view("hello"), to_value_view("heaven"));
+   auto val = tx->get<std::string>(to_key_view("hello"));
    REQUIRE(val);
    REQUIRE(*val == "heaven");
 
-   tx.update(to_key_view("hello"), to_value_view("small"));
-   val = tx.get<std::string>(to_key_view("hello"));
+   tx->update(to_key_view("hello"), to_value_view("small"));
+   val = tx->get<std::string>(to_key_view("hello"));
    REQUIRE(val);
    REQUIRE(*val == "small");
 
-   tx.update(to_key_view("hello"), to_value_view("medium"));
-   val = tx.get<std::string>(to_key_view("hello"));
+   tx->update(to_key_view("hello"), to_value_view("medium"));
+   val = tx->get<std::string>(to_key_view("hello"));
    REQUIRE(val);
    REQUIRE(*val == "medium");
 
-   tx.update(to_key_view("hello"),
-             to_value_view(
-                 "heaven is a great place to go! Let's get out of here. This line must be long."));
-   val = tx.get<std::string>(to_key_view("hello"));
+   tx->update(to_key_view("hello"),
+              to_value_view(
+                  "heaven is a great place to go! Let's get out of here. This line must be long."));
+   val = tx->get<std::string>(to_key_view("hello"));
    REQUIRE(val);
    REQUIRE(*val == "heaven is a great place to go! Let's get out of here. This line must be long.");
 
    INFO("setting a short (inline) value over an existing non-inline value");
-   tx.update(to_key_view("hello"), to_value_view("short"));
+   tx->update(to_key_view("hello"), to_value_view("short"));
 
    SECTION("updating an inline value that is smaller than object id to big value")
    {
-      tx.upsert(to_key_view("a"), to_value_view("a"));
-      tx.update(to_key_view("a"),
-                to_value_view("object_id is larger than 'a'.. what do we do here? This must be "
-                              "longer than 63 bytes"));
+      tx->upsert(to_key_view("a"), to_value_view("a"));
+      tx->update(to_key_view("a"),
+                 to_value_view("object_id is larger than 'a'.. what do we do here? This must be "
+                               "longer than 63 bytes"));
    }
 
    env.db->print_stats(std::cerr);
-   val = tx.get<std::string>(to_key_view("hello"));
+   val = tx->get<std::string>(to_key_view("hello"));
    REQUIRE(val);
    REQUIRE(*val == "short");
 
-   tx.abort();
+   tx->abort();
    env.db->print_stats(std::cerr);
 }
 
@@ -593,8 +593,8 @@ TEST_CASE("random-size-updates-shared")
    {
       auto ws = env.db->start_write_session();
       {
-         auto tx    = ws->start_transaction();
-         auto words = load_words(tx);
+         auto tx    = ws->start_write_transaction();
+         auto words = load_words(*tx);
 
          std::optional<node_handle> tmp;
          std::string                data;
@@ -609,13 +609,13 @@ TEST_CASE("random-size-updates-shared")
             auto idx = rng() % (words.size());
             data.resize(rng() % 250);
 
-            auto initsize = tx.get_size(to_key_view(words[idx]));
-            auto prevsize = tx.upsert(to_key_view(words[idx]), to_value_view(data));
+            auto initsize = tx->get_size(to_key_view(words[idx]));
+            auto prevsize = tx->upsert(to_key_view(words[idx]), to_value_view(data));
             assert(initsize == prevsize);
             REQUIRE(initsize == prevsize);
-            auto postsize = tx.get_size(to_key_view(words[idx]));
+            auto postsize = tx->get_size(to_key_view(words[idx]));
             REQUIRE(postsize == data.size());
-            tmp = tx.get_root();
+            tmp = tx->get_root();
             //  if( i % 1000 == 0 ) {
             //     ARBTRIE_DEBUG( "i: ", i, " ", ws->count_ids_with_refs() );
             //  }
@@ -638,15 +638,15 @@ TEST_CASE("remove")
    auto    ws = env.db->start_write_session();
    ARBTRIE_DEBUG("references before start: ", ws->count_ids_with_refs());
    {
-      write_transaction tx    = ws->start_transaction();
-      auto              words = load_words(tx);
+      write_transaction::ptr tx    = ws->start_write_transaction();
+      auto                   words = load_words(*tx);
 
       // remove key that does not exist
-      REQUIRE(tx.get_size(to_key_view("xcvbn")) == -1);
-      auto r = tx.remove(to_key_view("xcvbn"));
+      REQUIRE(tx->get_size(to_key_view("xcvbn")) == -1);
+      auto r = tx->remove(to_key_view("xcvbn"));
       REQUIRE(r == -1);
-      auto share = tx.get_root();
-      r          = tx.remove(to_key_view("xcvbn"));
+      auto share = tx->get_root();
+      r          = tx->remove(to_key_view("xcvbn"));
       REQUIRE(r == -1);
       ARBTRIE_DEBUG("references before release: ", ws->count_ids_with_refs());
    }
@@ -660,118 +660,118 @@ TEST_CASE("subtree2")
    {
       auto ws = env.db->start_write_session();
       {
-         auto tx = ws->start_transaction();
+         auto tx = ws->start_write_transaction();
 
          // create test tree
          std::string big_value;
-         tx.upsert(to_key_view("hello"), to_value_view("world"));
-         tx.upsert(to_key_view("goodbye"), to_value_view("darkness"));
-         auto& root = tx.root_handle();
+         tx->upsert(to_key_view("hello"), to_value_view("world"));
+         tx->upsert(to_key_view("goodbye"), to_value_view("darkness"));
+         auto& root = tx->root_handle();
 
          // insert subtree into empty tree
-         auto empty = ws->start_transaction(-1);
+         auto empty = ws->start_write_transaction(-1);
 
-         empty.upsert(to_key_view("subtree"), tx.get_root());
-         REQUIRE(tx.root_handle().ref() == 2);  // tx, and value of subtree key
-         auto r1 = empty.get_subtree(to_key_view("subtree"));
+         empty->upsert(to_key_view("subtree"), tx->get_root());
+         REQUIRE(tx->root_handle().ref() == 2);  // tx, and value of subtree key
+         auto r1 = empty->get_subtree(to_key_view("subtree"));
          REQUIRE(bool(r1));
-         REQUIRE(tx.root_handle().ref() == 3);  // r1, root, and value of subtree key
-         empty.remove(to_key_view("subtree"));
-         REQUIRE(tx.root_handle().ref() == 2);  // r1 and root
+         REQUIRE(tx->root_handle().ref() == 3);  // r1, root, and value of subtree key
+         empty->remove(to_key_view("subtree"));
+         REQUIRE(tx->root_handle().ref() == 2);  // r1 and root
 
          // insert subtree into tree with 1 value node,
          // this should split value node into a binary node with the root stored
-         empty.upsert(to_key_view("one"), to_value_view("value"));
-         empty.upsert(to_key_view("subtree"), tx.get_root());
+         empty->upsert(to_key_view("one"), to_value_view("value"));
+         empty->upsert(to_key_view("subtree"), tx->get_root());
          REQUIRE(root.ref() == 3);  // r1 and root, and value of subtree key
-         auto r2 = empty.get_subtree(to_key_view("subtree"));
+         auto r2 = empty->get_subtree(to_key_view("subtree"));
          REQUIRE(root.ref() == 4);  // r1, r2, and root, and value of subtree key
-         empty.remove(to_key_view("subtree"));
+         empty->remove(to_key_view("subtree"));
          REQUIRE(root.ref() == 3);  // r1 r2 and root
 
          // insert subtree into tree with binary node
          big_value.resize(100);
-         empty.upsert(to_key_view("big"), to_value_view(big_value));
-         empty.upsert(to_key_view("big2"), to_value_view(big_value));
-         empty.upsert(to_key_view("subtree"), node_handle(root));
-         auto r3 = empty.get_subtree(to_key_view("subtree"));
+         empty->upsert(to_key_view("big"), to_value_view(big_value));
+         empty->upsert(to_key_view("big2"), to_value_view(big_value));
+         empty->upsert(to_key_view("subtree"), node_handle(root));
+         auto r3 = empty->get_subtree(to_key_view("subtree"));
          REQUIRE(root.ref() == 5);  // r1, r2, r3 and root, and value of subtree key
-         empty.remove(to_key_view("subtree"));
+         empty->remove(to_key_view("subtree"));
          REQUIRE(root.ref() == 4);  // r1 r2 and root
 
          // refactor binary tree with subtree into radix node
-         empty.upsert(to_key_view("subtree"), node_handle(root));
+         empty->upsert(to_key_view("subtree"), node_handle(root));
          big_value.resize(60);
          std::string key = "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
          for (int i = 0; i < 50; ++i)
          {
-            empty.upsert(to_key_view(key), to_value_view(big_value));
+            empty->upsert(to_key_view(key), to_value_view(big_value));
             key[0]++;
          }
-         auto r4 = empty.get_subtree(to_key_view("subtree"));
+         auto r4 = empty->get_subtree(to_key_view("subtree"));
          REQUIRE(root.ref() == 6);  // r1, r2, r3, r4 and root, and value of subtree key
 
          // split value node into binary tree
-         empty.upsert(to_key_view("S"), node_handle(root));
+         empty->upsert(to_key_view("S"), node_handle(root));
          REQUIRE(root.ref() == 7);  // r1, r2, r3, r4, and root, and value of "subtree" and "S" key
-         auto r5 = empty.get_subtree(to_key_view("S"));
+         auto r5 = empty->get_subtree(to_key_view("S"));
          REQUIRE(root.ref() ==
                  8);  // r1, r2, r3, r4, r5 and root, and value of "subtree" and "S" key
 
          // insert into inner eof value
-         empty.upsert(to_key_view(""), node_handle(root));
+         empty->upsert(to_key_view(""), node_handle(root));
          REQUIRE(root.ref() ==
                  9);  // r1, r2, r3, r4, and root, and value of "subtree", "", and "S" key
-         auto r6 = empty.get_subtree(to_key_view(""));
+         auto r6 = empty->get_subtree(to_key_view(""));
          REQUIRE(root.ref() ==
                  10);  // r1, r2, r3, r4, r5, r6 and root, and value of "subtree", "", and "S" key
 
-         empty.upsert(to_key_view("start-with-data"), to_value_view("data"));
-         empty.upsert(to_key_view("start-with-data"), node_handle(root));
+         empty->upsert(to_key_view("start-with-data"), to_value_view("data"));
+         empty->upsert(to_key_view("start-with-data"), node_handle(root));
 
          REQUIRE(
              root.ref() ==
              11);  // r1, r2, r3, r4, r5, r6 and root, and value of "subtree", "", "start-with-data", and "S" key
-         empty.upsert(to_key_view("start-with-data"), to_value_view("release test"));
+         empty->upsert(to_key_view("start-with-data"), to_value_view("release test"));
          REQUIRE(root.ref() ==
                  10);  // r1, r2, r3, r4, r5, r6 and root, and value of "subtree", ", and "S" key
-         empty.upsert(to_key_view("start-with-data"), node_handle(root));
-         empty.upsert(to_key_view("start-with-data"), node_handle(root));
-         empty.upsert(to_key_view("start-with-data"), node_handle(root));
+         empty->upsert(to_key_view("start-with-data"), node_handle(root));
+         empty->upsert(to_key_view("start-with-data"), node_handle(root));
+         empty->upsert(to_key_view("start-with-data"), node_handle(root));
          REQUIRE(root.ref() ==
                  11);  // r1, r2, r3, r4, r5, r6 and root, and value of "subtree", ", and "S" key
 
          {
             std::vector<char> buf;
-            empty.lower_bound();
-            while (not empty.is_end())
+            empty->lower_bound();
+            while (not empty->is_end())
             {
-               if (empty.key() == "big")
+               if (empty->key() == "big")
                   std::cerr << "break big\n";
 
-               std::cerr << '"' << to_str(empty.key()) << " = " << empty.subtree().is_valid()
+               std::cerr << '"' << to_str(empty->key()) << " = " << empty->subtree().is_valid()
                          << "\n";
-               if (auto sitr = empty.subtree_iterator(); sitr.valid())
+               if (auto sitr = empty->subtree_iterator(); sitr.valid())
                {
                   sitr.start();
                   while (sitr.next())
                      std::cerr << "\t\t" << to_str(sitr.key()) << "\n";
                }
-               empty.next();
+               empty->next();
             }
          }
 
-         empty.abort();
+         empty->abort();
          REQUIRE(root.ref() == 7);  // r1, r2, r3, r4, r5, r6 and root
 
-         auto old_subtree = tx.upsert(to_key_view("version1"), node_handle(root));
-         tx.upsert(to_key_view("goodbye"), to_value_view("evil"));
-         auto v1 = tx.get_subtree(to_key_view("version1"));
+         auto old_subtree = tx->upsert(to_key_view("version1"), node_handle(root));
+         tx->upsert(to_key_view("goodbye"), to_value_view("evil"));
+         auto v1 = tx->get_subtree(to_key_view("version1"));
          REQUIRE(bool(v1));
          std::vector<char> value;
          v1->get(to_key_view("goodbye"), &value);
-         REQUIRE(tx.lower_bound(to_key_view("version1")));
-         REQUIRE(tx.subtree().is_valid());
+         REQUIRE(tx->lower_bound(to_key_view("version1")));
+         REQUIRE(tx->subtree().is_valid());
 
          ARBTRIE_DEBUG("output: ", std::string(value.data(), value.size()));
          // auto size    = ws->get( root, to_key_view("version1"), v1 );
@@ -813,8 +813,8 @@ TEST_CASE("random-size-updates")
    {
       auto ws = env.db->start_write_session();
       {
-         auto tx    = ws->start_transaction();
-         auto words = load_words(tx);
+         auto tx    = ws->start_write_transaction();
+         auto words = load_words(*tx);
 
          std::string       data;
          std::vector<char> result;
@@ -824,11 +824,11 @@ TEST_CASE("random-size-updates")
             auto idx = rng() % words.size();
             data.resize(rng() % 250);
 
-            auto initsize = tx.get_size(to_key_view(words[idx]));
-            auto prevsize = tx.upsert(to_key_view(words[idx]), to_value_view(data));
+            auto initsize = tx->get_size(to_key_view(words[idx]));
+            auto prevsize = tx->upsert(to_key_view(words[idx]), to_value_view(data));
             assert(initsize == prevsize);
             REQUIRE(initsize == prevsize);
-            auto postsize = tx.get_size(to_key_view(words[idx]));
+            auto postsize = tx->get_size(to_key_view(words[idx]));
             REQUIRE(postsize == data.size());
          }
          env.db->print_stats(std::cerr);
@@ -851,12 +851,12 @@ TEST_CASE("recover")
    environ    env;
    {
       auto ws = env.db->start_write_session();
-      auto tx = ws->start_transaction();
+      auto tx = ws->start_write_transaction();
       // No need for create_root() with transaction API
-      load_words(tx);
-      tx.commit_and_continue();
+      load_words(*tx);
+      tx->commit_and_continue();
       // get_node_stats is on the session, not the transaction
-      auto stats = v1 = ws->get_node_stats(tx.get_root());
+      auto stats = v1 = ws->get_node_stats(tx->get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -870,8 +870,8 @@ TEST_CASE("recover")
    env.db = new database("arbtriedb");
    {
       auto ws    = env.db->start_read_session();
-      auto rt    = ws.start_transaction();
-      auto stats = v2 = ws.get_node_stats(rt.get_root());
+      auto rt    = ws.start_read_transaction();
+      auto stats = v2 = ws.get_node_stats(rt->get_root());
       REQUIRE(v2 == v1);
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
@@ -885,8 +885,8 @@ TEST_CASE("recover")
    ARBTRIE_WARN("AFTER RECOVER");
    {
       auto ws    = env.db->start_write_session();
-      auto tx    = ws->start_transaction();
-      auto stats = v3 = ws->get_node_stats(tx.get_root());
+      auto tx    = ws->start_write_transaction();
+      auto stats = v3 = ws->get_node_stats(tx->get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -898,15 +898,15 @@ TEST_CASE("recover")
    {
       ARBTRIE_WARN("INSERT 1 Million Rows");
       auto ws = env.db->start_write_session();
-      auto tx = ws->start_transaction();
+      auto tx = ws->start_write_transaction();
       for (uint64_t i = 0; i < 10000; ++i)
       {
          key_view kstr((char*)&i, sizeof(i));
-         tx.insert(kstr, kstr);
+         tx->insert(kstr, kstr);
       }
-      tx.commit_and_continue();
+      tx->commit_and_continue();
       // get_node_stats is on the session, not the transaction
-      auto stats = v4 = ws->get_node_stats(tx.get_root());
+      auto stats = v4 = ws->get_node_stats(tx->get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -918,8 +918,8 @@ TEST_CASE("recover")
    ARBTRIE_WARN("AFTER RECOVER 2");
    {
       auto ws    = env.db->start_write_session();
-      auto tx    = ws->start_transaction();
-      auto stats = v5 = ws->get_node_stats(tx.get_root());
+      auto tx    = ws->start_write_transaction();
+      auto stats = v5 = ws->get_node_stats(tx->get_root());
       ARBTRIE_DEBUG("total nodes: ", stats.total_nodes());
       ARBTRIE_DEBUG("max-depth: ", stats.max_depth);
       ARBTRIE_DEBUG("avg-depth: ", stats.average_depth());
@@ -941,7 +941,7 @@ TEST_CASE("dense-rand-insert")
    environ env;
    auto    ws = env.db->start_write_session();
    {
-      auto tx = ws->start_transaction();
+      auto tx = ws->start_write_transaction();
 
       for (int i = 0; i < 100000; i++)
       {
@@ -949,13 +949,13 @@ TEST_CASE("dense-rand-insert")
          {
             ARBTRIE_WARN("i: ", i);
          }
-         REQUIRE(tx.count_keys() == i);
+         REQUIRE(tx->count_keys() == i);
 
          uint64_t val = rand64();
          key_view kstr((char*)&val, sizeof(val));
-         tx.insert(kstr, kstr);
+         tx->insert(kstr, kstr);
 
-         auto value = tx.get<std::string>(kstr);
+         auto value = tx->get<std::string>(kstr);
          if (!value)
          {
             ARBTRIE_WARN("unable to find key: ", val, " i:", i);
@@ -963,7 +963,7 @@ TEST_CASE("dense-rand-insert")
          }
          REQUIRE(value);
       }
-      tx.abort();
+      tx->abort();
    }
    REQUIRE(ws->count_ids_with_refs() == 0);
 }

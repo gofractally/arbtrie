@@ -121,7 +121,7 @@ namespace arbtrie
                                    binary_node::key_index::value_type t2)
        : node_header(asize, nid, node_type::binary, 0), _alloc_pos(0)
    {
-      _branch_id_region = branch_reg.to_int();
+      _branch_id_region = branch_reg;
       _branch_cap       = min_branch_cap(2);
       if (k1 < k2)
       {
@@ -243,9 +243,9 @@ namespace arbtrie
                                    const clone_remove& rem)
        : node_header(asize, nid, node_type::binary, src->num_branches() - 1), _alloc_pos(0)
    {
-      assert(asize <= binary_node_max_size);
+      //     assert(asize <= binary_node_max_size);
       assert(alloc_size(src, cfg, rem) <= asize);
-      _branch_cap = min_branch_cap(src->num_branches() - 1);  //round_up_multiple<64>(bcap * 4) / 4;
+      _branch_cap       = min_branch_cap(src->num_branches() - 1);
       _branch_id_region = src->_branch_id_region;
 
       auto kh  = key_hashes();
@@ -313,7 +313,7 @@ namespace arbtrie
       memcpy(ptr->key_hashes(), src->key_hashes(), ptr->_num_branches);
       memcpy(ptr->value_hashes(), src->value_hashes(), ptr->_num_branches);
       ptr->_alloc_pos  = 0;
-      ptr->_dead_space = 0;
+      ptr->_dead_space = 0;  /// space freed by past removal/realloc of key/values
       auto sko         = src->key_offsets();
       auto ko          = ptr->key_offsets();
       auto nb          = src->_num_branches;

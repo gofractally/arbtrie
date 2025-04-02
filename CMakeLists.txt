@@ -56,6 +56,7 @@ option(BUILD_VISUALIZER "Build segment visualizer" )
 
 # Find required packages
 find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 # Find Boost
 set(Boost_NO_WARN_NEW_VERSIONS ON)
@@ -87,7 +88,6 @@ add_library(arbtrie
     src/mapping.cpp
     src/seg_allocator.cpp
     src/seg_allocator_session.cpp
-    src/id_alloc.cpp
     src/recover.cpp
     src/iterator_count_keys.cpp
     src/segment_thread.cpp
@@ -256,6 +256,55 @@ endif()
 
 # Add subdirectories
 add_subdirectory(programs)
+
+# MDBX benchmark test (optional)
+option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
+if(BUILD_MDBX_TEST)
+    message(STATUS "Building MDBX benchmark test")
+    # Look for header directly in external/libmdbx
+    find_path(MDBX_INCLUDE_DIR mdbx.h PATHS external/libmdbx HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_CACHE)
+    
+    # Look for library directly in external/libmdbx, prefer static
+    find_library(MDBX_LIBRARY NAMES libmdbx-static.a libmdbx.a mdbx 
+                 PATHS external/libmdbx 
+                 HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_DEFAULT_PATH NO_CACHE)
+
+    # If static wasn't found, maybe dynamic exists (less preferred but okay for testing)
+    if(NOT MDBX_LIBRARY)
+         find_library(MDBX_LIBRARY NAMES mdbx 
+                      PATHS external/libmdbx 
+                      HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_DEFAULT_PATH NO_CACHE)
+    endif()
+
+
+    if(MDBX_INCLUDE_DIR AND MDBX_LIBRARY)
+        message(STATUS "Found MDBX include: ${MDBX_INCLUDE_DIR}")
+        message(STATUS "Found MDBX library: ${MDBX_LIBRARY}")
+        add_executable(lmdbx_arb_test test/lmdbx_arb_test.cpp)
+        target_include_directories(lmdbx_arb_test PUBLIC ${MDBX_INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
+        target_link_libraries(lmdbx_arb_test PRIVATE ${MDBX_LIBRARY} ${Boost_LIBRARIES} Threads::Threads)
+        if(WIN32)
+            # Add necessary libraries for Windows if mdbx requires them
+        elseif(APPLE)
+            # Add necessary libraries for macOS if mdbx requires them
+        else()
+            # Add necessary libraries for Linux (like pthread, rt if needed)
+             target_link_libraries(lmdbx_arb_test PRIVATE rt) # For clock_gettime if needed by boost/chrono?
+        endif()
+
+         # Install the test executable if needed
+         install(TARGETS lmdbx_arb_test RUNTIME DESTINATION bin)
+
+    else()
+        message(WARNING "MDBX library or includes not found. Skipping lmdbx_arb_test build. Looked in external/libmdbx")
+        if(NOT MDBX_INCLUDE_DIR)
+            message(WARNING "MDBX_INCLUDE_DIR not found.")
+        endif()
+        if(NOT MDBX_LIBRARY)
+            message(WARNING "MDBX_LIBRARY not found.")
+        endif()
+    endif()
+endif()
 
 # Only add test directory if testing is enabled
 if(BUILD_TESTS)

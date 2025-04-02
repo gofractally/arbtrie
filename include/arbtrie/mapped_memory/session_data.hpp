@@ -64,6 +64,10 @@ namespace arbtrie
          uint64_t           free_session_bitmap() const;
          uint32_t           session_segment_seq(uint32_t session_num) const;
          uint32_t           next_session_segment_seq(uint32_t session_num);
+         void               add_bytes_written(uint32_t session_num, uint64_t bytes) noexcept
+         {
+            _total_bytes_written[session_num] += bytes;
+         }
 
          /// only one thread may call this a time, will block until it is
          /// safe to sync the segment.
@@ -80,6 +84,16 @@ namespace arbtrie
          dirty_segment_queue& dirty_segments(uint32_t session_num)
          {
             return _dirty_segments[session_num];
+         }
+
+         /**
+          * Gets the total bytes written by a specific session
+          * @param session_num The session number to query
+          * @return The total bytes written by the session
+          */
+         uint64_t total_bytes_written(uint32_t session_num) const
+         {
+            return _total_bytes_written[session_num];
          }
 
         private:
@@ -102,6 +116,11 @@ namespace arbtrie
 
          /// each transaction
          dirty_segment_queue _dirty_segments[session_cap];
+
+         /** tracks the number of bytes written by each session so we can
+          * measure write amplification.
+          */
+         uint64_t _total_bytes_written[session_cap];
 
          /// the segments each session is currently modifying, or -1 if none
          // padded_atomic<uint64_t> _modify_lock[session_cap];

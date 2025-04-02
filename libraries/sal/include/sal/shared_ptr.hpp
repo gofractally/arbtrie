@@ -19,6 +19,9 @@ namespace sal
       std::atomic<uint64_t> _data;
 
      public:
+      // Default constructor to ensure proper initialization of the atomic
+      shared_ptr() : _data(0) {}
+
       static constexpr uint64_t location_offset = 21;
       /**
        * The internal structure of the bits stored in the atomic _data
@@ -88,10 +91,10 @@ namespace sal
          return true;
       };
 
-      uint32_t ref() const { return load().ref; }
-      location loc() const { return load().loc(); }
-      bool     active() const { return load().active; }
-      bool     pending_cache() const { return load().pending_cache; }
+      uint32_t ref() const { return load(std::memory_order_relaxed).ref; }
+      location loc() const { return load(std::memory_order_acquire).loc(); }
+      bool     active() const { return load(std::memory_order_relaxed).active; }
+      bool     pending_cache() const { return load(std::memory_order_relaxed).pending_cache; }
 
       /// @deprecated dont use this
       uint64_t to_int(std::memory_order order = std::memory_order_relaxed) const
@@ -121,7 +124,13 @@ namespace sal
        */
       shared_ptr_data release()
       {
-         shared_ptr_data prior(_data.fetch_sub(1, std::memory_order_release));
+         // if we are not the last reference then relaxed is best, we will
+         // load with acquire before returning if we are the last reference.
+         // TSAN seems happy with relaxed + acquire and this works because all
+         // modifications are either done by the "unique owner" aka (ref 1),
+         // or done by a thread that has just copied the data to a new location
+         // and we are synchronziing with the cas_move below.
+         shared_ptr_data prior(_data.fetch_sub(1, std::memory_order_relaxed));
          assert(prior.ref > 0);
          if constexpr (debug_memory)
          {
@@ -129,7 +138,13 @@ namespace sal
                abort();
          }
          if (prior.ref == 1)
-            clear_pending_cache();
+         {
+            if (prior.pending_cache or prior.active)
+               clear_pending_cache();
+            // make sure that any changes in location and the new memory being
+            // pointed at are visible to the releasing thread.
+            return load(std::memory_order_acquire);
+         }
          return prior;
       };
       void clear_pending_cache()
@@ -163,7 +178,7 @@ namespace sal
                return false;
             prior.set_loc(desired_loc);
          } while (not _data.compare_exchange_weak(expect_data, prior.to_int(),
-                                                  std::memory_order_release));
+                                                  std::memory_order_seq_cst));
          return true;
       }
 

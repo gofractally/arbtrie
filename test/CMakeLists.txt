@@ -9,6 +9,7 @@ add_executable(arbtrie-tests
     cache_difficulty_state_tests.cpp
     mapped_memory_tests.cpp
     poly_buffer_test.cpp
+    find_byte_tests.cpp
 )
 
 target_link_libraries(arbtrie-tests 
@@ -174,5 +175,27 @@ target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
 
 # Add the min_index subdirectory with its tests
 add_subdirectory(min_index)
+
+# Add SQLite benchmark test executable
+add_executable(sqlite-arb-test sqlite_arb_test.cpp)
+
+# Link libraries for sqlite-arb-test
+target_link_libraries(sqlite-arb-test
+    PRIVATE
+        Boost::program_options
+        SQLite::SQLite3
+)
+
+# Set output directory for sqlite-arb-test
+set_target_properties(sqlite-arb-test
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Add test to CTest (optional, uncomment if you want 'ctest' to run it)
+# add_test(
+#     NAME sqlite-arb-test
+#     COMMAND sqlite-arb-test
+# )
 
 

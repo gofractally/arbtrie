@@ -27,9 +27,8 @@ struct TestEnv
       std::filesystem::create_directories(db_path);
 
       // Configure and open the database
-      config cfg;
+      runtime_config cfg;
       // Compaction is now managed internally by the database
-      cfg.cache_on_read = true;  // Enable cache
 
       // Create and open the database
       database::create(db_path, cfg);
@@ -50,63 +49,63 @@ TEST_CASE("Debug last() operation", "[last][debug]")
    TestEnv env;
 
    // Start a transaction
-   auto tx = env.ws->start_transaction();
+   auto tx = env.ws->start_write_transaction();
 
    // Insert some test keys
    std::cout << "Inserting test keys" << std::endl;
-   tx.insert("key1", "value1");
-   tx.insert("key2", "value2");
-   tx.insert("key3", "value3");
+   tx->insert("key1", "value1");
+   tx->insert("key2", "value2");
+   tx->insert("key3", "value3");
 
    // Commit the inserts
-   tx.commit_and_continue();
+   tx->commit_and_continue();
 
    SECTION("Test start() followed by last()")
    {
       std::cout << "Starting transaction and calling last()" << std::endl;
 
       // Print state before start
-      std::cout << "Before start(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start() << std::endl;
+      std::cout << "Before start(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start() << std::endl;
 
       // Start the transaction
-      tx.start();
+      tx->start();
 
       // Print state after start
-      std::cout << "After start(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start() << std::endl;
+      std::cout << "After start(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start() << std::endl;
 
       // Check if we can call first() after start
       std::cout << "Calling first() after start()" << std::endl;
-      bool first_result = tx.first();
+      bool first_result = tx->first();
       std::cout << "first() returned: " << (first_result ? "true" : "false") << std::endl;
 
       if (first_result)
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "First key: " << key << std::endl;
       }
 
       // Start a new transaction to test last()
-      tx.commit_and_continue();
-      tx.start();
+      tx->commit_and_continue();
+      tx->start();
 
       // Print state before last
-      std::cout << "Before last(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start() << std::endl;
+      std::cout << "Before last(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start() << std::endl;
 
       // Call last() and check result
       std::cout << "Calling last()" << std::endl;
-      bool last_result = tx.last();
+      bool last_result = tx->last();
 
       // Print state after last
-      std::cout << "After last(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start()
+      std::cout << "After last(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start()
                 << ", last_result=" << (last_result ? "true" : "false") << std::endl;
 
       if (last_result)
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -116,35 +115,35 @@ TEST_CASE("Debug last() operation", "[last][debug]")
       std::cout << "Testing begin() followed by last()" << std::endl;
 
       // Print state before begin
-      std::cout << "Before begin(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start() << std::endl;
+      std::cout << "Before begin(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start() << std::endl;
 
       // Call begin() and check result
-      bool begin_result = tx.begin();
+      bool begin_result = tx->begin();
 
       // Print state after begin
-      std::cout << "After begin(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start()
+      std::cout << "After begin(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start()
                 << ", begin_result=" << (begin_result ? "true" : "false") << std::endl;
 
       if (begin_result)
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "First key from begin(): " << key << std::endl;
       }
 
       // Call last() and check result
       std::cout << "Calling last() after begin()" << std::endl;
-      bool last_result = tx.last();
+      bool last_result = tx->last();
 
       // Print state after last
-      std::cout << "After last(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start()
+      std::cout << "After last(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start()
                 << ", last_result=" << (last_result ? "true" : "false") << std::endl;
 
       if (last_result)
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }
@@ -154,20 +153,20 @@ TEST_CASE("Debug last() operation", "[last][debug]")
       std::cout << "Testing direct last() without start()" << std::endl;
 
       // Print state before last
-      std::cout << "Before last(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start() << std::endl;
+      std::cout << "Before last(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start() << std::endl;
 
       // Call last() directly without start() and check result
-      bool last_result = tx.last();
+      bool last_result = tx->last();
 
       // Print state after last
-      std::cout << "After last(): is_valid=" << tx.valid() << ", is_end=" << tx.is_end()
-                << ", is_start=" << tx.is_start()
+      std::cout << "After last(): is_valid=" << tx->valid() << ", is_end=" << tx->is_end()
+                << ", is_start=" << tx->is_start()
                 << ", last_result=" << (last_result ? "true" : "false") << std::endl;
 
       if (last_result)
       {
-         std::string key(tx.key().data(), tx.key().size());
+         std::string key(tx->key().data(), tx->key().size());
          std::cout << "Last key: " << key << std::endl;
       }
    }

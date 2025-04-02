@@ -14,6 +14,7 @@
 #include <arbtrie/segment_thread.hpp>
 #include <arbtrie/sync_lock.hpp>
 #include <condition_variable>
+#include <sal/block_allocator.hpp>
 #include <thread>
 #include <vector>
 
@@ -46,16 +47,18 @@ namespace arbtrie
       // only really require 1 per thread
       static const uint32_t max_session_count = 64;
 
-      seg_allocator(std::filesystem::path dir);
+      seg_allocator(std::filesystem::path dir, runtime_config cfg);
       ~seg_allocator();
+
+      void stop_threads();
+      void start_threads();
 
       /**
        * Debugging methods
        * @group Debugging
        */
       ///@{
-      void           print_region_stats() { _id_alloc.print_region_stats(); }
-      uint64_t       count_ids_with_refs() { return _id_alloc.count_ids_with_refs(); }
+      uint64_t       count_ids_with_refs() { return _id_alloc.used(); }
       seg_alloc_dump dump();
       ///@}
 
@@ -68,7 +71,7 @@ namespace arbtrie
       bool config_update_checksum_on_modify() const;
       ///@}
 
-      void sync(sync_type st = sync_type::sync);
+      void fsync(bool full = false) { _block_alloc.fsync(full); }
 
       seg_alloc_session start_session() { return seg_alloc_session(*this, alloc_session_num()); }
 
@@ -99,11 +102,9 @@ namespace arbtrie
 
      private:
       friend class database;
-      void    release_unreachable();
-      void    reset_meta_nodes(recover_args args);
-      void    reset_reference_counts();
-      int64_t clear_lock_bits();
-      void    sync_segment(int seg, sync_type st) noexcept;
+      void release_unreachable();
+      void reset_meta_nodes(recover_args args);
+      void reset_reference_counts();
 
       friend class seg_alloc_session;
       friend class read_lock;
@@ -118,11 +119,12 @@ namespace arbtrie
       /// @{
       mapped_memory::segment* get_segment(segment_number seg) noexcept
       {
-         return static_cast<mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
+         return reinterpret_cast<mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
       }
       const mapped_memory::segment* get_segment(segment_number seg) const noexcept
       {
-         return static_cast<const mapped_memory::segment*>(_block_alloc.get(block_number(seg)));
+         return reinterpret_cast<const mapped_memory::segment*>(
+             _block_alloc.get(block_number(seg)));
       }
 
       uint32_t alloc_session_num();
@@ -206,7 +208,7 @@ namespace arbtrie
       id_alloc _id_alloc;
 
       // allocates new segments
-      block_allocator _block_alloc;
+      sal::block_allocator _block_alloc;
 
       mapping                         _seg_alloc_state_file;
       mapped_memory::allocator_state* _mapped_state;
@@ -230,10 +232,26 @@ namespace arbtrie
         * @param seg The segment number containing the object
         */
       template <typename T>
-      inline void record_freed_space(segment_number seg, T* obj)
+      inline void record_freed_space(const uint32_t ses_num, segment_number seg, T* obj)
       {
          assert(get_segment_for_object(obj) == seg && "object not in segment");
+         /*
+         auto base   = _block_alloc.get(offset_ptr());
+         auto offset = (const char*)obj - base;
+         if (can_modify(ses_num, node_location::from_absolute_address(offset)))
+         {
+            if (not obj->is_allocator_header())
+            {
+               record_reusable(ses_num, obj->size());
+            }
+         }
+         */
          _mapped_state->_segment_data.add_freed_space(seg, obj);
+      }
+
+      inline void record_session_write(uint32_t session_num, uint64_t bytes) noexcept
+      {
+         _mapped_state->_session_data.add_bytes_written(session_num, bytes);
       }
 
       /**
@@ -318,7 +336,6 @@ namespace arbtrie
             // back takes the lowest priority segment, without ack means it will
             // not send a signal to the provider to mlock the segment
             segnum = _mapped_state->_segment_provider.ready_unpinned_segments.pop();
-            ARBTRIE_WARN("get_new_segment unpinned: ", segnum);
          }
          return {segnum, get_segment(segnum)};
       }

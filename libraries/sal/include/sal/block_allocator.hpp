@@ -60,8 +60,9 @@ namespace sal
 
       /**
        * This method syncs all mapped memory to disk.
+       * @param full uses F_FULLFSYNC else just fsync()
        */
-      void sync(sync_type st);
+      void fsync(bool full = false);
 
       /**
        * Return a pointer to the block at the specified offset
@@ -69,10 +70,10 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A pointer to the block at the specified offset
        */
-      template <typename T = void>
+      template <typename T = char>
       inline T* get(offset_ptr offset) noexcept
       {
-         assert(*offset < _file_size);
+         assert(*offset + sizeof(T) <= _file_size.load(std::memory_order_relaxed));
          return reinterpret_cast<T*>(((char*)_mapped_base) + *offset);
       }
       /**
@@ -81,10 +82,10 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A const pointer to the block at the specified offset
        */
-      template <typename T = void>
+      template <typename T = char>
       inline const T* get(offset_ptr offset) const noexcept
       {
-         assert(*offset < _file_size);
+         assert(*offset + sizeof(T) <= _file_size.load(std::memory_order_relaxed));
          return reinterpret_cast<const T*>(((const char*)_mapped_base) + *offset);
       }
       /**
@@ -93,7 +94,7 @@ namespace sal
        * @param block_num The block number (index)
        * @return A const pointer to the block at the specified block number
        */
-      template <typename T = void>
+      template <typename T = char>
       inline T* get(block_number block_num) noexcept
       {
          assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
@@ -106,7 +107,7 @@ namespace sal
        * @param offset The offset pointer (returned by alloc)
        * @return A const pointer to the block at the specified offset
        */
-      template <typename T = void>
+      template <typename T = char>
       inline const T* get(block_number block_num) const noexcept
       {
          assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
@@ -135,7 +136,7 @@ namespace sal
        */
       inline block_number offset_to_block(offset_ptr offset) const noexcept
       {
-         assert(*offset < _file_size);
+         assert(*offset < _file_size.load(std::memory_order_relaxed));
          // Fast division by power of 2
          return block_number(*offset >> _log2_block_size);
       }
@@ -153,7 +154,7 @@ namespace sal
       }
 
       // ensures that at least the desired number of blocks are present
-      uint32_t reserve(uint32_t desired_num_blocks);
+      uint32_t reserve(uint32_t desired_num_blocks, bool mlock = false);
 
       /**
        * Allocate a new block and return both the block number and offset pointer to it
@@ -203,7 +204,7 @@ namespace sal
       uint64_t              _block_size;
       uint8_t               _log2_block_size;  // log2 of block_size for fast bit shifting
       uint64_t              _max_blocks;
-      uint64_t              _file_size;
+      std::atomic<uint64_t> _file_size;
       int                   _fd;
       std::atomic<uint64_t> _num_blocks;
       mutable std::mutex    _resize_mutex;

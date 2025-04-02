@@ -1,6 +1,7 @@
 #pragma once
 #include <arbtrie/concepts.hpp>
 #include <arbtrie/debug.hpp>
+#include <arbtrie/find_byte.hpp>
 #include <arbtrie/inner_node.hpp>
 #include <concepts>
 
@@ -13,28 +14,64 @@ namespace arbtrie
     *  functionality for inner nodes in the tree.
     *
     *  - break even storage with full node is 206 elements
-    *  - break even storage with a bitset node is 32 elements
-    *  - always more effecient with storage than index node
-    *
+    *  - break even storage with a (hypothetical) bitset node is 32 elements
+    *  - always more effecient with storage than (hypothetical) index node
     *  - can hold up to 257 elements in a less effecient manner than
     *  full node
     *
-    *  - log(n) time for get/update
-    *  - log(n) time for lower bound 
+    *  - O(n/2) average time for get/update
+    *  - O(n/2) average time for lower bound 
+    * 
+    *  Node is always allocated as a multiple of the page size
     *
     *  notional data layout
     *  --------------------
-    *  node_header head
-    *  uint64_t    descendants:48 :e // total values under this one
-    *  uint64_t    spare_capacity:8
-    *  uint64_t    prefix_trunc:8
-    *  uint8_t     prefix[_prefix_len]
-    *  uint8_t     setlist[head.num_branches-head.has_eof]
-    *  uint8_t     sparesetlist[spare_capacity]
-    *  id_address   branches[head.num_branches]
-    *  id_address   spareids[spare_capacity]
+    *  // object_header (base of node_header) - 12 bytes
+    *  uint32_t checksum:8;        // First byte for checksum
+    *  uint32_t sequence:24;       // 24-bit sequence number
+    *  id_address _node_id;        // 8 bytes for node address
+    *  uint32_t _ntype:3;          // node type
+    *  uint32_t _nsize:25;         // allocated bytes 
+    *  uint32_t _unused:3;         // unused bits
+    *  uint32_t _header_type:1;    // 0 for node, 1 for allocator
+    *  
+    *  // node_header fields - 4 additional bytes
+    *  id_region _branch_id_region; // 2 bytes for branch region
+    *  uint16_t _num_branches:9;    // number of branches
+    *  uint16_t _binary_node_opt:1; // binary node optimization flag
+    *  uint16_t _unused:6;          // unused bits
+    *  
+    *  // inner_node<setlist_node> fields - 12 bytes
+    *  uint32_t _descendants;         // 4 bytes for descendant count
+    *  id_address _eof_value;         // 8 bytes for EOF value pointer
+    *  uint32_t _eof_subtree:1;       // whether EOF is a subtree
+    *  uint32_t _prefix_capacity:10;  // size of prefix buffer
+    *  uint32_t _prefix_size:10;      // actual prefix length
+    *  uint32_t _unused:11;           // unused bits
+    *  
+    *  // setlist_node has no additional fixed fields
+    *  
+    *  // Variable-sized data (layout in memory)
+    *  uint8_t prefix[_prefix_capacity];      // Variable size prefix data
+    *  uint8_t setlist[_num_branches];        // Character values for branches
+    *  // potentially unused space in the middle
+    *  // id_index pointers grow backward from the end of allocated space
+    *  id_index branches[_num_branches];      // Branch pointers (at end of node)
+    * 
+    * | Size | Available | Required | Max     | Leftover | Optimal    |
+    * |      | Space     | Prefix s | Branches| Bytes    | Prefix Cap |
+    * |------|-----------|----------|---------|----------|------------|
+    * |  64  |    32     |    0     |   10    |    2     |     2      |
+    * | 128  |    96     |    0     |   32    |    0     |     0      |
+    * | 192  |   160     |    0     |   53    |    1     |     1      |
+    * | 256  |   224     |    0     |   74    |    2     |     2      |
+    * | 320  |   288     |    0     |   96    |    0     |     0      |
+    * | 384  |   352     |    0     |  117    |    1     |     1      |
+    * | 448  |   416     |    0     |  138    |    2     |     2      |
+    * | 512  |   480     |    0     |  160    |    0     |     0      |
+    * 
+    * 
     */
-
    class setlist_node : public inner_node<setlist_node>
    {
      public:
@@ -47,7 +84,7 @@ namespace arbtrie
          return (_nsize - sizeof(setlist_node) - prefix_capacity());
       }
       // the max number of branches
-      uint8_t        branch_capacity() const { return branch_data_cap() / (1 + sizeof(id_index)); }
+      uint8_t        branch_capacity() const { return _setlist_branch_capacity; }
       uint8_t*       get_setlist_ptr() { return end_prefix(); }
       const uint8_t* get_setlist_ptr() const { return end_prefix(); }
       int            get_setlist_size() const { return num_branches(); }
@@ -63,21 +100,10 @@ namespace arbtrie
          return ((id_index*)tail()) - branch_capacity() + num_branches();
       }
 
-      // node concept
-      ///@{
-      //key_view      get_prefix() const { return to_key(key_ptr(), _ksize); }
-      /*
-      search_result get_branch(key_view k) const
+      sal::alloc_hint get_branch_alloc_hint() const
       {
-         throw std::runtime_error("setlist_node::get_branch: not implemented");
-         return search_result::end();
+         return sal::alloc_hint(branch_region(), get_branch_ptr(), num_branches());
       }
-      search_result lower_bound(key_view k) const
-      {
-         throw std::runtime_error("setlist_node::get_branch: not implemented");
-         return search_result::end();
-      }
-      */
 
       constexpr local_index begin_index() const { return local_index(-1); }
       constexpr local_index end_index() const
@@ -105,13 +131,9 @@ namespace arbtrie
          if (k.empty())
             return local_index(-1 + has_eof_value());
 
-         auto sl  = get_setlist_ptr();
-         auto slp = sl;
-         auto sle = slp + num_branches();
-
-         while (slp != sle && uint8_t(*slp) < uint8_t(k.front()))
-            ++slp;
-         return local_index(slp - sl + has_eof_value());
+         auto lb = arbtrie::lower_bound((const uint8_t*)get_setlist_ptr(), num_branches(),
+                                        uint8_t(k.front()));
+         return local_index(lb + has_eof_value());
       }
       local_index upper_bound_index(key_view k) const
       {
@@ -249,9 +271,9 @@ namespace arbtrie
       void set_index(int idx, uint8_t byte, id_address adr)
       {
          assert(idx < _num_branches);
-         assert(adr.region() == branch_region());
+         assert(adr.region == branch_region());
          assert((char*)(get_branch_ptr() + idx) < tail());
-         get_branch_ptr()[idx]  = id_index(adr.index().to_int());
+         get_branch_ptr()[idx]  = adr.index;  //id_index(adr.index.to_int());
          get_setlist_ptr()[idx] = byte;
       }
 
@@ -387,11 +409,11 @@ namespace arbtrie
          assert(br < 257);
          assert(br > 0);
          assert(b);
-         assert(b.region() == branch_region());
+         assert(b.region == branch_region());
 
          auto pos = get_setlist().find(br - 1);
          assert(pos != key_view::npos);
-         get_branch_ptr()[pos] = id_index(b.index().to_int());
+         get_branch_ptr()[pos] = b.index;  //id_index(b.index().to_int());
          return *this;
       }
 
@@ -534,7 +556,7 @@ namespace arbtrie
    {
       assert(br < max_branch_count);
       assert(br > 0);
-      assert(b.region() == branch_region());
+      assert(b.region == branch_region());
 
       id_index* branches = get_branch_ptr();
       assert(_num_branches <= branch_capacity());
@@ -559,7 +581,7 @@ namespace arbtrie
       assert((char*)b_found + 1 + ((char*)b_end - (char*)b_found) <= tail());
       memmove(b_found + 1, b_found, (char*)b_end - (char*)b_found);
 
-      *b_found = id_index(b.index().to_int());
+      *b_found = b.index;  //id_index(b.index().to_int());
 
       ++_num_branches;
       return *this;

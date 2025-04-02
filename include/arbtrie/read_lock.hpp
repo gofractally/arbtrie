@@ -30,7 +30,8 @@ namespace arbtrie
       void release();
 
      private:
-      void         unlock();
+      void unlock();
+      template <typename T>
       node_header* copy_on_write(temp_meta_type meta);
 
       // it starts out true because lock isn't acquired unless as() is called
@@ -55,7 +56,11 @@ namespace arbtrie
    class read_lock
    {
      public:
-      object_ref alloc(id_region reg, uint32_t size, node_type type, auto initfunc);
+      object_ref alloc(id_region         reg,
+                       const alloc_hint& hint,
+                       uint32_t          size,
+                       node_type         type,
+                       auto              initfunc);
 
       // id_address reuse,
       object_ref realloc(object_ref& r, uint32_t size, node_type type, auto initfunc);
@@ -64,13 +69,16 @@ namespace arbtrie
              * @defgroup Region Alloc Helpers
              */
       /// @{
-      id_region     get_new_region();
-      void          free_meta_node(id_address);
-      id_allocation get_new_meta_node(id_region);
+      id_region get_new_region();
+      void      free_meta_node(id_address);
+      /*
+      id_allocation get_new_ptr(id_region,
+                                id_address::index_type* index_hints,
+                                uint16_t                hint_count);
+      */
       /// @}
 
       inline object_ref get(id_address adr);
-      inline object_ref get(node_header*);
 
       auto call_with_node(id_address adr, auto&& call);
 

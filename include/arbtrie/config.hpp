@@ -1,13 +1,10 @@
 #pragma once
+#include <unistd.h>
 #include <arbtrie/hash/xxh32.hpp>
 #include <bit>
 #include <cstddef>
+#include <iostream>
 #include <string_view>
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace arbtrie
 {
@@ -35,30 +32,88 @@ namespace arbtrie
 
    /**
     * For ACID **Durablity** requriments this configures
-    * how agressive triedent will be in flushing data to disk.
+    * how agressive arbtrie will be in flushing data to disk 
+    * and protecting data from corruption.
     * 
-    * 0. none - msync() will not be called and data will be
-    *      lost if the computer crashes. So long as the OS
-    *      doesn't crash your data is safe even if your
-    *      program crashes.
-    * 1. async - msync(MS_ASYNC) will be used which will tell
-    *      the OS to write as soon as possible without blocking
-    *      the caller. This will write data frequently, and
-    *      churn the SSD more than none. 
-    * 2. sync - msync(MS_SYNC) will be used to block caller
-    *      when they update the top-root. In this mode the
-    *      database is "gauranteed" to be recoverable assuming
-    *      the OS didn't silently buffer and the disks didn't
-    *      silently buffer contrary to the implied behavior
-    *      of msync()
-    *
+    * 0. none - fastests (no system calls) but least protection,
+    *    you must be sure your program will not write to the database's
+    *    mapped memory except during a commit() call, mprotect() is probably
+    *    worth doing as it doesn't have much overhead. 
+    * 1. mprotect - mprotect() will be used to write protect the
+    *    data in memory once committed. This will prevent application
+    *    code from modifying the data and corrupting the database. This is
+    *    the level that assumes the OS will not crash or power cut. Even if
+    *    your app crashes, your data is safe.
+    * 2. msync_async - msync(MS_ASYNC) will be used which will tell
+    *    the OS to write as soon as possible without blocking
+    *    the caller. This only flushes to the OS disk-cache and
+    *    does not gaurantee that the data is on disk.
+    * 3. msync_sync - msync(MS_SYNC) will be used to block caller
+    *    until the OS has finished its msync() to disk cache.
+    * 4. fsync - in addition to msync(MS_SYNC) tells the OS to
+    *    sync the data to the physical disk. Note that while the
+    *    OS will have sent all data to the drive, this does not
+    *    gaurantee that the drive hasn't cached the data and it
+    *    may not be on the drive yet. 
+    * 5. full - F_FULLSYNC (Mac OS X), in addition to fsync() asks the 
+    *    drive to flush all data to the physical media, this will
+    *    sync all data from all processes on the system not just
+    *    the current process.
     */
-   enum sync_type
+   enum class sync_type
    {
-      none  = 0,  // on program close or as OS chooses
-      async = 1,  // nonblocking, but write soon
-      sync  = 2   // block until changes are committed to disk
+      none        = 0,  // on program close or as OS chooses
+      mprotect    = 1,  // mprotect() will be used to write protect the data
+      msync_async = 2,  // nonblocking, but write soon
+      msync_sync  = 3,  // block until changes are committed to disk
+      fsync       = 4,  // in addition to msync(MS_SYNC) tells the OS to
+                        // sync the data to the physical disk. Note that while the
+                        // OS will have sent all data to the drive, this does not
+                        // gaurantee that the drive hasn't cached the data and it
+                        // may not be on the drive yet.
+      full = 5          // F_FULLSYNC (Mac OS X), in addition to fsync() asks the
    };
+   inline std::ostream& operator<<(std::ostream& os, sync_type st)
+   {
+      switch (st)
+      {
+         case sync_type::none:
+            return os << "none";
+         case sync_type::mprotect:
+            return os << "mprotect";
+         case sync_type::msync_async:
+            return os << "msync_async";
+         case sync_type::msync_sync:
+            return os << "msync_sync";
+         case sync_type::fsync:
+            return os << "fsync";
+         case sync_type::full:
+            return os << "full";
+         default:
+            return os << "unknown";
+      }
+   }
+
+   inline std::istream& operator>>(std::istream& is, sync_type& st)
+   {
+      std::string str;
+      is >> str;
+      if (str == "none")
+         st = sync_type::none;
+      else if (str == "mprotect")
+         st = sync_type::mprotect;
+      else if (str == "msync_async")
+         st = sync_type::msync_async;
+      else if (str == "msync_sync")
+         st = sync_type::msync_sync;
+      else if (str == "fsync")
+         st = sync_type::fsync;
+      else if (str == "full")
+         st = sync_type::full;
+      else
+         is.setstate(std::ios::failbit);
+      return is;
+   }
 
    enum access_mode
    {
@@ -72,6 +127,16 @@ namespace arbtrie
    struct runtime_config
    {
       /**
+       * The point at which a binary node will get converted into
+       * a full node or setlist node (depending on keys).
+       */
+      uint32_t binary_refactor_threshold      = 4096;
+      uint32_t binary_node_max_size           = 4096;
+      uint32_t binary_node_max_keys           = 254;
+      uint32_t binary_node_initial_size       = 4096;
+      uint32_t binary_node_initial_branch_cap = 64;
+
+      /**
        * The default is 1 GB, this gives 32 segments,
        * if you have a lot of write threads you may want to 
        * increase this to 64 MB per thread or more. The
@@ -81,7 +146,7 @@ namespace arbtrie
        * 
        * This should be a multiple of the segment size
        */
-      uint64_t max_pinned_cache_size_mb = 1024;
+      uint64_t max_pinned_cache_size_mb = 1024 * 8;
 
       /**
        * The default is 1 hour, and this impacts the
@@ -90,7 +155,7 @@ namespace arbtrie
        * changing access patterns, but are more effecient
        * with respect to CPU and SSD wear. 
        */
-      uint64_t read_cache_window_sec = 60 * 60;
+      uint64_t read_cache_window_sec = 60 * 60 * 5;
 
       /**
        * When true, read operations will promote
@@ -139,6 +204,23 @@ namespace arbtrie
        *    each OS and hardware configuration is different.
        */
       sync_type sync_mode = sync_type::none;
+
+      /**
+       * Every commit advances the write-protected region of
+       * memory, at this time there is an opportunity to calculate
+       * the checksum of the segment(s) that are being frozen; however
+       * this information is only useful for detecting corruption, and
+       * not recovering from corruption. 
+       * 
+       * Indepdnent of this checksum there is also a 1 byte checksum
+       * on every key/value pair that is stored in binary nodes, and
+       * each node also has a 1 byte checksum which is updated on
+       * commit. 
+       * 
+       * This is more expensive, but it will detect corruption
+       * of data at rest. This is about a 10% performance hit.
+       */
+      bool checksum_commits = false;
 
       /**
        * Calculating the checksum is expensive and mostly
@@ -201,7 +283,7 @@ namespace arbtrie
 
    // designed to fit within 4096 bytes with other header information
    // so msync the page doesn't waste data.
-   static constexpr const uint32_t num_top_roots = 510;
+   static constexpr const uint32_t num_top_roots = 1024;
 
    /**
     * This will slow down performance, but ensures the checksum should
@@ -232,6 +314,8 @@ namespace arbtrie
    // On M2+ macs this is 128, use std::hardware_destructive_interference_size
    // if you need the real cacheline size, we assume 64 for most x86 architectures
    static constexpr const uint32_t cacheline_size = 64;
+
+   static constexpr const bool use_alloc_hints = true;
 
    // the largest object that will attempt to be promoted to pinned cache,
    // the goal of the cache is to avoid disk cache misses. This would ideally
@@ -343,7 +427,7 @@ namespace arbtrie
    // initial space reserved for growth in place, larger values
    // support faster insertion, but have much wasted space if your
    // keys are not dense.
-   static constexpr const int binary_node_initial_size = 2048;
+   static constexpr const int binary_node_initial_size = 3072;
 
    // extra space reserved for growth in place
    static constexpr const int binary_node_initial_branch_cap = 64;

@@ -14,39 +14,17 @@ namespace arbtrie
           requires std::same_as<decltype(T::type), const node_type>;
 
           // Required member functions
-          {
-             node.add_branch(br, addr)
-          } -> std::same_as<T&>;
-          {
-             node.remove_branch(br)
-          } -> std::same_as<T&>;
-          {
-             node.set_branch(br, addr)
-          } -> std::same_as<T&>;
-          {
-             const_node.get_branch(br)
-          } -> std::same_as<id_address>;
-          {
-             const_node.lower_bound(br)
-          } -> std::same_as<std::pair<branch_index_type, id_address>>;
-          {
-             const_node.can_add_branch()
-          } -> std::same_as<bool>;
-          {
-             const_node.get_prefix()
-          } -> std::same_as<key_view>;
-          {
-             const_node.has_eof_value()
-          } -> std::same_as<bool>;
-          {
-             const_node.get_eof_address()
-          } -> std::same_as<id_address>;
-          {
-             const_node.get_eof_value()
-          } -> std::same_as<value_type>;
-          {
-             const_node.is_eof_subtree()
-          } -> std::same_as<bool>;
+          { node.add_branch(br, addr) } -> std::same_as<T&>;
+          { node.remove_branch(br) } -> std::same_as<T&>;
+          { node.set_branch(br, addr) } -> std::same_as<T&>;
+          { const_node.get_branch(br) } -> std::same_as<id_address>;
+          { const_node.lower_bound(br) } -> std::same_as<std::pair<branch_index_type, id_address>>;
+          { const_node.can_add_branch() } -> std::same_as<bool>;
+          { const_node.get_prefix() } -> std::same_as<key_view>;
+          { const_node.has_eof_value() } -> std::same_as<bool>;
+          { const_node.get_eof_address() } -> std::same_as<id_address>;
+          { const_node.get_eof_value() } -> std::same_as<value_type>;
+          { const_node.is_eof_subtree() } -> std::same_as<bool>;
 
           // Required from inner_node base
           requires std::derived_from<T, inner_node<T>>;
@@ -69,13 +47,18 @@ namespace arbtrie
    template <typename Derived>
    struct inner_node : node_header
    {
+      uint16_t setlist_branch_data_cap() const
+      {
+         return (_nsize - sizeof(Derived) - prefix_capacity());
+      }
       inline inner_node(uint32_t            size,
                         id_address_seq      nid,
                         const clone_config& cfg,
                         uint16_t            num_branch = 0)
           : node_header(size, nid, Derived::type, num_branch)
       {
-         _prefix_capacity = cfg.prefix_capacity();
+         _prefix_capacity         = cfg.prefix_capacity();
+         _setlist_branch_capacity = setlist_branch_data_cap() / (1 + sizeof(id_index));
          if (cfg.set_prefix)
             set_prefix(*cfg.set_prefix);
       }
@@ -92,12 +75,14 @@ namespace arbtrie
 
          if (cfg.set_prefix)
          {
-            _prefix_capacity = cfg.prefix_capacity();
+            _prefix_capacity         = cfg.prefix_capacity();
+            _setlist_branch_capacity = setlist_branch_data_cap() / (1 + sizeof(id_index));
             set_prefix(*cfg.set_prefix);
          }
          else
          {
-            _prefix_capacity = std::max<int>(cfg.prefix_cap, src->prefix_size());
+            _prefix_capacity         = std::max<int>(cfg.prefix_cap, src->prefix_size());
+            _setlist_branch_capacity = setlist_branch_data_cap() / (1 + sizeof(id_index));
             set_prefix(src->get_prefix());
          }
       }
@@ -120,11 +105,11 @@ namespace arbtrie
       uint32_t descendants() const { return _descendants; }
 
       uint32_t   _descendants = 0;
+      id_address _eof_value;
+      uint32_t   _eof_subtree : 1 = false;
       uint32_t   _prefix_capacity : 10;
       uint32_t   _prefix_size : 10;
-      uint32_t   _unused : 11;  // TODO: this could be used extend range of _descendants
-      uint32_t   _eof_subtree : 1 = false;
-      id_address _eof_value;
+      uint32_t   _setlist_branch_capacity : 8;
 
       void set_eof(id_address e)
       {

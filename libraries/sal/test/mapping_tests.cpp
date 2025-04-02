@@ -54,9 +54,6 @@ TEST_CASE("Memory mapping basic operations", "[mapping]")
       {
          REQUIRE(data_ptr[i] == static_cast<char>(0xFF));
       }
-
-      // Sync to disk
-      map.sync(sal::sync_type::sync);
    }
 
    SECTION("Non-empty file mapping and resize")

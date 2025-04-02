@@ -6,109 +6,93 @@
 
 namespace sal
 {
-   /// @brief  works with any multiple of 8, aigned on 16 byte boundary
-   /// TODO: doesn't support ignoring zeros, but could be added with a different variatin
-   /// @param indices
-   /// @param hint_count
-   void calculate_hint_neon(hint& h, uint16_t* indices, uint16_t hint_count)
+   inline int find_byte(const uint8_t arr[8], uint8_t value)
    {
-      //uint16x8x4_t chunks[4] = {vld1q_u16_x4(indices), vld1q_u16_x4(indices + 32),
-      //                          vld1q_u16_x4(indices + 64), vld1q_u16_x4(indices + 96)};
+      uint64_t data   = *(const uint64_t*)arr;          // Load 8 bytes
+      uint64_t target = value * 0x0101010101010101ULL;  // Broadcast value to all bytes
+      uint64_t mask   = ((data ^ target) - 0x0101010101010101ULL) & ~(data ^ target);
+      mask &= 0x8080808080808080ULL;  // Extract high bits
+      if (mask == 0)
+         return -1;
+      return __builtin_ctzll(mask) >> 3;
+   }
 
-      auto      mask63 = vdupq_n_u16(63);
-      uint16_t* end    = indices + hint_count;
-      while (indices < end)
+   /**
+    * Same as find_byte but assumes the value will be found.
+    * Removes the branch that handles the not-found case.
+    */
+   inline int find_byte_nocheck(const uint8_t arr[8], uint8_t value)
+   {
+      uint64_t       data   = *(const uint64_t*)arr;          // Load 8 bytes
+      uint64_t       target = value * 0x0101010101010101ULL;  // Broadcast value to all bytes
+      const uint64_t data_xor_target = data ^ target;
+      uint64_t       mask            = (data_xor_target - 0x0101010101010101ULL) & ~data_xor_target;
+      mask &= 0x8080808080808080ULL;      // Extract high bits
+      return __builtin_ctzll(mask) >> 3;  // Assume value is found
+   }
+
+   /**
+    *  Identifies up to first 8 unique pages and the cachelines on the pages that
+    *  have at least one hint present. Any cachelines on pages that are not part
+    *  of the first 8 unique pages are not included in the hint.
+    */
+   void calculate_hint_simple(hint& h, uint16_t* indicies, uint16_t count)
+   {
+      int unique_pages = 0;
+      for (uint16_t i = 0; i < count; ++i)
       {
-         uint16x8_t hints              = vld1q_u16(indices);
-         uint16x8_t pages              = vshrq_n_u16(hints, 9);
-         uint16x8_t page_idx           = vshrq_n_u16(hints, 15);
-         uint16x8_t bit_positions      = vandq_u16(pages, mask63);
-         uint16x8_t cacheline_indicies = vandq_u16(vshrq_n_u16(hints, 3), mask63);
+         const uint16_t value = indicies[i];
+         if (value == 0)
+            continue;  /// skip this value, it has no hint
 
-         h.pages[vgetq_lane_u16(page_idx, 0)] |= (1ULL << vgetq_lane_u16(bit_positions, 0));
-         h.pages[vgetq_lane_u16(page_idx, 1)] |= (1ULL << vgetq_lane_u16(bit_positions, 1));
-         h.pages[vgetq_lane_u16(page_idx, 2)] |= (1ULL << vgetq_lane_u16(bit_positions, 2));
-         h.pages[vgetq_lane_u16(page_idx, 3)] |= (1ULL << vgetq_lane_u16(bit_positions, 3));
-         h.pages[vgetq_lane_u16(page_idx, 4)] |= (1ULL << vgetq_lane_u16(bit_positions, 4));
-         h.pages[vgetq_lane_u16(page_idx, 5)] |= (1ULL << vgetq_lane_u16(bit_positions, 5));
-         h.pages[vgetq_lane_u16(page_idx, 6)] |= (1ULL << vgetq_lane_u16(bit_positions, 6));
-         h.pages[vgetq_lane_u16(page_idx, 7)] |= (1ULL << vgetq_lane_u16(bit_positions, 7));
+         const uint16_t page = value >> 9;  /// 512 ptrs' page
+         // there are max 128 pages, so we need to know if we are in first or second half
+         const uint8_t page_idx = page >> 6;  /// divide by 64, 0 or 1
+         // the index bit that represets the page is page % 64
+         const uint8_t  page_bit_index = (page & 63);
+         const uint64_t page_bit       = 1ULL << page_bit_index;
 
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 0)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 0));
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 1)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 1));
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 2)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 2));
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 3)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 3));
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 4)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 4));
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 5)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 5));
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 6)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 6));
-         h.cachelines[vgetq_lane_u16(cacheline_indicies, 7)] |=
-             (1ULL << vgetq_lane_u16(bit_positions, 7));
-         indices += 8;
+         // this is all fine... but.. the hint would need to have 128  uint64_t (1kb)
+         // to store all possible cacheline hints... or we need to prune the cachelines
+         // to a smaller set, say first 8 unique pages
+
+         bool     unique_page = (h.pages[page_idx] & page_bit) == 0;
+         uint16_t upi;
+         if (unique_page)
+         {
+            if (unique_pages >= 8)
+               continue;  /// skip this page, too many already
+            h.pages[page_idx] |= page_bit;
+            upi                          = unique_pages;
+            h.page_order[unique_pages++] = page_idx;
+         }
+         else
+         {
+            /// we have already seen this page, so we need to find the cacheline index
+            upi = find_byte_nocheck(h.page_order, page_idx);
+         }
+
+         // there are 8 ids per cacheline, so the global cacheline idnex is indices[i]/8
+         // there are 64 cachelines per page, so we need global cacheline index % 64
+         const uint16_t cl_idx = (indicies[i] / 8) % 64;
+
+         h.cachelines[upi] |= 1ULL << cl_idx;
       }
    }
-   void calculate_hint_scalar(hint& h, uint16_t* indices, uint16_t count)
+   uint64_t hint::get_cachelines_for_page(uint8_t page) const
    {
-      auto end = indices + count;
-      while (indices < end)
-      {
-         uint16_t value = *indices;
-         ++indices;
-         if (value == 0)
-            continue;
-         uint16_t page         = value >> 9;
-         uint16_t page_idx     = page >> 6;
-         uint16_t bit_position = page & 63;
-         h.pages[page_idx] |= (1ULL << bit_position);
-         uint16_t cacheline_index = (value >> 3) & 63;
-         h.cachelines[page_idx] |= (1ULL << cacheline_index);
-      }
+      auto idx = find_byte(page_order, page);
+      if (idx != -1)
+         return 0;
+      return cachelines[idx];
    }
 
    void hint::calculate(uint16_t* indices, uint16_t count)
    {
-#if defined(__ARM_NEON)
       if (count)
       {
-         // Calculate unaligned prefix elements (to get to 16-byte alignment)
-         uint16_t* original_indices = indices;
-         uint16_t  prefix_count     = 0;
-
-         if (reinterpret_cast<uintptr_t>(indices) & 0xF)
-         {
-            // Calculate how many uint16_t elements needed to reach alignment
-            prefix_count = ((16 - (reinterpret_cast<uintptr_t>(indices) & 0xF)) / sizeof(uint16_t));
-            // Make sure we don't exceed total count
-            prefix_count = (prefix_count > count) ? count : prefix_count;
-            indices += prefix_count;
-            count -= prefix_count;
-
-            // Process unaligned prefix with scalar function
-            calculate_hint_scalar(*this, original_indices, prefix_count);
-         }
-
-         // Handle aligned middle with NEON
-         uint16_t neon_count = count & ~7;
-         if (neon_count)
-         {
-            calculate_hint_neon(*this, indices, neon_count);
-            indices += neon_count;
-            count &= 7;
-         }
-
-         // Handle remaining elements with scalar
-         if (count)
-            calculate_hint_scalar(*this, indices, count);
+         calculate_hint_simple(*this, indices, count);
       }
-#else
-      calculate_hint_scalar(*this, indices, count);
-#endif
    }
 
 }  // namespace sal

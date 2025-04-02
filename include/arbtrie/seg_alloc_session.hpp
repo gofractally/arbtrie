@@ -24,7 +24,7 @@ namespace arbtrie
       // could be read while the return value of this method is in scope can
       // be reused (overwritten)
       read_lock lock();
-      void      sync(sync_type st, int top_root_index, id_address top_root);
+      void      sync(int top_root_index, id_address top_root);
 
       ~seg_alloc_session();
       seg_alloc_session(seg_alloc_session&& mv);

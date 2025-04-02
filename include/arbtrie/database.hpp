@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <arbtrie/arbtrie.hpp>
 #include <arbtrie/binary_node.hpp>
+#include <arbtrie/file_fwd.hpp>
 #include <arbtrie/iterator.hpp>
 #include <arbtrie/mapped_memory.hpp>
 #include <arbtrie/node_handle.hpp>
@@ -65,41 +66,6 @@ namespace arbtrie
       uint32_t flags;
    };
 
-   struct config
-   {
-      /**
-          *  Read threads can move the accessed data into
-          *  a warm cache to improve cache locality and separate
-          *  infrequently used data from frequently used data.
-          *
-          *  If used with anything other than sync_type::none, this
-          *  will produce write amplification somewhat less than
-          *  the total data read because on sync() the moved cache
-          *  values must be flushed to disk.
-          */
-      bool cache_on_read = false;
-
-      /**
-          * The max amount of a segment that is allowed to be empty
-          * before the compactor thread will move the remaining contents
-          * to a new segment. 
-          *
-          * Lower values save space, but produce more write amplification when
-          * using sync_type other than none.  Lower values improve cache
-          * locality and reduce page misses by keeping the data denser.
-          */
-      int compact_empty_threshold_percent = 20;
-
-      /**
-          * Triedent will discourage the OS from swapping out 
-          * the most recently used segments by using mlock(),
-          * may want a higher compaction threshold if using mlock()
-          */
-      uint64_t max_pinnable_segments = 64;
-
-      sync_type sync_mode = sync_type::none;
-   };
-
    class read_session
    {
      protected:
@@ -114,10 +80,6 @@ namespace arbtrie
 
       database* _db;
       read_session(database* db);
-
-      // Move operations can now be enabled with pointer members
-      read_session(read_session&&)            = default;
-      read_session& operator=(read_session&&) = default;
 
       int get(object_ref& root, key_view key, std::invocable<bool, value_type> auto&& callback);
       int get(object_ref&                             root,
@@ -139,21 +101,33 @@ namespace arbtrie
 
      public:
       ~read_session();
+      // Move operations can now be enabled with pointer members
+      read_session(read_session&&)            = default;
+      read_session& operator=(read_session&&) = default;
+
       std::unique_ptr<seg_alloc_session> _segas;
 
       uint64_t count_ids_with_refs() { return _segas->count_ids_with_refs(); }
 
-      template <iterator_caching_mode CacheMode = noncaching>
+      template <iterator_caching_mode CacheMode = caching>
       auto create_iterator(node_handle h)
       {
          return iterator<CacheMode>(*this, std::move(h));
       }
 
-      read_transaction start_transaction(int top_root_node = 0)
+      read_transaction::ptr start_read_transaction(int top_root_node = 0)
       {
-         if (top_root_node == -1)
-            return read_transaction(*this, create_root());
-         return read_transaction(*this, get_root(top_root_node));
+         node_handle root = (top_root_node == -1) ? create_root() : get_root(top_root_node);
+         // Use make_shared with the private token
+         return std::make_shared<read_transaction>(read_transaction::private_token{}, *this,
+                                                   std::move(root));
+      }
+      caching_read_transaction::ptr start_caching_read_transaction(int top_root_node = 0)
+      {
+         node_handle root = (top_root_node == -1) ? create_root() : get_root(top_root_node);
+         // Use make_shared with the private token
+         return std::make_shared<caching_read_transaction>(
+             caching_read_transaction::private_token{}, *this, std::move(root));
       }
 
       /**
@@ -308,7 +282,7 @@ namespace arbtrie
       id_address remove(session_rlock& state, id_address root, key_view key);
 
       value_type _cur_val;
-      bool       _sync_lock = false;
+      // bool       _sync_lock = false;
 
       // when a new key is inserted this is set to 1 and the and
       // when a key is removed this is set to -1
@@ -333,7 +307,6 @@ namespace arbtrie
       //
       // @returns the prior root so caller can choose when/where
       // to release it, if ignored it will be released immediately
-      template <sync_type stype = sync_type::none>
       node_handle set_root(node_handle r, int index = 0);
 
       // Designed to only be called by write_transaction objects
@@ -375,9 +348,8 @@ namespace arbtrie
        * @param top_root_node The index of the root node to use, or -1 for a temporary root
        * @return write_transaction A new transaction object
        */
-      write_transaction start_transaction(int top_root_node = 0);
+      write_transaction::ptr start_write_transaction(int top_root_node = 0);
 
-      template <sync_type stype = sync_type::sync>
       void sync();
 
       /**
@@ -423,9 +395,9 @@ namespace arbtrie
 
      private:
       template <upsert_mode mode>
-      id_address upsert(object_ref& root, key_view key);
+      id_address upsert(object_ref& root, key_view key, const alloc_hint& parent_hint);
       template <upsert_mode mode>
-      id_address upsert(object_ref&& root, key_view key);
+      id_address upsert(object_ref&& root, key_view key, const alloc_hint& parent_hint);
 
       template <upsert_mode mode, typename NodeType>
       id_address upsert_inner_existing_br(object_ref&       r,
@@ -433,75 +405,135 @@ namespace arbtrie
                                           const NodeType*   fn,
                                           key_view          cpre,
                                           branch_index_type bidx,
-                                          id_address        br);
+                                          id_address        br,
+                                          const alloc_hint& parent_hint);
       template <upsert_mode mode, typename NodeType>
       id_address upsert_inner_new_br(object_ref&       r,
                                      key_view          key,
                                      const NodeType*   fn,
                                      key_view          cpre,
                                      branch_index_type bidx,
-                                     id_address        br);
+                                     id_address        br,
+                                     const alloc_hint& parent_hint);
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_prefix(object_ref&     r,
-                               key_view        key,
-                               key_view        cpre,
-                               const NodeType* fn,
-                               key_view        rootpre);
+      id_address upsert_prefix(object_ref&       r,
+                               key_view          key,
+                               key_view          cpre,
+                               const NodeType*   fn,
+                               key_view          rootpre,
+                               const alloc_hint& parent_hint);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_eof(object_ref& r, const NodeType* fn);
+      id_address upsert_eof(const alloc_hint& parent_hint, object_ref& r, const NodeType* fn);
 
       template <upsert_mode mode, typename NodeType>
-      id_address remove_eof(object_ref& r, const NodeType* fn);
+      id_address remove_eof(const alloc_hint& parent_hint, object_ref& r, const NodeType* fn);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_inner(object_ref& r, const NodeType* fn, key_view key);
+      id_address upsert_inner(object_ref&       r,
+                              const NodeType*   fn,
+                              key_view          key,
+                              const alloc_hint& parent_hint);
 
       template <upsert_mode mode, typename NodeType>
-      id_address upsert_inner(object_ref&& r, const NodeType* fn, key_view key)
+      id_address upsert_inner(object_ref&&      r,
+                              const NodeType*   fn,
+                              key_view          key,
+                              const alloc_hint& parent_hint)
       {
-         return upsert_inner<mode>(r, fn, key);
+         return upsert_inner<mode>(r, fn, key, parent_hint);
       }
 
       template <upsert_mode mode>
       id_address upsert_eof_value(object_ref& root);
 
       template <upsert_mode mode>
-      id_address upsert_value(object_ref& root, const value_node* vn, key_view key);
+      id_address upsert_value(object_ref&       root,
+                              const value_node* vn,
+                              key_view          key,
+                              const alloc_hint& hint);
 
       //=======================
       // binary_node operations
       // ======================
       id_address make_binary(id_region         reg,
+                             const alloc_hint& parent_hint,
                              session_rlock&    state,
                              key_view          key,
                              const value_type& val);
 
       template <upsert_mode mode>
-      id_address upsert_binary(object_ref& root, const binary_node* bn, key_view key);
+      id_address upsert_binary(object_ref&        root,
+                               const binary_node* bn,
+                               key_view           key,
+                               const alloc_hint&  parent_hint);
 
       template <upsert_mode mode>
       id_address update_binary_key(object_ref&        root,
                                    const binary_node* bn,
                                    uint16_t           lb_idx,
-                                   key_view           key);
+                                   key_view           key,
+                                   const alloc_hint&  parent_hint);
       template <upsert_mode mode>
       id_address remove_binary_key(object_ref&        root,
                                    const binary_node* bn,
                                    uint16_t           lb_idx,
-                                   key_view           key);
+                                   key_view           key,
+                                   const alloc_hint&  parent_hint);
    };
 
+   /**
+    * @class database
+    * @brief A class for managing an Arbtrie database
+    * 
+    * This class provides a high-level interface for creating, opening, and managing
+    * an Arbtrie database. It supports read-only and read-write access modes,
+    * and provides methods for creating new databases, opening existing ones,
+    * 
+    * @example
+    * ```
+    * // Create a new database
+    * database::create("my_database");
+    * 
+    * // Open an existing database
+    * auto db = database::open("my_database");
+    * 
+    * // Create a read-only session
+    * auto read_session = db->start_read_session();
+    * 
+    * // Create a read-write session
+    * ```
+    * 
+    * ACID properties:
+    *   - every time transaction::commit is called, 
+    *     write_session::start_write_transaction::commit lambda
+    *     will call seg_alloc_session::sync() which will call
+    *     segment::sync() for every segment that has been modified since
+    *     the last sync. The segment will mprotect() and msync() the regions
+    *     that have been modified. 
+    *   - after all segments have msynced, seg_alloc_session will fsync() 
+    *     the segments file to tell the OS to push data to disk. 
+    *   - then start_write_transaction::commit lambda will call
+    *      write_session::set_root() and atomically update the root node
+    *      pointer in database header file. 
+    *   - lastly the database header file is msynced, fsynced or F_FULL_SYNC
+    *     according to the sync_mode in runtime_config.
+    *   - The F_FULL_SYNC flag forces everything from all processes to be
+    *     pushed to the disk and for the disk to flush everything from its
+    *     cache to the physical media. F_FULL_SYNC takes care of all files so
+    *     that fsync() is not needed on each individual file.
+    * 
+    */
    class database
    {
      public:
       static constexpr auto read_write = access_mode::read_write;
       static constexpr auto read_only  = access_mode::read_only;
 
-      database(std::filesystem::path dir, config = {}, access_mode = read_write);
+      database(std::filesystem::path dir, runtime_config = {}, access_mode = read_write);
       ~database();
 
-      static void create(std::filesystem::path dir, config = {});
+      static std::shared_ptr<database> create(std::filesystem::path dir, runtime_config = {});
 
       /**
        * @brief Start a new write session for modifying the database
@@ -518,10 +550,23 @@ namespace arbtrie
       read_session start_read_session();
 
       void print_stats(std::ostream& os, bool detail = false);
-      void print_region_stats();
 
       void recover(recover_args args = recover_args());
       bool validate();
+
+      /**
+       * @brief Gets the current runtime configuration.
+       * @return A copy of the current runtime_config.
+       */
+      runtime_config get_runtime_config() const;
+
+      /**
+       * @brief Sets the runtime configuration.
+       * @param cfg The new runtime_config to apply.
+       * @note Modifying configuration on a live database might have unintended consequences
+       *       depending on the specific setting changed. Use with caution.
+       */
+      void set_runtime_config(const runtime_config& cfg);
 
      private:
       friend class read_session;
@@ -541,22 +586,15 @@ namespace arbtrie
          uint32_t          magic          = file_magic;
          uint32_t          flags          = file_type_database_root;
          std::atomic<bool> clean_shutdown = true;
+         runtime_config    config;
          // top_root is protected by _root_change_mutex to prevent race conditions
          // which involve loading or storing top_root, bumping refcounts, decrementing
          // refcounts, cloning, and cleaning up node children when the refcount hits 0.
          // Since it's protected by a mutex, it normally wouldn't need to be atomic.
          // However, making it atomic hopefully aids SIGKILL behavior, which is impacted
          // by instruction reordering and multi-instruction non-atomic writes.
-         //
-         // There are 488 top roots because database_memory should be no larger than
-         // a page size (the min memsync unit) and therefore there is no extra overhead
-         // for syncing 4096 bytes vs 64 bytes.  Having more than one top-root allows
-         // different trees to be versioned and maintained independently. If all trees
-         // were implemented as values on keys of a root tree then they could not be
-         // operated on in parallel.
          std::atomic<uint64_t> top_root[num_top_roots];
       };
-      static_assert(sizeof(database_memory) == 4096);
 
       mutable std::mutex _sync_mutex;
       mutable std::mutex _root_change_mutex[num_top_roots];
@@ -567,12 +605,6 @@ namespace arbtrie
       seg_allocator    _sega;
       mapping          _dbfile;
       database_memory* _dbm;
-      config           _config;
-
-      /**
-       *  At most one write session may have the sync lock
-       */
-      std::atomic<int64_t> _sync_lock;
    };
 
    template <typename NodeType>
@@ -824,8 +856,7 @@ namespace arbtrie
     *        returned so that the caller can control when it
     *        goes out of scope and resources are freed.
     */
-   template <sync_type stype>
-   node_handle write_session::set_root(node_handle r, int index)
+   inline node_handle write_session::set_root(node_handle r, int index)
    {
       assert(index < num_top_roots);
       assert(index >= 0);
@@ -837,12 +868,9 @@ namespace arbtrie
             std::unique_lock lock(_db->_root_change_mutex[index]);
             old_r = _db->_dbm->top_root[index].exchange(new_r, std::memory_order_relaxed);
          }
-         if constexpr (stype != sync_type::none)
+         if (old_r != new_r)
          {
-            if (old_r != new_r)
-            {
-               _db->_dbfile.sync(stype);
-            }
+            _db->_dbfile.sync(_db->_dbm->config.sync_mode);
          }
       }
       _db->modify_lock(index).unlock();
@@ -853,17 +881,19 @@ namespace arbtrie
     * flushes state to disk according to sync_type,
     * only one thread may call this method at a time and it will
     * block until all msync() calls have returned. 
-    */
-   template <sync_type stype>
-   void write_session::sync()
+   inline void write_session::sync()
    {
-      if constexpr (stype != sync_type::none)
+      switch (_db->_dbm->config.sync_mode)
       {
-         std::unique_lock lock(_db->_root_change_mutex);
-         _db->_sega.sync(stype);
-         _db->_dbfile.sync(stype);
+         case sync_type::full:
+         case sync_type::fsync:
+            _db->_sega.fsync();
+            _db->_dbfile.sync(_db->_dbm->config.sync_mode);
+         default:
+            return;
       }
    }
+    */
 
    inline write_session::~write_session() {}
 }  // namespace arbtrie

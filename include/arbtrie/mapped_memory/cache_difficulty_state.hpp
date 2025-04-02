@@ -51,7 +51,6 @@ namespace arbtrie
             // Define targets
             uint64_t target_bytes         = _total_cache_size / 16;  // 1/16th of cache
             int64_t  target_time_interval = target_ms / 16;          // 1/16th of total time in ms
-
             // Determine which trigger occurred
             bool bytes_trigger = (_bytes_promoted_since_last_difficulty_update >= target_bytes);
             bool time_trigger  = (elapsed_ms >= target_time_interval);
@@ -59,6 +58,15 @@ namespace arbtrie
             // If neither trigger hit, no change
             if (!bytes_trigger && !time_trigger)
                return;
+
+            /*
+            if (bytes_trigger)
+               ARBTRIE_WARN("compactor_update_difficulty: ", elapsed_ms, " target_ms: ", target_ms,
+                            " target_bytes: ", target_bytes, " time_trigger: ", time_trigger,
+                            " bytes_trigger: ", bytes_trigger, " _recent_bytes_promoted: ",
+                            _bytes_promoted_since_last_difficulty_update,
+                            " elapsed_ms: ", elapsed_ms);
+                            */
 
             // Current difficulty value
             uint64_t max_uint32         = uint32_t(-1);
@@ -104,10 +112,11 @@ namespace arbtrie
                 probability > 0 ? std::round(1.0 / probability) : max_uint32;
 
             // Print warning with the new difficulty expressed as 1 in N attempts
-            ARBTRIE_WARN("Cache difficulty updated: ", new_difficulty, " (1 in ", attempts_per_hit,
-                         " attempts)",
-                         " bytes_promoted: ", _bytes_promoted_since_last_difficulty_update,
-                         " elapsed_ms: ", elapsed_ms, " probability: ", probability);
+
+            //            ARBTRIE_WARN("Cache difficulty updated: ", new_difficulty, " (1 in ", attempts_per_hit,
+            //                        " attempts)",
+            //                         " bytes_promoted: ", _bytes_promoted_since_last_difficulty_update,
+            //                         " elapsed_ms: ", elapsed_ms, " probability: ", probability);
 
             // Update the internal member directly
             _cache_difficulty.store(new_difficulty, std::memory_order_relaxed);
@@ -143,7 +152,6 @@ namespace arbtrie
          void compactor_promote_bytes(uint64_t   bytes,
                                       time_point current_time = std::chrono::system_clock::now())
          {
-            //    _bytes_promoted_since_last_update += bytes;
             _bytes_promoted_since_last_difficulty_update += bytes;
             total_promoted_bytes.fetch_add(bytes, std::memory_order_relaxed);
             compactor_update_difficulty(current_time);

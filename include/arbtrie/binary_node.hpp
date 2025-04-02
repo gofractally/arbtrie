@@ -1,5 +1,6 @@
 #pragma once
 #include <arbtrie/concepts.hpp>
+#include <arbtrie/find_byte.hpp>
 #include <arbtrie/node_header.hpp>
 #include <arbtrie/value_type.hpp>
 
@@ -639,16 +640,40 @@ namespace arbtrie
 
       local_index get_index(key_view key) const
       {
-         auto     khash  = key_hash(key);
+         auto khash = key_hash(key);
+         auto khh   = key_header_hash(khash);
+         //const uint8_t* hashes  = key_hashes();
+         //int            nhashes = num_branches();
+
+         /**
+         int base = 0;
+         while (true)
+         {
+            auto idx = arbtrie::find_byte(hashes, nhashes, khh);
+
+            if (idx == nhashes)
+               return local_end_index;
+
+            auto bidx = base + idx;
+            auto kvp  = get_key_val_ptr(bidx);
+            if (kvp->key() == key)
+               return local_index(bidx);
+
+            auto idx_p1 = idx + 1;
+            hashes += idx_p1;
+            nhashes -= idx_p1;
+            base = bidx + 1;
+         }
+         */
+
          key_view hashes = to_key(key_hashes(), num_branches());
-         auto     khh    = key_header_hash(khash);
 
          int base = 0;
          while (true)
          {
             auto idx = hashes.find(khh);
             if (idx == key_view::npos)
-               return local_end_index;
+               return local_index(num_branches());
             auto bidx = base + idx;
             auto kvp  = get_key_val_ptr(bidx);
             if (kvp->key() == key)
@@ -742,7 +767,7 @@ namespace arbtrie
       bool validate() const
       {
          assert(spare_capacity() >= 0);
-         assert(_nsize <= 4096);
+         //         assert(_nsize <= 4096);
          auto nb = num_branches();
          for (int i = 0; i < nb; ++i)
          {
@@ -792,6 +817,35 @@ namespace arbtrie
             }
             ++pos;
          }
+      }
+
+      /**
+       * @param mem an array of id_index to store the branch indices
+       * @param size the size of the mem array reserved for the hints
+       * @return an alloc_hint with a pointer to mem and a count of number of hints, up to size
+       */
+      inline sal::alloc_hint get_branch_alloc_hint(id_index* mem, uint32_t size) const
+      {
+         return sal::alloc_hint::any();
+         //ARBTRIE_WARN("this method shouldn't be called");
+         sal::alloc_hint hint(branch_region(), mem, num_branches());
+         return hint;
+         auto*      mem_pos = mem;
+         auto       start   = key_offsets();
+         auto       pos     = start;
+         const auto end     = start + num_branches();
+         while (pos != end and hint.count < size)
+         {
+            if (pos->type & key_index::obj_id)  // object_id or subtree
+            {
+               assert(get_key_val_ptr_offset(pos->pos)->value_size() == sizeof(id_address));
+               *mem_pos = id_address(get_key_val_ptr_offset(pos->pos)->value_id()).index;
+               ++mem_pos;
+               ++hint.count;
+            }
+            ++pos;
+         }
+         return hint;
       }
 
       // key_index contains the index position + type

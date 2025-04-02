@@ -115,7 +115,7 @@ namespace sal
       // Reserve the maximum virtual address space early to ensure contiguity
       uint64_t max_potential_size = static_cast<uint64_t>(max_blocks) * block_size;
 
-      if (max_potential_size > 0)
+      while (max_potential_size > 0)
       {
          // Try to reserve the entire potential address space without mapping files
          _reserved_base =
@@ -130,15 +130,16 @@ namespace sal
          if (_reserved_base != MAP_FAILED)
          {
             _reservation_size = max_potential_size;
-            sal_debug("Reserved contiguous address space: base={:#x}, size={}",
-                      reinterpret_cast<uintptr_t>(_reserved_base), _reservation_size);
+            SAL_INFO("Reserved contiguous address space:  size={}", _reservation_size);
+            break;
          }
          else
          {
             // Reservation failed - we require this for proper operation
-            SAL_ERROR("Failed to reserve address space of size {}: {}", max_potential_size,
-                      strerror(errno));
-            throw std::runtime_error("Failed to reserve contiguous address space");
+            SAL_ERROR("Failed to reserve address space of size {}: {}, trying lower max",
+                      max_potential_size, strerror(errno));
+            max_potential_size /= 2;
+            //throw std::runtime_error("Failed to reserve contiguous address space");
          }
       }
 
@@ -194,8 +195,8 @@ namespace sal
          throw std::system_error{errno, std::generic_category()};
       }
 
-      _file_size = statbuf->st_size;
-      if (_file_size % block_size != 0)
+      _file_size.store(statbuf->st_size, std::memory_order_relaxed);
+      if (_file_size.load(std::memory_order_relaxed) % block_size != 0)
       {
          // Clean up the reservation before throwing
          if (_reserved_base && _reserved_base != MAP_FAILED)
@@ -207,29 +208,31 @@ namespace sal
          throw std::runtime_error("block file isn't a multiple of block size");
       }
 
-      if (_file_size)
+      if (_file_size.load(std::memory_order_relaxed) > 0)
       {
          auto prot = PROT_READ | PROT_WRITE;
 
          // Map the file at the beginning of our reserved space
          // Release the protection on the portion we need
-         if (::munmap(_reserved_base, _file_size) != 0)
+         if (::munmap(_reserved_base, _file_size.load(std::memory_order_relaxed)) != 0)
          {
             SAL_WARN("Failed to release protection on reserved space: {}", strerror(errno));
             // Continue anyway, trying to map
          }
 
          // Map the file at the exact address of our reserved space
-         _mapped_base = ::mmap(_reserved_base, _file_size, prot, MAP_SHARED | MAP_FIXED, _fd, 0);
+         _mapped_base = ::mmap(_reserved_base, _file_size.load(std::memory_order_relaxed), prot,
+                               MAP_SHARED | MAP_FIXED, _fd, 0);
 
          if (_mapped_base != MAP_FAILED)
          {
             // Successfully mapped the file at the beginning of our reserved space
             sal_debug("Successfully mapped existing file at reserved space: base={:#x}, size={}",
-                      reinterpret_cast<uintptr_t>(_mapped_base), _file_size);
+                      reinterpret_cast<uintptr_t>(_mapped_base),
+                      _file_size.load(std::memory_order_relaxed));
 
             // Calculate how many blocks we have
-            uint32_t block_count = _file_size / _block_size;
+            uint32_t block_count = _file_size.load(std::memory_order_relaxed) / _block_size;
             _num_blocks.store(block_count, std::memory_order_release);
          }
          else
@@ -253,9 +256,10 @@ namespace sal
       if (_fd)
       {
          // Unmap the entire file at once if we have a mapped base
-         if (_mapped_base && _mapped_base != MAP_FAILED && _file_size > 0)
+         if (_mapped_base && _mapped_base != MAP_FAILED &&
+             _file_size.load(std::memory_order_relaxed) > 0)
          {
-            ::munmap(_mapped_base, _file_size);
+            ::munmap(_mapped_base, _file_size.load());
             _mapped_base = nullptr;
          }
 
@@ -271,19 +275,30 @@ namespace sal
       }
    }
 
-   void block_allocator::sync(sync_type st)
+   void block_allocator::fsync(bool full)
    {
-      if (_fd and sync_type::none != st)
+      if (_fd)
       {
-         // We can sync the entire mapped region at once
-         if (_mapped_base && _mapped_base != MAP_FAILED && _file_size > 0)
+#ifdef __APPLE__
+         if (full)
          {
-            ::msync(_mapped_base, _file_size, msync_flag(st));
+            if (fcntl(_fd, F_FULLFSYNC) < 0)
+            {
+               SAL_ERROR("Failed to fsync file: {}", strerror(errno));
+               throw std::system_error(errno, std::generic_category());
+            }
+            return;
+         }
+#endif
+         if (::fsync(_fd) < 0)
+         {
+            SAL_ERROR("Failed to fsync file: {}", strerror(errno));
+            throw std::system_error(errno, std::generic_category());
          }
       }
    }
 
-   uint32_t block_allocator::reserve(uint32_t desired_num_blocks)
+   uint32_t block_allocator::reserve(uint32_t desired_num_blocks, bool mlock)
    {
       if (desired_num_blocks > _max_blocks)
          throw std::runtime_error("unable to reserve, maximum block would be reached");
@@ -291,14 +306,14 @@ namespace sal
       std::lock_guard l{_resize_mutex};
 
       // Calculate current capacity in blocks (how many blocks the file can hold)
-      uint32_t capacity = _file_size / _block_size;
+      uint32_t capacity = _file_size.load(std::memory_order_relaxed) / _block_size;
 
       // Check if we already have enough space reserved in the file
       if (capacity >= desired_num_blocks)
          return capacity;
 
       auto add_count = desired_num_blocks - capacity;
-      auto new_size  = _file_size + _block_size * add_count;
+      auto new_size  = _file_size.load(std::memory_order_relaxed) + _block_size * add_count;
 
       // Resize the file
       if (::ftruncate(_fd, new_size) < 0)
@@ -325,6 +340,13 @@ namespace sal
 
       if (addr != MAP_FAILED)
       {
+         if (mlock)
+         {
+            if (::mlock(addr, map_size) != 0)
+            {
+               SAL_ERROR("Failed to mlock file: {}", strerror(errno));
+            }
+         }
          // Successfully mapped the file
          if (capacity == 0)
          {

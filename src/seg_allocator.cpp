@@ -79,7 +79,7 @@ namespace arbtrie
 
    }  // namespace mapped_memory
 
-   seg_allocator::seg_allocator(std::filesystem::path dir)
+   seg_allocator::seg_allocator(std::filesystem::path dir, runtime_config cfg)
        : _id_alloc(dir / "ids"),
          _block_alloc(dir / "segs", segment_size, max_segment_count),
          _seg_alloc_state_file(dir / "header", access_mode::read_write, true)
@@ -91,9 +91,14 @@ namespace arbtrie
       }
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
+      _mapped_state->_config = cfg;
 
       mlock_pinned_segments();
 
+      start_threads();
+   }
+   void seg_allocator::start_threads()
+   {
       // Initialize and start all threads after _mapped_state is set
       _compactor_thread.emplace(&_mapped_state->compact_thread_state, "compactor",
                                 [this](segment_thread& thread) { compactor_loop(thread); });
@@ -133,6 +138,11 @@ namespace arbtrie
    }
 
    seg_allocator::~seg_allocator()
+   {
+      stop_threads();
+   }
+
+   void seg_allocator::stop_threads()
    {
       // Stop all threads
       if (_read_bit_decay_thread)
@@ -184,8 +194,8 @@ namespace arbtrie
       using namespace std::chrono_literals;
 
       // Initialize current_region from the persisted state
-      uint16_t current_region =
-          _mapped_state->next_clear_read_bit_region.load(std::memory_order_relaxed);
+      auto current_region =
+          id_region(_mapped_state->next_clear_read_bit_region.load(std::memory_order_relaxed));
 
       // Number of total iterations needed to cover all regions (processing at least 1 region per iteration)
       const auto total_iterations_needed = id_alloc::max_regions;
@@ -197,10 +207,10 @@ namespace arbtrie
       while (thread.yield(sleep_duration))
       {
          auto start_time = high_resolution_clock::now();
-         _id_alloc.clear_some_read_bits(current_region, 1);
+         _id_alloc.clear_active_bits(current_region, 1);
 
          // save and update the next region to process, wrapping around because uint16_t
-         _mapped_state->next_clear_read_bit_region.store(++current_region,
+         _mapped_state->next_clear_read_bit_region.store(*(++current_region),
                                                          std::memory_order_relaxed);
 
          // Dynamically calculate sleep time based on window size
@@ -331,15 +341,16 @@ namespace arbtrie
             if (obj_ref.compare_exchange_location(start_loc, new_loc))
             {
                _mapped_state->_cache_difficulty_state.compactor_promote_bytes(header->size());
-               record_freed_space(get_segment_num(start_loc), header);
+               ses.record_freed_space(get_segment_num(start_loc), header);
             }
             else
             {
                if (not ses.unalloc(header->size()))
-                  record_freed_space(get_segment_num(new_loc), new_header);
+                  ses.record_freed_space(get_segment_num(new_loc), new_header);
             }
          }
       }
+      _mapped_state->_cache_difficulty_state.compactor_promote_bytes(0);
       return more_work;
    }
 
@@ -370,7 +381,7 @@ namespace arbtrie
          if (not seg_data.is_read_only(i) or not seg_data.is_pinned(i))
             continue;
          const auto freed_space = seg_data.get_freed_space(i);
-         if (freed_space < segment_size / 8)
+         if (freed_space < _mapped_state->_config.compact_pinned_unused_threshold_mb * 1024 * 1024)
             continue;
 
          int64_t vage = seg_data.get_vage(i);
@@ -420,7 +431,8 @@ namespace arbtrie
             pinned++;
             continue;
          }
-         if (freed_space < segment_size / 2)
+         if (freed_space <
+             _mapped_state->_config.compact_unpinned_unused_threshold_mb * 1024 * 1024)
          {
             insufficient_space++;
             continue;
@@ -446,8 +458,6 @@ namespace arbtrie
          return false;
       }
 
-      ARBTRIE_WARN("compact_unpinned_segments: ", total_qualifying);
-
       // configure the session to not allocate from the pinned segments
       for (int i = 0; i < total_qualifying; ++i)
          compact_segment(ses, qualifying_segments[i].first);
@@ -457,7 +467,7 @@ namespace arbtrie
 
    void seg_allocator::compact_segment(seg_alloc_session& ses, uint64_t seg_num)
    {
-      ARBTRIE_DEBUG("compact_segment: ", seg_num);
+      //      ARBTRIE_ERROR("compact_segment: ", seg_num);
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
 
@@ -516,7 +526,7 @@ namespace arbtrie
 
          if (not obj_ref.compare_exchange_location(expect_loc, loc))
             if (not ses.unalloc(nh->size()))
-               record_freed_space(get_segment_num(loc), head);
+               ses.record_freed_space(get_segment_num(loc), head);
       };  /// end try_copy_node lambda
 
       uint32_t src_vage = s->_vage_accumulator.average_age();
@@ -537,7 +547,7 @@ namespace arbtrie
       // Reset appropriate state fields while preserving pinned state and other flags
       // _mapped_state->_segment_data.meta[seg_num].finalize_compaction();
 
-      ses.sync(sync_type::none, 0, id_address());
+      ses.sync(0, id_address());
 
       // ensures that the segment will not get selected for compaction again until
       // after it is reused by the provider thread.
@@ -608,6 +618,8 @@ namespace arbtrie
          seg_info.freed_objects = 0;
          seg_info.alloc_pos     = seg->get_alloc_pos();
          seg_info.is_pinned     = seg_data.is_pinned(i);
+         seg_info.is_read_only  = seg_data.is_read_only(i);
+         seg_info.is_free       = _mapped_state->_segment_provider.free_segments.test(i);
          seg_info.bitmap_pinned = _mapped_state->_segment_provider.mlock_segments.test(i);
          seg_info.age =
              seg->_provider_sequence;  // TODO: rename seg_info.age to seg_info.provider_sequence
@@ -625,24 +637,30 @@ namespace arbtrie
       // Gather session information
       result.active_sessions = _mapped_state->_session_data.active_session_count();
 
-      /*
       auto fs = _mapped_state->_session_data.free_session_bitmap();
-      for (uint32_t i = 0; i < max_session_count; ++i)
+      for (uint32_t i = 0; i < _mapped_state->_session_data.session_capacity(); ++i)
       {
-         if (fs & (1ull << i))
+         // Check if this bit is not free (0 bit means in use)
+         //if ((fs & (1ull << i)) == 0)
          {
             seg_alloc_dump::session_info session;
-            session.session_num = i;
-            auto p              = _mapped_state->_read_lock_queue.session_lock_ptr(i);
-            session.is_locked   = (uint32_t(p) != uint32_t(-1));
-            session.read_ptr    = uint32_t(p);
-            result.sessions.push_back(session);
+            session.session_num   = i;
+            auto&    session_lock = _mapped_state->_read_lock_queue.get_session_lock(i);
+            uint64_t lock_value   = session_lock.load();
+            session.is_locked     = (uint32_t(lock_value) != uint32_t(-1));
+            session.read_ptr      = uint32_t(lock_value);
+
+            // Get the total bytes written by this session
+            session.total_bytes_written = _mapped_state->_session_data.total_bytes_written(i);
+
+            // Only add sessions with more than 0 bytes written
+            if (session.total_bytes_written > 0)
+               result.sessions.push_back(session);
          }
       }
-      */
 
-      // Gather pending segments information
       /*
+      // Gather pending segments information
       for (auto x = _mapped_state->alloc_ptr.load(); x < _mapped_state->end_ptr.load(); ++x)
       {
          seg_alloc_dump::pending_segment pending;
@@ -679,7 +697,7 @@ namespace arbtrie
             total_branches++;
 
             // Calculate cacheline from the address index - divide by 8 objects  8 bytes each per cacheline
-            uint32_t cacheline = branch_addr.index().to_int() / 8;
+            uint32_t cacheline = *branch_addr.index / 8;
             unique_cachelines.insert(cacheline);
          }
       };
@@ -706,6 +724,7 @@ namespace arbtrie
       uint64_t                    total_bytes         = 0;
       uint32_t                    total_objects       = 0;  // All objects
       uint32_t non_value_nodes = 0;  // Count of non-value nodes for average calculation
+      uint32_t value_nodes     = 0;  // Count of value nodes for average calculation
 
       auto seg  = get_segment(seg_num);
       auto send = (const node_header*)((char*)seg + segment_size);
@@ -718,6 +737,25 @@ namespace arbtrie
       while (foo < send && foo->address())
       {
          if (foo->is_allocator_header())
+         {
+            foo = foo->next();
+            continue;
+         }
+         // Get the object reference for this node
+         auto foo_address = foo->address();
+
+         auto& obj_ref = _id_alloc.get(foo_address);
+         if (obj_ref.ref() == 0)
+         {
+            foo = foo->next();
+            continue;
+         }
+
+         auto current_loc = obj_ref.loc();
+         auto foo_idx     = (char*)foo - (char*)seg;
+
+         // Only count if the object reference is pointing to this exact node
+         if (current_loc.absolute_address() != seg_num * segment_size + foo_idx)
          {
             foo = foo->next();
             continue;
@@ -750,22 +788,11 @@ namespace arbtrie
                non_value_nodes++;  // Count non-value nodes for average calculation
             }
          }
-
-         // Get the object reference for this node
-         auto foo_address = foo->address();
-
-         auto& obj_ref     = _id_alloc.get(foo_address);
-         auto  current_loc = obj_ref.loc();
-         auto  foo_idx     = (char*)foo - (char*)seg;
-
-         // Only count if the object reference is pointing to this exact node
-         if (current_loc.absolute_address() != seg_num * segment_size + foo_idx)
+         else
          {
-            foo = foo->next();
-            continue;
+            // Count all objects
+            value_nodes++;
          }
-         // Count all objects
-         total_objects++;
 
          // Check if the read bit is set and if the location matches
          if (obj_ref.active())
@@ -776,7 +803,10 @@ namespace arbtrie
 
          foo = foo->next();
       }
-
+      //      ARBTRIE_ERROR("segment: ", seg_num, " value_nodes: ", value_nodes,
+      //                    " non_value_nodes: ", non_value_nodes,
+      //                    " free_space: ", _mapped_state->_segment_data.get_freed_space(seg_num));
+      //
       result.nodes_with_read_bit = nodes_with_read_bit;
       result.total_bytes         = total_bytes;
       result.total_objects       = total_objects;

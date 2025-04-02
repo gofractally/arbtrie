@@ -22,9 +22,22 @@ namespace sal
       using region_type = typed_int<uint16_t, struct region_tag>;
       ptr_address() {}
       ptr_address(region_type region, index_type index) : index(index), region(region) {}
+      explicit ptr_address(uint32_t addr)
+          : index(index_type(addr & 0xffff)), region(region_type(addr >> 16))
+      {
+      }
 
       index_type  index;
       region_type region;
+
+      uint32_t                     to_int() const { return uint32_t(*region) << 16 | *index; }
+      static constexpr ptr_address from_int(uint32_t addr)
+      {
+         return ptr_address(region_type(addr >> 16), index_type(addr & 0xffff));
+      }
+      explicit operator bool() const { return bool(index); }
+
+      friend bool operator<=>(const ptr_address& a, const ptr_address& b) = default;
 
       friend std::ostream& operator<<(std::ostream& os, const ptr_address& addr)
       {
@@ -33,7 +46,56 @@ namespace sal
    };
    static_assert(sizeof(ptr_address) == 4, "ptr_address must be 4 bytes");
 
+   /**
+    * operator to combine a region and index into an address
+    */
+   inline ptr_address operator+(ptr_address::region_type r, ptr_address::index_type i)
+   {
+      return ptr_address(r, i);
+   }
+
+   /**
+    * When address are allocated they are assigned a sequence number
+    * which is used to track the order of allocation across threads and
+    * facilitate recovery when multiple segments have the same node with
+    * the same address. 
+    */
+   struct ptr_address_seq
+   {
+      ptr_address address;
+      uint32_t    sequence;
+
+      constexpr ptr_address_seq(ptr_address addr, uint32_t seq) : address(addr), sequence(seq) {}
+
+      constexpr      operator ptr_address() const { return address; }
+      constexpr bool operator==(const ptr_address_seq& other) const = default;
+   };
+
+   /// forward declared internal hint which is the aggregate of alloc_hints
    struct hint;
+
+   /**
+    * The allocator should make its best effort to allocate a new ptr on
+    * the same cacheline as one of the hints. If the allocator can't find
+    * a cacheline with a free slot, it will allocate a new ptr in a new
+    * cacheline that is mostly empty.
+    */
+   struct alloc_hint
+   {
+      alloc_hint(ptr_address::region_type       region,
+                 const ptr_address::index_type* hints,
+                 uint16_t                       count = 1)
+          : region(region), hints(hints), count(count)
+      {
+      }
+      static constexpr alloc_hint any()
+      {
+         return alloc_hint{ptr_address::region_type(0), nullptr, 0};
+      }
+      ptr_address::region_type       region = ptr_address::region_type(0);
+      const ptr_address::index_type* hints  = nullptr;
+      uint16_t                       count  = 0;
+   };
 
    namespace detail
    {
@@ -45,13 +107,13 @@ namespace sal
        * Stores 512 pointers in a region along with
        * index information to help identify free slots.
        */
-      struct page  // 4176 bytes
+      struct alignas(std::hardware_destructive_interference_size) page  // 4176 bytes
       {
          /// 1 bit for each ptr in page::ptrs, 64 bytes 1 cacheline
          std::array<std::atomic<uint64_t>, ptrs_per_page / 64> free_ptrs;
          /// 1 bit for each 64 bit cacheline in page::ptrs that has at least 1 free ptr
          std::atomic<uint64_t> free_cachelines = uint64_t(-1);
-         /// 1 bit for each 64 bit cacheline in page::ptrs with <= 4 free ptr
+         /// 1 bit for each 64 bit cacheline in page::ptrs with 4+ free ptrs
          std::atomic<uint64_t> half_free_cachelines = 0;
 
          auto& get_ptr(ptr_address::index_type index) { return ptrs[ptr_index_on_page(index)]; }
@@ -59,7 +121,7 @@ namespace sal
          page()
          {
             free_cachelines.store(~0ULL, std::memory_order_relaxed);
-            half_free_cachelines.store(0, std::memory_order_relaxed);
+            half_free_cachelines.store(~0ULL, std::memory_order_relaxed);
 
             // the first ptr is always taken, it is the null ptr, and
             // should never be allocated.
@@ -74,7 +136,7 @@ namespace sal
          }
 
          // 64 cachelines, 512 ptrs
-         std::array<shared_ptr, ptrs_per_page> ptrs;
+         alignas(64) std::array<shared_ptr, ptrs_per_page> ptrs;
       };
 
       using page_offset                      = block_allocator::offset_ptr;
@@ -86,6 +148,9 @@ namespace sal
          /// there are at most 128 pages in a region with 512 ptrs per
          /// page giving 2^16 addresses per region.
          std::array<std::atomic<uint64_t>, 2> free_pages;
+
+         /// 1 bit for each page that has at least 1 cacheline with 4+ free ptrs
+         std::array<std::atomic<uint64_t>, 2> free_halfline_pages;
 
          /// page_index of -1 means the page is not allocated,
          /// otherwise it is an offset_ptr into _page_allocator
@@ -108,6 +173,8 @@ namespace sal
                p.store(null_page, std::memory_order_relaxed);
             free_pages[0].store(~0ULL, std::memory_order_relaxed);
             free_pages[1].store(~0ULL, std::memory_order_relaxed);
+            free_halfline_pages[0].store(~0ULL, std::memory_order_relaxed);
+            free_halfline_pages[1].store(~0ULL, std::memory_order_relaxed);
          }
       };
 
@@ -209,9 +276,27 @@ namespace sal
        *  @throw std::runtime_error if no ptrs are available
        *  @return an the address of the allocated ptr and a pointer to the shared_ptr
        */
-      allocation alloc(ptr_address::region_type region,
-                       ptr_address::index_type* hint       = 0,
-                       uint16_t                 hint_count = 0);
+      allocation alloc(ptr_address::region_type region, const alloc_hint& hint = alloc_hint::any());
+      allocation first_avail_alloc(ptr_address::region_type region);
+
+      struct region_stats_t
+      {
+         ptr_address::region_type region;
+         uint16_t                 use;
+      };
+      std::vector<region_stats_t> region_stats() const
+      {
+         std::vector<region_stats_t> stats;
+         stats.reserve(1ull << 16);
+         const auto& pt  = get_page_table();
+         auto&       ruc = pt.region_use_counts;
+         for (uint32_t i = 0; i < (1ull << 16) / 4; ++i)
+         {
+            uint64_t use = ruc[i].load(std::memory_order_relaxed);
+            stats.push_back({ptr_address::region_type(i), uint16_t(use >> (i % 4))});
+         }
+         return stats;
+      }
 
       /// @pre address is a valid pointer address
       void free(ptr_address address);
@@ -253,6 +338,20 @@ namespace sal
       }
 
       /**
+       * @brief Get a shared_ptr by address, allocating it if it doesn't exist
+       * 
+       * This method is used in recovery scenarios where we need to ensure a pointer
+       * exists at a specific address. If the pointer already exists, it returns a
+       * reference to the existing pointer. If it doesn't exist, it allocates a new
+       * pointer at that address.
+       * 
+       * @param address The address to retrieve or allocate at
+       * @return A reference to the shared_ptr at the specified address
+       * @throws std::runtime_error if allocation fails
+       */
+      shared_ptr& get_or_alloc(ptr_address address);
+
+      /**
        * This API is utilized to rebuild the allocator in the event of a 
        * a crash that corrupted the state.
        * @group recovery_api
@@ -272,21 +371,26 @@ namespace sal
       uint64_t used() const;
 
       /**
-       * @brief Calculate statistics on region usage
+       * @brief Calculate summary statistics on region usage
        * @return A struct containing min, max, mean, and standard deviation of region usage
        */
-      struct region_stats_t
+      struct region_usage_summary_t
       {
-         uint16_t min;     ///< Minimum number of used pointers in any non-empty region
-         uint16_t max;     ///< Maximum number of used pointers in any region
-         double   mean;    ///< Average number of used pointers across non-empty regions
-         double   stddev;  ///< Standard deviation of used pointers across non-empty regions
-         uint32_t count;   ///< Number of non-empty regions
+         uint16_t min;          ///< Minimum number of used pointers in any non-empty region
+         uint16_t max;          ///< Maximum number of used pointers in any region
+         double   mean;         ///< Average number of used pointers across non-empty regions
+         double   stddev;       ///< Standard deviation of used pointers across non-empty regions
+         uint32_t count;        ///< Number of non-empty regions
+         uint64_t total_usage;  ///< Total usage count across all regions
       };
-      region_stats_t region_stats() const;
+      region_usage_summary_t get_region_usage_summary() const;
       /// @}
 
+      static constexpr uint32_t max_regions = 1 << 16;
+      void clear_active_bits(ptr_address::region_type start_region, uint32_t num_regions);
+
      private:
+      uint64_t get_region_use_count(ptr_address::region_type region) const;
       /**
        * This class is designed to be accessed by multiple threads, but because it is
        * lock free, it is possible the indices that direct us to free ptrs are read in
@@ -297,7 +401,10 @@ namespace sal
        * @throw std::runtime_error if no ptrs are available
        * @return an allocation if successful, std::nullopt if transient inconsitency detected
        */
-      std::optional<allocation> try_alloc(ptr_address::region_type region, const hint& h);
+      std::optional<allocation> try_alloc(ptr_address::region_type region);
+      std::optional<allocation> try_alloc(detail::region&          reg,
+                                          ptr_address::region_type reg_num,
+                                          ptr_address::index_type  index);
 
       detail::page_number address_index_to_page(ptr_address::index_type address_index)
       {

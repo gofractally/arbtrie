@@ -140,23 +140,40 @@ namespace arbtrie
        *   
        *   Iterators should be long-lived and not recreated for each query.
        */
-   template <iterator_caching_mode CacheMode = noncaching>
-   class iterator
+   template <iterator_caching_mode CacheMode = caching>
+   class iterator : public std::enable_shared_from_this<iterator<CacheMode>>
    {
       friend class arbtrie::read_session;
       friend class arbtrie::write_session;
       friend class arbtrie::mutable_iterator<CacheMode>;
       friend class arbtrie::write_transaction;
 
+     private:
+      struct private_token
+      {
+      };  // Define the private token
+
       iterator(read_session& s, node_handle r);
       iterator(write_session& s, node_handle r);
 
      public:
-      iterator(const iterator& other);
-      iterator(iterator&& other) noexcept;
+      // Constructors made public, require private_token
+      iterator(private_token, read_session& s, node_handle r) : _rs(&s), _root(std::move(r))
+      {
+         clear();
+         push_rend(_root.address());
+      }
+      iterator(private_token, write_session& s, node_handle r);
+      using ptr = std::shared_ptr<iterator<CacheMode>>;
+      // iterators are managed by shared pointers so they don't
+      // need to be copied and moved, and they have a large internal buffer
+      // that would be a bad idea to copy anyway. Lastly, it would invalidate
+      // any transactions that are holding a reference to the iterator.
+      iterator(const iterator& other)     = delete;
+      iterator(iterator&& other) noexcept = delete;
 
-      iterator& operator=(const iterator& other);
-      iterator& operator=(iterator&& other) noexcept;
+      iterator& operator=(const iterator& other)     = delete;
+      iterator& operator=(iterator&& other) noexcept = delete;
 
       static constexpr const int32_t value_nothing = -1;
       static constexpr const int32_t value_subtree = -2;
@@ -378,11 +395,16 @@ namespace arbtrie
       void push_path(id_address oid, local_index branch_index);
       void pop_path();
 
+      template <bool copy_path = true>
       void push_prefix(key_view prefix);
 
+      template <bool copy_path = true>
       void update_branch(key_view new_branch, local_index new_index);
+      template <bool copy_path = true>
       void update_branch(local_index new_index);
+      template <bool copy_path = true>
       void update_branch(char new_branch, local_index new_index);
+      void set_path(key_view key);
 
       local_index current_index() const;
 
@@ -402,10 +424,10 @@ namespace arbtrie
       };
       static_assert(sizeof(path_entry) == sizeof(id_address) + sizeof(uint32_t));
 
-      std::unique_ptr<std::array<path_entry, max_key_length + 1>> _path;
-      std::unique_ptr<std::array<char, max_key_length>>           _branches;
-      path_entry*                                                 _path_back;
-      char*                                                       _branches_end;
+      std::array<path_entry, max_key_length + 1> _path;
+      std::array<char, max_key_length>           _branches;
+      path_entry*                                _path_back;
+      char*                                      _branches_end;
 
       read_session* _rs;
       node_handle   _root;
@@ -425,11 +447,21 @@ namespace arbtrie
      protected:
       friend class write_transaction;
       mutable_iterator(write_session& ws, node_handle r)
-          : iterator<CacheMode>(ws, std::move(r)), _ws(&ws)
+          : iterator<CacheMode>(typename iterator<CacheMode>::private_token{}, ws, std::move(r)),
+            _ws(&ws)
       {
       }
 
      public:
+      struct private_token
+      {
+      };
+      mutable_iterator(private_token, write_session& ws, node_handle r)
+          : iterator<CacheMode>(typename iterator<CacheMode>::private_token{}, ws, std::move(r)),
+            _ws(&ws)
+      {
+      }
+
       using iterator<CacheMode>::root_handle;
       using iterator<CacheMode>::key;
       using iterator<CacheMode>::start;
@@ -452,13 +484,14 @@ namespace arbtrie
       using iterator<CacheMode>::upper_bound;
       using iterator<CacheMode>::reverse_lower_bound;
       using iterator<CacheMode>::reverse_upper_bound;
+      using ptr = std::shared_ptr<mutable_iterator<CacheMode>>;
 
       /**
        * Get a mutable iterator to the subtree at the specified key
        * @param key The key to get the subtree from
-       * @return An optional containing the mutable iterator if a subtree exists at the key, nullopt otherwise
+       * @return A shared pointer to the mutable iterator if a subtree exists at the key, nullptr otherwise
        */
-      std::optional<mutable_iterator<CacheMode>> get_subtree(key_view key) const;
+      ptr get_subtree(key_view key) const;
 
       /**
        * Update or insert a value at the specified key, move to the start()

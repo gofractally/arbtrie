@@ -1,8 +1,10 @@
 #pragma once
+#include <arbtrie/concepts.hpp>
 #include <arbtrie/fast_memcpy.hpp>
 #include <arbtrie/read_lock.hpp>
 #include <arbtrie/seg_alloc_session.hpp>
 
+static uint64_t total_reusable_freed_space[64];
 namespace arbtrie
 {
 
@@ -39,17 +41,25 @@ namespace arbtrie
       return oref;
    }
 
-   inline id_allocation read_lock::get_new_meta_node(id_region reg)
+   /*
+   inline id_allocation read_lock::get_new_ptr(id_region               reg,
+                                               id_address::index_type* index_hints,
+                                               uint16_t                hint_count)
    {
-      return _session._sega._id_alloc.get_new_id(reg);
+      return _session._sega._id_alloc.alloc(reg, index_hints, hint_count);
    }
+   */
 
-   inline object_ref read_lock::alloc(id_region reg, uint32_t size, node_type type, auto init)
+   inline object_ref read_lock::alloc(id_region         reg,
+                                      const alloc_hint& hint,
+                                      uint32_t          size,
+                                      node_type         type,
+                                      auto              init)
    {
       assert(size >= sizeof(node_header));
       assert(type != node_type::undefined);
 
-      auto allocation = _session._sega._id_alloc.get_new_id(reg);
+      auto allocation = _session._sega._id_alloc.alloc(reg, hint);
 
       // alloc_data() starts a modify lock on the allocation segment, which
       // which must be released by calling end_modify() after all writes are done
@@ -63,13 +73,13 @@ namespace arbtrie
 
       assert(type == node_type::value or bool(node_ptr->_branch_id_region));
 
-      allocation.meta.store(temp_meta_type().set_loc(loc).set_ref(1), std::memory_order_release);
+      allocation.ptr->store(temp_meta_type().set_loc(loc).set_ref(1), std::memory_order_release);
 
       assert(node_ptr->_nsize == size);
       assert(node_ptr->_ntype == type);
       assert(node_ptr->_node_id == allocation.address);
 
-      return object_ref(*this, allocation.address, allocation.meta);
+      return object_ref(*this, allocation.address, *allocation.ptr);
    }
 
    /**
@@ -104,7 +114,7 @@ namespace arbtrie
 
    inline void read_lock::free_meta_node(id_address a)
    {
-      _session._sega._id_alloc.free_id(a);
+      _session._sega._id_alloc.free(a);
    }
 
    inline id_region read_lock::get_new_region()
@@ -166,9 +176,10 @@ namespace arbtrie
       if (_rlock.can_modify(loc))
          return (T*)(_observed_ptr = _rlock.get_node_pointer(loc));
 
-      return (T*)(_observed_ptr = copy_on_write(val));
+      return (T*)(_observed_ptr = copy_on_write<T>(val));
    }
 
+   template <typename T>
    inline node_header* modify_lock::copy_on_write(temp_meta_type meta)
    {
       auto loc = meta.loc();
@@ -177,9 +188,24 @@ namespace arbtrie
       auto old_oref = _rlock.get(cur_ptr->address());
       assert(cur_ptr->address() == old_oref.address());
 
-      auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
-                                 { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
-      return _rlock.get_node_pointer(oref.meta_data().loc());
+      if constexpr (is_binary_node<T>)
+      {
+         /// expand to the maximum size of a binary node to make room for new data,
+         /// the compactor will shirnk this back down to the correct size after the
+         /// transaction is committed and the state is "read only", this will minimize
+         /// the number of times we have to copy the node data during a transaction.
+         /// TODO: calculate the the new size, and do an efficient copy. skipping the
+         /// dead space that we are reserving.
+         auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
+                                    { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
+         return _rlock.get_node_pointer(oref.meta_data().loc());
+      }
+      else
+      {
+         auto oref = _rlock.realloc(old_oref, cur_ptr->_nsize, cur_ptr->get_type(), [&](auto ptr)
+                                    { memcpy_aligned_64byte(ptr, cur_ptr, cur_ptr->_nsize); });
+         return _rlock.get_node_pointer(oref.meta_data().loc());
+      }
    }
 
    template <typename T>
@@ -237,6 +263,8 @@ namespace arbtrie
    inline void read_lock::freed_object(segment_number segment, const node_header* obj_ptr)
    {
       _session.record_freed_space(segment, obj_ptr);
+      // if (can_modify(
+      //    total_reusable_freed_space[session_num()] += obj_ptr->size();
    }
 
    inline bool read_lock::is_read_only(node_location loc) const

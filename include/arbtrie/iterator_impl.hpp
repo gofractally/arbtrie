@@ -54,7 +54,7 @@ namespace arbtrie
       std::stringstream ss;
       ss << "'" << key() << "' => ";
       size_t pos = 0;
-      for (size_t i = 0; i < _path->size(); ++i)
+      for (size_t i = 0; i < _path.size(); ++i)
       {
          const auto& entry = (*_path)[i];
          if (&entry > _path_back)
@@ -63,12 +63,12 @@ namespace arbtrie
          if (i > 0)
             ss << " / ";
          // Print prefix
-         ss << "'" << key_view(_branches->data() + pos, entry.prefix_size) << "'";
+         ss << "'" << key_view(_branches.data() + pos, entry.prefix_size) << "'";
          pos += entry.prefix_size;
          // Print branch if it exists
          if (entry.branch_size > 0)
          {
-            ss << " '" << key_view(_branches->data() + pos, entry.branch_size) << "'";
+            ss << " '" << key_view(_branches.data() + pos, entry.branch_size) << "'";
          }
          pos += entry.branch_size;
       }
@@ -78,7 +78,7 @@ namespace arbtrie
    template <iterator_caching_mode CacheMode>
    iterator<CacheMode> iterator<CacheMode>::subtree_iterator() const
    {
-      return iterator<CacheMode>(*_rs, subtree());
+      return iterator<CacheMode>(private_token{}, *_rs, subtree());
    }
    template <iterator_caching_mode CacheMode>
    node_handle iterator<CacheMode>::subtree() const
@@ -429,7 +429,7 @@ namespace arbtrie
       // Handle end() case just like in prev()
       if (is_end()) [[unlikely]]
       {
-         _path_back    = _path->data();
+         _path_back    = _path.data();
          auto oref     = state.get(_path_back->oid);
          _path_back[0] = {
              .oid   = _root.address(),
@@ -463,7 +463,7 @@ namespace arbtrie
 
                               if (nidx <= n->begin_index())
                               {
-                                 if (_path_back != _path->data())
+                                 if (_path_back != _path.data())
                                     return pop_path(), false;  // continue up the tree
 
                                  // if we are at the top of the tree, we are done
@@ -643,10 +643,11 @@ namespace arbtrie
    }
 
    /**
-    * Find an exact key match and invoke callback with the value
+    * Find an exact key match and invoke callback with the value,
+    * moves the iterator to the found key (slower than get())
     * @param key The key to find
     * @param callback Function to call with the value if found
-    * @return Value returned by callback on success
+    * @return true if the key was found, false otherwise
     * @pre Iterator must be valid (valid() == true)
     */
    template <iterator_caching_mode CacheMode>
@@ -662,6 +663,7 @@ namespace arbtrie
    bool iterator<CacheMode>::find_impl(read_lock& state, key_view key)
    {
       ARBTRIE_REQUIRE_ITR_VALID();
+      const auto start_key = key;
       while (true)
       {
          auto oref = state.get(_path_back->oid);
@@ -692,7 +694,10 @@ namespace arbtrie
                  if constexpr (is_inner_node<decltype(n)>)
                  {
                     if (not bkey.size())  // eof value
+                    {
+              //         ARBTRIE_INFO( "found inner eof_value: ", key);
                        return update_branch(nidx), true;  // Record EOF branch and we're done
+                    }
 
                     update_branch(bkey.front(), nidx);  // Record first byte of branch
 
@@ -703,9 +708,12 @@ namespace arbtrie
                     return false;  // Continue search in child node
                  }
                  else  // on binary nodes / value nodes we have to swap the entire key
+                 {
+             //       ARBTRIE_INFO( "found binary node: ", bkey, " nidx = ", nidx);
                     return update_branch(bkey, nidx), true;
-              }))
-            return not is_end();
+                 }
+              })) // end if 
+              { return not is_end(); }
          // clang-format on
       }
       __builtin_unreachable();
@@ -795,14 +803,14 @@ namespace arbtrie
    {
       ARBTRIE_REQUIRE_ITR_VALID();
       if (not is_end())
-         return (*_path)[0].index == rend_index.to_int();
+         return (_path)[0].index == rend_index.to_int();
       return false;
    }
 
    template <iterator_caching_mode CacheMode>
    bool iterator<CacheMode>::is_end() const
    {
-      return _path_back == _path->data() - 1;
+      return _path_back == _path.data() - 1;
    }
 
    template <iterator_caching_mode CacheMode>
@@ -820,7 +828,7 @@ namespace arbtrie
    key_view iterator<CacheMode>::key() const
    {
       ARBTRIE_REQUIRE_ITR_VALID();
-      return to_key(_branches->data(), _branches_end - _branches->data());
+      return to_key(_branches.data(), _branches_end - _branches.data());
    }
 
    /** an iterator is only valid if it has a root node,
@@ -832,9 +840,9 @@ namespace arbtrie
 #ifndef NDEBUG
       if (_root.address())
       {
-         if (_path_back == _path->data() - 1)
+         if (_path_back == _path.data() - 1)
             return true;  // end
-         if (_path_back == _path->data())
+         if (_path_back == _path.data())
          {
             if (_path_back->index == -1)
                assert(_path_back->prefix_size == 0);
@@ -847,11 +855,11 @@ namespace arbtrie
             assert(_path_back->index < end_index.to_int());
          }
          // it should pop _path_back instead
-         // when we are at start() when _path_back = _path->data()
+         // when we are at start() when _path_back = _path.data()
       }
 #endif
       return bool(_root.address());
-      //return _path_back >= _path->data() and _path_back->oid != id_address();
+      //return _path_back >= _path.data() and _path_back->oid != id_address();
    }
 
    template <iterator_caching_mode CacheMode>
@@ -865,7 +873,7 @@ namespace arbtrie
    void iterator<CacheMode>::debug_print(const Args&... args) const
    {
       return;
-      std::cerr << std::string(_path->size() * 4, ' ');
+      std::cerr << std::string(_path.size() * 4, ' ');
       (std::cerr << ... << args) << "\n";
    }
 
@@ -936,41 +944,80 @@ namespace arbtrie
    }
 
    template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::push_prefix(key_view prefix)
    {
-      std::copy(prefix.begin(), prefix.end(), _branches_end);
-      _branches_end += prefix.size();
+      if constexpr (copy_path)
+      {
+         std::copy(prefix.begin(), prefix.end(), _branches_end);
+         _branches_end += prefix.size();
+      }
       _path_back->prefix_size = prefix.size();
       _path_back->branch_size = 0;
    }
 
    template <iterator_caching_mode CacheMode>
+   void iterator<CacheMode>::set_path(key_view key)
+   {
+      std::copy(key.begin(), key.end(), _branches_end);
+      _branches_end += key.size();
+   }
+
+   template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::update_branch(key_view new_branch, local_index new_index)
    {
+      // note... we know that the data pointed at by new_branch and _branches_end is
+      // safe to read and write even though we go beyond the end of the buffer...  so
+      // we can attempt to use faster 8 byte copy of the data...
+
+#if 1 /* safe path */
+      if constexpr (copy_path)
+      {
+         _branches_end -= _path_back->branch_size;
+         std::copy(new_branch.begin(), new_branch.end(), _branches_end);
+         _branches_end += new_branch.size();
+      }
+#else /* safe but sketchy fast path */
       // Adjust size of branches to remove old key and make space for new key
       _branches_end -= _path_back->branch_size;
-      std::copy(new_branch.begin(), new_branch.end(), _branches_end);
+      uint64_t* bend = (uint64_t*)_branches_end;
       _branches_end += new_branch.size();
+      uint64_t*       nend = (uint64_t*)_branches_end;
+      const uint64_t* nbr  = (const uint64_t*)new_branch.data();
+      while (bend < nend)
+      {
+         *bend = *nbr;
+         bend++;
+         nbr++;
+      }
+#endif
 
       _path_back->branch_size = new_branch.size();
       _path_back->index       = new_index.to_int();
    }
 
    template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::update_branch(local_index new_index)
    {
-      _branches_end -= _path_back->branch_size;
+      if constexpr (copy_path)
+         _branches_end -= _path_back->branch_size;
       _path_back->index       = new_index.to_int();
       _path_back->branch_size = 0;
    }
 
    template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::update_branch(char new_branch, local_index new_index)
    {
       // Adjust size of branches to remove old key and make space for new key
-      _branches_end -= _path_back->branch_size;
-      *_branches_end = new_branch;
-      _branches_end++;
+      if constexpr (copy_path)
+      {
+         _branches_end -= _path_back->branch_size;
+         *_branches_end = new_branch;
+         _branches_end++;
+      }
       _path_back->branch_size = 1;
       _path_back->index       = new_index.to_int();
    }
@@ -984,89 +1031,19 @@ namespace arbtrie
    template <iterator_caching_mode CacheMode>
    void iterator<CacheMode>::clear()
    {
-      _branches_end = _branches->data();
-      _path_back    = _path->data() - 1;
+      _branches_end = _branches.data();
+      _path_back    = _path.data() - 1;
    }
-
    template <iterator_caching_mode CacheMode>
-   iterator<CacheMode>::iterator(read_session& s, node_handle r)
-       : _rs(&s),
-         _root(std::move(r)),
-         _path(std::make_unique<std::array<path_entry, max_key_length + 1>>()),
-         _branches(std::make_unique<std::array<char, max_key_length>>())
+   iterator<CacheMode>::iterator(iterator<CacheMode>::private_token,
+                                 write_session& s,
+                                 node_handle    r)
+       : _rs(&s), _root(std::move(r))
    {
       clear();
       push_rend(_root.address());
    }
 
-   template <iterator_caching_mode CacheMode>
-   iterator<CacheMode>::iterator(write_session& s, node_handle r)
-       : _rs(&s),
-         _root(std::move(r)),
-         _path(std::make_unique<std::array<path_entry, max_key_length + 1>>()),
-         _branches(std::make_unique<std::array<char, max_key_length>>())
-   {
-      clear();
-      push_rend(_root.address());
-   }
-
-   template <iterator_caching_mode CacheMode>
-   iterator<CacheMode>::iterator(const iterator& other)
-       : _rs(other._rs),
-         _root(other._root),
-         _path(std::make_unique<std::array<path_entry, max_key_length + 1>>(*other._path)),
-         _branches(std::make_unique<std::array<char, max_key_length>>(*other._branches)),
-         _path_back(_path->data() + (other._path_back - other._path->data())),
-         _branches_end(_branches->data() + (other._branches_end - other._branches->data()))
-   {
-   }
-
-   template <iterator_caching_mode CacheMode>
-   iterator<CacheMode>::iterator(iterator&& other) noexcept
-       : _rs(other._rs),
-         _root(std::move(other._root)),
-         _path(std::move(other._path)),
-         _branches(std::move(other._branches)),
-         _path_back(other._path_back),
-         _branches_end(other._branches_end)
-   {
-      other._path_back    = nullptr;
-      other._branches_end = nullptr;
-      other._rs           = nullptr;
-   }
-
-   template <iterator_caching_mode CacheMode>
-   iterator<CacheMode>& iterator<CacheMode>::operator=(const iterator& other)
-   {
-      if (this != &other)
-      {
-         _rs           = other._rs;
-         _root         = other._root;
-         _path         = std::make_unique<std::array<path_entry, max_key_length + 1>>(*other._path);
-         _branches     = std::make_unique<std::array<char, max_key_length>>(*other._branches);
-         _path_back    = _path->data() + (other._path_back - other._path->data());
-         _branches_end = _branches->data() + (other._branches_end - other._branches->data());
-      }
-      return *this;
-   }
-
-   template <iterator_caching_mode CacheMode>
-   iterator<CacheMode>& iterator<CacheMode>::operator=(iterator&& other) noexcept
-   {
-      if (this != &other)
-      {
-         _rs                 = other._rs;
-         _root               = std::move(other._root);
-         _path               = std::move(other._path);
-         _branches           = std::move(other._branches);
-         _path_back          = other._path_back;
-         _branches_end       = other._branches_end;
-         other._path_back    = nullptr;
-         other._branches_end = nullptr;
-         other._rs           = nullptr;
-      }
-      return *this;
-   }
    size_t count_keys_impl(read_lock& state, id_address root, key_view begin, key_view end);
 
    template <iterator_caching_mode CacheMode>
@@ -1077,7 +1054,7 @@ namespace arbtrie
    }
 
    //==============================================================
-   // Mutable Iterator
+   // Mutable Iterator Public Methods
    //==============================================================
 
    template <iterator_caching_mode CacheMode>
@@ -1230,14 +1207,13 @@ namespace arbtrie
                                return std::nullopt;
                             }))
       {
-         return iterator<CacheMode>(*_rs, std::move(*handle));
+         return iterator<CacheMode>(iterator<CacheMode>::private_token{}, *_rs, std::move(*handle));
       }
       return std::nullopt;
    }
 
    template <iterator_caching_mode CacheMode>
-   std::optional<mutable_iterator<CacheMode>> mutable_iterator<CacheMode>::get_subtree(
-       key_view key) const
+   mutable_iterator<CacheMode>::ptr mutable_iterator<CacheMode>::get_subtree(key_view key) const
    {
       if (auto handle = this->get(key,
                                   [&](const value_type& v) -> std::optional<node_handle>
@@ -1247,9 +1223,10 @@ namespace arbtrie
                                      return std::nullopt;
                                   }))
       {
-         return mutable_iterator<CacheMode>(*_ws, std::move(*handle));
+         return std::make_shared<mutable_iterator<CacheMode>>(
+             mutable_iterator<CacheMode>::private_token{}, *this->_ws, std::move(*handle));
       }
-      return std::nullopt;
+      return nullptr;
    }
 
 }  // namespace arbtrie
