@@ -87,6 +87,12 @@ namespace sal
       }
       return offset;
    }
+   uint64_t shared_ptr_alloc::get_region_use_count(ptr_address::region_type region) const
+   {
+      auto idx   = *region / 4;
+      auto count = get_page_table().region_use_counts[idx].load(std::memory_order_relaxed);
+      return count >> (*region % 4) & 0xffff;
+   }
 
    /**
     * This class is designed to be accessed by multiple threads, but because it is
@@ -121,6 +127,9 @@ namespace sal
                //            SAL_WARN("free_pages[1]: {}", std::bitset<64>(free_pages));
                if (not free_pages)
                {
+                  SAL_ERROR("shared_ptr_alloc: no pointers available in region {}", *region,
+                            " use_count: ", get_region_use_count(region));
+                  return std::nullopt;
                   throw std::runtime_error("shared_ptr_alloc: no pointers available");
                }
             }
@@ -234,6 +243,7 @@ namespace sal
 
    allocation shared_ptr_alloc::alloc(ptr_address::region_type region, const alloc_hint& ahint)
    {
+      assert(region);
       if (ahint.count > 0 && ahint.region != region)
       {
          SAL_ERROR("alloc hint region mismatch: {} != {}", ahint.region, region);
@@ -257,6 +267,7 @@ namespace sal
 
    allocation shared_ptr_alloc::first_avail_alloc(ptr_address::region_type region)
    {
+      assert(region);
       std::optional<allocation> alloc = try_alloc(region);
       int                       count = 0;
       while (!alloc)
@@ -284,6 +295,7 @@ namespace sal
                                                                 ptr_address::region_type reg_num,
                                                                 ptr_address::index_type  index)
    {
+      assert(reg_num);
       auto     page_idx            = address_index_to_page(index);
       auto     page_offset         = reg.get_page_offset(page_idx);
       auto&    pg                  = get_page(page_offset);
@@ -742,16 +754,16 @@ namespace sal
       return total_used;
    }
 
-   shared_ptr_alloc::region_stats_t shared_ptr_alloc::region_stats() const
+   shared_ptr_alloc::region_usage_summary_t shared_ptr_alloc::get_region_usage_summary() const
    {
-      region_stats_t        stats = {UINT16_MAX, 0, 0.0, 0.0, 0};
-      std::vector<uint16_t> counts;
+      region_usage_summary_t stats = {UINT16_MAX, 0, 0.0, 0.0, 0, 0};
+      std::vector<uint16_t>  counts;
 
       // Reserve space for all possible regions (2^16)
       // Each region is a 16-bit value, so total memory is only 128KB
       counts.reserve(1ULL << 16);
 
-      // First pass: collect all non-zero region counts
+      // First pass: collect all non-zero region counts and calculate total usage
       for (size_t i = 0; i < get_page_table().region_use_counts.size(); ++i)
       {
          uint64_t packed_counts =
@@ -763,8 +775,29 @@ namespace sal
                                      static_cast<uint16_t>((packed_counts >> 32) & 0xFFFF),
                                      static_cast<uint16_t>((packed_counts >> 48) & 0xFFFF)};
 
+         // Add all 4 counts to the total usage
+         stats.total_usage +=
+             uint64_t(counts_array[0]) + counts_array[1] + counts_array[2] + counts_array[3];
+
          for (int j = 0; j < 4; ++j)
          {
+            // Calculate the actual region number
+            uint32_t current_region_num = i * 4 + j;
+
+            // Add count to total usage, *excluding* region 0 if it's maxed out
+            if (current_region_num == 0 && counts_array[j] == UINT16_MAX)
+            {
+               // Skip adding region 0's artificial max count to total_usage
+            }
+            else
+            {
+               stats.total_usage += counts_array[j];
+            }
+
+            // Skip region 0 for min/max/mean/stddev calculation
+            if (current_region_num == 0)
+               continue;
+
             if (counts_array[j] > 0)
             {
                // Update min and max
@@ -777,7 +810,10 @@ namespace sal
          }
       }
 
-      // Update count of non-empty regions
+      // Total usage is now calculated correctly within the loop
+      // No need to subtract region 0 count afterwards
+
+      // Update count of non-empty regions (excluding region 0)
       stats.count = counts.size();
 
       // If no regions have pointers, return early with defaults

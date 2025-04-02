@@ -112,6 +112,7 @@ int main(int argc, char** argv)
    int      rounds             = 3;
    int      multithread_rounds = 20;
    int      num_read_threads   = 15;  // Number of concurrent reader threads
+   int      datasize           = 8;
    uint64_t map_size_mb =
        1024 * 4;  // Default initial map size (e.g., 4GB) - MDBX grows automatically
    bool run_dense_rand        = true;
@@ -144,6 +145,7 @@ int main(int argc, char** argv)
         ("get-known-be-seq", po::bool_switch(&run_get_known_be_seq)->default_value(true), "Run get known key big endian seq test")
         ("lower-bound-rand", po::bool_switch(&run_lower_bound_rand)->default_value(true), "Run lower bound random i64 test")
         ("concurrent-rw", po::bool_switch(&run_concurrent_rw)->default_value(true), "Run concurrent read/write test")
+        ("datasize", po::value<int>(&datasize)->default_value(8), "Size of data to insert in bytes")
         ("sync-mode", po::value<std::string>()->default_value("safe"), "Sync mode: safe (SAFE_NOSYNC), none (UTTERLY_NOSYNC), full (SYNC_DURABLE)")
         ("writemap", po::bool_switch()->default_value(false), "Use MDBX_WRITEMAP mode")
         ("map-size-mb", po::value<uint64_t>(&map_size_mb)->default_value(4096), "Initial/Upper geometry limit in MB")
@@ -939,6 +941,7 @@ int main(int argc, char** argv)
             rthreads.emplace_back(read_loop);
          }
 
+         std::vector<char> datav(datasize);
          // Main thread acts as writer
          MDBX_txn* txn = nullptr;
          for (int ro = 0; ro < multithread_rounds; ++ro)
@@ -953,10 +956,11 @@ int main(int argc, char** argv)
             {
                uint64_t val = rand64();  // arb.cpp uses rand64 here too
                MDBX_val key, data;
-               key.iov_base = &val;
-               key.iov_len  = sizeof(val);
-               data         = key;
-               rc           = mdbx_put(txn, dbi, &key, &data, (MDBX_put_flags_t)0);
+               key.iov_base  = &val;
+               key.iov_len   = sizeof(val);
+               data.iov_base = datav.data();
+               data.iov_len  = datasize;
+               rc            = mdbx_put(txn, dbi, &key, &data, (MDBX_put_flags_t)0);
                check_mdbx_rc(rc, "mdbx_put ConcurrentWrite " + std::to_string(i));
                total_items_inserted++;
 

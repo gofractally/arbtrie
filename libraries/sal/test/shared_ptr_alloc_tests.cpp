@@ -874,7 +874,7 @@ TEST_CASE("shared_ptr_alloc region statistics", "[sal][shared_ptr_alloc]")
 
    SECTION("Empty allocator should return default stats")
    {
-      auto stats = alloc.region_stats();
+      auto stats = alloc.get_region_usage_summary();
       REQUIRE(stats.count == 0);
       REQUIRE(stats.min == 0);
       REQUIRE(stats.max == 0);
@@ -912,7 +912,7 @@ TEST_CASE("shared_ptr_alloc region statistics", "[sal][shared_ptr_alloc]")
       }
 
       // Check statistics
-      auto stats = alloc.region_stats();
+      auto stats = alloc.get_region_usage_summary();
 
       // We should have 5 regions with allocations
       REQUIRE(stats.count == 5);
@@ -935,7 +935,7 @@ TEST_CASE("shared_ptr_alloc region statistics", "[sal][shared_ptr_alloc]")
          alloc.free(addr);
       }
 
-      auto updated_stats = alloc.region_stats();
+      auto updated_stats = alloc.get_region_usage_summary();
 
       // Now we should have 4 regions with allocations
       REQUIRE(updated_stats.count == 4);

@@ -5,6 +5,13 @@ set_target_properties(arbt
     PROPERTIES 
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+add_executable(arbdump arbdump.cpp)
+target_link_libraries(arbdump PUBLIC Boost::program_options arbtrie)
+target_include_directories(arbdump PUBLIC ${Boost_INCLUDE_DIRS})
+set_target_properties(arbdump 
+    PROPERTIES 
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 
 if(ENABLE_SANITIZER)
     target_compile_options(arbt PUBLIC -fsanitize=thread -g)

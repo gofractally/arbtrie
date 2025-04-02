@@ -279,6 +279,25 @@ namespace sal
       allocation alloc(ptr_address::region_type region, const alloc_hint& hint = alloc_hint::any());
       allocation first_avail_alloc(ptr_address::region_type region);
 
+      struct region_stats_t
+      {
+         ptr_address::region_type region;
+         uint16_t                 use;
+      };
+      std::vector<region_stats_t> region_stats() const
+      {
+         std::vector<region_stats_t> stats;
+         stats.reserve(1ull << 16);
+         const auto& pt  = get_page_table();
+         auto&       ruc = pt.region_use_counts;
+         for (uint32_t i = 0; i < (1ull << 16) / 4; ++i)
+         {
+            uint64_t use = ruc[i].load(std::memory_order_relaxed);
+            stats.push_back({ptr_address::region_type(i), uint16_t(use >> (i % 4))});
+         }
+         return stats;
+      }
+
       /// @pre address is a valid pointer address
       void free(ptr_address address);
 
@@ -352,24 +371,26 @@ namespace sal
       uint64_t used() const;
 
       /**
-       * @brief Calculate statistics on region usage
+       * @brief Calculate summary statistics on region usage
        * @return A struct containing min, max, mean, and standard deviation of region usage
        */
-      struct region_stats_t
+      struct region_usage_summary_t
       {
-         uint16_t min;     ///< Minimum number of used pointers in any non-empty region
-         uint16_t max;     ///< Maximum number of used pointers in any region
-         double   mean;    ///< Average number of used pointers across non-empty regions
-         double   stddev;  ///< Standard deviation of used pointers across non-empty regions
-         uint32_t count;   ///< Number of non-empty regions
+         uint16_t min;          ///< Minimum number of used pointers in any non-empty region
+         uint16_t max;          ///< Maximum number of used pointers in any region
+         double   mean;         ///< Average number of used pointers across non-empty regions
+         double   stddev;       ///< Standard deviation of used pointers across non-empty regions
+         uint32_t count;        ///< Number of non-empty regions
+         uint64_t total_usage;  ///< Total usage count across all regions
       };
-      region_stats_t region_stats() const;
+      region_usage_summary_t get_region_usage_summary() const;
       /// @}
 
       static constexpr uint32_t max_regions = 1 << 16;
       void clear_active_bits(ptr_address::region_type start_region, uint32_t num_regions);
 
      private:
+      uint64_t get_region_use_count(ptr_address::region_type region) const;
       /**
        * This class is designed to be accessed by multiple threads, but because it is
        * lock free, it is possible the indices that direct us to free ptrs are read in
