@@ -58,11 +58,15 @@ namespace arbtrie
             // If neither trigger hit, no change
             if (!bytes_trigger && !time_trigger)
                return;
-            ARBTRIE_WARN("compactor_update_difficulty: ", elapsed_ms, " target_ms: ", target_ms,
-                         " target_bytes: ", target_bytes, " time_trigger: ", time_trigger,
-                         " bytes_trigger: ", bytes_trigger,
-                         " _recent_bytes_promoted: ", _bytes_promoted_since_last_difficulty_update,
-                         " elapsed_ms: ", elapsed_ms);
+
+            /*
+            if (bytes_trigger)
+               ARBTRIE_WARN("compactor_update_difficulty: ", elapsed_ms, " target_ms: ", target_ms,
+                            " target_bytes: ", target_bytes, " time_trigger: ", time_trigger,
+                            " bytes_trigger: ", bytes_trigger, " _recent_bytes_promoted: ",
+                            _bytes_promoted_since_last_difficulty_update,
+                            " elapsed_ms: ", elapsed_ms);
+                            */
 
             // Current difficulty value
             uint64_t max_uint32         = uint32_t(-1);
@@ -108,10 +112,11 @@ namespace arbtrie
                 probability > 0 ? std::round(1.0 / probability) : max_uint32;
 
             // Print warning with the new difficulty expressed as 1 in N attempts
-            ARBTRIE_WARN("Cache difficulty updated: ", new_difficulty, " (1 in ", attempts_per_hit,
-                         " attempts)",
-                         " bytes_promoted: ", _bytes_promoted_since_last_difficulty_update,
-                         " elapsed_ms: ", elapsed_ms, " probability: ", probability);
+
+            //            ARBTRIE_WARN("Cache difficulty updated: ", new_difficulty, " (1 in ", attempts_per_hit,
+            //                        " attempts)",
+            //                         " bytes_promoted: ", _bytes_promoted_since_last_difficulty_update,
+            //                         " elapsed_ms: ", elapsed_ms, " probability: ", probability);
 
             // Update the internal member directly
             _cache_difficulty.store(new_difficulty, std::memory_order_relaxed);

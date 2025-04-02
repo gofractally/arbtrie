@@ -533,7 +533,7 @@ namespace arbtrie
       database(std::filesystem::path dir, runtime_config = {}, access_mode = read_write);
       ~database();
 
-      static void create(std::filesystem::path dir, runtime_config = {});
+      static std::shared_ptr<database> create(std::filesystem::path dir, runtime_config = {});
 
       /**
        * @brief Start a new write session for modifying the database

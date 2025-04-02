@@ -125,8 +125,9 @@ int main(int argc, char** argv)
    bool run_lower_bound_rand  = true;
    bool run_concurrent_rw     = true;
 
-   unsigned mdbx_sync_flags = MDBX_SAFE_NOSYNC;  // Default to fast but safe sync mode
-   unsigned mdbx_env_flags  = MDBX_LIFORECLAIM | MDBX_NOSUBDIR;  // Flags for mdbx_env_open
+   unsigned mdbx_sync_flags =
+       MDBX_SAFE_NOSYNC | MDBX_NOMETASYNC;  // Default to fast but safe sync mode
+   unsigned mdbx_env_flags = MDBX_LIFORECLAIM | MDBX_NOSUBDIR;  // Flags for mdbx_env_open
 
    // clang-format off
     po::options_description desc("MDBX Benchmark Options");

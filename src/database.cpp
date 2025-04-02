@@ -265,7 +265,7 @@ namespace arbtrie
             }
          }
       }
-      _dbm->config         = cfg;
+      set_runtime_config(cfg);
       _dbm->clean_shutdown = false;
    }
 
@@ -275,7 +275,7 @@ namespace arbtrie
       _dbfile.sync(sync_type::full);
    }
 
-   void database::create(std::filesystem::path dir, runtime_config cfg)
+   std::shared_ptr<database> database::create(std::filesystem::path dir, runtime_config cfg)
    {
       if (std::filesystem::exists(std::filesystem::symlink_status(dir / "db")) ||
           std::filesystem::exists(std::filesystem::symlink_status(dir / "data")))
@@ -283,7 +283,7 @@ namespace arbtrie
 
       std::filesystem::create_directories(dir / "data");
 
-      std::make_shared<database>(dir, cfg, access_mode::read_write);
+      return std::make_shared<database>(dir, cfg, access_mode::read_write);
    }
 
    void database::print_stats(std::ostream& os, bool detail)
@@ -496,9 +496,11 @@ namespace arbtrie
 
       if constexpr (mode.is_remove())
       {
+         //   ARBTRIE_WARN(root.address(), " remove value ", to_hex(key));
          if (vn->key() == key)
          {
-            _delta_keys = -1;
+            _old_value_size = vn->value_size();
+            _delta_keys     = -1;
             return id_address();
          }
          if constexpr (mode.must_remove())
@@ -1105,8 +1107,6 @@ namespace arbtrie
                id_address new_id = upsert_eof_value<mode>(old_val);
                if (new_id != val_nid)
                {
-                  ARBTRIE_WARN("new id: ", new_id, " old val: ", val_nid);
-                  ARBTRIE_WARN("replacing..");
                   r.modify().as<NodeType>()->set_eof(new_id);
                   release_node(old_val);
                }
@@ -2023,6 +2023,8 @@ namespace arbtrie
       // Assert that _mapped_state is valid
       assert(_sega._mapped_state && "seg_allocator's mapped_state must be valid");
       _sega._mapped_state->_config = cfg;
+      _sega._mapped_state->_segment_provider.max_mlocked_segments =
+          cfg.max_pinned_cache_size_mb * 1024 * 1024 / segment_size;
 
       // Potentially need to signal or update other components (like seg_allocator)
       // if they depend on these config values.

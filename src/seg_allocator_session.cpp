@@ -220,7 +220,8 @@ namespace arbtrie
          // sync() will write an allocation_header, and this header is space that
          // can be reclaimed if compacted, so we need to record it in the meta data
          // for easy access by the compactor
-         _sega.record_session_write(_session_num, seg->sync(st, top_root_index, top_root));
+         _sega.record_session_write(
+             _session_num, seg->sync(st, top_root_index, top_root, _sega._mapped_state->_config));
          auto ahead = seg->get_last_aheader();
          //   ARBTRIE_INFO("sync: segment: ", seg_num, " free_space: ", seg->free_space(),
          //                " ahead: ", ahead->_nsize);

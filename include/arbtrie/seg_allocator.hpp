@@ -50,6 +50,9 @@ namespace arbtrie
       seg_allocator(std::filesystem::path dir, runtime_config cfg);
       ~seg_allocator();
 
+      void stop_threads();
+      void start_threads();
+
       /**
        * Debugging methods
        * @group Debugging
@@ -333,7 +336,6 @@ namespace arbtrie
             // back takes the lowest priority segment, without ack means it will
             // not send a signal to the provider to mlock the segment
             segnum = _mapped_state->_segment_provider.ready_unpinned_segments.pop();
-            ARBTRIE_WARN("get_new_segment unpinned: ", segnum);
          }
          return {segnum, get_segment(segnum)};
       }

@@ -374,49 +374,6 @@ void test_refactor();
 int  main(int argc, char** argv)
 {
    arbtrie::thread_name("main");
-
-   std::optional<node_handle> last_root;
-   std::optional<node_handle> last_root2;
-   int                        rounds             = 3;
-   int                        multithread_rounds = 20;
-   namespace po                                  = boost::program_options;
-   // clang-format off
-   po::options_description desc("Test options");
-   desc.add_options()
-      ("help,h", "Print help message")
-      ("dense-rand", po::bool_switch()->default_value(true), "Run dense random insert test")
-      ("little-endian-seq", po::bool_switch()->default_value(true), "Run little endian sequential insert test")
-      ("big-endian-seq", po::bool_switch()->default_value(true), "Run big endian sequential insert test")
-      ("big-endian-rev", po::bool_switch()->default_value(true), "Run big endian reverse sequential insert test")
-      ("rand-string", po::bool_switch()->default_value(true), "Run random string insert test")
-      ("sync", po::value<sync_type>()->default_value(sync_type::mprotect), "none, mprotect, msync_async, msync_sync, fsync, full")
-      ("enable-read-cache", po::bool_switch()->default_value(true), "Read threads will promote data to pinned memory")
-      ("count", po::value<int>()->default_value(1000000), "Number of items to insert")
-      ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch")
-      ("compacted-pinned-threshold-mb", po::value<int>()->default_value(16), 
-                "How much unused space is tolerated before compacting pinned segments, "
-                "increases SSD wear if in sync mode and this is low, but boosts performance "
-                " if you can keep more pinned memory doing useful stuff, max 32MB")
-      ("compacted-unpinned-threshold-mb", po::value<int>()->default_value(16), 
-                "How much unused space is tolerated before compacting unpinned segments, "
-                "increases SSD wear, but reduces space used if low, if high it will save your "
-                " SSD from wear but consume more storage, max 32MB")
-      ("rounds", po::value<int>()->default_value(3), "Number of rounds to run")
-      ("multithread-rounds", po::value<int>()->default_value(20), "Number of multi-thread rounds to run")
-      ("max-pinned-cache-size-mb", po::value<int>()->default_value(1024), "Amount of RAM to pin in memory, multiple of 32 MB");
-   // clang-format on
-
-   po::variables_map vm;
-   po::store(po::parse_command_line(argc, argv, desc), vm);
-   po::notify(vm);
-
-   if (vm.count("help"))
-   {
-      std::cout << desc << "\n";
-      return 0;
-   }
-
-
    //test_binary_node();
    //   test_refactor();
    //   return 0;
@@ -457,6 +414,49 @@ int  main(int argc, char** argv)
 
       do
       {
+         std::optional<node_handle> last_root;
+         std::optional<node_handle> last_root2;
+         int                        rounds             = 3;
+         int                        multithread_rounds = 20;
+         int                        data_size          = 8;
+         namespace po                                  = boost::program_options;
+         // clang-format off
+         po::options_description desc("Test options");
+         desc.add_options()
+            ("help,h", "Print help message")
+            ("dense-rand", po::bool_switch()->default_value(true), "Run dense random insert test")
+            ("little-endian-seq", po::bool_switch()->default_value(true), "Run little endian sequential insert test")
+            ("big-endian-seq", po::bool_switch()->default_value(true), "Run big endian sequential insert test")
+            ("big-endian-rev", po::bool_switch()->default_value(true), "Run big endian reverse sequential insert test")
+            ("rand-string", po::bool_switch()->default_value(true), "Run random string insert test")
+            ("sync", po::value<sync_type>()->default_value(sync_type::mprotect), "none, mprotect, msync_async, msync_sync, fsync, full")
+            ("enable-read-cache", po::bool_switch()->default_value(true), "Read threads will promote data to pinned memory")
+            ("count", po::value<int>()->default_value(1000000), "Number of items to insert")
+            ("batch-size", po::value<int>()->default_value(100), "Number of items to insert per batch")
+            ("compacted-pinned-threshold-mb", po::value<int>()->default_value(16), 
+                      "How much unused space is tolerated before compacting pinned segments, "
+                      "increases SSD wear if in sync mode and this is low, but boosts performance "
+                      " if you can keep more pinned memory doing useful stuff, max 32MB")
+            ("compacted-unpinned-threshold-mb", po::value<int>()->default_value(16), 
+                      "How much unused space is tolerated before compacting unpinned segments, "
+                      "increases SSD wear, but reduces space used if low, if high it will save your "
+                      " SSD from wear but consume more storage, max 32MB")
+            ("rounds", po::value<int>()->default_value(3), "Number of rounds to run")
+            ("datasize", po::value<int>()->default_value(8), "Number of bytes in the key")
+            ("multithread-rounds", po::value<int>()->default_value(20), "Number of multi-thread rounds to run")
+            ("max-pinned-cache-size-mb", po::value<int>()->default_value(1024), "Amount of RAM to pin in memory, multiple of 32 MB");
+         // clang-format on
+
+         po::variables_map vm;
+         po::store(po::parse_command_line(argc, argv, desc), vm);
+         po::notify(vm);
+
+         if (vm.count("help"))
+         {
+            std::cout << desc << "\n";
+            return 0;
+         }
+
          const int count                          = vm["count"].as<int>();
          batch_size                               = vm["batch-size"].as<int>();
          rounds                                   = vm["rounds"].as<int>();
@@ -466,6 +466,7 @@ int  main(int argc, char** argv)
          cfg.compact_unpinned_unused_threshold_mb = vm["compacted-unpinned-threshold-mb"].as<int>();
          cfg.sync_mode                            = vm["sync"].as<sync_type>();
          cfg.enable_read_cache                    = vm["enable-read-cache"].as<bool>();
+         data_size                                = vm["datasize"].as<int>();
 
          ARBTRIE_WARN("count: ", count);
          ARBTRIE_WARN("batch size: ", batch_size);
@@ -770,18 +771,26 @@ int  main(int argc, char** argv)
 
          std::vector<std::unique_ptr<std::thread>> rthreads;
          rthreads.reserve(15);
-         std::atomic<bool>    done = false;
-         std::atomic<int64_t> read_count;
-         std::mutex           _lr_mutex;
+         std::atomic<bool>     done = false;
+         std::atomic<int64_t>  read_count;
+         std::mutex            _lr_mutex;
+         std::vector<uint64_t> inserted_numbers;
+         inserted_numbers.resize(multithread_rounds * count);
+         std::atomic<uint64_t> inserted_numbers_round(1);
+
+         char data[data_size];
 
          for (uint32_t i = 0; i < rthreads.capacity(); ++i)
          {
             auto read_loop = [&]()
             {
+               std::vector<char> buf;
+               buf.resize(8);
                arbtrie::thread_name("read_thread");
-               auto    rs = db.start_read_session();
-               int64_t tc = 0;
-               int     cn = 0;
+               auto     rs    = db.start_read_session();
+               int64_t  tc    = 0;
+               int      cn    = 0;
+               uint64_t round = inserted_numbers_round.load(std::memory_order_relaxed) * count;
                while (not done.load(std::memory_order_relaxed))
                {
                   int  roundc = 100000;
@@ -792,8 +801,13 @@ int  main(int argc, char** argv)
                      ++added;
                      // uint64_t val = XXH64(&i, sizeof(i), 0);
                      uint64_t val = rand64();
+                     val          = inserted_numbers[val % round];
                      key_view kstr((char*)&val, sizeof(val));
-                     rtx->lower_bound(kstr);
+                     if (rtx->valid())
+                     {
+                        //  rtx->lower_bound(kstr);
+                        rtx->get(kstr, &buf);
+                     }
                      if ((i & 0x4ff) == 0)
                      {
                         read_count.fetch_add(added, std::memory_order_relaxed);
@@ -815,17 +829,19 @@ int  main(int argc, char** argv)
             auto start = std::chrono::steady_clock::now();
             for (int i = 0; i < count; ++i)
             {
-               uint64_t val = rand64();
-               auto     str = std::to_string(val);
+               uint64_t val                     = rand64();
+               inserted_numbers[ro * count + i] = val;
+               // auto     str = std::to_string(val);
                ++seq;
                key_view kstr((char*)&val, sizeof(val));
-               tx->insert(kstr, kstr);
+               key_view data_key(data, data_size);
+               tx->insert(kstr, data_key);
                if (i % batch_size == 0)
                   tx->commit_and_continue();
             }
             auto end   = std::chrono::steady_clock::now();
             auto delta = end - start;
-
+            inserted_numbers_round.fetch_add(1, std::memory_order_relaxed);
             tx->commit_and_continue();
 
             std::cout << ro << "] " << std::setw(12)
@@ -842,6 +858,104 @@ int  main(int argc, char** argv)
          done = true;
          for (auto& r : rthreads)
             r->join();
+
+         auto find_all = [&](const int64_t start_idx)
+         {
+            ARBTRIE_WARN("find all from ", start_idx, " ", multithread_rounds,
+                         " start_idx/multithread_rounds: ", start_idx / count);
+            for (int ro = start_idx / count; ro < multithread_rounds; ++ro)
+            {
+               ARBTRIE_WARN(" find all from ", start_idx);
+               auto start = std::chrono::steady_clock::now();
+               for (int i = start_idx % count; i < count; ++i)
+               {
+                  uint64_t val = inserted_numbers[ro * multithread_rounds + i];
+                  //auto     str = std::to_string(val);
+                  key_view kstr((char*)&val, sizeof(val));
+                  if (not tx->find(kstr))
+                  {
+                     ARBTRIE_ERROR("something broke: ", val, " ro: ", ro, " i: ", i,
+                                   " start_idx: ", start_idx);
+                     abort();
+                     ro = multithread_rounds;
+                     break;
+                  }
+                  /*
+               auto result = tx->remove(kstr);
+               if (result != 8)
+               {
+                  ARBTRIE_ERROR("something broke: ", result);
+                  ro = multithread_rounds;
+                  break;
+               }
+                  if (i % batch_size == 0)
+                     tx->commit_and_continue();
+               */
+               }
+               auto end   = std::chrono::steady_clock::now();
+               auto delta = end - start;
+
+               std::cout << ro << "] " << std::setw(12)
+                         << add_comma(int64_t(
+                                (count) /
+                                (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
+                         << " dense rand find/sec  total found items: " << add_comma(count) << "\n";
+            }
+         };
+         find_all(0);
+         for (int ro = 0; ro < multithread_rounds; ++ro)
+         {
+            ARBTRIE_WARN("init count: ", tx->count_keys());
+            auto init_count = tx->count_keys();
+            auto start      = std::chrono::steady_clock::now();
+            for (int i = 0; i < count; ++i)
+            {
+               //find_all(ro * count + i);
+               uint64_t val = inserted_numbers[ro * count + i];
+               //    ARBTRIE_WARN("removing ", val, " ro: ", ro, " i: ", i);
+               //auto     str = std::to_string(val);
+               key_view kstr((char*)&val, sizeof(val));
+               /*
+               if (not tx->find(kstr))
+               {
+                  ARBTRIE_ERROR("something broke: ", val, " ro: ", ro, " i: ", i);
+                  ro = multithread_rounds;
+                  break;
+               }
+               if (not tx->find(kstr))
+               {
+                  ARBTRIE_ERROR("unable to find before remove: ", val, " ro: ", ro, " i: ", i);
+                  abort();
+                  ro = multithread_rounds;
+                  break;
+               }
+               */
+               auto result = tx->remove(kstr);
+               if (result != 8)
+               {
+                  ARBTRIE_ERROR("something broke: ", result, " val: ", val, " ro: ", ro, " i: ", i);
+                  abort();
+                  ro = multithread_rounds;
+                  break;
+               }
+            }
+            auto end   = std::chrono::steady_clock::now();
+            auto delta = end - start;
+            if (tx->count_keys() != init_count - count)
+            {
+               ARBTRIE_ERROR("something broke: ", tx->count_keys(), " init_count: ", init_count);
+               abort();
+            }
+
+            tx->commit_and_continue();
+
+            std::cout << ro << "] " << std::setw(12)
+                      << add_comma(int64_t(
+                             (count) /
+                             (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
+                      << " dense rand remove/sec  total items: " << add_comma(init_count - count)
+                      << "\n";
+         }
 
          ARBTRIE_WARN("sleeping for 1 seconds");
          std::this_thread::sleep_for(std::chrono::seconds(1));

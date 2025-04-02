@@ -200,7 +200,7 @@ namespace arbtrie
       // Track the maximum location width seen so far
       inline size_t& max_location_width()
       {
-         static size_t width = 25;  // Start with default width of 25
+         static thread_local size_t width = 25;  // Start with default width of 25
          return width;
       }
 

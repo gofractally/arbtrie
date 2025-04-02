@@ -146,7 +146,7 @@ namespace arbtrie
        * 
        * This should be a multiple of the segment size
        */
-      uint64_t max_pinned_cache_size_mb = 1024;
+      uint64_t max_pinned_cache_size_mb = 1024 * 8;
 
       /**
        * The default is 1 hour, and this impacts the
@@ -155,7 +155,7 @@ namespace arbtrie
        * changing access patterns, but are more effecient
        * with respect to CPU and SSD wear. 
        */
-      uint64_t read_cache_window_sec = 60 * 60;
+      uint64_t read_cache_window_sec = 60 * 60 * 5;
 
       /**
        * When true, read operations will promote
@@ -204,6 +204,23 @@ namespace arbtrie
        *    each OS and hardware configuration is different.
        */
       sync_type sync_mode = sync_type::none;
+
+      /**
+       * Every commit advances the write-protected region of
+       * memory, at this time there is an opportunity to calculate
+       * the checksum of the segment(s) that are being frozen; however
+       * this information is only useful for detecting corruption, and
+       * not recovering from corruption. 
+       * 
+       * Indepdnent of this checksum there is also a 1 byte checksum
+       * on every key/value pair that is stored in binary nodes, and
+       * each node also has a 1 byte checksum which is updated on
+       * commit. 
+       * 
+       * This is more expensive, but it will detect corruption
+       * of data at rest. This is about a 10% performance hit.
+       */
+      bool checksum_commits = false;
 
       /**
        * Calculating the checksum is expensive and mostly
@@ -297,6 +314,8 @@ namespace arbtrie
    // On M2+ macs this is 128, use std::hardware_destructive_interference_size
    // if you need the real cacheline size, we assume 64 for most x86 architectures
    static constexpr const uint32_t cacheline_size = 64;
+
+   static constexpr const bool use_alloc_hints = true;
 
    // the largest object that will attempt to be promoted to pinned cache,
    // the goal of the cache is to avoid disk cache misses. This would ideally

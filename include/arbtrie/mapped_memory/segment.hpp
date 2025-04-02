@@ -223,7 +223,10 @@ namespace arbtrie
          }
 
          /// @return the total bytes synced/written by this session
-         uint64_t sync(sync_type st, int top_root_index, id_address top_root)
+         uint64_t sync(sync_type             st,
+                       int                   top_root_index,
+                       id_address            top_root,
+                       const runtime_config& cfg)
          {
             auto  alloc_pos          = get_alloc_pos();
             char* alloc_ptr          = data + alloc_pos;
@@ -254,8 +257,9 @@ namespace arbtrie
             auto new_alloc_pos = std::min<uint32_t>(next_page_pos, end_pos());
 
             // Set size to reach page boundary
-            ahead->_nsize    = new_alloc_pos - alloc_pos;
-            ahead->_checksum = XXH3_64bits(data + ahead->_start_checksum_pos, cheksum_size);
+            ahead->_nsize = new_alloc_pos - alloc_pos;
+            if (cfg.checksum_commits)
+               ahead->_checksum = XXH3_64bits(data + ahead->_start_checksum_pos, cheksum_size);
 
             auto old_first_writable_page_pos =
                 uint32_t(_first_writable_page.load(std::memory_order_relaxed))

@@ -199,7 +199,7 @@ namespace sal
          SAL_ERROR("alloc hint region mismatch: {} != {}", ahint.region, region);
          abort();
       }
-      if constexpr (false /*use_alloc_hints*/)
+      if constexpr (true /*use_alloc_hints*/)
       {
          auto&       reg = get_page_table().regions[*region];
          const auto* end = ahint.hints + ahint.count;

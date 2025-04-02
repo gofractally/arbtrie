@@ -643,10 +643,11 @@ namespace arbtrie
    }
 
    /**
-    * Find an exact key match and invoke callback with the value
+    * Find an exact key match and invoke callback with the value,
+    * moves the iterator to the found key (slower than get())
     * @param key The key to find
     * @param callback Function to call with the value if found
-    * @return Value returned by callback on success
+    * @return true if the key was found, false otherwise
     * @pre Iterator must be valid (valid() == true)
     */
    template <iterator_caching_mode CacheMode>
@@ -662,6 +663,7 @@ namespace arbtrie
    bool iterator<CacheMode>::find_impl(read_lock& state, key_view key)
    {
       ARBTRIE_REQUIRE_ITR_VALID();
+      const auto start_key = key;
       while (true)
       {
          auto oref = state.get(_path_back->oid);
@@ -693,7 +695,7 @@ namespace arbtrie
                  {
                     if (not bkey.size())  // eof value
                     {
-                       ARBTRIE_INFO( "found inner eof_value: ", key);
+              //         ARBTRIE_INFO( "found inner eof_value: ", key);
                        return update_branch(nidx), true;  // Record EOF branch and we're done
                     }
 
@@ -707,11 +709,11 @@ namespace arbtrie
                  }
                  else  // on binary nodes / value nodes we have to swap the entire key
                  {
-                    ARBTRIE_INFO( "found binary node: ", bkey, " nidx = ", nidx);
+             //       ARBTRIE_INFO( "found binary node: ", bkey, " nidx = ", nidx);
                     return update_branch(bkey, nidx), true;
                  }
-              }))
-            return not is_end();
+              })) // end if 
+              { return not is_end(); }
          // clang-format on
       }
       __builtin_unreachable();
@@ -942,15 +944,27 @@ namespace arbtrie
    }
 
    template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::push_prefix(key_view prefix)
    {
-      std::copy(prefix.begin(), prefix.end(), _branches_end);
-      _branches_end += prefix.size();
+      if constexpr (copy_path)
+      {
+         std::copy(prefix.begin(), prefix.end(), _branches_end);
+         _branches_end += prefix.size();
+      }
       _path_back->prefix_size = prefix.size();
       _path_back->branch_size = 0;
    }
 
    template <iterator_caching_mode CacheMode>
+   void iterator<CacheMode>::set_path(key_view key)
+   {
+      std::copy(key.begin(), key.end(), _branches_end);
+      _branches_end += key.size();
+   }
+
+   template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::update_branch(key_view new_branch, local_index new_index)
    {
       // note... we know that the data pointed at by new_branch and _branches_end is
@@ -958,9 +972,12 @@ namespace arbtrie
       // we can attempt to use faster 8 byte copy of the data...
 
 #if 1 /* safe path */
-      _branches_end -= _path_back->branch_size;
-      std::copy(new_branch.begin(), new_branch.end(), _branches_end);
-      _branches_end += new_branch.size();
+      if constexpr (copy_path)
+      {
+         _branches_end -= _path_back->branch_size;
+         std::copy(new_branch.begin(), new_branch.end(), _branches_end);
+         _branches_end += new_branch.size();
+      }
 #else /* safe but sketchy fast path */
       // Adjust size of branches to remove old key and make space for new key
       _branches_end -= _path_back->branch_size;
@@ -981,20 +998,26 @@ namespace arbtrie
    }
 
    template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::update_branch(local_index new_index)
    {
-      _branches_end -= _path_back->branch_size;
+      if constexpr (copy_path)
+         _branches_end -= _path_back->branch_size;
       _path_back->index       = new_index.to_int();
       _path_back->branch_size = 0;
    }
 
    template <iterator_caching_mode CacheMode>
+   template <bool copy_path>
    void iterator<CacheMode>::update_branch(char new_branch, local_index new_index)
    {
       // Adjust size of branches to remove old key and make space for new key
-      _branches_end -= _path_back->branch_size;
-      *_branches_end = new_branch;
-      _branches_end++;
+      if constexpr (copy_path)
+      {
+         _branches_end -= _path_back->branch_size;
+         *_branches_end = new_branch;
+         _branches_end++;
+      }
       _path_back->branch_size = 1;
       _path_back->index       = new_index.to_int();
    }

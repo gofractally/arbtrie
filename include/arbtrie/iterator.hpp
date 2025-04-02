@@ -395,11 +395,16 @@ namespace arbtrie
       void push_path(id_address oid, local_index branch_index);
       void pop_path();
 
+      template <bool copy_path = true>
       void push_prefix(key_view prefix);
 
+      template <bool copy_path = true>
       void update_branch(key_view new_branch, local_index new_index);
+      template <bool copy_path = true>
       void update_branch(local_index new_index);
+      template <bool copy_path = true>
       void update_branch(char new_branch, local_index new_index);
+      void set_path(key_view key);
 
       local_index current_index() const;
 
