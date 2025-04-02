@@ -775,7 +775,7 @@ int  main(int argc, char** argv)
          std::atomic<int64_t>  read_count;
          std::mutex            _lr_mutex;
          std::vector<uint64_t> inserted_numbers;
-         inserted_numbers.resize(multithread_rounds * count);
+         //  inserted_numbers.resize(multithread_rounds * count);
          std::atomic<uint64_t> inserted_numbers_round(1);
 
          char data[data_size];
@@ -801,12 +801,12 @@ int  main(int argc, char** argv)
                      ++added;
                      // uint64_t val = XXH64(&i, sizeof(i), 0);
                      uint64_t val = rand64();
-                     val          = inserted_numbers[val % round];
+                     //val          =numptrs inserted_numbers[val % round];
                      key_view kstr((char*)&val, sizeof(val));
                      if (rtx->valid())
                      {
-                        //  rtx->lower_bound(kstr);
-                        rtx->get(kstr, &buf);
+                        rtx->lower_bound(kstr);
+                        //                rtx->get(kstr, &buf);
                      }
                      if ((i & 0x4ff) == 0)
                      {
@@ -821,38 +821,49 @@ int  main(int argc, char** argv)
             rthreads.emplace_back(new std::thread(read_loop));
          }
 
-         std::cout << "insert dense rand while reading " << rthreads.size()
-                   << " threads  batch size: " << batch_size << " for " << multithread_rounds
-                   << " rounds\n";
-         for (int ro = 0; ro < multithread_rounds; ++ro)
+         try
          {
-            auto start = std::chrono::steady_clock::now();
-            for (int i = 0; i < count; ++i)
+            std::cout << "insert dense rand while reading " << rthreads.size()
+                      << " threads  batch size: " << batch_size << " for " << multithread_rounds
+                      << " rounds\n";
+            for (int ro = 0; ro < multithread_rounds; ++ro)
             {
-               uint64_t val                     = rand64();
-               inserted_numbers[ro * count + i] = val;
-               // auto     str = std::to_string(val);
-               ++seq;
-               key_view kstr((char*)&val, sizeof(val));
-               key_view data_key(data, data_size);
-               tx->insert(kstr, data_key);
-               if (i % batch_size == 0)
-                  tx->commit_and_continue();
-            }
-            auto end   = std::chrono::steady_clock::now();
-            auto delta = end - start;
-            inserted_numbers_round.fetch_add(1, std::memory_order_relaxed);
-            tx->commit_and_continue();
+               auto start = std::chrono::steady_clock::now();
+               for (int i = 0; i < count; ++i)
+               {
+                  uint64_t val                     = rand64();
+                  inserted_numbers[ro * count + i] = val;
+                  // auto     str = std::to_string(val);
+                  ++seq;
+                  key_view kstr((char*)&val, sizeof(val));
+                  key_view data_key(data, data_size);
+                  tx->insert(kstr, data_key);
+                  if (i % batch_size == 0)
+                     tx->commit_and_continue();
+               }
+               auto end   = std::chrono::steady_clock::now();
+               auto delta = end - start;
+               inserted_numbers_round.fetch_add(1, std::memory_order_relaxed);
+               tx->commit_and_continue();
 
-            std::cout << ro << "] " << std::setw(12)
-                      << add_comma(int64_t(
-                             (count) /
-                             (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
-                      << " dense rand insert/sec  total items: " << add_comma(seq) << "    "
-                      << add_comma(int64_t(
-                             (read_count.exchange(0, std::memory_order_relaxed)) /
-                             (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
-                      << "  lowerbound/sec \n";
+               std::cout << ro << "] " << std::setw(12)
+                         << add_comma(int64_t(
+                                (count) /
+                                (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
+                         << " dense rand insert/sec  total items: " << add_comma(seq) << "    "
+                         << add_comma(int64_t(
+                                (read_count.exchange(0, std::memory_order_relaxed)) /
+                                (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
+                         << "  lowerbound/sec \n";
+            }
+         }
+         catch (const std::exception& e)
+         {
+            ARBTRIE_WARN("Caught Exception: ", e.what());
+            done = true;
+            for (auto& r : rthreads)
+               r->join();
+            throw;
          }
 
          done = true;
@@ -902,20 +913,22 @@ int  main(int argc, char** argv)
                          << " dense rand find/sec  total found items: " << add_comma(count) << "\n";
             }
          };
-         find_all(0);
-         for (int ro = 0; ro < multithread_rounds; ++ro)
+         if (false)
          {
-            ARBTRIE_WARN("init count: ", tx->count_keys());
-            auto init_count = tx->count_keys();
-            auto start      = std::chrono::steady_clock::now();
-            for (int i = 0; i < count; ++i)
+            find_all(0);
+            for (int ro = 0; ro < multithread_rounds; ++ro)
             {
-               //find_all(ro * count + i);
-               uint64_t val = inserted_numbers[ro * count + i];
-               //    ARBTRIE_WARN("removing ", val, " ro: ", ro, " i: ", i);
-               //auto     str = std::to_string(val);
-               key_view kstr((char*)&val, sizeof(val));
-               /*
+               ARBTRIE_WARN("init count: ", tx->count_keys());
+               auto init_count = tx->count_keys();
+               auto start      = std::chrono::steady_clock::now();
+               for (int i = 0; i < count; ++i)
+               {
+                  //find_all(ro * count + i);
+                  uint64_t val = inserted_numbers[ro * count + i];
+                  //    ARBTRIE_WARN("removing ", val, " ro: ", ro, " i: ", i);
+                  //auto     str = std::to_string(val);
+                  key_view kstr((char*)&val, sizeof(val));
+                  /*
                if (not tx->find(kstr))
                {
                   ARBTRIE_ERROR("something broke: ", val, " ro: ", ro, " i: ", i);
@@ -930,31 +943,33 @@ int  main(int argc, char** argv)
                   break;
                }
                */
-               auto result = tx->remove(kstr);
-               if (result != 8)
-               {
-                  ARBTRIE_ERROR("something broke: ", result, " val: ", val, " ro: ", ro, " i: ", i);
-                  abort();
-                  ro = multithread_rounds;
-                  break;
+                  auto result = tx->remove(kstr);
+                  if (result != 8)
+                  {
+                     ARBTRIE_ERROR("something broke: ", result, " val: ", val, " ro: ", ro,
+                                   " i: ", i);
+                     abort();
+                     ro = multithread_rounds;
+                     break;
+                  }
                }
-            }
-            auto end   = std::chrono::steady_clock::now();
-            auto delta = end - start;
-            if (tx->count_keys() != init_count - count)
-            {
-               ARBTRIE_ERROR("something broke: ", tx->count_keys(), " init_count: ", init_count);
-               abort();
-            }
+               auto end   = std::chrono::steady_clock::now();
+               auto delta = end - start;
+               if (tx->count_keys() != init_count - count)
+               {
+                  ARBTRIE_ERROR("something broke: ", tx->count_keys(), " init_count: ", init_count);
+                  abort();
+               }
 
-            tx->commit_and_continue();
+               tx->commit_and_continue();
 
-            std::cout << ro << "] " << std::setw(12)
-                      << add_comma(int64_t(
-                             (count) /
-                             (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
-                      << " dense rand remove/sec  total items: " << add_comma(init_count - count)
-                      << "\n";
+               std::cout << ro << "] " << std::setw(12)
+                         << add_comma(int64_t(
+                                (count) /
+                                (std::chrono::duration<double, std::milli>(delta).count() / 1000)))
+                         << " dense rand remove/sec  total items: " << add_comma(init_count - count)
+                         << "\n";
+            }
          }
 
          ARBTRIE_WARN("sleeping for 1 seconds");

@@ -305,7 +305,95 @@ namespace arbtrie
    template <typename NodeType>
    void retain_children(session_rlock& state, const NodeType* in)
    {
-      in->visit_branches([&](auto bid) { state.get(bid).retain(); });
+      if constexpr (is_full_node<NodeType>)
+      {
+         const auto* br      = in->branches();
+         using ptr           = sal::shared_ptr*;
+         const int nprefetch = 8;
+         ptr       ptrs[full_node::branch_count + 1];
+         int       numptrs = 0;
+         auto      r       = in->branch_region();
+
+         if (in->has_eof_value())
+            ptrs[numptrs++] = &state.get(in->_eof_value).meta();
+
+         for (int i = 0; i < full_node::branch_count; i++)
+         {
+            if (auto b = br[i])
+            {
+               sal::shared_ptr* p = &state.get(id_address(r, b)).meta();
+               ptrs[numptrs++]    = p;
+            }
+         }
+         const int np = numptrs;
+
+         // How many pointers ahead to prefetch (adjust based on profiling)
+         const int prefetch_distance = 8;
+         const int unroll_factor     = 4;  // Process this many per loop iteration.
+
+         int p = 0;
+
+         // --- Prefetch Initial Batch ---
+         // Prefetch the first 'prefetch_distance' elements.
+         int initial_prefetch_count = (np < prefetch_distance) ? np : prefetch_distance;
+         for (int k = 0; k < initial_prefetch_count; ++k)
+         {
+            // Prefetch for write (retain likely modifies refcount) with high temporal locality.
+            __builtin_prefetch((const void*)ptrs[k], 1 /*write*/, 3 /*high locality*/);
+         }
+
+         // --- Main Unrolled Loop ---
+         // Process blocks of 'unroll_factor' (4) pointers.
+         // Loop condition ensures we have enough elements for the current block (4)
+         // AND the block we want to prefetch (another 4, 'prefetch_distance' ahead).
+         for (; p + unroll_factor + prefetch_distance <= np;
+              p += unroll_factor)  // p + 4 + prefetch_distance <= np
+         {
+            // Prefetch the block 'prefetch_distance' elements ahead
+            __builtin_prefetch((const void*)ptrs[p + prefetch_distance + 0], 1, 3);
+            __builtin_prefetch((const void*)ptrs[p + prefetch_distance + 1], 1, 3);
+            __builtin_prefetch((const void*)ptrs[p + prefetch_distance + 2], 1, 3);
+            __builtin_prefetch((const void*)ptrs[p + prefetch_distance + 3], 1, 3);
+
+            // Process (retain) the current block of 'unroll_factor' (4) pointers
+            ptrs[p + 0]->retain();
+            ptrs[p + 1]->retain();
+            ptrs[p + 2]->retain();
+            ptrs[p + 3]->retain();
+         }
+
+         // --- Handle Remaining Prefetches (Near the End) ---
+         // Prefetch the elements that the next loop ('Remainder Loop 1') will process.
+         int remaining_prefetch_start = p + prefetch_distance;
+         for (int k = 0; k < unroll_factor && remaining_prefetch_start + k < np; ++k)
+         {  // k < 4
+            __builtin_prefetch((const void*)ptrs[remaining_prefetch_start + k], 1, 3);
+         }
+
+         // --- Remainder Loop 1 (Unrolled Processing without Prefetching) ---
+         // Process remaining full blocks of 'unroll_factor' (4) without issuing new prefetches.
+         for (; p + unroll_factor <= np; p += unroll_factor)  // p + 4 <= np
+         {
+            ptrs[p + 0]->retain();
+            ptrs[p + 1]->retain();
+            ptrs[p + 2]->retain();
+            ptrs[p + 3]->retain();
+         }
+
+         // --- Remainder Loop 2 (Single Element Processing) ---
+         // Process any final elements that didn't form a full 'unroll_factor' (4) block.
+         for (; p < np; ++p)
+         {
+            ptrs[p]->retain();
+         }
+
+         //for (int p = 0; p < np; ++p)
+         //   ptrs[p]->retain();
+      }
+      else
+      {
+         in->visit_branches([&](auto bid) { state.get(bid).retain(); });
+      }
    }
 
    id_address make_value(id_region         reg,

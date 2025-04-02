@@ -113,7 +113,7 @@ namespace sal
          std::array<std::atomic<uint64_t>, ptrs_per_page / 64> free_ptrs;
          /// 1 bit for each 64 bit cacheline in page::ptrs that has at least 1 free ptr
          std::atomic<uint64_t> free_cachelines = uint64_t(-1);
-         /// 1 bit for each 64 bit cacheline in page::ptrs with <= 4 free ptr
+         /// 1 bit for each 64 bit cacheline in page::ptrs with 4+ free ptrs
          std::atomic<uint64_t> half_free_cachelines = 0;
 
          auto& get_ptr(ptr_address::index_type index) { return ptrs[ptr_index_on_page(index)]; }
@@ -121,7 +121,7 @@ namespace sal
          page()
          {
             free_cachelines.store(~0ULL, std::memory_order_relaxed);
-            half_free_cachelines.store(0, std::memory_order_relaxed);
+            half_free_cachelines.store(~0ULL, std::memory_order_relaxed);
 
             // the first ptr is always taken, it is the null ptr, and
             // should never be allocated.
@@ -149,6 +149,9 @@ namespace sal
          /// page giving 2^16 addresses per region.
          std::array<std::atomic<uint64_t>, 2> free_pages;
 
+         /// 1 bit for each page that has at least 1 cacheline with 4+ free ptrs
+         std::array<std::atomic<uint64_t>, 2> free_halfline_pages;
+
          /// page_index of -1 means the page is not allocated,
          /// otherwise it is an offset_ptr into _page_allocator
          std::array<std::atomic<page_offset>, pages_per_region> pages;
@@ -170,6 +173,8 @@ namespace sal
                p.store(null_page, std::memory_order_relaxed);
             free_pages[0].store(~0ULL, std::memory_order_relaxed);
             free_pages[1].store(~0ULL, std::memory_order_relaxed);
+            free_halfline_pages[0].store(~0ULL, std::memory_order_relaxed);
+            free_halfline_pages[1].store(~0ULL, std::memory_order_relaxed);
          }
       };
 

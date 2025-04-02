@@ -171,7 +171,7 @@ TEST_CASE("shared_ptr_alloc exhaustive allocation and free", "[sal][shared_ptr_a
       auto allocation_a = alloc.alloc(region);
       REQUIRE(allocation_a.ptr != nullptr);
       permanent_addrs.push_back(allocation_a.address);
-      assert(last_index == allocation_a.address.index);
+      //   assert(last_index == allocation_a.address.index);
       // Allocate pointer B
       auto allocation_b = alloc.alloc(region);
       REQUIRE(allocation_b.ptr != nullptr);
