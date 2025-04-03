@@ -757,7 +757,8 @@ namespace sal
    shared_ptr_alloc::region_usage_summary_t shared_ptr_alloc::get_region_usage_summary() const
    {
       region_usage_summary_t stats = {UINT16_MAX, 0, 0.0, 0.0, 0, 0};
-      std::vector<uint16_t>  counts;
+      std::vector<uint32_t>  counts;
+      stats.min = -1;
 
       // Reserve space for all possible regions (2^16)
       // Each region is a 16-bit value, so total memory is only 128KB
@@ -784,29 +785,18 @@ namespace sal
             // Calculate the actual region number
             uint32_t current_region_num = i * 4 + j;
 
-            // Add count to total usage, *excluding* region 0 if it's maxed out
-            if (current_region_num == 0 && counts_array[j] == UINT16_MAX)
-            {
-               // Skip adding region 0's artificial max count to total_usage
-            }
-            else
-            {
-               stats.total_usage += counts_array[j];
-            }
-
             // Skip region 0 for min/max/mean/stddev calculation
             if (current_region_num == 0)
                continue;
 
-            if (counts_array[j] > 0)
-            {
-               // Update min and max
-               stats.min = std::min(stats.min, counts_array[j]);
-               stats.max = std::max(stats.max, counts_array[j]);
+            // stats.total_usage += counts_array[j];
 
-               // Add to our collection for mean and stddev calculation
-               counts.push_back(counts_array[j]);
-            }
+            // Update min and max
+            stats.min = std::min<uint16_t>(stats.min, counts_array[j]);
+            stats.max = std::max<uint16_t>(stats.max, counts_array[j]);
+
+            // Add to our collection for mean and stddev calculation
+            counts.push_back(counts_array[j]);
          }
       }
 
@@ -825,6 +815,7 @@ namespace sal
 
       // Calculate mean using std::accumulate
       uint64_t sum = std::accumulate(counts.begin(), counts.end(), 0ULL);
+      stats.max    = *std::max_element(counts.begin(), counts.end());
       stats.mean   = static_cast<double>(sum) / stats.count;
 
       // Calculate standard deviation

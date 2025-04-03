@@ -337,7 +337,12 @@ namespace arbtrie
             // not send a signal to the provider to mlock the segment
             segnum = _mapped_state->_segment_provider.ready_unpinned_segments.pop();
          }
-         return {segnum, get_segment(segnum)};
+         auto shp = get_segment(segnum);
+         shp->_vage_accumulator.reset(arbtrie::get_current_time_ms());
+         shp->_provider_sequence = _mapped_state->_segment_provider._next_alloc_seq.fetch_add(
+             1, std::memory_order_relaxed);
+         _mapped_state->_segment_data.allocated_by_session(segnum);
+         return {segnum, shp};
       }
 
       // Helper to synchronize segment pinned state between bitmap and metadata

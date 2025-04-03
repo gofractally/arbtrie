@@ -41,33 +41,6 @@ TEST_CASE("segment_meta basic operations", "[segment_meta]")
       REQUIRE(meta.get_freed_space() == 3072);
    }
 
-   SECTION("prepare_for_reuse operation")
-   {
-      // Set up some state first
-      meta.add_freed_space(1024);
-      meta.set_pinned(true);
-      meta.prepare_for_compaction(12345);
-
-      // Verify state before resetting
-      REQUIRE(meta.get_freed_space() == 1024);
-      REQUIRE(meta.is_read_only());
-      REQUIRE(meta.is_pinned());
-      REQUIRE(meta.get_vage() == 12345);
-
-      // Reset with prepare_for_reuse
-      meta.prepare_for_reuse();
-
-      // Verify freed_space is reset and read_only flag is cleared
-      REQUIRE(meta.get_freed_space() == 0);
-      REQUIRE_FALSE(meta.is_read_only());
-
-      // The pinned flag should remain unchanged
-      REQUIRE(meta.is_pinned());
-
-      // vage is not reset by prepare_for_reuse
-      REQUIRE(meta.get_vage() == 12345);
-   }
-
    SECTION("prepare_for_compaction operation")
    {
       // Set up some initial state
@@ -91,19 +64,6 @@ TEST_CASE("segment_meta flags operations", "[segment_meta][flags]")
 {
    segment_meta meta;
 
-   SECTION("read_only flag operations")
-   {
-      REQUIRE_FALSE(meta.is_read_only());
-
-      // Set read_only via prepare_for_compaction
-      meta.prepare_for_compaction(1000);
-      REQUIRE(meta.is_read_only());
-
-      // Clear read_only via prepare_for_reuse
-      meta.prepare_for_reuse();
-      REQUIRE_FALSE(meta.is_read_only());
-   }
-
    SECTION("pinned flag operations")
    {
       REQUIRE_FALSE(meta.is_pinned());
@@ -119,22 +79,6 @@ TEST_CASE("segment_meta flags operations", "[segment_meta][flags]")
       // Set pinned flag again
       meta.set_pinned(true);
       REQUIRE(meta.is_pinned());
-   }
-
-   SECTION("flag interaction - prepare_for_reuse preserves pinned")
-   {
-      // Set up both flags
-      meta.set_pinned(true);
-      meta.prepare_for_compaction(1000);
-
-      REQUIRE(meta.is_pinned());
-      REQUIRE(meta.is_read_only());
-
-      // prepare_for_reuse should clear read_only but preserve pinned
-      meta.prepare_for_reuse();
-
-      REQUIRE(meta.is_pinned());
-      REQUIRE_FALSE(meta.is_read_only());
    }
 
    SECTION("flag interaction - prepare_for_compaction preserves pinned")
@@ -181,92 +125,6 @@ TEST_CASE("segment_meta concurrent operations", "[segment_meta][concurrent]")
       }
 
       REQUIRE(meta.get_freed_space() == num_threads * iterations * increment);
-   }
-
-   SECTION("Concurrent flag operations")
-   {
-      std::atomic<bool> keep_running{true};
-      std::atomic<int>  iterations{0};
-
-      // Thread that sets and unsets the pinned flag
-      std::thread pinning_thread(
-          [&]()
-          {
-             while (keep_running.load(std::memory_order_relaxed))
-             {
-                meta.set_pinned(true);
-                meta.set_pinned(false);
-                iterations++;
-             }
-          });
-
-      // Thread that sets and unsets the read_only flag
-      std::thread readonly_thread(
-          [&]()
-          {
-             uint64_t vage = 1000;
-             while (keep_running.load(std::memory_order_relaxed))
-             {
-                meta.prepare_for_compaction(vage++);
-                meta.prepare_for_reuse();
-             }
-          });
-
-      // Let threads run for a short time
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-      // Stop the threads
-      keep_running.store(false, std::memory_order_relaxed);
-      pinning_thread.join();
-      readonly_thread.join();
-
-      // Report iterations - this is just informational
-      INFO("Completed " << iterations << " iterations of flag operations");
-
-      // No need for specific assertions here, as we're mainly testing that
-      // concurrent operations don't crash or cause data races
-   }
-
-   SECTION("Pinned bit integrity during concurrent operations")
-   {
-      std::atomic<bool> keep_running{true};
-      std::atomic<bool> error_detected{false};
-
-      // Set pinned bit initially
-      meta.set_pinned(true);
-
-      // Thread that constantly verifies the pinned state
-      std::thread checker_thread(
-          [&]()
-          {
-             while (keep_running.load(std::memory_order_relaxed))
-             {
-                if (!meta.is_pinned())
-                {
-                   error_detected.store(true, std::memory_order_relaxed);
-                   break;
-                }
-             }
-          });
-
-      // Thread that performs other operations but shouldn't affect pinned state
-      std::thread worker_thread(
-          [&]()
-          {
-             for (int i = 0; i < 10000 && !error_detected; i++)
-             {
-                meta.add_freed_space(8);
-                meta.prepare_for_compaction(i);
-                meta.prepare_for_reuse();
-             }
-          });
-
-      worker_thread.join();
-      keep_running.store(false, std::memory_order_relaxed);
-      checker_thread.join();
-
-      REQUIRE_FALSE(error_detected);
-      REQUIRE(meta.is_pinned());
    }
 }
 

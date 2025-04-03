@@ -293,7 +293,10 @@ namespace sal
          for (uint32_t i = 0; i < (1ull << 16) / 4; ++i)
          {
             uint64_t use = ruc[i].load(std::memory_order_relaxed);
-            stats.push_back({ptr_address::region_type(i), uint16_t(use >> (i % 4))});
+            stats.push_back({ptr_address::region_type(i), uint16_t(use & 0xffff)});
+            stats.push_back({ptr_address::region_type(i), uint16_t((use >> 16) & 0xffff)});
+            stats.push_back({ptr_address::region_type(i), uint16_t((use >> 32) & 0xffff)});
+            stats.push_back({ptr_address::region_type(i), uint16_t((use >> 48) & 0xffff)});
          }
          return stats;
       }

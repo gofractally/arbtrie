@@ -775,7 +775,7 @@ int  main(int argc, char** argv)
          std::atomic<int64_t>  read_count;
          std::mutex            _lr_mutex;
          std::vector<uint64_t> inserted_numbers;
-         //  inserted_numbers.resize(multithread_rounds * count);
+         inserted_numbers.resize(multithread_rounds * count);
          std::atomic<uint64_t> inserted_numbers_round(1);
 
          char data[data_size];
@@ -831,7 +831,8 @@ int  main(int argc, char** argv)
                auto start = std::chrono::steady_clock::now();
                for (int i = 0; i < count; ++i)
                {
-                  uint64_t val                     = rand64();
+                  uint64_t val = rand64();
+                  //    val &= 0x3f3f3f3f3f3f3f3f;
                   inserted_numbers[ro * count + i] = val;
                   // auto     str = std::to_string(val);
                   ++seq;
