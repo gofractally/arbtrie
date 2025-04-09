@@ -1,11 +1,9 @@
 #pragma once
 #include <filesystem>
-#include <memory>
 #include <mutex>
 #include <utility>
 
 #include <cassert>
-#include <system_error>
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -13,11 +11,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <iostream>
-#include <vector>
-
 #include <sal/mapping.hpp>  // sync_type
-#include <sal/typed_int.hpp>
+#include <ucc/typed_int.hpp>
 
 namespace sal
 {
@@ -29,8 +24,8 @@ namespace sal
    {
      public:
       // 64-bit offset from the base pointer
-      using offset_ptr                        = typed_int<uint64_t, struct offset_ptr_tag>;
-      using block_number                      = typed_int<uint64_t, struct block_num_tag>;
+      using offset_ptr                        = ucc::typed_int<uint64_t, struct offset_ptr_tag>;
+      using block_number                      = ucc::typed_int<uint64_t, struct block_num_tag>;
       static constexpr offset_ptr null_offset = offset_ptr(-1);
 
       /**

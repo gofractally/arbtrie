@@ -1,10 +1,15 @@
 #pragma once
-#include <compare>
+#include <compare>  // <=> operator
 #include <iostream>
 #include <limits>
 
-namespace sal
+namespace ucc
 {
+   /**
+    * A wrapper around a type that adds a tag to the type.
+    * This is useful for creating types that are not interchangeable with other types. 
+    * it is easy to unwrap the type using *value to get the underlying type T
+    */
    template <typename T, typename Tag>
    class typed_int
    {
@@ -12,8 +17,8 @@ namespace sal
 
      public:
       // Constructors
-      constexpr typed_int() : value(T{}) {}
-      constexpr explicit typed_int(T v) : value(v) {}
+      constexpr typed_int() noexcept : value(T{}) {}
+      constexpr explicit typed_int(T v) noexcept : value(v) {}
 
       // Copy and move constructors
       constexpr typed_int(const typed_int& other)     = default;
@@ -24,236 +29,239 @@ namespace sal
       constexpr typed_int& operator=(typed_int&& other) noexcept = default;
 
       // Conversion operators
-      constexpr explicit operator T() const { return value; }
-      constexpr explicit operator bool() const { return value != 0; }
-      constexpr bool     operator!() const { return value == 0; }
+      constexpr explicit operator T() const noexcept { return value; }
+      constexpr explicit operator bool() const noexcept { return value != 0; }
+      constexpr bool     operator!() const noexcept { return value == 0; }
 
       // Safer way to access the underlying value
-      constexpr T get_value() const { return value; }
+      constexpr T get_value() const noexcept { return value; }
 
       // Dereference operator for convenient access to the value
-      constexpr T operator*() const { return value; }
+      constexpr T operator*() const noexcept { return value; }
 
       template <typename U>
-      constexpr U as() const
+      constexpr U as() const noexcept
       {
          return static_cast<U>(value);
       }
 
-      friend constexpr bool operator==(const typed_int& lhs, const typed_int& rhs)
+      friend constexpr bool operator==(const typed_int& lhs, const typed_int& rhs) noexcept
       {
          return lhs.value == rhs.value;
       }
-      friend constexpr bool operator!=(const typed_int& lhs, const typed_int& rhs)
+      friend constexpr bool operator!=(const typed_int& lhs, const typed_int& rhs) noexcept
       {
          return lhs.value != rhs.value;
       }
-      friend constexpr bool operator<(const typed_int& lhs, const typed_int& rhs)
+      friend constexpr bool operator<(const typed_int& lhs, const typed_int& rhs) noexcept
       {
          return lhs.value < rhs.value;
       }
-      friend constexpr bool operator<=(const typed_int& lhs, const typed_int& rhs)
+      friend constexpr bool operator<=(const typed_int& lhs, const typed_int& rhs) noexcept
       {
          return lhs.value <= rhs.value;
       }
-      friend constexpr bool operator>(const typed_int& lhs, const typed_int& rhs)
+      friend constexpr bool operator>(const typed_int& lhs, const typed_int& rhs) noexcept
       {
          return lhs.value > rhs.value;
       }
-      friend constexpr bool operator>=(const typed_int& lhs, const typed_int& rhs)
+      friend constexpr bool operator>=(const typed_int& lhs, const typed_int& rhs) noexcept
       {
          return lhs.value >= rhs.value;
       }
 
-      friend constexpr auto operator<=>(const typed_int& lhs, const typed_int& rhs)
+      friend constexpr auto operator<=>(const typed_int& lhs, const typed_int& rhs) noexcept
       {
          return lhs.value <=> rhs.value;
       }
 
       // Comparison with raw value
-      friend constexpr bool operator==(const typed_int& lhs, const T& rhs)
+      friend constexpr bool operator==(const typed_int& lhs, const T& rhs) noexcept
       {
          return lhs.value == rhs;
       }
-      friend constexpr bool operator!=(const typed_int& lhs, const T& rhs)
+      friend constexpr bool operator!=(const typed_int& lhs, const T& rhs) noexcept
       {
          return lhs.value != rhs;
       }
-      friend constexpr bool operator<(const typed_int& lhs, const T& rhs)
+      friend constexpr bool operator<(const typed_int& lhs, const T& rhs) noexcept
       {
          return lhs.value < rhs;
       }
-      friend constexpr bool operator<=(const typed_int& lhs, const T& rhs)
+      friend constexpr bool operator<=(const typed_int& lhs, const T& rhs) noexcept
       {
          return lhs.value <= rhs;
       }
-      friend constexpr bool operator>(const typed_int& lhs, const T& rhs)
+      friend constexpr bool operator>(const typed_int& lhs, const T& rhs) noexcept
       {
          return lhs.value > rhs;
       }
-      friend constexpr bool operator>=(const typed_int& lhs, const T& rhs)
+      friend constexpr bool operator>=(const typed_int& lhs, const T& rhs) noexcept
       {
          return lhs.value >= rhs;
       }
 
       // reversed for symmetry
-      friend constexpr bool operator==(const T& lhs, const typed_int& rhs)
+      friend constexpr bool operator==(const T& lhs, const typed_int& rhs) noexcept
       {
          return lhs == rhs.value;
       }
-      friend constexpr bool operator!=(const T& lhs, const typed_int& rhs)
+      friend constexpr bool operator!=(const T& lhs, const typed_int& rhs) noexcept
       {
          return lhs != rhs.value;
       }
-      friend constexpr bool operator<(const T& lhs, const typed_int& rhs)
+      friend constexpr bool operator<(const T& lhs, const typed_int& rhs) noexcept
       {
          return lhs < rhs.value;
       }
-      friend constexpr bool operator<=(const T& lhs, const typed_int& rhs)
+      friend constexpr bool operator<=(const T& lhs, const typed_int& rhs) noexcept
       {
          return lhs <= rhs.value;
       }
-      friend constexpr bool operator>(const T& lhs, const typed_int& rhs)
+      friend constexpr bool operator>(const T& lhs, const typed_int& rhs) noexcept
       {
          return lhs > rhs.value;
       }
-      friend constexpr bool operator>=(const T& lhs, const typed_int& rhs)
+      friend constexpr bool operator>=(const T& lhs, const typed_int& rhs) noexcept
       {
          return lhs >= rhs.value;
       }
 
       // Arithmetic operators
-      constexpr typed_int& operator+=(const typed_int& rhs)
+      constexpr typed_int& operator+=(const typed_int& rhs) noexcept
       {
          value += rhs.value;
          return *this;
       }
-      constexpr typed_int& operator-=(const typed_int& rhs)
+      constexpr typed_int& operator-=(const typed_int& rhs) noexcept
       {
          value -= rhs.value;
          return *this;
       }
-      constexpr typed_int& operator*=(const typed_int& rhs)
+      constexpr typed_int& operator*=(const typed_int& rhs) noexcept
       {
          value *= rhs.value;
          return *this;
       }
-      constexpr typed_int& operator/=(const typed_int& rhs)
+      constexpr typed_int& operator/=(const typed_int& rhs) noexcept
       {
          value /= rhs.value;
          return *this;
       }
-      constexpr typed_int& operator%=(const typed_int& rhs)
+      constexpr typed_int& operator%=(const typed_int& rhs) noexcept
       {
          value %= rhs.value;
          return *this;
       }
 
-      friend constexpr typed_int operator+(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator+(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs += rhs;
          return lhs;
       }
-      friend constexpr typed_int operator-(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator-(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs -= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator*(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator*(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs *= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator/(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator/(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs /= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator%(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator%(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs %= rhs;
          return lhs;
       }
 
       // Unary operators
-      constexpr typed_int operator+() const { return *this; }
-      constexpr typed_int operator-() const { return typed_int(-value); }
+      constexpr typed_int operator+() const noexcept { return *this; }
+      constexpr typed_int operator-() const noexcept { return typed_int(-value); }
 
       // Bitwise operators
-      constexpr typed_int& operator&=(const typed_int& rhs)
+      constexpr typed_int& operator&=(const typed_int& rhs) noexcept
       {
          value &= rhs.value;
          return *this;
       }
-      constexpr typed_int& operator|=(const typed_int& rhs)
+      constexpr typed_int& operator|=(const typed_int& rhs) noexcept
       {
          value |= rhs.value;
          return *this;
       }
-      constexpr typed_int& operator^=(const typed_int& rhs)
+      constexpr typed_int& operator^=(const typed_int& rhs) noexcept
       {
          value ^= rhs.value;
          return *this;
       }
-      constexpr typed_int& operator<<=(const typed_int& rhs)
+      constexpr typed_int& operator<<=(const typed_int& rhs) noexcept
       {
          value <<= rhs.value;
          return *this;
       }
-      constexpr typed_int& operator>>=(const typed_int& rhs)
+      constexpr typed_int& operator>>=(const typed_int& rhs) noexcept
       {
          value >>= rhs.value;
          return *this;
       }
 
-      friend constexpr typed_int operator&(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator&(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs &= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator|(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator|(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs |= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator^(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator^(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs ^= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator<<(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator<<(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs <<= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator>>(typed_int lhs, const typed_int& rhs)
+      friend constexpr typed_int operator>>(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs >>= rhs;
          return lhs;
       }
-      friend constexpr typed_int operator~(const typed_int& val) { return typed_int(~val.value); }
+      friend constexpr typed_int operator~(const typed_int& val) noexcept
+      {
+         return typed_int(~val.value);
+      }
 
       // Increment/decrement operators
-      constexpr typed_int& operator++()
+      constexpr typed_int& operator++() noexcept
       {
          ++value;
          return *this;
       }
 
-      constexpr typed_int operator++(int)
+      constexpr typed_int operator++(int) noexcept
       {
          typed_int tmp(*this);
          ++value;
          return tmp;
       }
 
-      constexpr typed_int& operator--()
+      constexpr typed_int& operator--() noexcept
       {
          --value;
          return *this;
       }
 
-      constexpr typed_int operator--(int)
+      constexpr typed_int operator--(int) noexcept
       {
          typed_int tmp(*this);
          --value;
@@ -277,15 +285,15 @@ namespace sal
          return is;
       }
    };
-}  // namespace sal
+}  // namespace ucc
 
 namespace std
 {
    template <typename T, typename Tag>
-   struct numeric_limits<sal::typed_int<T, Tag>>
+   struct numeric_limits<ucc::typed_int<T, Tag>>
    {
      private:
-      using TypedInt = sal::typed_int<T, Tag>;
+      using TypedInt = ucc::typed_int<T, Tag>;
 
      public:
       static constexpr bool is_specialized = true;

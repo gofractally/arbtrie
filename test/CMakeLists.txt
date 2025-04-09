@@ -90,10 +90,46 @@ target_link_libraries(arbtrie-last-test PRIVATE arbtrie Catch2::Catch2WithMain)
 add_executable(arbtrie-last-debug arbtrie_last_debug.cpp)
 target_link_libraries(arbtrie-last-debug PRIVATE arbtrie Catch2::Catch2WithMain)
 
+# Add psitri test executable
+add_executable(psitri-tests
+    ../libraries/psitri/tests/leaf_node_test.cpp
+    ../libraries/psitri/tests/leaf_node_split_test.cpp
+)
+
+target_link_libraries(psitri-tests
+    PRIVATE
+        psitri # psitri library depends on sal
+        Catch2::Catch2WithMain
+)
+
+target_include_directories(psitri-tests
+    PUBLIC
+        # Include directories from psitri and Catch2
+        $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>
+        $<TARGET_PROPERTY:Catch2::Catch2WithMain,INTERFACE_INCLUDE_DIRECTORIES>
+)
+
+# Define XXH_INLINE_ALL for the tests as well
+target_compile_definitions(psitri-tests PUBLIC XXH_INLINE_ALL)
+
+set_target_properties(psitri-tests
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Add psitri-tests to CTest
+add_test(
+    NAME psitri-tests
+    COMMAND psitri-tests
+)
+
 # Apply sanitizer and coverage settings if enabled
 if(ENABLE_SANITIZER)
     target_compile_options(arbtrie-tests PUBLIC -fsanitize=thread -g)
     target_link_options(arbtrie-tests PUBLIC -fsanitize=thread -g)
+    
+    target_compile_options(psitri-tests PUBLIC -fsanitize=thread -g) # Added for psitri-tests
+    target_link_options(psitri-tests PUBLIC -fsanitize=thread -g)   # Added for psitri-tests
     
     target_compile_options(arbtrie-fuzz-tester PUBLIC -fsanitize=thread -g)
     target_link_options(arbtrie-fuzz-tester PUBLIC -fsanitize=thread -g)
@@ -105,6 +141,9 @@ endif()
 if(ENABLE_COVERAGE)
     target_compile_options(arbtrie-tests PUBLIC --coverage)
     target_link_options(arbtrie-tests PUBLIC --coverage)
+    
+    target_compile_options(psitri-tests PUBLIC --coverage) # Added for psitri-tests
+    target_link_options(psitri-tests PUBLIC --coverage)   # Added for psitri-tests
     
     target_compile_options(arbtrie-fuzz-tester PUBLIC --coverage)
     target_link_options(arbtrie-fuzz-tester PUBLIC --coverage)

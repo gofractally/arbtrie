@@ -1,58 +1,20 @@
 #pragma once
+#include <hash/lehmer64.h>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cstdint>
 #include <filesystem>
-#include <ostream>
 #include <sal/block_allocator.hpp>
 #include <sal/mapping.hpp>
 #include <sal/shared_ptr.hpp>
-#include <sal/typed_int.hpp>
-
+#include <sal/simd_utils.hpp>
+#include <span>
+#include <ucc/typed_int.hpp>
 namespace sal
 {
 
-   /**
-    * 
-    */
-   struct ptr_address
-   {
-      using index_type  = typed_int<uint16_t, struct index_tag>;
-      using region_type = typed_int<uint16_t, struct region_tag>;
-      ptr_address() {}
-      ptr_address(region_type region, index_type index) : index(index), region(region) {}
-      explicit ptr_address(uint32_t addr)
-          : index(index_type(addr & 0xffff)), region(region_type(addr >> 16))
-      {
-      }
-
-      index_type  index;
-      region_type region;
-
-      uint32_t                     to_int() const { return uint32_t(*region) << 16 | *index; }
-      static constexpr ptr_address from_int(uint32_t addr)
-      {
-         return ptr_address(region_type(addr >> 16), index_type(addr & 0xffff));
-      }
-      explicit operator bool() const { return bool(index); }
-
-      friend bool operator<=>(const ptr_address& a, const ptr_address& b) = default;
-
-      friend std::ostream& operator<<(std::ostream& os, const ptr_address& addr)
-      {
-         return os << "r" << addr.region << "." << addr.index;
-      }
-   };
-   static_assert(sizeof(ptr_address) == 4, "ptr_address must be 4 bytes");
-
-   /**
-    * operator to combine a region and index into an address
-    */
-   inline ptr_address operator+(ptr_address::region_type r, ptr_address::index_type i)
-   {
-      return ptr_address(r, i);
-   }
+   using ptr_address = ucc::typed_int<uint32_t, struct ptr_address_tag>;
 
    /**
     * When address are allocated they are assigned a sequence number
@@ -60,152 +22,108 @@ namespace sal
     * facilitate recovery when multiple segments have the same node with
     * the same address. 
     */
-   struct ptr_address_seq
+   class ptr_address_seq
    {
+     public:
+      uint16_t    sequence;
       ptr_address address;
-      uint32_t    sequence;
 
-      constexpr ptr_address_seq(ptr_address addr, uint32_t seq) : address(addr), sequence(seq) {}
+      ptr_address_seq() : sequence(0), address(0) {}
+      constexpr ptr_address_seq(ptr_address addr, uint32_t seq) : sequence(seq), address(addr) {}
 
       constexpr      operator ptr_address() const { return address; }
       constexpr bool operator==(const ptr_address_seq& other) const = default;
-   };
+   } __attribute__((packed));
 
-   /// forward declared internal hint which is the aggregate of alloc_hints
-   struct hint;
-
-   /**
-    * The allocator should make its best effort to allocate a new ptr on
-    * the same cacheline as one of the hints. If the allocator can't find
-    * a cacheline with a free slot, it will allocate a new ptr in a new
-    * cacheline that is mostly empty.
-    */
-   struct alloc_hint
-   {
-      alloc_hint(ptr_address::region_type       region,
-                 const ptr_address::index_type* hints,
-                 uint16_t                       count = 1)
-          : region(region), hints(hints), count(count)
-      {
-      }
-      static constexpr alloc_hint any()
-      {
-         return alloc_hint{ptr_address::region_type(0), nullptr, 0};
-      }
-      ptr_address::region_type       region = ptr_address::region_type(0);
-      const ptr_address::index_type* hints  = nullptr;
-      uint16_t                       count  = 0;
-   };
+   using alloc_hint = std::span<const ptr_address>;
 
    namespace detail
    {
-      static constexpr uint32_t ptrs_per_page    = 512;
-      static constexpr uint32_t pages_per_region = (1 << 16) / ptrs_per_page;
-      using page_number                          = typed_int<uint16_t, struct page_number_tag>;
+      static constexpr uint32_t ptrs_per_zone       = 1 << 22;  // 4 million
+      static constexpr uint32_t zone_size_bytes     = ptrs_per_zone * sizeof(shared_ptr);  // 32
+      static constexpr uint32_t max_allocated_zones = (1ull << 32) / ptrs_per_zone;
+      using zone_number = ucc::typed_int<uint16_t, struct zone_number_tag>;
 
-      /**
-       * Stores 512 pointers in a region along with
-       * index information to help identify free slots.
-       */
-      struct alignas(std::hardware_destructive_interference_size) page  // 4176 bytes
+      struct zone_free_list
       {
-         /// 1 bit for each ptr in page::ptrs, 64 bytes 1 cacheline
-         std::array<std::atomic<uint64_t>, ptrs_per_page / 64> free_ptrs;
-         /// 1 bit for each 64 bit cacheline in page::ptrs that has at least 1 free ptr
-         std::atomic<uint64_t> free_cachelines = uint64_t(-1);
-         /// 1 bit for each 64 bit cacheline in page::ptrs with 4+ free ptrs
-         std::atomic<uint64_t> half_free_cachelines = 0;
-
-         auto& get_ptr(ptr_address::index_type index) { return ptrs[ptr_index_on_page(index)]; }
-
-         page()
-         {
-            free_cachelines.store(~0ULL, std::memory_order_relaxed);
-            half_free_cachelines.store(~0ULL, std::memory_order_relaxed);
-
-            // the first ptr is always taken, it is the null ptr, and
-            // should never be allocated.
-            for (uint32_t i = 0; i < free_ptrs.size(); ++i)
-               free_ptrs[i].store(~0ULL, std::memory_order_relaxed);
-         }
-
-        private:
-         int ptr_index_on_page(ptr_address::index_type address_index)
-         {
-            return *address_index % ptrs_per_page;
-         }
-
-         // 64 cachelines, 512 ptrs
-         alignas(64) std::array<shared_ptr, ptrs_per_page> ptrs;
+         std::array<std::atomic<uint64_t>, ptrs_per_zone / 64> free_ptrs;
       };
-
-      using page_offset                      = block_allocator::offset_ptr;
-      static constexpr page_offset null_page = block_allocator::null_offset;
-
-      struct region
+      struct ptr_alloc_header
       {
-         /// 1 bit for each page in the region with at least 1 free ptr,
-         /// there are at most 128 pages in a region with 512 ptrs per
-         /// page giving 2^16 addresses per region.
-         std::array<std::atomic<uint64_t>, 2> free_pages;
+         /// zone number with most free ptrs
+         std::atomic<uint16_t> min_alloc_zone;
 
-         /// 1 bit for each page that has at least 1 cacheline with 4+ free ptrs
-         std::array<std::atomic<uint64_t>, 2> free_halfline_pages;
+         /// total allocations in this zone
+         std::atomic<uint32_t> alloc_seq;
+         std::atomic<uint64_t> total_allocations;
 
-         /// page_index of -1 means the page is not allocated,
-         /// otherwise it is an offset_ptr into _page_allocator
-         std::array<std::atomic<page_offset>, pages_per_region> pages;
-
-         page_offset get_page_offset(ptr_address::index_type index) const
+         /// @return the sequence number of the allocation
+         uint32_t inc_alloc_count(ptr_address ptr)
          {
-            return pages[*index / ptrs_per_page].load(std::memory_order_relaxed);
+            total_allocations.fetch_add(1, std::memory_order_relaxed);
+            const auto zone       = *ptr / ptrs_per_zone;
+            auto       prior_used = zone_alloc_count[zone].fetch_add(1, std::memory_order_relaxed);
+
+            /**
+             * When adding to a zone we might no longer be the valid "min zone", 
+             * so if we are considered the "min zone" we may need to update the min
+             * zone to the lowest zone. We don't know what the true lowest is, but
+             * we can quickly calculate the average per zone, so if our zone is above
+             * average then we know, with certainty, that we are no longer the min zone.
+             */
+            auto min_zone = min_alloc_zone.load(std::memory_order_relaxed);
+            if (min_zone == zone and prior_used >= average_allocations())
+               update_min_zone();
+
+            return alloc_seq.fetch_add(1, std::memory_order_relaxed);
          }
-         page_offset get_page_offset(page_number page) const
+         void update_min_zone()
          {
-            return pages[*page].load(std::memory_order_relaxed);
-         }
-
-         static_assert(std::atomic<detail::page_offset>::is_always_lock_free,
-                       "std::atomic<page_offset> must be lock free");
-         region()
-         {
-            for (auto& p : pages)
-               p.store(null_page, std::memory_order_relaxed);
-            free_pages[0].store(~0ULL, std::memory_order_relaxed);
-            free_pages[1].store(~0ULL, std::memory_order_relaxed);
-            free_halfline_pages[0].store(~0ULL, std::memory_order_relaxed);
-            free_halfline_pages[1].store(~0ULL, std::memory_order_relaxed);
-         }
-      };
-
-      struct page_table
-      {
-         /// next region to allocate in for those who don't care which region
-         std::atomic<uint16_t> _next_region = 0;
-         std::atomic<uint32_t> _sequence    = 0;
-
-         /// protected by _page_alloc_mutex
-         std::atomic<uint64_t> _pages_alloced = 0;
-         /// 1 bit for each region with at least 1 free page
-         std::array<region, 1 << 16> regions;
-
-         region& get_region(ptr_address::region_type reg) { return regions[*reg]; }
-
-         void inc_region(ptr_address::region_type reg)
-         {
-            auto idx = *reg / 4;
-            auto bit = *reg % 4;
-            region_use_counts[idx].fetch_add(1ULL << (bit * 16), std::memory_order_relaxed);
-         }
-         void dec_region(ptr_address::region_type reg)
-         {
-            auto idx = *reg / 4;
-            auto bit = *reg % 4;
-            region_use_counts[idx].fetch_sub(1ULL << (bit * 16), std::memory_order_relaxed);
+            uint32_t min_zone  = 0;
+            uint32_t min_count = zone_alloc_count[0].load(std::memory_order_relaxed);
+            uint32_t num_zones = allocated_zones.load(std::memory_order_relaxed);
+            for (uint32_t i = 1; i < num_zones; ++i)
+            {
+               auto zmin = zone_alloc_count[i].load(std::memory_order_relaxed);
+               if (zmin < min_count)
+               {
+                  min_zone  = i;
+                  min_count = zmin;
+               }
+            }
+            min_alloc_zone.store(min_zone, std::memory_order_release);
          }
 
-         /// there are 4, 16 bit, counters per uint64_t.
-         alignas(128) std::array<std::atomic<uint64_t>, (1 << 16) / 4> region_use_counts;
+         void dec_alloc_count(ptr_address ptr)
+         {
+            const auto zone  = *ptr / ptrs_per_zone;
+            auto       prior = zone_alloc_count[zone].fetch_sub(1, std::memory_order_relaxed);
+
+            /**
+             * When removing from a zone we might become the new "min zone", or at least
+             * be lower than what is considered the current "min zone" which may be anywhere
+             * between the abs min and the average. 
+             */
+            auto maz      = min_alloc_zone.load(std::memory_order_acquire);
+            auto maz_used = zone_alloc_count[maz].load(std::memory_order_relaxed);
+
+            if (prior - 1 < maz_used)
+               min_alloc_zone.store(zone, std::memory_order_release);
+
+            total_allocations.fetch_sub(1, std::memory_order_relaxed);
+         }
+         uint32_t average_allocations() const
+         {
+            return total_allocations.load(std::memory_order_relaxed) /
+                   allocated_zones.load(std::memory_order_relaxed);
+         }
+
+         /// the number of zones allocated
+         std::atomic<uint32_t> allocated_zones;
+
+         /// for each zone, the number of allocated pointers in the zone, max 1024 zones
+         /// for 4 billion pointers (2^32)
+         std::array<std::atomic<uint32_t>, (1ull << 32) / ptrs_per_zone> zone_alloc_count;
       };
    }  // namespace detail
 
@@ -231,30 +149,24 @@ namespace sal
     * 
     * This allocator uses a memory mapped file to store the shared pointers tightly packed
     * and provides a 32 bit ptr_address to each shared pointer. Furthermore, the allocator
-    * gives the caller the power to control up to 256 regions in which to allocate the
-    * shared pointers and even enables the caller to provide hints about cachelines it
-    * would prefer to use. 
+    * gives the caller the power to provide hints about cachelines it would prefer to use.
     * 
-    * In this way data structures such as COW tries can build nodes that store all
-    * of their children in a single region and address them with just 16 bits of address
-    * while also greatly increasing the probability of many children sharing cachelines.
+    * In this way data structures such as COW tries can build nodes that easily compress
+    * the number of bytes needed to store pointers while also minimizing cache misses when
+    * retaining/releasing/visiting all children.
     * 
-    * The pointers fit in a single atomic uint64_t and contain a reference to an offset
-    * into the memory mapped file provided by the data allocator. The data allocator only
-    * produces cacheline aligned data, so the offset can save bits and make space to store
-    * additional metadata with the pointer. This enables atomic moves of the data the
-    * pointer references among other things.
+    * The allocator grows in blocks (zones) of 32 mb, of 4 million pointers, and will utilize 
+    * the allocation zone until it is 50% full, at which point it will allocate a new zone. 
+    * From this point on, the allocator will switch zones whenever a zone becomes the least
+    * filled or when it goes above the average filled zone. 
     * 
-    * Given a ptr_address, first load page_table to get the idx of page
-    *        then load the page + offset to get the shared ptr.location
+    * Data is stored in 3 files, a header file contains meta information that helps identify
+    * the lest filled, a bitmap file that tracks which pointers are free, and a data file
+    * that contains the shared pointers.
     * 
-    * This means 2 cacheline loads per ptr access if the page_table is cold.
-    * The page_table when using 4 billion pointers is about 32 MB, but the
-    * first 6144 pointers in each region can be accessed with just the 
-    * 1st cacheline. Assuming well distributed data across regions,
-    * you have a database with 3 GB worth of pointers pointing to at 
-    * least 25 GB of memory. All access for one node are likely to go 
-    * through the same cacheline of the page table.  
+    * Given the contiguous nature of the memory mapping, a pointer's address is a direct
+    * offset into the datafile and the bitmap file which makes alloc/free/get operations
+    * very fast.
     */
    class shared_ptr_alloc
    {
@@ -266,78 +178,134 @@ namespace sal
       ~shared_ptr_alloc();
 
       /**
-       * A suggestion for a region when you don't care which region 
-       * you are allocated in, attempts provide a region that isn't
-       * already over crowded.
-       */
-      ptr_address::region_type get_new_region();
-
-      /**
        *  @throw std::runtime_error if no ptrs are available
        *  @return an the address of the allocated ptr and a pointer to the shared_ptr
+       * @brief this will attempt to allocate on one of the least filled cachelines
+       * within the current zone. 
        */
-      allocation alloc(ptr_address::region_type region, const alloc_hint& hint = alloc_hint::any());
-      allocation first_avail_alloc(ptr_address::region_type region);
-
-      struct region_stats_t
+      allocation alloc()
       {
-         ptr_address::region_type region;
-         uint16_t                 use;
-      };
-      std::vector<region_stats_t> region_stats() const
-      {
-         std::vector<region_stats_t> stats;
-         stats.reserve(1ull << 16);
-         const auto& pt  = get_page_table();
-         auto&       ruc = pt.region_use_counts;
-         for (uint32_t i = 0; i < (1ull << 16) / 4; ++i)
+         // each thread will look to a different cacheline in the zone minimizing contention
+         static std::atomic<uint64_t>     seed(0);
+         static thread_local lehmer64_rng rnd(seed.fetch_add(1, std::memory_order_relaxed));
+         do
          {
-            uint64_t use = ruc[i].load(std::memory_order_relaxed);
-            stats.push_back({ptr_address::region_type(i), uint16_t(use & 0xffff)});
-            stats.push_back({ptr_address::region_type(i), uint16_t((use >> 16) & 0xffff)});
-            stats.push_back({ptr_address::region_type(i), uint16_t((use >> 32) & 0xffff)});
-            stats.push_back({ptr_address::region_type(i), uint16_t((use >> 48) & 0xffff)});
+            // if average allocations is > 50% then we need to add a new zone
+            if (_header_ptr->average_allocations() > detail::ptrs_per_zone / 2) [[unlikely]]
+               ensure_capacity(num_allocated_zones() + 1);
+
+            auto  min_zone       = _header_ptr->min_alloc_zone.load(std::memory_order_relaxed);
+            auto* zone_free_base = _free_list_base + (((detail::ptrs_per_zone * min_zone) / 64));
+
+            /// pick 1 cacheline ( 8 uint64_t ) from zone_free_base at random..
+            static constexpr uint32_t n64_per_zone = detail::ptrs_per_zone / 64;
+            static constexpr uint32_t cl_per_zone  = n64_per_zone / 8;
+
+            auto cl   = rnd.next() % cl_per_zone;
+            auto base = zone_free_base + (cl * 8);
+
+            alignas(128) uint64_t free_bits[8];
+            for (int i = 0; i < 8; ++i)
+               free_bits[i] = base[i].load(std::memory_order_relaxed);
+
+            // get an index of the byte with the most set (free) bits
+            auto most_free_byte = max_pop_cnt8_index64((uint8_t*)free_bits);
+
+            ptr_address ptr_hint(min_zone * detail::ptrs_per_zone + cl * 8 + (most_free_byte * 8));
+
+            // it is entirely possible that all 64 bytes are already taken and/or another
+            // thread randomly chose the same cacheline and took the last pointer in the cacheline.
+            // so we need to try again... given a 50% capacity target, most of the time there should
+            // be at least 1 free pointer out of the 512 pointers checked by max_pop_cnt8_index64.
+            auto optalloc = try_alloc(alloc_hint{&ptr_hint, 1});
+            if (not optalloc) [[unlikely]]
+               continue;
+
+            return *optalloc;
+         } while (_header_ptr->total_allocations.load(std::memory_order_acquire) < (1ull << 32));
+         [[likely]] throw std::runtime_error("failed to allocate");
+      }
+
+      void ensure_capacity(uint32_t req_zones);
+
+      /**
+       * @brief first attempt to allocate with one of the hints, and if that fails,
+       * then allocate on one of the least filled cachelines
+       * within the current zone to reduce the likelihood of using a spot a future
+       * alloc may want via a hint. 
+       */
+      allocation alloc(const alloc_hint& hint)
+      {
+         if (auto alloc = try_alloc(hint))
+            return *alloc;
+         return alloc();
+      }
+
+      /**
+       * This will attempt to allocate in one of the cachelines provided by the hint.
+       */
+      std::optional<allocation> try_alloc(const alloc_hint& hint)
+      {
+         for (auto addr : hint)
+         {
+            // round down to the nearest 16 element boundary
+            uint32_t cl = *addr & ~uint32_t(0x0f);
+
+            std::atomic<uint64_t>& free_list = _free_list_base[cl / 64];
+
+            // in a 128 byte cacheline, there are 16 8 byte ptrs
+            uint64_t base_clinebits = 0xffffull << (cl % 64);
+
+            uint64_t masked_free_bits = free_list.load(std::memory_order_relaxed) & base_clinebits;
+
+            while (masked_free_bits)
+            {
+               int         index = std::countr_zero(masked_free_bits);
+               ptr_address ptr(cl + index);
+               shared_ptr& p = _ptr_base[*ptr];
+               if (claim_address(ptr)) [[likely]]
+                  return allocation{ptr, &p, _header_ptr->inc_alloc_count(ptr)};
+               masked_free_bits = free_list.load(std::memory_order_acquire) & base_clinebits;
+            }
          }
-         return stats;
+         return std::nullopt;
       }
 
       /// @pre address is a valid pointer address
-      void free(ptr_address address);
+      void free(ptr_address address) noexcept
+      {
+         assert((*address / detail::ptrs_per_zone) <
+                _header_ptr->allocated_zones.load(std::memory_order_relaxed));
+         assert(_ptr_base[*address].ref() == 0);
+
+         release_address(address);
+         _header_ptr->dec_alloc_count(address);
+      }
 
       /// @pre address is a valid pointer address returned from alloc()
-      shared_ptr& get(ptr_address address)
+      shared_ptr& get(ptr_address address) noexcept
       {
-         detail::page_offset poff =
-             get_page_table().get_region(address.region).get_page_offset(address.index);
-         return get_page(poff).get_ptr(address.index);
+         assert((*address / detail::ptrs_per_zone) <
+                _header_ptr->allocated_zones.load(std::memory_order_relaxed));
+
+         return _ptr_base[*address];
       }
 
       /// @brief Try to get a pointer, returning nullptr if the address is invalid or freed
       /// @param address The address to look up
       /// @return A pointer to the shared_ptr if it exists and is allocated, nullptr otherwise
-      shared_ptr* try_get(ptr_address address)
+      shared_ptr* try_get(ptr_address address) noexcept
       {
-         auto& region = get_page_table().get_region(address.region);
-
-         // Check if the page exists
-         detail::page_offset poff = region.get_page_offset(address.index);
-         if (poff == detail::null_page)
+         if ((*address / detail::ptrs_per_zone) >=
+             _header_ptr->allocated_zones.load(std::memory_order_relaxed))
             return nullptr;
 
-         // Get the page
-         auto& page = get_page(poff);
-
-         // Check if the pointer is allocated (bit is NOT set in the free bitmap)
-         uint32_t slot_idx = *address.index / 64;
-         uint32_t bit_idx  = *address.index % 64;
-
-         // If the bit is set, the pointer is free
-         uint64_t free_ptrs_bitmap = page.free_ptrs[slot_idx].load(std::memory_order_relaxed);
-         if (free_ptrs_bitmap & (1ULL << bit_idx))
+         auto& ptr = _ptr_base[*address];
+         if (ptr.load(std::memory_order_relaxed).cacheline_offset ==
+             shared_ptr::max_cacheline_offset)
             return nullptr;
 
-         // Pointer exists and is allocated
-         return &page.get_ptr(address.index);
+         return &ptr;
       }
 
       /**
@@ -352,7 +320,17 @@ namespace sal
        * @return A reference to the shared_ptr at the specified address
        * @throws std::runtime_error if allocation fails
        */
-      shared_ptr& get_or_alloc(ptr_address address);
+      shared_ptr& get_or_alloc(ptr_address address)
+      {
+         if (auto ptr = try_get(address))
+            return *ptr;
+
+         ensure_capacity(*address / detail::ptrs_per_zone + 1);
+
+         if (not claim_address(address)) [[unlikely]]
+            throw std::runtime_error("failed to allocate");
+         return _ptr_base[*address];
+      }
 
       /**
        * This API is utilized to rebuild the allocator in the event of a 
@@ -360,7 +338,7 @@ namespace sal
        * @group recovery_api
        */
       /// @{
-      // set all meta nodes to 0
+      // set all meta nodes to empty state
       void clear_all();
 
       // release all refs, if prior was <= 1 move to free list
@@ -371,84 +349,74 @@ namespace sal
 
       /// @brief Returns the total number of used pointers across all regions
       /// @return The sum of all region use counts
-      uint64_t used() const;
-
-      /**
-       * @brief Calculate summary statistics on region usage
-       * @return A struct containing min, max, mean, and standard deviation of region usage
-       */
-      struct region_usage_summary_t
+      uint64_t used() const
       {
-         uint16_t min;          ///< Minimum number of used pointers in any non-empty region
-         uint16_t max;          ///< Maximum number of used pointers in any region
-         double   mean;         ///< Average number of used pointers across non-empty regions
-         double   stddev;       ///< Standard deviation of used pointers across non-empty regions
-         uint32_t count;        ///< Number of non-empty regions
-         uint64_t total_usage;  ///< Total usage count across all regions
-      };
-      region_usage_summary_t get_region_usage_summary() const;
-      /// @}
-
-      static constexpr uint32_t max_regions = 1 << 16;
-      void clear_active_bits(ptr_address::region_type start_region, uint32_t num_regions);
-
-     private:
-      uint64_t get_region_use_count(ptr_address::region_type region) const;
-      /**
-       * This class is designed to be accessed by multiple threads, but because it is
-       * lock free, it is possible the indices that direct us to free ptrs are read in
-       * an inconsistent state. If this happens we will arrive at the end of the page
-       * expecting to find an available ptr but not find one (another thread claimed it),
-       * this isn't a problem, just try again in a loop like CAS. 
-       * 
-       * @throw std::runtime_error if no ptrs are available
-       * @return an allocation if successful, std::nullopt if transient inconsitency detected
-       */
-      std::optional<allocation> try_alloc(ptr_address::region_type region);
-      std::optional<allocation> try_alloc(detail::region&          reg,
-                                          ptr_address::region_type reg_num,
-                                          ptr_address::index_type  index);
-
-      detail::page_number address_index_to_page(ptr_address::index_type address_index)
-      {
-         return detail::page_number(*address_index / ptrs_per_page);
-      }
-      int ptr_index_on_page(ptr_address::index_type address_index)
-      {
-         return *address_index % ptrs_per_page;
-      }
-      detail::page_offset alloc_page(detail::page_number pg_num);
-
-      detail::page& get_or_alloc_page(detail::region& reg, detail::page_number pg_num);
-
-      /// @pre page_index is a valid page index
-      detail::page& get_page(block_allocator::offset_ptr pg)
-      {
-         return *_page_allocator->get<detail::page>(pg);
-      }
-      detail::page_table& get_page_table() { return *_page_table->as<detail::page_table>(); }
-
-      // Const versions for read-only access
-      const detail::page_table& get_page_table() const
-      {
-         return *_page_table->as<detail::page_table>();
+         return _header_ptr->total_allocations.load(std::memory_order_relaxed);
       }
 
-      static constexpr uint32_t ptrs_per_page    = 512;
-      static constexpr uint32_t pages_per_region = (1 << 16) / ptrs_per_page;
-      static constexpr uint32_t alloc_block_size = 16 * 1024 * 1024;
+      void clear_active_bits(ptr_address start, uint32_t num)
+      {
+         auto end = std::min<uint64_t>(*start + num, detail::ptrs_per_zone * num_allocated_zones());
+         for (auto i = start; i < end; ++i)
+            get(i).clear_pending_cache();
+      }
 
+      uint32_t num_allocated_zones() const
+      {
+         return _header_ptr->allocated_zones.load(std::memory_order_relaxed);
+      }
+
+      /// the maximum address that could be allocated without
+      /// resizing the file.
+      uint32_t current_max_address_count() const
+      {
+         return detail::ptrs_per_zone * num_allocated_zones();
+      }
+
+      //private:
+      bool claim_address(ptr_address address)
+      {
+         assert((*address / detail::ptrs_per_zone) <
+                _header_ptr->allocated_zones.load(std::memory_order_relaxed));
+
+         auto& p = _ptr_base[*address];
+         if (p.claim())
+         {
+            /// clear the bit in the bitmap to indicate the pointer is allocated
+            auto prior = _free_list_base[*address / 64].fetch_sub(1ull << (*address % 64),
+                                                                  std::memory_order_relaxed);
+            assert(prior & (1ull << (*address % 64)));
+            (void)prior;  // suppress unused variable warning in release builds
+         }
+         return true;
+      }
+      void release_address(ptr_address address)
+      {
+         assert((*address / detail::ptrs_per_zone) <
+                _header_ptr->allocated_zones.load(std::memory_order_relaxed));
+
+         assert(!(_free_list_base[*address / 64].load(std::memory_order_relaxed) &
+                  (1ull << (*address % 64))));
+
+         _ptr_base[*address].move({}, std::memory_order_relaxed);
+
+         auto prior = _free_list_base[*address / 64].fetch_add(1ull << (*address % 64),
+                                                               std::memory_order_release);
+         assert(prior & (1ull << (*address % 64)));
+         (void)prior;  // suppress unused variable warning in release builds
+      }
       /**
        * used for allocating blocks of pages 16 MB at a time,
        * and then subdividing them into page objects and issuing
        * them as needed.
        */
-      std::unique_ptr<block_allocator> _page_allocator;
-      std::unique_ptr<mapping>         _page_table;
+      std::unique_ptr<block_allocator> _zone_allocator;
+      std::unique_ptr<block_allocator> _zone_free_list;
+      std::unique_ptr<mapping>         _header;
       std::filesystem::path            _dir;
-
-      /// only one thread at a time should attempt to allocate
-      /// pages when they come across a null_page in the page_table
-      std::mutex _page_alloc_mutex;
+      detail::ptr_alloc_header*        _header_ptr;
+      shared_ptr*                      _ptr_base;
+      std::atomic<uint64_t>*           _free_list_base;
+      std::mutex                       _grow_mutex;
    };
 }  // namespace sal

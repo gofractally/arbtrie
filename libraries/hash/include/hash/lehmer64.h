@@ -22,7 +22,7 @@ struct lehmer64_rng
           (((__uint128_t)splitmix64_stateless(seed, 0)) << 64) + splitmix64_stateless(seed, 1);
    }
 
-   uint64_t next()
+   uint64_t next() noexcept
    {
       _lehmer64_state *= 0xda942042e4dd58b5ull;
       auto r = _lehmer64_state >> 64;

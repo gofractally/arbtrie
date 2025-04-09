@@ -20,6 +20,9 @@ set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
 # Print build type for debugging
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
+# Common compiler flags
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension -fdiagnostics-color=always")
+
 # Set debug flags explicitly - must be before project()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -UNDEBUG -fno-omit-frame-pointer" CACHE STRING "Flags used by the compiler in Debug builds" FORCE)
@@ -77,42 +80,41 @@ endif()
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
 option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
 
-# Add the SAL library
 add_subdirectory(libraries/sal)
-message(STATUS "SAL library added to build")
+add_subdirectory(libraries/psitri)
+add_subdirectory(libraries/hash)
+add_subdirectory(libraries/ucc)
 
 # Main library
-add_library(arbtrie
-    src/node_handle.cpp
-    src/database.cpp
-    src/mapping.cpp
-    src/seg_allocator.cpp
-    src/seg_allocator_session.cpp
-    src/recover.cpp
-    src/iterator_count_keys.cpp
-    src/segment_thread.cpp
-    src/mapped_memory/session_data.cpp
-)
+#add_library(arbtrie
+#    src/node_handle.cpp
+#    src/database.cpp
+##    src/mapping.cpp
+#    src/seg_allocator.cpp
+#    src/seg_allocator_session.cpp
+#    src/recover.cpp
+#    src/iterator_count_keys.cpp
+#    src/segment_thread.cpp
+#    src/mapped_memory/session_data.cpp
+#)
 
 # Library configuration
-target_include_directories(arbtrie 
-    PUBLIC 
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${Boost_INCLUDE_DIRS}
-)
+#target_include_directories(arbtrie 
+#    PUBLIC 
+#        ${CMAKE_CURRENT_SOURCE_DIR}/include
+#        ${Boost_INCLUDE_DIRS}
+#)
 
-target_link_libraries(arbtrie 
-    PUBLIC 
-        Threads::Threads
-        sal
-)
-target_compile_features(arbtrie PUBLIC cxx_std_23)
+#target_link_libraries(arbtrie 
+#    PUBLIC 
+#        Threads::Threads
+#        sal
+#)
+#target_compile_features(arbtrie PUBLIC cxx_std_23)
 
 # Set up explicit compile definitions
-add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
+#add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
 
-# Common compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension -fdiagnostics-color=always")
 
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -254,8 +256,6 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(X86_64)|(amd64)|(AMD64)")
     endif()
 endif()
 
-# Add subdirectories
-add_subdirectory(programs)
 
 # MDBX benchmark test (optional)
 option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
@@ -312,14 +312,14 @@ if(BUILD_TESTS)
 endif()
 
 # Installation rules (optional)
-install(TARGETS arbtrie
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin
-)
+# install(TARGETS arbtrie
+#     LIBRARY DESTINATION lib
+#     ARCHIVE DESTINATION lib
+#     RUNTIME DESTINATION bin
+# )
 
-install(DIRECTORY include/
-    DESTINATION include
-)
+# install(DIRECTORY include/
+#     DESTINATION include
+# )
 
 # End of file - removing duplicate SAL options and includes

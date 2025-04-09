@@ -1,21 +1,12 @@
 #pragma once
 
-#include <stdint.h>
 #include <assert.h>
+#include <stdint.h>
 
-/// general case for all CPUs 
-inline int find_nth_set_bit(uint64_t x, unsigned n) {
-    assert( x != 0 ); /// popcount us undefined behavior for 0
-    int total_set_bits = __builtin_popcountll(x);
-    if (n >= total_set_bits) return 64;
+/// general case for all CPUs
 
-    // Iterate to the nth set bit
-    for (int i = 0; i < n; i++) {
-        x &= (x - 1);  // Clear the least significant set bit
-    }
-    return __builtin_ctzll(x);  // Return position of the next set bit
-}
-
+namespace ucc
+{
 
 /**
    What is _pdep_u64?
@@ -47,10 +38,32 @@ Since _pdep_u64 outputs a value with exactly one set bit (or zero), _tzcnt_u64 r
 If the input to _tzcnt_u64 is 0 (i.e., n exceeds the number of set bits), it returns 64.
 
 */
-
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
 
 /// highly optimized 2 instruction for x86
-inline unsigned find_nth_set_bit(uint64_t x, unsigned n) {
-    assert( x != 0 );
-    return _tzcnt_u64(_pdep_u64(1ULL << n, x));
-}
+#ifdef __x86_64__
+   inline unsigned find_nth_set_bit(uint64_t x, unsigned n)
+   {
+      assert(x != 0);
+      return _tzcnt_u64(_pdep_u64(1ULL << n, x));
+   }
+#else
+   inline int find_nth_set_bit(uint64_t x, unsigned n)
+   {
+      assert(x != 0);  /// popcount us undefined behavior for 0
+      uint32_t total_set_bits = __builtin_popcountll(x);
+      if (n >= total_set_bits)
+         return 64;
+
+      // Iterate to the nth set bit
+      for (int i = 0; i < n; i++)
+      {
+         x &= (x - 1);  // Clear the least significant set bit
+      }
+      return __builtin_ctzll(x);  // Return position of the next set bit
+   }
+#endif
+
+}  // namespace ucc

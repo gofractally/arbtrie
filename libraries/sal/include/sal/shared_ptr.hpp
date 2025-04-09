@@ -20,9 +20,10 @@ namespace sal
 
      public:
       // Default constructor to ensure proper initialization of the atomic
-      shared_ptr() : _data(0) {}
+      shared_ptr() noexcept : _data(0) {}
 
-      static constexpr uint64_t location_offset = 21;
+      static constexpr uint64_t location_offset      = 21;
+      static constexpr uint64_t max_cacheline_offset = (1ULL << 41) - 1;
       /**
        * The internal structure of the bits stored in the atomic _data
        */
@@ -40,29 +41,29 @@ namespace sal
          /// when reference count goes to 0 along with the active bit.
          uint64_t pending_cache : 1;
 
-         shared_ptr_data() : ref(0), cacheline_offset(0), active(0), pending_cache(0) {}
-         shared_ptr_data(uint64_t value) { from_int(value); }
-         uint64_t to_int() const { return std::bit_cast<uint64_t>(*this); }
-         void     from_int(uint64_t value) { *this = std::bit_cast<shared_ptr_data>(value); }
-         location loc() const { return location::from_cacheline(cacheline_offset); }
+         shared_ptr_data() noexcept : ref(0), cacheline_offset(0), active(0), pending_cache(0) {}
+         shared_ptr_data(uint64_t value) noexcept { from_int(value); }
+         uint64_t to_int() const noexcept { return std::bit_cast<uint64_t>(*this); }
+         void from_int(uint64_t value) noexcept { *this = std::bit_cast<shared_ptr_data>(value); }
+         location loc() const noexcept { return location::from_cacheline(cacheline_offset); }
 
-         shared_ptr_data& set_ref(uint64_t r)
+         shared_ptr_data& set_ref(uint64_t r) noexcept
          {
             assert(r <= max_ref_count);
             ref = r;
             return *this;
          }
-         shared_ptr_data& set_loc(location l)
+         shared_ptr_data& set_loc(location l) noexcept
          {
             cacheline_offset = l.cacheline();
             return *this;
          }
-         shared_ptr_data& set_active(bool a)
+         shared_ptr_data& set_active(bool a) noexcept
          {
             active = a;
             return *this;
          }
-         shared_ptr_data& set_pending_cache(bool p)
+         shared_ptr_data& set_pending_cache(bool p) noexcept
          {
             pending_cache = p;
             return *this;
@@ -79,9 +80,12 @@ namespace sal
        */
       static constexpr uint64_t max_ref_count = (1ULL << 21) - sal::max_threads;
 
-      int  use_count() const { return shared_ptr_data(_data.load(std::memory_order_relaxed)).ref; }
-      bool unique() const { return use_count() == 1; }
-      void reset() { _data.store(shared_ptr_data().to_int(), std::memory_order_relaxed); }
+      int use_count() const noexcept
+      {
+         return shared_ptr_data(_data.load(std::memory_order_relaxed)).ref;
+      }
+      bool unique() const noexcept { return use_count() == 1; }
+      void reset() noexcept { _data.store(shared_ptr_data().to_int(), std::memory_order_relaxed); }
       bool retain()
       {
          shared_ptr_data prior(_data.fetch_add(1, std::memory_order_relaxed));
@@ -91,30 +95,33 @@ namespace sal
          return true;
       };
 
-      uint32_t ref() const { return load(std::memory_order_relaxed).ref; }
-      location loc() const { return load(std::memory_order_acquire).loc(); }
-      bool     active() const { return load(std::memory_order_relaxed).active; }
-      bool     pending_cache() const { return load(std::memory_order_relaxed).pending_cache; }
+      uint32_t ref() const noexcept { return load(std::memory_order_relaxed).ref; }
+      location loc() const noexcept { return load(std::memory_order_acquire).loc(); }
+      bool     active() const noexcept { return load(std::memory_order_relaxed).active; }
+      bool pending_cache() const noexcept { return load(std::memory_order_relaxed).pending_cache; }
 
       /// @deprecated dont use this
-      uint64_t to_int(std::memory_order order = std::memory_order_relaxed) const
+      uint64_t to_int(std::memory_order order = std::memory_order_relaxed) const noexcept
       {
          return _data.load(order);
       }
 
-      shared_ptr_data load(std::memory_order order = std::memory_order_relaxed) const
+      shared_ptr_data load(std::memory_order order = std::memory_order_relaxed) const noexcept
       {
          return shared_ptr_data(_data.load(order));
       }
-      void store(shared_ptr_data value, std::memory_order order = std::memory_order_relaxed)
+      void store(shared_ptr_data   value,
+                 std::memory_order order = std::memory_order_relaxed) noexcept
       {
          _data.store(value.to_int(), order);
       }
-      void reset(location loc, int ref = 1, std::memory_order order = std::memory_order_release)
+      void reset(location          loc,
+                 int               ref   = 1,
+                 std::memory_order order = std::memory_order_release) noexcept
       {
          store(shared_ptr_data().set_loc(loc).set_ref(ref), order);
       }
-      void set_ref(int ref, std::memory_order order = std::memory_order_relaxed)
+      void set_ref(int ref, std::memory_order order = std::memory_order_relaxed) noexcept
       {
          store(load(order).set_ref(ref), order);
       }
@@ -122,7 +129,7 @@ namespace sal
       /**
        * @return the state of the shared_ptr_data before decrementing the reference count
        */
-      shared_ptr_data release()
+      shared_ptr_data release() noexcept
       {
          // if we are not the last reference then relaxed is best, we will
          // load with acquire before returning if we are the last reference.
@@ -147,7 +154,7 @@ namespace sal
          }
          return prior;
       };
-      void clear_pending_cache()
+      void clear_pending_cache() noexcept
       {
          uint64_t        expected = _data.load(std::memory_order_relaxed);
          shared_ptr_data updated;
@@ -167,8 +174,9 @@ namespace sal
        * and the ref count is not 0, note that other changes to
        * the shared_ptr_data are alloewd 
        */
-      bool cas_move(location expected_loc, location desired_loc)
+      bool cas_move(location expected_loc, location desired_loc) noexcept
       {
+         assert(desired_loc.cacheline() != max_cacheline_offset);
          uint64_t        expect_data = _data.load(std::memory_order_relaxed);
          shared_ptr_data prior;
          do
@@ -182,6 +190,29 @@ namespace sal
          return true;
       }
 
+      // used by the allocator to claim this pointer to use, uses the
+      // cacheline_offset max value to indicate the pointer alloc/free.
+      bool claim() noexcept
+      {
+         uint64_t        expect_data = _data.load(std::memory_order_relaxed);
+         shared_ptr_data prior;
+         do
+         {
+            prior.from_int(expect_data);
+            if (prior.cacheline_offset != max_cacheline_offset) [[unlikely]]
+               return false;
+            prior.cacheline_offset = 0;
+         } while (not _data.compare_exchange_weak(expect_data, prior.to_int(),
+                                                  std::memory_order_seq_cst));
+         return true;
+      }
+      void release_claim() noexcept
+      {
+         shared_ptr_data prior;
+         prior.cacheline_offset = max_cacheline_offset;
+         _data.store(prior.to_int(), std::memory_order_relaxed);
+      }
+
       /**
        * Moves the location without regard to the prior location, but
        * without disrupting any other fields that may be updated by
@@ -189,8 +220,10 @@ namespace sal
        * 
        * @return the updated shared_ptr_data
        */
-      shared_ptr_data move(location loc, std::memory_order order = std::memory_order_relaxed)
+      shared_ptr_data move(location          loc,
+                           std::memory_order order = std::memory_order_relaxed) noexcept
       {
+         assert(loc.cacheline() != max_cacheline_offset);
          auto            expected = _data.load(order);
          shared_ptr_data updated;
          do
@@ -210,7 +243,7 @@ namespace sal
        *
        * @return true if successfully incremented activity, false if failed due to contention
        */
-      bool try_inc_activity()
+      bool try_inc_activity() noexcept
       {
          uint64_t        expected = _data.load(std::memory_order_relaxed);
          shared_ptr_data updated(expected);
@@ -228,7 +261,7 @@ namespace sal
        * 
        * @return true if the pending cache bit was cleared, false otherwise
        */
-      bool try_end_pending_cache()
+      bool try_end_pending_cache() noexcept
       {
          uint64_t        expected = _data.load(std::memory_order_relaxed);
          shared_ptr_data updated;
@@ -246,5 +279,7 @@ namespace sal
       static_assert(sizeof(shared_ptr_data) == 8, "shared_ptr_data must be 8 bytes");
    };
    static_assert(sizeof(shared_ptr) == 8, "shared_ptr must be 8 bytes");
+
+   using shared_ptr_data = shared_ptr::shared_ptr_data;
 
 }  // namespace sal
