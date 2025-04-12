@@ -1,5 +1,7 @@
 #include <psitri/database.hpp>
 #include <psitri/database_impl.hpp>
+#include <psitri/read_session.hpp>
+#include <psitri/write_session.hpp>
 
 namespace psitri
 {
@@ -49,6 +51,15 @@ namespace psitri
    {
       _cfg = cfg;
       _allocator.set_runtime_config(cfg);
+   }
+
+   std::shared_ptr<write_session> database::start_write_session()
+   {
+      return std::make_shared<write_session>(*this);
+   }
+   std::shared_ptr<read_session> database::start_read_session()
+   {
+      return std::make_shared<read_session>(*this);
    }
 
 }  // namespace psitri

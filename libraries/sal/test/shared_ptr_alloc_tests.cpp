@@ -1,15 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
+#include <sal/control_block.hpp>
+#include <sal/control_block_alloc.hpp>
 #include <sal/debug.hpp>
-#include <sal/shared_ptr.hpp>
-#include <sal/shared_ptr_alloc.hpp>
 
 #include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <condition_variable>
 #include <filesystem>
 #include <iostream>  // Added for progress output
-#include <memory>
 #include <mutex>
 #include <random>
 #include <string>
@@ -19,59 +17,61 @@
 namespace fs = std::filesystem;
 
 // Helper function to initialize a pointer for testing
-void init_test_ptr(sal::shared_ptr* ptr, uint32_t cacheline_val, int ref_count)
+void init_test_ptr(sal::control_block* ptr, uint32_t cacheline_val, int ref_count)
 {
    if (ptr)
       ptr->reset(sal::location::from_cacheline(cacheline_val), ref_count);
 }
 
-TEST_CASE("shared_ptr_alloc basic operations", "[sal][shared_ptr_alloc]")
+TEST_CASE("ControlBlockAllocBasic", "[sal][control_block_alloc]")
 {
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
    SECTION("Construction and destruction")
    {
       // Make sure we can construct and destruct the allocator
-      REQUIRE_NOTHROW(sal::shared_ptr_alloc(temp_path));
+      REQUIRE_NOTHROW(sal::control_block_alloc(temp_path));
    }
 
    SECTION("Basic allocation and freeing")
    {
-      sal::shared_ptr_alloc alloc(temp_path);
+      sal::control_block_alloc alloc(temp_path);
 
-      // Allocate a shared_ptr
+      // Allocate a control_block
       auto allocation = alloc.alloc();
 
       // Check that we got a valid allocation
       REQUIRE(allocation.ptr != nullptr);
-      REQUIRE(allocation.address != sal::ptr_address(0));  // Check for a non-zero address
 
-      // Should be able to access the shared_ptr (initial ref count might not be 0)
+      // Should be able to access the control_block (initial ref count might not be 0)
       REQUIRE_NOTHROW(allocation.ptr->use_count());
 
       // Free the allocation
       // Initialize before freeing to avoid assertion failure on ref count check
       init_test_ptr(allocation.ptr, 1, 0);
-      REQUIRE_NOTHROW(alloc.free(allocation.address));
+      REQUIRE_NOTHROW(alloc.free(allocation.addr_seq.address));
    }
 
    SECTION("Multiple allocations and frees")
    {
-      sal::shared_ptr_alloc alloc(temp_path);
+      sal::control_block_alloc alloc(temp_path);
 
-      // Allocate a smaller number of shared_ptrs
-      constexpr size_t              num_allocs = 100;  // Increased count
-      std::vector<sal::ptr_address> addresses;
-      std::vector<sal::shared_ptr*> pointers;  // Store pointers to init before free
+      // Allocate a smaller number of control_blocks
+      constexpr size_t                 num_allocs = 100;  // Increased count
+      std::vector<sal::ptr_address>    addresses;
+      std::vector<sal::control_block*> pointers;  // Store pointers to init before free
 
       for (size_t i = 0; i < num_allocs; ++i)
       {
          auto allocation = alloc.alloc();
          REQUIRE(allocation.ptr != nullptr);
-         addresses.push_back(allocation.address);
+         // Verify no duplicates
+         REQUIRE(std::find(addresses.begin(), addresses.end(), allocation.addr_seq.address) ==
+                 addresses.end());
+         addresses.push_back(allocation.addr_seq.address);
          pointers.push_back(allocation.ptr);
       }
 
@@ -92,14 +92,14 @@ TEST_CASE("shared_ptr_alloc basic operations", "[sal][shared_ptr_alloc]")
 
    SECTION("Allocation with hint")
    {
-      sal::shared_ptr_alloc alloc(temp_path);
+      sal::control_block_alloc alloc(temp_path);
 
       // Allocate one pointer to get a potential hint address
       auto initial_alloc = alloc.alloc();
       REQUIRE(initial_alloc.ptr != nullptr);
 
       // Use the allocated address as a hint for the next allocation
-      sal::ptr_address hint_addr = initial_alloc.address;
+      sal::ptr_address hint_addr = initial_alloc.addr_seq.address;
       sal::alloc_hint  hint{&hint_addr, 1};
 
       // Try allocating with the hint
@@ -109,54 +109,57 @@ TEST_CASE("shared_ptr_alloc basic operations", "[sal][shared_ptr_alloc]")
 
       // Try allocating with a hint where the address is already free
       init_test_ptr(initial_alloc.ptr, 1, 0);
-      alloc.free(initial_alloc.address);
+      alloc.free(initial_alloc.addr_seq.address);
       auto hinted_alloc2 = alloc.alloc(hint);
       REQUIRE(hinted_alloc2.ptr != nullptr);
 
       // Clean up
       init_test_ptr(hinted_alloc.ptr, 1, 0);
-      alloc.free(hinted_alloc.address);
+      alloc.free(hinted_alloc.addr_seq.address);
       init_test_ptr(hinted_alloc2.ptr, 1, 0);
-      alloc.free(hinted_alloc2.address);
+      alloc.free(hinted_alloc2.addr_seq.address);
    }
 
    SECTION("try_alloc with hint")
    {
-      sal::shared_ptr_alloc alloc(temp_path);
+      sal::control_block_alloc alloc(temp_path);
 
       // Allocate one pointer
       auto alloc1 = alloc.alloc();
       REQUIRE(alloc1.ptr != nullptr);
-      sal::ptr_address hint_addr = alloc1.address;
+      sal::ptr_address hint_addr = alloc1.addr_seq.address;
       sal::alloc_hint  hint{&hint_addr, 1};
 
-      // try_alloc with a hint for an *already allocated* address should fail
-      auto failed_alloc = alloc.try_alloc(hint);
-      REQUIRE(!failed_alloc);
+      // try_alloc with a hint should allocate in the same cacheline
+      auto alloc2 = alloc.try_alloc(hint);
+      REQUIRE(alloc2);
+      REQUIRE(alloc2->ptr != nullptr);
+      // Check they share the same cacheline by masking off the low 4 bits
+      REQUIRE((*alloc2->addr_seq.address & ~uint32_t(0x0f)) == (*hint_addr & ~uint32_t(0x0f)));
 
       // Free the first pointer
       init_test_ptr(alloc1.ptr, 1, 0);
-      alloc.free(alloc1.address);
+      alloc.free(alloc1.addr_seq.address);
 
       // try_alloc with a hint for a *free* address should succeed
       auto success_alloc = alloc.try_alloc(hint);
       REQUIRE(success_alloc);
       REQUIRE(success_alloc->ptr != nullptr);
-      REQUIRE(success_alloc->address == hint_addr);  // Should allocate at the hint address
+      REQUIRE(success_alloc->addr_seq.address == hint_addr);  // Should allocate at the hint address
 
       // Clean up
       init_test_ptr(success_alloc->ptr, 1, 0);
-      alloc.free(success_alloc->address);
+      alloc.free(success_alloc->addr_seq.address);
    }
 
    // Clean up directory
    fs::remove_all(temp_path);
 }
 
-TEST_CASE("shared_ptr_alloc persistence", "[sal][shared_ptr_alloc]")
+TEST_CASE("ControlBlockAllocPersistence", "[sal][control_block_alloc]")
 {
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_persist_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_persist_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
@@ -164,15 +167,15 @@ TEST_CASE("shared_ptr_alloc persistence", "[sal][shared_ptr_alloc]")
 
    // First allocator instance
    {
-      sal::shared_ptr_alloc alloc(temp_path);
+      sal::control_block_alloc alloc(temp_path);
 
       // Allocate a small number of pointers
       for (int i = 0; i < 20; ++i)  // Increased count
       {
          auto allocation = alloc.alloc();
          REQUIRE(allocation.ptr != nullptr);
-         // Store the allocation address
-         addresses.push_back(allocation.address);
+         // Store the allocation.addr_seq.address
+         addresses.push_back(allocation.addr_seq.address);
          // Initialize the pointer so it can be loaded later
          init_test_ptr(allocation.ptr, 100 + i, 1);
       }
@@ -181,7 +184,7 @@ TEST_CASE("shared_ptr_alloc persistence", "[sal][shared_ptr_alloc]")
 
    // Second allocator instance should be able to access the same pointers
    {
-      sal::shared_ptr_alloc alloc(temp_path);
+      sal::control_block_alloc alloc(temp_path);
 
       // Check each pointer can be accessed and freed
       for (size_t i = 0; i < addresses.size(); ++i)
@@ -190,7 +193,7 @@ TEST_CASE("shared_ptr_alloc persistence", "[sal][shared_ptr_alloc]")
          // Should be able to access the pointer without throwing
          REQUIRE_NOTHROW(alloc.get(addr));
          // Verify data
-         sal::shared_ptr& ptr = alloc.get(addr);
+         sal::control_block& ptr = alloc.get(addr);
          REQUIRE(ptr.loc().cacheline() == 100 + i);
          // Can't reliably check ref count after reload, but location should persist
 
@@ -204,18 +207,18 @@ TEST_CASE("shared_ptr_alloc persistence", "[sal][shared_ptr_alloc]")
    fs::remove_all(temp_path);
 }
 
-TEST_CASE("shared_ptr_alloc large allocation and free", "[sal][shared_ptr_alloc]")
+TEST_CASE("ControlBlockAllocLargeAllocFree", "[sal][control_block_alloc]")
 {
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_large_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_large_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
-   sal::shared_ptr_alloc alloc(temp_path);
+   sal::control_block_alloc alloc(temp_path);
 
    // Vector to hold our allocations
-   std::vector<sal::ptr_address> addresses;
-   std::vector<sal::shared_ptr*> pointers;
+   std::vector<sal::ptr_address>    addresses;
+   std::vector<sal::control_block*> pointers;
 
    // Allocate a large number of pointers to potentially trigger zone expansion
    constexpr uint32_t num_allocs = 50000;  // Reduced from 2^16, increased from 100k
@@ -229,7 +232,7 @@ TEST_CASE("shared_ptr_alloc large allocation and free", "[sal][shared_ptr_alloc]
       // Allocate pointer A and keep it
       auto allocation_a = alloc.alloc();
       REQUIRE(allocation_a.ptr != nullptr);
-      addresses.push_back(allocation_a.address);
+      addresses.push_back(allocation_a.addr_seq.address);
       pointers.push_back(allocation_a.ptr);
       init_test_ptr(allocation_a.ptr, i, 1);  // Keep it referenced
 
@@ -239,7 +242,7 @@ TEST_CASE("shared_ptr_alloc large allocation and free", "[sal][shared_ptr_alloc]
 
       // Free pointer B immediately
       init_test_ptr(allocation_b.ptr, 0, 0);  // Set ref count to 0 before free
-      REQUIRE_NOTHROW(alloc.free(allocation_b.address));
+      REQUIRE_NOTHROW(alloc.free(allocation_b.addr_seq.address));
 
       if (i > 0 && i % 5000 == 0)
          std::cout << "  Allocated/Freed " << i << " pairs...  ";
@@ -263,18 +266,18 @@ TEST_CASE("shared_ptr_alloc large allocation and free", "[sal][shared_ptr_alloc]
    fs::remove_all(temp_path);
 }
 
-TEST_CASE("shared_ptr_alloc multithreaded test", "[sal][shared_ptr_alloc][multithreaded]")
+TEST_CASE("ControlBlockAllocMultithreaded", "[sal][control_block_alloc][multithreaded]")
 {
    // Set main thread name
    sal::set_current_thread_name("TestMain");
 
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_mt_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_mt_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
    // Create allocator instance accessible by all threads
-   sal::shared_ptr_alloc alloc(temp_path);
+   sal::control_block_alloc alloc(temp_path);
 
    // Number of threads to use
    constexpr int num_threads = 16;
@@ -306,8 +309,8 @@ TEST_CASE("shared_ptr_alloc multithreaded test", "[sal][shared_ptr_alloc][multit
 
              SAL_INFO("Thread {} starting allocation test", t);
 
-             std::vector<sal::ptr_address> local_addresses;
-             std::vector<sal::shared_ptr*> local_pointers;  // To init before free
+             std::vector<sal::ptr_address>    local_addresses;
+             std::vector<sal::control_block*> local_pointers;  // To init before free
              local_addresses.reserve(ops_per_thread);
              local_pointers.reserve(ops_per_thread);
              std::random_device                    rd;
@@ -342,7 +345,7 @@ TEST_CASE("shared_ptr_alloc multithreaded test", "[sal][shared_ptr_alloc][multit
                       SAL_ERROR("Thread {} failed allocation!", t);
                       continue;  // or REQUIRE(allocation.ptr != nullptr); exit?
                    }
-                   local_addresses.push_back(allocation.address);
+                   local_addresses.push_back(allocation.addr_seq.address);
                    local_pointers.push_back(allocation.ptr);
                    // Don't init here, causes too much contention. Init before free.
                 }
@@ -410,26 +413,26 @@ TEST_CASE("shared_ptr_alloc multithreaded test", "[sal][shared_ptr_alloc][multit
    fs::remove_all(temp_path);
 }
 
-TEST_CASE("shared_ptr_alloc try_get method", "[sal][shared_ptr_alloc]")
+TEST_CASE("ControlBlockAllocTryGet", "[sal][control_block_alloc]")
 {
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_try_get_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_try_get_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
    // Create the allocator
-   sal::shared_ptr_alloc alloc(temp_path);
+   sal::control_block_alloc alloc(temp_path);
 
    SECTION("try_get with valid addresses")
    {
       // Allocate some pointers
-      std::vector<sal::ptr_address> addresses;
-      std::vector<sal::shared_ptr*> pointers;
+      std::vector<sal::ptr_address>    addresses;
+      std::vector<sal::control_block*> pointers;
       for (int i = 0; i < 20; ++i)  // Increased count
       {
          auto allocation = alloc.alloc();
          REQUIRE(allocation.ptr != nullptr);
-         addresses.push_back(allocation.address);
+         addresses.push_back(allocation.addr_seq.address);
          pointers.push_back(allocation.ptr);
 
          // Set some data to verify later
@@ -439,7 +442,7 @@ TEST_CASE("shared_ptr_alloc try_get method", "[sal][shared_ptr_alloc]")
       // Verify try_get returns non-null pointers for all valid addresses
       for (size_t i = 0; i < addresses.size(); ++i)
       {
-         sal::shared_ptr* ptr = alloc.try_get(addresses[i]);
+         sal::control_block* ptr = alloc.try_get(addresses[i]);
          REQUIRE(ptr != nullptr);
          // Don't check use_count directly after try_get if it wasn't modified
          REQUIRE(ptr->loc().cacheline() == 100 + i);
@@ -461,9 +464,9 @@ TEST_CASE("shared_ptr_alloc try_get method", "[sal][shared_ptr_alloc]")
       {
          auto allocation = alloc.alloc();
          REQUIRE(allocation.ptr != nullptr);
-         addresses.push_back(allocation.address);
+         addresses.push_back(allocation.addr_seq.address);
          init_test_ptr(allocation.ptr, 0, 0);  // Init before free
-         alloc.free(allocation.address);
+         alloc.free(allocation.addr_seq.address);
       }
 
       // try_get should return nullptr for freed addresses
@@ -491,7 +494,7 @@ TEST_CASE("shared_ptr_alloc try_get method", "[sal][shared_ptr_alloc]")
       // Allocate one, get its address, free it, then try a nearby address
       auto alloc_real = alloc.alloc();
       REQUIRE(alloc_real.ptr != nullptr);
-      sal::ptr_address real_addr = alloc_real.address;
+      sal::ptr_address real_addr = alloc_real.addr_seq.address;
       init_test_ptr(alloc_real.ptr, 0, 0);
       alloc.free(real_addr);
 
@@ -503,22 +506,22 @@ TEST_CASE("shared_ptr_alloc try_get method", "[sal][shared_ptr_alloc]")
    fs::remove_all(temp_path);
 }
 
-TEST_CASE("shared_ptr_alloc used count", "[sal][shared_ptr_alloc]")
+TEST_CASE("ControlBlockAllocUsedCount", "[sal][control_block_alloc]")
 {
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_used_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_used_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
-   sal::shared_ptr_alloc alloc(temp_path);
+   sal::control_block_alloc alloc(temp_path);
 
    // Initially there should be no used pointers
    REQUIRE(alloc.used() == 0);
 
    SECTION("Count increases with allocations and decreases with frees")
    {
-      std::vector<sal::ptr_address> addresses;
-      std::vector<sal::shared_ptr*> pointers;
+      std::vector<sal::ptr_address>    addresses;
+      std::vector<sal::control_block*> pointers;
 
       // Allocate 50 pointers
       constexpr int num_to_alloc = 50;
@@ -526,7 +529,7 @@ TEST_CASE("shared_ptr_alloc used count", "[sal][shared_ptr_alloc]")
       {
          auto allocation = alloc.alloc();
          REQUIRE(allocation.ptr != nullptr);
-         addresses.push_back(allocation.address);
+         addresses.push_back(allocation.addr_seq.address);
          pointers.push_back(allocation.ptr);
       }
 
@@ -559,21 +562,21 @@ TEST_CASE("shared_ptr_alloc used count", "[sal][shared_ptr_alloc]")
    fs::remove_all(temp_path);
 }
 
-TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
+TEST_CASE("ControlBlockAllocGetOrAlloc", "[sal][control_block_alloc]")
 {
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_get_or_alloc_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_get_or_alloc_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
    // Create the allocator
-   sal::shared_ptr_alloc alloc(temp_path);
+   sal::control_block_alloc alloc(temp_path);
 
    SECTION("Get existing pointers or allocate new ones")
    {
       // 1. First create some pointers through normal allocation
-      std::vector<sal::ptr_address> addresses;
-      std::vector<sal::shared_ptr*> pointers;
+      std::vector<sal::ptr_address>    addresses;
+      std::vector<sal::control_block*> pointers;
 
       // Allocate 10 pointers
       for (int i = 0; i < 10; ++i)
@@ -584,7 +587,7 @@ TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
          // Set a reference count and location
          init_test_ptr(allocation.ptr, 100 + i, i + 1);
 
-         addresses.push_back(allocation.address);
+         addresses.push_back(allocation.addr_seq.address);
          pointers.push_back(allocation.ptr);
       }
 
@@ -592,7 +595,7 @@ TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
       for (size_t i = 0; i < addresses.size(); ++i)
       {
          // Should return the existing pointer
-         sal::shared_ptr& ptr = alloc.get_or_alloc(addresses[i]);
+         sal::control_block& ptr = alloc.get_or_alloc(addresses[i]);
 
          // Verify it has the values we set (ref count might change, check location)
          REQUIRE(ptr.loc().cacheline() == 100 + i);
@@ -607,7 +610,7 @@ TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
          sal::ptr_address new_addr(50000 + i);  // Arbitrary large offset
 
          // The first call should allocate the pointer if it doesn't exist
-         sal::shared_ptr& new_ptr = alloc.get_or_alloc(new_addr);
+         sal::control_block& new_ptr = alloc.get_or_alloc(new_addr);
 
          // Check if it was newly allocated (ref count likely 0 or 1 initially)
          // We can't definitively know if it was truly *new* vs pre-existing from
@@ -617,14 +620,14 @@ TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
          init_test_ptr(&new_ptr, 200 + i, 10 + i);
 
          // The second call should return the same pointer
-         sal::shared_ptr& existing_ptr = alloc.get_or_alloc(new_addr);
+         sal::control_block& existing_ptr = alloc.get_or_alloc(new_addr);
 
          // Verify it's the same pointer with the same values
          REQUIRE(&existing_ptr == &new_ptr);  // Check they are the same object
          REQUIRE(existing_ptr.loc().cacheline() == 200 + i);
 
          // Also check with try_get to ensure it's registered properly
-         sal::shared_ptr* ptr_check = alloc.try_get(new_addr);
+         sal::control_block* ptr_check = alloc.try_get(new_addr);
          REQUIRE(ptr_check != nullptr);
          REQUIRE(ptr_check->loc().cacheline() == 200 + i);
       }
@@ -637,8 +640,8 @@ TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
       }
       for (int i = 0; i < 10; ++i)
       {
-         sal::ptr_address new_addr(50000 + i);
-         sal::shared_ptr* ptr_check = alloc.try_get(new_addr);
+         sal::ptr_address    new_addr(50000 + i);
+         sal::control_block* ptr_check = alloc.try_get(new_addr);
          if (ptr_check)
          {  // Only free if it exists
             init_test_ptr(ptr_check, 0, 0);
@@ -651,25 +654,24 @@ TEST_CASE("shared_ptr_alloc get_or_alloc method", "[sal][shared_ptr_alloc]")
    fs::remove_all(temp_path);
 }
 
-TEST_CASE("shared_ptr_alloc handles large allocation triggering zone growth",
-          "[sal][shared_ptr_alloc]")
+TEST_CASE("ControlBlockAllocZoneGrowth", "[sal][control_block_alloc]")
 {
    // Create a temporary directory for tests
-   fs::path temp_path = fs::temp_directory_path() / "shared_ptr_alloc_zone_growth_test";
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_zone_growth_test";
    fs::remove_all(temp_path);
    fs::create_directories(temp_path);
 
    SECTION("Large batch allocation possibly triggering zone expansion")
    {
-      sal::shared_ptr_alloc alloc(temp_path);
+      sal::control_block_alloc alloc(temp_path);
 
       // Allocate a very large number of pointers.
       // This *should* exceed ptrs_per_zone / 2 and trigger ensure_capacity.
       // We allocate more than ptrs_per_zone to be sure.
       constexpr size_t large_allocation_count = sal::detail::ptrs_per_zone + 1000;
 
-      std::vector<sal::ptr_address> addresses;
-      std::vector<sal::shared_ptr*> pointers;
+      std::vector<sal::ptr_address>    addresses;
+      std::vector<sal::control_block*> pointers;
       addresses.reserve(large_allocation_count);
       pointers.reserve(large_allocation_count);
 
@@ -683,7 +685,7 @@ TEST_CASE("shared_ptr_alloc handles large allocation triggering zone growth",
          sal::allocation allocation = {};
          REQUIRE_NOTHROW(allocation = alloc.alloc());  // Check allocation doesn't throw
          REQUIRE(allocation.ptr != nullptr);
-         addresses.push_back(allocation.address);
+         addresses.push_back(allocation.addr_seq.address);
          pointers.push_back(allocation.ptr);
 
          // Initialize with some data to verify later
@@ -699,7 +701,7 @@ TEST_CASE("shared_ptr_alloc handles large allocation triggering zone growth",
          if (i > 0 && i % (large_allocation_count / 10) == 0)
             std::cout << "  Verified " << i << " pointers..." << std::endl;
 
-         sal::shared_ptr* ptr = alloc.try_get(addresses[i]);
+         sal::control_block* ptr = alloc.try_get(addresses[i]);
          REQUIRE(ptr != nullptr);
          // REQUIRE(ptr->use_count() == 1); // Ref count might change due to internal ops?
          REQUIRE(ptr->loc().cacheline() == i % 1000);
@@ -719,6 +721,159 @@ TEST_CASE("shared_ptr_alloc handles large allocation triggering zone growth",
       std::cout << "All allocations freed successfully." << std::endl;
       REQUIRE(alloc.used() == 0);
    }
+
+   // Clean up
+   fs::remove_all(temp_path);
+}
+
+TEST_CASE("ControlBlockAlloc8MZoneExpansion", "[sal][control_block_alloc][!mayfail][long]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_8m_zone_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   sal::control_block_alloc alloc(temp_path);
+
+   // Target 8 million allocations, which should require at least 2 zones.
+   constexpr size_t num_allocs = 8 * 1000 * 1000;
+   // ptrs_per_zone is 4,194,304 (1 << 22)
+   REQUIRE(num_allocs > sal::detail::ptrs_per_zone);
+
+   std::vector<sal::ptr_address>    addresses;
+   std::vector<sal::control_block*> pointers;
+   addresses.reserve(num_allocs);
+   pointers.reserve(num_allocs);
+
+   std::cout << "Starting 8 million allocation test..." << std::endl;
+   // Allocate all pointers
+   for (size_t i = 0; i < num_allocs; ++i)
+   {
+      if (i > 0 && i % (num_allocs / 10) == 0)
+         std::cout << "  Allocated " << i << "/" << num_allocs << " pointers..." << std::endl;
+
+      sal::allocation allocation = {};
+      REQUIRE_NOTHROW(allocation = alloc.alloc());
+      REQUIRE(allocation.ptr != nullptr);
+      addresses.push_back(allocation.addr_seq.address);
+      pointers.push_back(allocation.ptr);
+      // Initialize immediately to avoid doing it in the free loop later (potentially slower)
+      init_test_ptr(allocation.ptr, i % 100, 1);  // Store some minimal data
+   }
+   std::cout << "Finished allocating " << num_allocs << " pointers." << std::endl;
+
+   // Verify we expanded beyond one zone
+   std::cout << "Allocated zones: " << alloc.num_allocated_zones() << std::endl;
+   REQUIRE(alloc.num_allocated_zones() >= 2);
+   REQUIRE(alloc.used() == num_allocs);
+
+   // Free all pointers
+   std::cout << "Freeing " << num_allocs << " pointers..." << std::endl;
+   for (size_t i = 0; i < num_allocs; ++i)
+   {
+      if (i > 0 && i % (num_allocs / 10) == 0)
+         std::cout << "  Freed " << i << "/" << num_allocs << " pointers..." << std::endl;
+      init_test_ptr(pointers[i], 0, 0);  // Set ref count to 0 before free
+      REQUIRE_NOTHROW(alloc.free(addresses[i]));
+   }
+   std::cout << "Finished freeing " << num_allocs << " pointers." << std::endl;
+
+   // Verify allocator is empty
+   REQUIRE(alloc.used() == 0);
+
+   // Clean up
+   fs::remove_all(temp_path);
+   std::cout << "8 million allocation test completed successfully." << std::endl;
+}
+
+TEST_CASE("ControlBlockAllocRandomAllocFree10M", "[sal][control_block_alloc][!mayfail][long]")
+{
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_10m_random_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   sal::control_block_alloc alloc(temp_path);
+
+   // Target pool size and number of random operations
+   constexpr size_t target_pool_size = 10 * 1000 * 1000;  // 10 million
+   constexpr size_t num_operations   = 30 * 1000 * 1000;  // 20 million random ops
+
+   // Ensure target pool size triggers zone expansion
+   REQUIRE(target_pool_size > sal::detail::ptrs_per_zone * 2);
+
+   std::vector<sal::ptr_address>    addresses;
+   std::vector<sal::control_block*> pointers;
+   addresses.reserve(target_pool_size);  // Reserve space to avoid reallocations
+   pointers.reserve(target_pool_size);
+
+   std::random_device                    rd;
+   std::mt19937                          gen(rd());
+   std::uniform_real_distribution<>      dis(0.0, 1.0);  // For alloc/free decision
+   std::uniform_int_distribution<size_t> idx_dis;        // For index selection
+
+   std::cout << "Starting 10M random alloc/free test (" << num_operations << " operations)..."
+             << std::endl;
+
+   for (size_t i = 0; i < num_operations; ++i)
+   {
+      if (i > 0 && i % (num_operations / 20) == 0)  // Progress output every 5%
+         std::cout << "  Operation " << i << "/" << num_operations
+                   << " (Current used: " << addresses.size() << "/" << target_pool_size << ")"
+                   << std::endl;
+
+      bool should_allocate = (dis(gen) < 0.75);  // Slightly bias towards allocating initially
+
+      if (should_allocate && addresses.size() < target_pool_size)
+      {
+         // Allocate
+         sal::allocation allocation = {};
+         REQUIRE_NOTHROW(allocation = alloc.alloc());
+         REQUIRE(allocation.ptr != nullptr);
+         addresses.push_back(allocation.addr_seq.address);
+         pointers.push_back(allocation.ptr);
+         // Initialize pointer (minimal data)
+         init_test_ptr(allocation.ptr, i % 255, 1);
+      }
+      else if (!addresses.empty())
+      {
+         // Free
+         idx_dis.param(std::uniform_int_distribution<size_t>::param_type(0, addresses.size() - 1));
+         size_t idx_to_free = idx_dis(gen);
+
+         // Prepare for free
+         init_test_ptr(pointers[idx_to_free], 0, 0);
+         REQUIRE_NOTHROW(alloc.free(addresses[idx_to_free]));
+
+         // Remove from tracking vectors (swap-and-pop)
+         std::swap(addresses[idx_to_free], addresses.back());
+         std::swap(pointers[idx_to_free], pointers.back());
+         addresses.pop_back();
+         pointers.pop_back();
+      }
+      // If we wanted to free but addresses is empty, do nothing this iteration
+   }
+
+   std::cout << "Finished random operations. Current used: " << alloc.used() << " ("
+             << addresses.size() << " tracked)" << std::endl;
+   REQUIRE(alloc.used() == addresses.size());
+
+   // Free any remaining pointers
+   std::cout << "Freeing " << addresses.size() << " remaining pointers..." << std::endl;
+   size_t remaining_count = addresses.size();
+   for (size_t i = 0; i < remaining_count; ++i)
+   {
+      if (i > 0 && i % (remaining_count / 10) == 0)
+         std::cout << "  Freed " << i << "/" << remaining_count << " remaining..." << std::endl;
+
+      init_test_ptr(pointers[i], 0, 0);
+      REQUIRE_NOTHROW(alloc.free(addresses[i]));
+   }
+   std::cout << "Finished freeing remaining pointers." << std::endl;
+
+   // Final verification
+   REQUIRE(alloc.used() == 0);
+   std::cout << "10M random alloc/free test completed successfully." << std::endl;
 
    // Clean up
    fs::remove_all(temp_path);

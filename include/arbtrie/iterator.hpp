@@ -381,6 +381,13 @@ namespace arbtrie
        */
       uint32_t count_keys(key_view lower_bound = {}, key_view upper_bound = {}) const;
 
+      /**
+       * 
+       * @param key 
+       * @return 
+       */
+      uint32_t count_keys(key_view key) const;
+
      protected:
       template <typename... Args>
       void debug_print(const Args&... args) const;
@@ -571,6 +578,8 @@ namespace arbtrie
        * @return size of the removed value
        * @throws if no value exists at this position
        * @pre valid(), not is_end(), not is_start()
+
+       // TODO: rename this, you cannot "remove end"
        */
       int remove_end();
 

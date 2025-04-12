@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <mutex>
+#include <psitri/write_session.hpp>
 #include <sal/allocator.hpp>
 #include <sal/config.hpp>
 #include <sal/mapping.hpp>
@@ -33,6 +34,9 @@ namespace psitri
       std::shared_ptr<read_session>  start_read_session();
 
      private:
+      friend class read_session;
+      friend class write_session;
+
       std::filesystem::path _dir;
       runtime_config        _cfg;
 
@@ -46,4 +50,5 @@ namespace psitri
       sal::mapping            _dbfile;
       detail::database_state* _dbm;
    };
+   using database_ptr = std::shared_ptr<database>;
 }  // namespace psitri

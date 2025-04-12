@@ -1,7 +1,7 @@
 #pragma once
 #include <memory>
-#include <psitri/node_handle.hpp>
 #include <sal/allocator.hpp>
+#include <sal/smart_ref.hpp>
 
 namespace psitri
 {
@@ -21,14 +21,14 @@ namespace psitri
       using ptr = std::shared_ptr<read_session>;
       ~read_session();
 
-      std::shared_ptr<read_cursor> create_read_cursor(node_handle root);
+      std::shared_ptr<read_cursor> create_read_cursor(sal::smart_ref root);
 
      protected:
       friend class read_cursor;
       friend class write_cursor;
 
-      std::shared_ptr<database>               _db;
-      std::unique_ptr<sal::allocator_session> _allocator_session;
+      std::shared_ptr<database>  _db;
+      sal::allocator_session_ptr _allocator_session;
 
       friend class database;
       read_session(database& db);
@@ -36,16 +36,4 @@ namespace psitri
      private:
    };
 
-   class write_session : public read_session
-   {
-     public:
-      using ptr = std::shared_ptr<write_session>;
-      ~write_session();
-
-      std::shared_ptr<read_cursor> create_write_cursor(node_handle root);
-
-     private:
-      friend class database;
-      write_session(database& db);
-   };
 }  // namespace psitri

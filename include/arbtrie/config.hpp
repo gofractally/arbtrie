@@ -28,6 +28,11 @@ namespace arbtrie
       {
          return page_size;
       }
+      inline constexpr std::size_t round_to_page(std::size_t arg)
+      {
+         //   constexpr std::size_t page_size = 4096;
+         return ((arg + os_page_size() - 1) / os_page_size()) * os_page_size();
+      }
    }  // namespace system_config
 
    /**

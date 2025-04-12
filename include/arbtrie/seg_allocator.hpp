@@ -13,10 +13,7 @@
 #include <arbtrie/seg_alloc_session.hpp>
 #include <arbtrie/segment_thread.hpp>
 #include <arbtrie/sync_lock.hpp>
-#include <condition_variable>
 #include <sal/block_allocator.hpp>
-#include <thread>
-#include <vector>
 
 /**
  *  @file seg_allocator.hpp

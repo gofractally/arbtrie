@@ -1,8 +1,12 @@
 #pragma once
 #include <algorithm>  // Add include for std::sort
+#include <cassert>    // Add include for assert
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
-#include <limits>   // Add include for std::numeric_limits
+#include <sal/config.hpp>
+#include <sal/numbers.hpp>
+#include <sal/time.hpp>
 #include <sstream>  // Add include for std::ostringstream
 #include <string>
 #include <vector>
@@ -14,29 +18,29 @@ namespace sal
    {
       struct segment_info
       {
-         uint32_t segment_num   = 0;
-         uint32_t freed_percent = 0;
-         uint64_t freed_bytes   = 0;
-         uint64_t freed_objects = 0;
-         int64_t  alloc_pos     = 0;
-         bool     is_alloc      = false;
-         bool     is_pinned     = false;  // From segment metadata
-         bool     bitmap_pinned = false;  // From mlock_segments bitmap
-         bool     is_read_only  = false;
-         bool     is_free       = false;
-         int64_t  age           = 0;
-         uint32_t read_nodes    = 0;  // Count of valid objects in segment
-         uint64_t read_bytes    = 0;  // Total size of valid objects
-         uint64_t vage          = 0;  // Virtual age of the segment
-         uint32_t total_objects = 0;  // Total count of all objects in segment
+         segment_number segment_num{0};
+         uint32_t       freed_percent = 0;
+         uint64_t       freed_bytes   = 0;
+         uint64_t       freed_objects = 0;
+         int64_t        alloc_pos     = 0;
+         bool           is_alloc      = false;
+         bool           is_pinned     = false;  // From segment metadata
+         bool           bitmap_pinned = false;  // From mlock_segments bitmap
+         bool           is_read_only  = false;
+         bool           is_free       = false;
+         uint64_t       age           = 0;
+         uint32_t       read_nodes    = 0;  // Count of valid objects in segment
+         uint64_t       read_bytes    = 0;  // Total size of valid objects
+         msec_timestamp vage;               // Virtual age of the segment
+         uint32_t       total_objects = 0;  // Total count of all objects in segment
       };
 
       struct session_info
       {
-         uint32_t session_num         = 0;
-         uint32_t read_ptr            = 0;
-         bool     is_locked           = true;
-         uint64_t total_bytes_written = 0;  // Total bytes written by this session
+         allocator_session_number session_num{0};
+         uint32_t                 read_ptr{0};
+         bool                     is_locked{true};
+         uint64_t                 total_bytes_written{0};  // Total bytes written by this session
       };
 
       struct pending_segment
@@ -238,9 +242,7 @@ namespace sal
       }
 
       // Helper method to create a histogram using Unicode block characters
-      static std::string create_histogram(const uint32_t data[257],
-                                          int            width  = 257,
-                                          int            height = 20)
+      static std::string create_histogram(const uint32_t data[257], int width = 257)
       {
          static const std::string blocks[] = {" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
 
@@ -344,14 +346,13 @@ namespace sal
       void print(std::ostream& os = std::cout) const
       {
          // Get current time in milliseconds since epoch using arbtrie::get_current_time_ms()
-         auto current_time_ms = arbtrie::get_current_time_ms();
+         auto current_time_ms = sal::get_current_time_msec();
 
          os << "\n--- segment allocator state ---\n";
 
          // Define column widths for consistency
          // clang-format off
          const int seg_width = 5;        // Segment number (5 digits)
-         const int pin_width = 3;        // Pin emoji
          const int prog_width = 15;      // Progress bar
          const int dot_width = 3;        // Status dot
          const int used_pct_width = 4;   // Used % - narrowed to 4 chars
@@ -440,20 +441,13 @@ namespace sal
                free_percent    = 0;
                unalloc_percent = 100;
             }
-            else if (seg.alloc_pos == 4294967295 || seg.alloc_pos == (uint64_t)-1)
-            {
-               // Full allocation, used = segment_size - freed_bytes
-               actual_used     = segment_size - seg.freed_bytes;
-               used_percent    = static_cast<int>((actual_used * 100) / segment_size);
-               free_percent    = static_cast<int>((seg.freed_bytes * 100) / segment_size);
-               unalloc_percent = 0;
-            }
             else
             {
                // Normal case
                // Calculate used space
-               actual_used =
-                   (seg.alloc_pos > seg.freed_bytes) ? (seg.alloc_pos - seg.freed_bytes) : 0;
+               actual_used  = (uint64_t(seg.alloc_pos) > uint64_t(seg.freed_bytes))
+                                  ? (seg.alloc_pos - seg.freed_bytes)
+                                  : 0;
                used_percent = static_cast<int>((actual_used * 100) / segment_size);
 
                // Calculate free space (allocated but freed)
@@ -480,7 +474,7 @@ namespace sal
                // PEND segment (already set above)
                status_dot = "🟡";  // Yellow dot for pending/recycled
             }
-            else if (seg.is_alloc && seg.alloc_pos < segment_size)
+            else if (seg.is_alloc && uint64_t(seg.alloc_pos) < segment_size)
             {
                // Active allocation
                status_dot = "🟢";  // Green dot for active
@@ -514,7 +508,7 @@ namespace sal
                // Track age for pinned segments
                if (seg.vage > 0)
                {
-                  double age_seconds = (current_time_ms - seg.vage) / 1000.0;
+                  double age_seconds = *(current_time_ms - seg.vage) / 1000.0;
                   pinned_total_age_seconds += age_seconds;
                   pinned_segments_count++;
 
@@ -528,7 +522,7 @@ namespace sal
                // Track age for unpinned segments
                if (seg.vage > 0)
                {
-                  double age_seconds = (current_time_ms - seg.vage) / 1000.0;
+                  double age_seconds = *(current_time_ms - seg.vage) / 1000.0;
                   unpinned_total_age_seconds += age_seconds;
                   unpinned_segments_count++;
 
@@ -560,7 +554,7 @@ namespace sal
             double time_diff_seconds = 0.0;
             if (seg.vage > 0)
             {
-               time_diff_seconds = (current_time_ms - seg.vage) / 1000.0;
+               time_diff_seconds = *(current_time_ms - seg.vage) / 1000.0;
             }
 
             // Format time difference with 1 decimal place

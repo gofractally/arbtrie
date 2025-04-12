@@ -1,5 +1,4 @@
 #pragma once
-#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cstdint>
@@ -11,23 +10,23 @@
 namespace sal
 {
    /**
-    * A shared pointer to a location in shared memory
+    * A control block for a shared pointer to a location in shared memory
     */
-   struct shared_ptr
+   struct control_block
    {
      private:
       std::atomic<uint64_t> _data;
 
      public:
       // Default constructor to ensure proper initialization of the atomic
-      shared_ptr() noexcept : _data(0) {}
+      control_block() noexcept : _data(0) {}
 
       static constexpr uint64_t location_offset      = 21;
       static constexpr uint64_t max_cacheline_offset = (1ULL << 41) - 1;
       /**
        * The internal structure of the bits stored in the atomic _data
        */
-      struct shared_ptr_data
+      struct control_block_data
       {
          /// reference count, up to 2M shared references
          uint64_t ref : 21;
@@ -41,32 +40,41 @@ namespace sal
          /// when reference count goes to 0 along with the active bit.
          uint64_t pending_cache : 1;
 
-         shared_ptr_data() noexcept : ref(0), cacheline_offset(0), active(0), pending_cache(0) {}
-         shared_ptr_data(uint64_t value) noexcept { from_int(value); }
+         control_block_data() noexcept : ref(0), cacheline_offset(0), active(0), pending_cache(0) {}
+         control_block_data(uint64_t value) noexcept { from_int(value); }
          uint64_t to_int() const noexcept { return std::bit_cast<uint64_t>(*this); }
-         void from_int(uint64_t value) noexcept { *this = std::bit_cast<shared_ptr_data>(value); }
+         void     from_int(uint64_t value) noexcept
+         {
+            *this = std::bit_cast<control_block_data>(value);
+         }
          location loc() const noexcept { return location::from_cacheline(cacheline_offset); }
 
-         shared_ptr_data& set_ref(uint64_t r) noexcept
+         control_block_data& set_ref(uint64_t r) noexcept
          {
             assert(r <= max_ref_count);
             ref = r;
             return *this;
          }
-         shared_ptr_data& set_loc(location l) noexcept
+         control_block_data& set_loc(location l) noexcept
          {
             cacheline_offset = l.cacheline();
             return *this;
          }
-         shared_ptr_data& set_active(bool a) noexcept
+         control_block_data& set_active(bool a) noexcept
          {
             active = a;
             return *this;
          }
-         shared_ptr_data& set_pending_cache(bool p) noexcept
+         control_block_data& set_pending_cache(bool p) noexcept
          {
             pending_cache = p;
             return *this;
+         }
+         friend std::ostream& operator<<(std::ostream& os, const control_block_data& data)
+         {
+            os << "{ref:" << data.ref << " loc:" << data.loc() << " active:" << data.active
+               << " pending_cache:" << data.pending_cache << "}";
+            return os;
          }
       };
 
@@ -82,17 +90,20 @@ namespace sal
 
       int use_count() const noexcept
       {
-         return shared_ptr_data(_data.load(std::memory_order_relaxed)).ref;
+         return control_block_data(_data.load(std::memory_order_relaxed)).ref;
       }
       bool unique() const noexcept { return use_count() == 1; }
-      void reset() noexcept { _data.store(shared_ptr_data().to_int(), std::memory_order_relaxed); }
-      bool retain()
+      void reset() noexcept
       {
-         shared_ptr_data prior(_data.fetch_add(1, std::memory_order_relaxed));
+         _data.store(control_block_data().to_int(), std::memory_order_relaxed);
+      }
+      control_block_data retain()
+      {
+         control_block_data prior = _data.fetch_add(1, std::memory_order_relaxed);
          if (prior.ref >= max_ref_count)
             throw std::runtime_error("reference count exceeded limits");
          assert(prior.ref > 0);
-         return true;
+         return prior;
       };
 
       uint32_t ref() const noexcept { return load(std::memory_order_relaxed).ref; }
@@ -106,12 +117,12 @@ namespace sal
          return _data.load(order);
       }
 
-      shared_ptr_data load(std::memory_order order = std::memory_order_relaxed) const noexcept
+      control_block_data load(std::memory_order order = std::memory_order_relaxed) const noexcept
       {
-         return shared_ptr_data(_data.load(order));
+         return control_block_data(_data.load(order));
       }
-      void store(shared_ptr_data   value,
-                 std::memory_order order = std::memory_order_relaxed) noexcept
+      void store(control_block_data value,
+                 std::memory_order  order = std::memory_order_relaxed) noexcept
       {
          _data.store(value.to_int(), order);
       }
@@ -119,7 +130,7 @@ namespace sal
                  int               ref   = 1,
                  std::memory_order order = std::memory_order_release) noexcept
       {
-         store(shared_ptr_data().set_loc(loc).set_ref(ref), order);
+         store(control_block_data().set_loc(loc).set_ref(ref), order);
       }
       void set_ref(int ref, std::memory_order order = std::memory_order_relaxed) noexcept
       {
@@ -127,9 +138,9 @@ namespace sal
       }
 
       /**
-       * @return the state of the shared_ptr_data before decrementing the reference count
+       * @return the state of the control_block_data before decrementing the reference count
        */
-      shared_ptr_data release() noexcept
+      control_block_data release() noexcept
       {
          // if we are not the last reference then relaxed is best, we will
          // load with acquire before returning if we are the last reference.
@@ -137,7 +148,7 @@ namespace sal
          // modifications are either done by the "unique owner" aka (ref 1),
          // or done by a thread that has just copied the data to a new location
          // and we are synchronziing with the cas_move below.
-         shared_ptr_data prior(_data.fetch_sub(1, std::memory_order_relaxed));
+         control_block_data prior(_data.fetch_sub(1, std::memory_order_relaxed));
          assert(prior.ref > 0);
          if constexpr (debug_memory)
          {
@@ -156,8 +167,8 @@ namespace sal
       };
       void clear_pending_cache() noexcept
       {
-         uint64_t        expected = _data.load(std::memory_order_relaxed);
-         shared_ptr_data updated;
+         uint64_t           expected = _data.load(std::memory_order_relaxed);
+         control_block_data updated;
          do
          {
             updated.from_int(expected);
@@ -172,13 +183,13 @@ namespace sal
        * updates the cacheline_offset to the desired value 
        * if the current value is equal to the expected value 
        * and the ref count is not 0, note that other changes to
-       * the shared_ptr_data are alloewd 
+       * the control_block_data are alloewd 
        */
       bool cas_move(location expected_loc, location desired_loc) noexcept
       {
          assert(desired_loc.cacheline() != max_cacheline_offset);
-         uint64_t        expect_data = _data.load(std::memory_order_relaxed);
-         shared_ptr_data prior;
+         uint64_t           expect_data = _data.load(std::memory_order_relaxed);
+         control_block_data prior;
          do
          {
             prior.from_int(expect_data);
@@ -192,14 +203,14 @@ namespace sal
 
       // used by the allocator to claim this pointer to use, uses the
       // cacheline_offset max value to indicate the pointer alloc/free.
-      bool claim() noexcept
+      [[nodiscard]] bool claim() noexcept
       {
-         uint64_t        expect_data = _data.load(std::memory_order_relaxed);
-         shared_ptr_data prior;
+         uint64_t           expect_data = _data.load(std::memory_order_relaxed);
+         control_block_data prior;
          do
          {
             prior.from_int(expect_data);
-            if (prior.cacheline_offset != max_cacheline_offset) [[unlikely]]
+            if (uint64_t(prior.cacheline_offset) != max_cacheline_offset) [[unlikely]]
                return false;
             prior.cacheline_offset = 0;
          } while (not _data.compare_exchange_weak(expect_data, prior.to_int(),
@@ -208,7 +219,7 @@ namespace sal
       }
       void release_claim() noexcept
       {
-         shared_ptr_data prior;
+         control_block_data prior;
          prior.cacheline_offset = max_cacheline_offset;
          _data.store(prior.to_int(), std::memory_order_relaxed);
       }
@@ -218,14 +229,14 @@ namespace sal
        * without disrupting any other fields that may be updated by
        * other threads.
        * 
-       * @return the updated shared_ptr_data
+       * @return the updated control_block_data
        */
-      shared_ptr_data move(location          loc,
-                           std::memory_order order = std::memory_order_relaxed) noexcept
+      control_block_data move(location          loc,
+                              std::memory_order order = std::memory_order_relaxed) noexcept
       {
          assert(loc.cacheline() != max_cacheline_offset);
-         auto            expected = _data.load(order);
-         shared_ptr_data updated;
+         auto               expected = _data.load(order);
+         control_block_data updated;
          do
          {
             updated.from_int(expected);
@@ -245,8 +256,8 @@ namespace sal
        */
       bool try_inc_activity() noexcept
       {
-         uint64_t        expected = _data.load(std::memory_order_relaxed);
-         shared_ptr_data updated(expected);
+         uint64_t           expected = _data.load(std::memory_order_relaxed);
+         control_block_data updated(expected);
          if (updated.pending_cache)
             return false;
          if (updated.active)
@@ -263,8 +274,8 @@ namespace sal
        */
       bool try_end_pending_cache() noexcept
       {
-         uint64_t        expected = _data.load(std::memory_order_relaxed);
-         shared_ptr_data updated;
+         uint64_t           expected = _data.load(std::memory_order_relaxed);
+         control_block_data updated;
          do
          {
             updated.from_int(expected);
@@ -276,10 +287,10 @@ namespace sal
          return true;
       }
 
-      static_assert(sizeof(shared_ptr_data) == 8, "shared_ptr_data must be 8 bytes");
+      static_assert(sizeof(control_block_data) == 8, "shared_ptr_data must be 8 bytes");
    };
-   static_assert(sizeof(shared_ptr) == 8, "shared_ptr must be 8 bytes");
+   static_assert(sizeof(control_block) == 8, "shared_ptr must be 8 bytes");
 
-   using shared_ptr_data = shared_ptr::shared_ptr_data;
+   using control_block_data = control_block::control_block_data;
 
 }  // namespace sal

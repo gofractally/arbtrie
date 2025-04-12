@@ -16,8 +16,9 @@ add_library(sal
     src/block_allocator.cpp
     src/allocator.cpp
     src/mapping.cpp
-    src/shared_ptr_alloc.cpp
+    src/control_block_alloc.cpp
 )
+target_compile_definitions(sal PUBLIC XXH_INLINE_ALL)
 
 # Set include directories
 target_include_directories(sal

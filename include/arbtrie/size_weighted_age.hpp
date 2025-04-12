@@ -1,5 +1,4 @@
 #pragma once
-#include <arbtrie/rdtsc.hpp>
 #include <arbtrie/util.hpp>
 
 namespace arbtrie

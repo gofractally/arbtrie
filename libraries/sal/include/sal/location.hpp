@@ -49,6 +49,12 @@ namespace sal
 
       uint64_t segment_offset() const noexcept { return absolute_address() % segment_size; }
 
+      friend std::ostream& operator<<(std::ostream& os, const location& loc)
+      {
+         os << "location{ abs:" << loc.absolute_address() << "}";
+         return os;
+      }
+
      private:
       explicit constexpr location(uint64_t cacheline_offset) noexcept
           : _cacheline_offset(cacheline_offset)
