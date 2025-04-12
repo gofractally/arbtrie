@@ -878,3 +878,204 @@ TEST_CASE("ControlBlockAllocRandomAllocFree10M", "[sal][control_block_alloc][!ma
    // Clean up
    fs::remove_all(temp_path);
 }
+
+TEST_CASE("ControlBlockAllocRandomAllocFree10M_Multithreaded",
+          "[sal][control_block_alloc][!mayfail][long][multithreaded]")
+{
+   // Set main thread name
+   sal::set_current_thread_name("TestMainMT10M");
+
+   // Create a temporary directory for tests
+   fs::path temp_path = fs::temp_directory_path() / "control_block_alloc_10m_random_mt_test";
+   fs::remove_all(temp_path);
+   fs::create_directories(temp_path);
+
+   // Create allocator instance accessible by all threads
+   sal::control_block_alloc alloc(temp_path);
+
+   // Threading parameters
+   constexpr int    num_threads       = 8;
+   constexpr size_t total_operations  = 100 * 1000 * 1000;  // ~30M total ops
+   constexpr size_t ops_per_thread    = total_operations / num_threads;
+   constexpr double alloc_probability = 0.55;  // 50% chance to alloc vs free
+
+   // Synchronization primitives
+   std::mutex              mutex;
+   std::condition_variable cv;
+   bool                    start_flag = false;
+   std::atomic<int>        threads_ready(0);
+   std::atomic<int>        threads_done(0);
+   std::atomic<uint64_t>   total_allocs(0);  // Track total successful allocs across threads
+   std::atomic<uint64_t>   total_frees(0);   // Track total successful frees across threads
+
+   // Thread vector
+   std::vector<std::thread> threads;
+
+   std::cout << "Starting 10M random alloc/free MULTITHREADED test (" << num_threads << " threads, "
+             << ops_per_thread << " ops/thread)..." << std::endl;
+
+   // Launch threads
+   for (int t = 0; t < num_threads; ++t)
+   {
+      threads.emplace_back(
+          [t, &alloc, &mutex, &cv, &start_flag, &threads_ready, &threads_done, &total_allocs,
+           &total_frees, ops_per_thread, num_threads]()
+          {
+             // Thread setup
+             std::string thread_name = "spaRandMT" + std::to_string(t);
+             sal::set_current_thread_name(thread_name.c_str());
+             std::random_device                    rd;
+             std::mt19937                          gen(rd());
+             std::uniform_real_distribution<>      dis(0.0, 1.0);
+             std::uniform_int_distribution<size_t> idx_dis;
+             std::vector<sal::ptr_address>         local_addresses;
+             std::vector<sal::control_block*>      local_pointers;
+             // Reserve some space to reduce reallocations, but not too much
+             constexpr size_t reserve_size = ops_per_thread / 2;
+             local_addresses.reserve(reserve_size);
+             local_pointers.reserve(reserve_size);
+
+             uint64_t thread_allocs = 0;
+             uint64_t thread_frees  = 0;
+
+             // Signal ready and wait
+             {
+                std::unique_lock<std::mutex> lock(mutex);
+                threads_ready++;
+                // Optional: Log thread readiness
+                // std::cout << "Thread " << t << " ready (" << threads_ready.load() << "/" << num_threads << ")" << std::endl;
+                cv.notify_all();
+                cv.wait(lock, [&start_flag] { return start_flag; });
+             }
+             // Optional: Log thread start
+             // std::cout << "Thread " << t << " starting work..." << std::endl;
+
+             // Main loop
+             for (size_t i = 0; i < ops_per_thread; ++i)
+             {
+                // Optional: Progress logging within thread (can cause slowdown)
+                // if (i > 0 && i % (ops_per_thread / 10) == 0) std::cout << "Thread " << t << " progress: " << i << "/" << ops_per_thread << std::endl;
+
+                bool should_allocate = (dis(gen) < alloc_probability);
+
+                if (should_allocate)
+                {
+                   // Allocate
+                   sal::allocation allocation = {};
+                   try
+                   {
+                      allocation = alloc.alloc();
+                   }
+                   catch (const std::exception& e)
+                   {
+                      // Use SAL_ERROR or std::cerr for logging errors in tests
+                      std::cerr << "Thread " << t << " allocation failed: " << e.what()
+                                << std::endl;
+                      continue;  // Skip this op if alloc fails
+                   }
+
+                   if (allocation.ptr != nullptr)
+                   {
+                      local_addresses.push_back(allocation.addr_seq.address);
+                      local_pointers.push_back(allocation.ptr);
+                      // Initialize pointer (minimal init)
+                      init_test_ptr(allocation.ptr, i % 255, 1);
+                      thread_allocs++;
+                   }
+                   else
+                   {
+                      std::cerr << "Thread " << t << " received nullptr allocation!" << std::endl;
+                   }
+                }
+                else if (!local_addresses.empty())
+                {
+                   // Free
+                   idx_dis.param(std::uniform_int_distribution<size_t>::param_type(
+                       0, local_addresses.size() - 1));
+                   size_t idx_to_free = idx_dis(gen);
+
+                   // Prepare for free
+                   init_test_ptr(local_pointers[idx_to_free], 0, 0);
+                   try
+                   {
+                      alloc.free(local_addresses[idx_to_free]);
+                      thread_frees++;  // Only increment if free call doesn't throw
+
+                      // Remove from tracking vectors (swap-and-pop) only after successful free
+                      std::swap(local_addresses[idx_to_free], local_addresses.back());
+                      std::swap(local_pointers[idx_to_free], local_pointers.back());
+                      local_addresses.pop_back();
+                      local_pointers.pop_back();
+                   }
+                   catch (const std::exception& e)
+                   {
+                      std::cerr << "Thread " << t << " free failed: " << e.what() << " for address "
+                                << local_addresses[idx_to_free] << std::endl;
+                      // If free fails, we might have an inconsistent state.
+                      // For this test, log the error and continue. The final alloc.used() check will catch issues.
+                   }
+                }
+                // If !should_allocate and local_addresses is empty, do nothing.
+             }  // End main loop
+
+             // Update global counters
+             total_allocs += thread_allocs;
+             total_frees += thread_frees;
+
+             // Clean up remaining pointers held by this thread
+             // std::cout << "Thread " << t << " cleaning up " << local_addresses.size() << " remaining pointers..." << std::endl;
+             size_t remaining_count = local_addresses.size();
+             for (size_t i = 0; i < remaining_count; ++i)
+             {
+                init_test_ptr(local_pointers[i], 0, 0);
+                try
+                {
+                   alloc.free(local_addresses[i]);
+                }
+                catch (const std::exception& e)
+                {
+                   std::cerr << "Thread " << t << " cleanup free failed: " << e.what()
+                             << " for address " << local_addresses[i] << std::endl;
+                }
+             }
+             local_addresses.clear();
+             local_pointers.clear();
+
+             // Signal done
+             threads_done++;
+             // std::cout << "Thread " << t << " done (" << threads_done.load() << "/" << num_threads << ")" << std::endl;
+          });  // End thread lambda
+   }  // End launching threads
+
+   // Wait for all threads to be ready before starting
+   {
+      std::unique_lock<std::mutex> lock(mutex);
+      std::cout << "Main thread waiting for " << num_threads << " threads to be ready..."
+                << std::endl;
+      cv.wait(lock, [&threads_ready, num_threads] { return threads_ready == num_threads; });
+      std::cout << "All threads ready. Starting test." << std::endl;
+      start_flag = true;
+      cv.notify_all();  // Signal threads to start
+   }
+
+   // Wait for all threads to complete their work
+   std::cout << "Main thread waiting for threads to finish..." << std::endl;
+   for (auto& th : threads)
+   {
+      th.join();
+   }
+
+   REQUIRE(threads_done == num_threads);
+   std::cout << "All threads completed." << std::endl;
+   std::cout << "Total allocations attempted by threads: " << total_allocs.load() << std::endl;
+   std::cout << "Total frees attempted by threads: " << total_frees.load() << std::endl;
+
+   // Final check: ensure all pointers are freed
+   uint64_t final_used = alloc.used();
+   std::cout << "Final allocator used count: " << final_used << std::endl;
+   REQUIRE(final_used == 0);
+   std::cout << "Verified all pointers freed. Multithreaded random test successful." << std::endl;
+
+   // Clean up
+   fs::remove_all(temp_path);
+}

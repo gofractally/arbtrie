@@ -58,7 +58,7 @@ if(SAL_BUILD_TESTS)
     add_executable(sal-tests
         test/block_allocator_tests.cpp
         test/mapping_tests.cpp
-        test/shared_ptr_alloc_tests.cpp
+        test/control_block_alloc_tests.cpp
         test/min_index_tests.cpp
     )
     

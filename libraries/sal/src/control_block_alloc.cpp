@@ -50,7 +50,6 @@ namespace sal
       azone = _header_ptr->allocated_zones.load(std::memory_order_acquire);
       if (azone == detail::max_allocated_zones)
          return;
-      SAL_WARN("ensure_capacity: {} req_zones", req_zones);
 
       auto num_zones = _zone_allocator->reserve(req_zones, true);
       _zone_free_list->reserve(req_zones, true);
@@ -58,6 +57,7 @@ namespace sal
       _zone_allocator->resize(num_zones);
       while (azone < num_zones)
       {
+         SAL_WARN("growing control_block capacity: {} ", azone);
          char* c = _zone_allocator->get(block_allocator::block_number(azone));
          char* f = _zone_free_list->get(block_allocator::block_number(azone));
          std::memset(c, 0xff, _zone_allocator->block_size());

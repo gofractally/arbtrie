@@ -6,6 +6,7 @@
 #include <bit>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block.hpp>
 #include <sal/mapping.hpp>
@@ -191,8 +192,7 @@ namespace sal
          // each thread will look to a different cacheline in the zone minimizing contention
          static std::atomic<uint64_t>     seed(0);
          static thread_local lehmer64_rng rnd(seed.fetch_add(1, std::memory_order_relaxed));
-         int                              attempts    = 0;
-         static int                       round_robin = 0;
+         int                              attempts = 0;
          do
          {
             // if average allocations is > 50% then we need to add a new zone
@@ -204,21 +204,38 @@ namespace sal
 
             /// pick 1 64 byte cacheline ( 8 uint64_t ) to scan free bits from
             static constexpr uint32_t n64_per_zone = detail::ptrs_per_zone / 64;
-            uint64_t                  start_index  = rnd.next() % (n64_per_zone - 8);
+            uint64_t                  start_index  = rnd.next() % n64_per_zone;
+            start_index &= ~7ull;  // round down to nearest multiple of 8
 
             // atomic load 8 uint64_t from the zone free list
-            alignas(128) uint64_t free_bits[8];
-            for (int i = 0; i < 8; ++i)
-               free_bits[i] = zone_free_base[start_index + i].load(std::memory_order_relaxed);
+            //alignas(128) uint64_t free_bits[8];
+            //for (int i = 0; i < 8; ++i)
+            //   free_bits[i] = zone_free_base[start_index + i].load(std::memory_order_relaxed);
 
-            uint8_t* free_bytes = (uint8_t*)free_bits;
+            uint8_t* free_bytes = (uint8_t*)(zone_free_base + start_index);
+
             // get an index of the byte with the most set (free) bits
             int most_free_byte = max_pop_cnt8_index64(free_bytes);
 
             if (free_bytes[most_free_byte] == 0) [[unlikely]]
             {
-               ++attempts;
-
+               // it is entirely possible that all 64 bytes are already taken and/or another
+               // thread randomly chose the same cacheline and took the last pointer in the cacheline.
+               // so we need to try again... given a 50% capacity target, most of the time there should
+               // be at least 1 free pointer out of the 512 pointers checked by max_pop_cnt8_index64.
+               // this is most likely to happen once you approach max capacity, but could happen
+               // if due to heavy locality in one area of memory that happens to get randomly
+               // chosen.  If 99% of all bits in a zone are allocated, then there is a 0.5% chance that
+               // 512 bits will all be taken... assuming independences; however, since we are
+               // also allowing hints, this would undermine complete independence, in any event,
+               // we can try multiple times across many different zones and are likely to find
+               // a free slot within a few attempts even with 99% of capacity. This is because
+               // we are able to check 512 bits at a time.
+               if (++attempts == 1024 * 1024)
+               {
+                  throw std::runtime_error("failed to allocate control block after 1M attempts ");
+               }
+               /*
                SAL_WARN("all 512 slots in zone {} starting at {} are taken", min_zone,
                         start_index * 512);
                SAL_WARN("most free byte: free_bits[{}] = {:x}", most_free_byte,
@@ -231,23 +248,18 @@ namespace sal
                         _header_ptr->total_allocations.load(std::memory_order_relaxed));
                SAL_WARN("ptrs-per-zone: {}", detail::ptrs_per_zone);
                SAL_WARN("zone_size_bytes: {}", detail::zone_size_bytes);
-               SAL_WARN("round_robin: {}", round_robin);
                assert(attempts < 10);
+               */
                continue;
-               throw std::runtime_error("failed to allocate");
             }
 
-            ptr_address ptr_hint(min_zone * detail::ptrs_per_zone + start_index * 64 +
-                                 (most_free_byte * 8));
-
-            // it is entirely possible that all 64 bytes are already taken and/or another
-            // thread randomly chose the same cacheline and took the last pointer in the cacheline.
-            // so we need to try again... given a 50% capacity target, most of the time there should
-            // be at least 1 free pointer out of the 512 pointers checked by max_pop_cnt8_index64.
-            auto optalloc = try_alloc(alloc_hint{&ptr_hint, 1});
+            auto optalloc = try_alloc(ptr_address(min_zone * detail::ptrs_per_zone +
+                                                  start_index * 64 + most_free_byte * 8));
             if (not optalloc) [[unlikely]]
             {
-               SAL_WARN("failed to allocate from hint: {} with cl claiming {} free", ptr_hint,
+               SAL_WARN("failed to allocate from hint: {} with cl claiming {} free",
+                        ptr_address(min_zone * detail::ptrs_per_zone + start_index * 64 +
+                                    most_free_byte * 8),
                         std::popcount(free_bytes[most_free_byte]));
                continue;
             }
@@ -272,6 +284,46 @@ namespace sal
          return alloc();
       }
 
+      std::optional<allocation> try_alloc(ptr_address addr)
+      {
+         // round down to the nearest 16 element boundary
+         uint32_t cl      = *addr & ~uint32_t(0x0f);
+         uint32_t flblock = cl / 64;
+
+         // the cacheline falls into these 64 bytes.
+         std::atomic<uint64_t>& free_list = _free_list_base[flblock];
+
+         // in a 128 byte cacheline, there are 16 8 byte ptrs ( aka 64 items)
+         // cl has already been rounded down, so if we %64 we will get 0,
+         // 16, 32, or 48, which is exaclty how many bytes we need to shift
+         // the mask that identifies potential spots on same cacheline as hint
+         const uint32_t base_offset    = cl % 64;
+         uint64_t       base_clinebits = 0xffffull << base_offset;
+
+         // now get the intersection of the mask and actual free bits to see if
+         // we have anything.
+         uint64_t flist            = free_list.load();
+         uint64_t masked_free_bits = flist & base_clinebits;
+
+         while (masked_free_bits)
+         {
+            // while there are free bits in the cacheline of the hint
+            int  index = std::countr_zero(masked_free_bits);
+            auto bit   = uint64_t(1ull) << index;
+            if (not free_list.compare_exchange_strong(flist, flist ^ bit,
+                                                      std::memory_order_acquire)) [[unlikely]]
+            {
+               masked_free_bits = flist & base_clinebits;
+               //               SAL_WARN("*contention* attempting to claim address: {} ", flblock * 64 + index);
+               continue;
+            }
+            ptr_address    ptr(flblock * 64 + index);
+            control_block& p = _ptr_base[*ptr];
+            return allocation{{ptr, _header_ptr->inc_alloc_count(ptr)}, &p};
+         }
+         return std::nullopt;
+      }
+
       /**
        * This will attempt to allocate in one of the cachelines provided by the hint.
        */
@@ -279,47 +331,8 @@ namespace sal
       {
          for (auto addr : hint)
          {
-            // round down to the nearest 16 element boundary
-            uint32_t cl      = *addr & ~uint32_t(0x0f);
-            uint32_t flblock = cl / 64;
-
-            // the cacheline falls into these 64 bytes.
-            std::atomic<uint64_t>& free_list = _free_list_base[flblock];
-
-            // in a 128 byte cacheline, there are 16 8 byte ptrs ( aka 64 items)
-            // cl has already been rounded down, so if we %64 we will get 0,
-            // 16, 32, or 48, which is exaclty how many bytes we need to shift
-            // the mask that identifies potential spots on same cacheline as hint
-            const uint32_t base_offset    = cl % 64;
-            uint64_t       base_clinebits = 0xffffull << base_offset;
-
-            // now get the intersection of the mask and actual free bits to see if
-            // we have anything.
-            uint64_t flist            = free_list.load();
-            uint64_t masked_free_bits = flist & base_clinebits;
-
-            while (masked_free_bits)
-            {
-               // while there are free bits in the cacheline of the hint
-               int         index   = std::countr_zero(masked_free_bits);
-               auto        idx_bit = uint64_t(1ull) << index;
-               ptr_address ptr(flblock * 64 + index);
-
-               control_block& p = _ptr_base[*ptr];
-
-               if (claim_address(ptr)) [[likely]]
-               {
-                  return allocation{{ptr, _header_ptr->inc_alloc_count(ptr)}, &p};
-               }
-
-               SAL_WARN(
-                   "failed to claim bit: {} "
-                   "\nmasked_free_bits: {}"
-                   "\nbit             : {}",
-                   index, std::bitset<64>(masked_free_bits), std::bitset<64>(idx_bit));
-               abort();
-               masked_free_bits = free_list.load(std::memory_order_acquire) & base_clinebits;
-            }
+            if (auto alloc = try_alloc(addr))
+               return alloc;
          }
          return std::nullopt;
       }
@@ -428,7 +441,7 @@ namespace sal
       }
 
       //private:
-      bool claim_address(ptr_address address)
+      inline bool claim_address(ptr_address address)
       {
          assert(is_free(address));
          //    SAL_WARN("claim_address: {}", address);
@@ -442,7 +455,7 @@ namespace sal
          {
             if (not(current & bit))
                return false;
-         } while (not flb.compare_exchange_weak(current, current ^ bit, std::memory_order_relaxed));
+         } while (not flb.compare_exchange_weak(current, current ^ bit, std::memory_order_acquire));
 
          return true;
       }
