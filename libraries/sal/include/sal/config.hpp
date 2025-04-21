@@ -75,16 +75,17 @@ namespace sal
     */
    enum class sync_type
    {
-      none        = 0,  // on program close or as OS chooses
-      mprotect    = 1,  // mprotect() will be used to write protect the data
-      msync_async = 2,  // nonblocking, but write soon
-      msync_sync  = 3,  // block until changes are committed to disk
-      fsync       = 4,  // in addition to msync(MS_SYNC) tells the OS to
-                        // sync the data to the physical disk. Note that while the
-                        // OS will have sent all data to the drive, this does not
-                        // gaurantee that the drive hasn't cached the data and it
-                        // may not be on the drive yet.
-      full = 5          // F_FULLSYNC (Mac OS X), in addition to fsync() asks the
+      none        = 0,        // on program close or as OS chooses
+      mprotect    = 1,        // mprotect() will be used to write protect the data
+      msync_async = 2,        // nonblocking, but write soon
+      msync_sync  = 3,        // block until changes are committed to disk
+      fsync       = 4,        // in addition to msync(MS_SYNC) tells the OS to
+                              // sync the data to the physical disk. Note that while the
+                              // OS will have sent all data to the drive, this does not
+                              // gaurantee that the drive hasn't cached the data and it
+                              // may not be on the drive yet.
+      full              = 5,  // F_FULLSYNC (Mac OS X), in addition to fsync() asks the
+      default_sync_type = msync_sync
    };
    inline std::ostream& operator<<(std::ostream& os, sync_type st)
    {

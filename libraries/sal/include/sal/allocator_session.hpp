@@ -1,6 +1,7 @@
 #pragma once
 #include <hash/lehmer64.h>
 #include <cstdint>
+#include <sal/config.hpp>
 #include <sal/control_block.hpp>
 #include <sal/control_block_alloc.hpp>
 #include <sal/location.hpp>
@@ -9,6 +10,7 @@
 #include <sal/mapped_memory/session_data.hpp>
 #include <sal/numbers.hpp>
 #include <sal/time.hpp>
+#include "ucc/round.hpp"
 
 namespace sal
 {
@@ -23,6 +25,8 @@ namespace sal
 
    class allocator_session;
    class allocator_session_ptr;
+   class transaction;
+   using transaction_ptr = std::unique_ptr<transaction>;
 
    class read_lock;
    class alloc_header;
@@ -42,13 +46,79 @@ namespace sal
       [[nodiscard]] read_lock lock() noexcept;
 
       template <typename T>
-      [[nodiscard]] smart_ptr<T> alloc(uint32_t size, alloc_hint hint, auto&&... args);
+      [[nodiscard]] ptr_address alloc(auto&&... args) noexcept
+      {
+         return this->alloc<T>(T::alloc_size(std::forward<decltype(args)>(args)...), alloc_hint{},
+                               std::forward<decltype(args)>(args)...);
+      }
+      template <typename T>
+      [[nodiscard]] smart_ptr<T> smart_alloc(auto&&... args) noexcept
+      {
+         return this->smart_alloc<T>(T::alloc_size(std::forward<decltype(args)>(args)...),
+                                     alloc_hint{}, std::forward<decltype(args)>(args)...);
+      }
+
+      template <typename T>
+      [[nodiscard]] ptr_address alloc(alloc_hint hint, auto&&... args) noexcept
+      {
+         return this->alloc<T>(T::alloc_size(std::forward<decltype(args)>(args)...), hint,
+                               std::forward<decltype(args)>(args)...);
+      }
+      template <typename T>
+      [[nodiscard]] smart_ptr<T> smart_alloc(alloc_hint hint, auto&&... args) noexcept
+      {
+         return this->smart_alloc<T>(T::alloc_size(std::forward<decltype(args)>(args)...), hint,
+                                     std::forward<decltype(args)>(args)...);
+      }
+
+      template <typename T>
+      [[nodiscard]] ptr_address alloc(uint32_t size, alloc_hint hint, auto&&... args) noexcept;
+
+      template <typename T>
+      [[nodiscard]] smart_ptr<T> smart_alloc(uint32_t   size,
+                                             alloc_hint hint,
+                                             auto&&... args) noexcept;
 
       template <typename To, typename From>
-      [[nodiscard]] smart_ptr<To> realloc(smart_ref<From>& ptr, uint32_t size, auto&&... args);
+      [[nodiscard]] smart_ref<To> realloc(const smart_ref<From>& ptr, auto&&... args) noexcept
+      {
+         return this->realloc<To>(ptr, To::alloc_size(std::forward<decltype(args)>(args)...),
+                                  std::forward<decltype(args)>(args)...);
+      }
+      template <typename To, typename From>
+      [[nodiscard]] smart_ref<To> realloc(const smart_ref<From>& ptr,
+                                          uint32_t               size,
+                                          auto&&... args);
 
       template <typename T>
       [[nodiscard]] T* copy_on_write(smart_ref<T>& ptr);
+
+      template <typename T = alloc_header>
+      [[nodiscard]] smart_ptr<T> get_root(root_object_number ro) noexcept;
+
+      /**
+       * Sets the root object for the session.
+       * 
+       * @param ro The root object number to set.
+       * @param ptr The smart pointer to set the root object to.
+       * @return The previous root object.
+       */
+      template <typename T>
+      smart_ptr<T> set_root(root_object_number ro, smart_ptr<T> ptr, sync_type) noexcept;
+
+      template <typename T, typename U>
+      smart_ptr<T> cas_root(root_object_number ro,
+                            smart_ptr<T>       expect,
+                            smart_ptr<U>       desired,
+                            sync_type) noexcept;
+
+      /**
+       * Returns a transaction object that can be used to modify the root object.
+       * The transaction object will be released when the transaction is committed or
+       * aborted.
+       */
+      transaction_ptr       start_transaction(root_object_number ro) noexcept;
+      allocator_session_ptr get_session_ptr() noexcept;
 
       /**
        * This is to be used if and only if the user has taken ownership of the
@@ -65,7 +135,9 @@ namespace sal
       void retain(ptr_address adr) noexcept;
 
       template <typename T = alloc_header>
-      [[nodiscard]] smart_ref<T> get(ptr_address adr) noexcept;
+      [[nodiscard]] smart_ref<T> get_ref(ptr_address adr) noexcept;
+
+      inline bool is_read_only(ptr_address adr) const noexcept;
 
       template <typename UserData>
       void sync(sync_type st, const runtime_config& cfg, UserData user_data = 0)
@@ -79,8 +151,16 @@ namespace sal
       void sync(sync_type st);
 
       ~allocator_session();
+      allocator&               get_allocator() const noexcept { return _sega; }
+      allocator_session_number get_session_num() const noexcept { return _session_num; }
 
      private:
+      friend class transaction;
+      smart_ptr<alloc_header> transaction_commit(root_object_number      ro,
+                                                 smart_ptr<alloc_header> desired,
+                                                 sync_type               st) noexcept;
+      void                    transaction_abort(root_object_number ro) noexcept;
+
       friend class read_lock;
       friend class allocator_session_ptr;
       friend class allocator;
@@ -95,8 +175,8 @@ namespace sal
       T*             get(location loc) noexcept;
       control_block& get(ptr_address adr) noexcept { return _ptr_alloc.get(adr); }
 
-      void retain_read_lock();
-      void release_read_lock();
+      void retain_read_lock() noexcept;
+      void release_read_lock() noexcept;
 
       void init_active_segment();
       void finalize_active_segment();
@@ -199,7 +279,12 @@ namespace sal
    class allocator_session_ptr
    {
      public:
-      allocator_session_ptr(allocator_session* session_ptr) : _session_ptr(session_ptr) {}
+      explicit allocator_session_ptr(allocator_session* session_ptr) : _session_ptr(session_ptr) {}
+      allocator_session_ptr(allocator_session* session_ptr, bool retain) : _session_ptr(session_ptr)
+      {
+         if (retain) [[likely]]
+            _session_ptr->retain_session();
+      }
       ~allocator_session_ptr()
       {
          if (_session_ptr)
@@ -241,3 +326,4 @@ namespace sal
    };
 
 }  // namespace sal
+#include <sal/read_lock.hpp>

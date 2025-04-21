@@ -300,8 +300,7 @@ namespace sal
          /// @return the total bytes synced/written by this session
          /// @tparam UserData the type of the user data to be stored in the sync header, must be
          /// POD and <= 44 bytes
-         template <typename UserData>
-         uint64_t sync(sync_type st, const runtime_config& cfg, UserData user_data);
+         uint64_t sync(sync_type st, const runtime_config& cfg, std::span<char> user_data);
 
          char data[segment_size - segment_footer_size];
          // the next position to allocate data, only

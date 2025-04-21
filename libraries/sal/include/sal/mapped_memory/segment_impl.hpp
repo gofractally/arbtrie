@@ -9,8 +9,7 @@ namespace sal
       /// @return the total bytes synced/written by this session
       /// @tparam UserData the type of the user data to be stored in the sync header, must be
       /// POD and <= 44 bytes
-      template <typename UserData>
-      uint64_t segment::sync(sync_type st, const runtime_config& cfg, UserData user_data)
+      uint64_t segment::sync(sync_type st, const runtime_config& cfg, std::span<char> user_data)
       {
          auto  alloc_pos = get_alloc_pos();
          char* alloc_ptr = data + alloc_pos;
@@ -31,8 +30,8 @@ namespace sal
          auto ahead = new (alloc_ptr) sync_header(asize);
          ahead->set_timestamp(sal::get_current_time_usec());
          ahead->set_prev_aheader_pos(_last_aheader_pos);
-         memcpy(ahead->user_data(), &user_data, sizeof(UserData));
-         ahead->set_user_data_size(sizeof(UserData));
+         memcpy(ahead->user_data(), user_data.data(), user_data.size());
+         ahead->set_user_data_size(user_data.size());
          auto lah = get_last_aheader();
 
          if (lah->type() == header_type::sync_head)

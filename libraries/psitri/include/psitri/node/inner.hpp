@@ -1,13 +1,139 @@
 #pragma once
 #include <cassert>
 #include <cstdint>
-#include <optional>
-#include <psitri/node/node.hpp>
+#include <psitri/node/inner_base.hpp>
 #include <psitri/util.hpp>
+#include <sal/numbers.hpp>
 #include <span>
+#include <ucc/lower_bound.hpp>
 
 namespace psitri
 {
+
+   class inner_prefix_node : public inner_node_base<inner_prefix_node>
+   {
+     public:
+      static constexpr node_type type_id = node_type::inner_prefix;
+      friend class inner_node_base<inner_prefix_node>;
+
+      static inline uint32_t alloc_size(key_view          prefix,
+                                        const branch_set& branches,
+                                        int               numcline,
+                                        uint8_t*          cline_indices) noexcept
+      {
+         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+                                           2 * branches.count() - 1 +
+                                           numcline * sizeof(cline_data));
+      }
+      static inline uint32_t alloc_size(key_view                  prefix,
+                                        const inner_prefix_node*  clone,
+                                        const op::replace_branch& update) noexcept
+      {
+         auto new_branches = clone->_num_branches + update.sub_branches.count() - 1;
+         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+                                           2 * new_branches - 1 +
+                                           update.needed_clines * sizeof(cline_data));
+      }
+      static inline uint32_t alloc_size(const inner_prefix_node* clone,
+                                        key_view                 prefix,
+                                        subrange                 range,
+                                        const cline_freq_table&  ftab) noexcept
+      {
+         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+                                           2 * (*range.end - *range.begin) - 1 +
+                                           ftab.compressed_clines() * sizeof(cline_data));
+      }
+
+      inner_prefix_node(uint32_t          asize,
+                        ptr_address_seq   seq,
+                        key_view          prefix,
+                        const branch_set& branches,
+                        int               numcline,
+                        uint8_t*          cline_indices) noexcept
+          : inner_node_base(asize, node_type::inner_prefix, seq)
+      {
+         assert(asize == alloc_size(prefix, branches, numcline, cline_indices));
+         // set cap once so offsets are valid
+         _prefix_cap = prefix.size();
+         init(branches, numcline, cline_indices);
+         set_prefix(prefix);
+      }
+
+      inner_prefix_node(uint32_t                 asize,
+                        ptr_address_seq          seq,
+                        const inner_prefix_node* clone,
+                        key_view                 prefix,
+                        subrange                 range,
+                        const cline_freq_table&  ftab) noexcept
+          : inner_node_base(asize, node_type::inner_prefix, seq)
+      {
+         _prefix_cap = prefix.size();
+         init(asize, seq, clone, range, ftab);
+         _prefix_cap = prefix.size();
+         set_prefix(prefix);
+      }
+
+      inner_prefix_node(uint32_t                  asize,
+                        ptr_address_seq           seq,
+                        key_view                  prefix,
+                        const inner_prefix_node*  clone,
+                        const op::replace_branch& update) noexcept
+          : inner_node_base(asize, node_type::inner_prefix, seq)
+      {
+         assert(asize == alloc_size(prefix, clone, update));
+         // set cap once so offsets are valid
+         _prefix_cap = prefix.size();
+         init(clone, update);
+         set_prefix(prefix);
+      }
+
+      uint16_t       prefix_len() const noexcept { return _prefix_len; }
+      uint16_t       prefix_capacity() const noexcept { return _prefix_cap; }
+      key_view       prefix() const noexcept { return key_view((const char*)_prefix, _prefix_len); }
+      uint8_t*       divisions() noexcept { return _prefix + _prefix_cap; }
+      const uint8_t* divisions() const noexcept { return _prefix + _prefix_cap; }
+      branch*        branches() noexcept { return (branch*)(divisions() + num_divisions()); }
+      branch*        branches_end() noexcept { return branches() + num_branches(); }
+      const branch*  const_branches() const noexcept
+      {
+         return (const branch*)(divisions() + num_divisions());
+      }
+      uint16_t num_branches() const noexcept { return _num_branches; }
+
+      void set_prefix(key_view pre) noexcept
+      {
+         assert(pre.size() <= prefix_capacity());
+         _prefix_len = pre.size();
+         memcpy(_prefix, pre.data(), pre.size());
+      }
+      branch_number lower_bound(key_view key) const noexcept
+      {
+         if (key < prefix()) [[unlikely]]
+            return branch_number(0);
+         assert(key.size() >= prefix_len());
+         return inner_node_base<inner_prefix_node>::lower_bound(key[prefix_len()]);
+      }
+      [[nodiscard]] inline bool can_apply(const op::replace_branch& up) const noexcept
+      {
+         return alloc_size(prefix(), this, up) == size();
+      }
+
+     protected:
+      uint64_t _descendents : 39;  ///< 500 billion keys max
+      uint64_t _num_branches : 9;  ///< a maximum of 256 branches per node (16 clines * 16 indices)
+      uint64_t _num_cline : 5;     ///< only 16 cline are possible w/ 4 bit branch index
+      uint64_t _prefix_len : 11;   ///< prefix length in bytes
+      uint16_t _prefix_cap : 11;   ///< prefix capacity in bytes
+      uint16_t _unused : 5;  ///< perhaps store used_cline (_num_cline-used_cline = free_clines)
+      uint8_t  _prefix[/*prefix_len*/];  ///< prefix length in bytes
+      /** 
+          uint8_t  _divisions[ num_branches - 1 ];  
+          branch branches[_numbranches]  - 
+          -- -a-- - | ... spare space... 
+          ptr_address clines[_numcline] - 64 byte aligned at end of object
+          tail()
+      */
+   } __attribute__((packed));
 
    /**
     *  This node does not consume part of the key when traversing it,
@@ -19,122 +145,55 @@ namespace psitri
     *  a refactor simply because a child node changed address after an update
     *  from shared state.
     *
-    *  Unlike the ARBTRIE above... we only have 1 inner node type
+    *  Unlike the ARBTRIE above... we only have 1 inner_node node type
     */
-   class inner : public node
+   class inner_node : public inner_node_base<inner_node>
    {
      public:
-      /// construct a basic node with a prefix, two branches and a divider
-      inner(uint32_t        asize,
-            ptr_address_seq seq,
-            key_view        prefix,
-            ptr_address     self,
-            ptr_address     a,
-            uint8_t         div,
-            ptr_address     b);
-      /// clone and insert branch b after div
-      inner(uint32_t        asize,
-            ptr_address_seq seq,
-            const inner*    clone,
-            key_view        prefix,
-            uint8_t         div,
-            ptr_address     b);
-      /// clone and update branch_num with ptr_address
-      inner(uint32_t        asize,
-            ptr_address_seq seq,
-            const inner*    clone,
-            key_view        prefix,
-            branch_number   bn,
-            ptr_address     b);
+      static constexpr node_type type_id = node_type::inner;
+      friend class inner_node_base<inner_node>;
+      //      inner_node(uint32_t asize, ptr_address_seq seq, branch_set branches) noexcept;
 
-      static uint32_t alloc_size(uint32_t prefix_size, uint32_t ncline, uint32_t nbranch)
+      inner_node(uint32_t          asize,
+                 ptr_address_seq   seq,
+                 const branch_set& branches,
+                 int               numcline,
+                 uint8_t*          cline_indices) noexcept;
+
+      inner_node(uint32_t                asize,
+                 ptr_address_seq         seq,
+                 const inner_node*       clone,
+                 subrange                range,
+                 const cline_freq_table& ftab) noexcept;
+
+      inner_node(uint32_t                  asize,
+                 ptr_address_seq           seq,
+                 const inner_node*         clone,
+                 const op::replace_branch& update) noexcept;
+
+      /**
+       * Calculate the size of an inner_node object, the first param is always null and used for
+       * type-based dispatch from sal::allocator_session::alloc and the remaining params match the
+       * constructor parameters after the asize and ptr_address_seq which are always present. The
+       * return value will be passed to the constructor and the constructor will assert that the size
+       * passed matches the size returned by these methods.
+       */
+      ///@{
+      inline static uint32_t alloc_size(const branch_set& branches,
+                                        int               numcline,
+                                        uint8_t*          cline_indices) noexcept;
+      inline static uint32_t alloc_size(const inner_node*       clone,
+                                        subrange                range,
+                                        const cline_freq_table& ftab) noexcept;
+      inline static uint32_t alloc_size(const inner_node*         clone,
+                                        const op::replace_branch& update) noexcept;
+      ///@}
+
+      branch_number lower_bound(key_view key) const noexcept
       {
-         uint32_t size =
-             sizeof(inner) + prefix_size + ncline * sizeof(ptr_address) + nbranch * 2 - 1;
-         return round_up_multiple<64>(size);
-      }
-
-      /// query API
-
-      uint64_t       descendents() const noexcept { return _descendents; }
-      const key_view prefix() const noexcept
-      {
-         return key_view((const char*)_prefix, _prefix_size);
-      }
-      ptr_address get_branch(branch_number n) const noexcept
-      {
-         auto br = branches()[*n];
-         return ptr_address(*clines_tail()[-br.line] + br.index);
-      }
-
-      /// branches are numbered 0 to num_branches()
-      branch_number lower_bound(uint8_t b) const noexcept
-      {
-         return branch_number(psitri::lower_bound(divisions(), num_divisions(), b));
-      }
-
-      /// modification API
-
-      bool can_set_branch(branch_number bn, ptr_address bp) noexcept { return false; }
-
-      bool set_branch(branch_number bn, ptr_address bp) noexcept
-      {
-         return false;
-         // does it share an existing cacheline?
-         // have we exceeded 16 cl?
-         //   can we add a new cacheline for this one w/out realloc
-      }
-
-      bool can_insert_branch() const noexcept { return false; }
-
-      void insert_branch(uint8_t divider, branch bc) noexcept
-      {
-         assert(can_insert_branch());
-         assert(bc.line < num_clines());
-      }
-
-      // given a ptr_address, calculate branch object it should fall on,
-      // if it falls on an existing cacheline.
-      std::optional<branch> calc_branch(ptr_address bp) const noexcept
-      {
-         const ptr_address  cl        = bp & ~ptr_address(0x0f);
-         const ptr_address* lines     = clines_tail();
-         auto               num_lines = num_clines();
-         for (int i = 0; i < num_lines; ++i)
-         {
-            if (lines[-i] == cl)
-               return branch(i, *bp & 0x0f);
-         }
-         return std::nullopt;
-      }
-      bool can_add_cline() const noexcept
-      {
-         if (num_clines() >= 16)
-            return false;
-         auto fs = free_space();
-         if (fs >= sizeof(ptr_address))
-            return true;
-         /// perhaps we have a null cline we can use
-         return calc_branch(ptr_address(0)).has_value();
-      }
-
-      uint32_t free_space() const noexcept
-      {
-         uint32_t head_size = (uint8_t*)branches_end() - ((uint8_t*)this);
-         uint32_t tail_size = num_clines() * sizeof(ptr_address);
-         return size() - (head_size + tail_size);
-      }
-
-      void visit_branches(auto&& lam) const noexcept(lam(ptr_address()))
-      {
-         const branch*      pos = branches();
-         const branch*      end = branches_end();
-         const ptr_address* cls = clines_tail();
-         while (pos != end)
-         {
-            lam(ptr_address(*cls[-pos->line] + pos->index));
-            ++pos;
-         }
+         if (key.size() == 0) [[unlikely]]
+            return branch_number(0);
+         return inner_node_base<inner_node>::lower_bound(key[0]);
       }
 
       void remove_branch(branch_number)
@@ -144,49 +203,122 @@ namespace psitri
          // shift all branches after bn left 1 byte
          // shift all dividers after bn-1 left 1 byte
       }
-      std::span<const ptr_address> get_branch_clines() const noexcept
-      {
-         return std::span<const ptr_address>(clines(), num_clines());
-      }
-      uint8_t num_branches() const noexcept { return _num_branches; }
+      uint16_t num_branches() const noexcept { return _num_branches; }
 
-     protected:
-      uint32_t     num_clines() const noexcept { return _num_cline; }
-      ptr_address* clines() noexcept
-      {
-         return reinterpret_cast<ptr_address*>(tail()) - num_clines();
-      }
-      const ptr_address* clines() const noexcept
-      {
-         return reinterpret_cast<const ptr_address*>(tail()) - num_clines();
-      }
-      ptr_address*       clines_tail() noexcept { return reinterpret_cast<ptr_address*>(tail()); }
-      const ptr_address* clines_tail() const noexcept { return (const ptr_address*)(tail()); }
-      const uint8_t*     divisions() const noexcept { return _prefix + _prefix_cap; }
-      uint8_t*           divisions() noexcept { return _prefix + _prefix_cap; }
-      uint32_t           num_divisions() const noexcept { return num_branches() - 1; }
-      const branch*      branches() const noexcept
+      const branch* const_branches() const noexcept
       {
          return (const branch*)(divisions() + num_divisions());
       }
-      branch*       branches() noexcept { return (branch*)(divisions() + num_divisions()); }
-      const branch* branches_end() const noexcept { return branches() + num_branches(); }
+
+     protected:
+      branch* branches() noexcept { return (branch*)(divisions() + num_divisions()); }
+
+      const uint8_t* divisions() const noexcept { return _divisions; }
+      uint8_t*       divisions() noexcept { return _divisions; }
+      const branch*  branches_end() const noexcept { return const_branches() + num_branches(); }
+      branch*        branches_end() noexcept { return branches() + num_branches(); }
 
      private:
       uint64_t _descendents : 39;  // 500 billion keys max
-      uint64_t _prefix_cap : 10;   /// TODO: may be able to reuse this for num_branches
-      uint64_t _prefix_size : 10;
-      uint64_t _num_cline : 5;  /// only 16 cline are possible w/ 4 bit branch index
-      uint8_t  _num_branches;
-      uint8_t  _prefix[];
-
+      uint64_t _num_branches : 9;  // a maximum of 256 branches per node (16 clines * 16 indices)
+      uint64_t _num_cline : 5;     /// only 16 cline are possible w/ 4 bit branch index
+      uint64_t _unused : 11;       /// maybe store used_cline (_num_cline-used_cline = free_clines)
+      uint8_t  _divisions[/* num_branches - 1 */];  //< offset 20 bytes, which is 4 byte algined
       /** 
-          uint8_t divisions[_numbranches - 1]
-          branch branches[_numbranches] |
+          branch branches[_numbranches]  - 
           -- -a-- - | ... spare space... 
-          ptr_address clines[_numcline]
+          ptr_address clines[_numcline] - 64 byte aligned at end of object
           tail()
       */
-   } __attribute__((packed));
-   static_assert(sizeof(inner) == 21);
+   } __attribute__((packed));  // class inner_node
+   /// if this is not 20, then it will impact alignment of branches
+   static constexpr uint32_t inner_node_size = 20;
+   static_assert(sizeof(inner_node) == inner_node_size);
+
+   inline uint32_t inner_node::alloc_size(const branch_set& branches,
+                                          int               numcline,
+                                          uint8_t*          cline_indices) noexcept
+   {
+      auto divider_capacity = ucc::round_up_multiple<1>(branches.count() - 1);
+      return ucc::round_up_multiple<64>(inner_node_size + numcline * sizeof(ptr_address) +
+                                        divider_capacity + branches.count());
+   }
+   inline uint32_t inner_node::alloc_size(const inner_node*         clone,
+                                          const op::replace_branch& update) noexcept
+   {
+      auto new_branches_count = clone->num_branches() + update.sub_branches.count() - 1;
+      auto divider_capacity   = new_branches_count - 1;
+      return ucc::round_up_multiple<64>(inner_node_size +
+                                        update.needed_clines * sizeof(ptr_address) +
+                                        divider_capacity + new_branches_count);
+   }
+
+   inline inner_node::inner_node(uint32_t          asize,
+                                 ptr_address_seq   seq,
+                                 const branch_set& init_branches,
+                                 int               numcline,
+                                 uint8_t*          cline_indices) noexcept
+       : inner_node_base(asize, node_type::inner, seq)
+   {
+      assert(asize == alloc_size(init_branches, numcline, cline_indices));
+      init(init_branches, numcline, cline_indices);
+   }
+
+   inline inner_node::inner_node(uint32_t                  asize,
+                                 ptr_address_seq           seq,
+                                 const inner_node*         clone,
+                                 const op::replace_branch& update) noexcept
+       : inner_node_base(asize, node_type::inner, seq)
+   {
+      assert(asize == alloc_size(clone, update));
+      init(clone, update);
+   }
+
+   /**
+    * Calculate the size of a new inner_node that is a subrange of the existing node.
+    * 
+    * To determine the size of the new node we need to know how many clines are required
+    * for the branches in the subrange. This is calculated by passing the branches to the
+    * method create_cline_freq_table( begin, end );
+    *
+    * The freq table cannot be calculated within this method because the constructor also
+    * needs the calculated data to initialize the new node and it is expensive to calculate
+    * twice.
+    * @param clone - the node to copy branches from.
+    * @param ftab the result of create_cline_freq_table( begin, end )
+    */
+   inline uint32_t inner_node::alloc_size(const inner_node*       clone,
+                                          subrange                range,
+                                          const cline_freq_table& ftab) noexcept
+   {
+      auto new_branches_count = *range.end - *range.begin;
+      auto divider_capacity   = ucc::round_up_multiple<1>(new_branches_count - 1);
+      auto needed_clines      = ftab.compressed_clines();
+      return ucc::round_up_multiple<64>(inner_node_size + needed_clines * sizeof(ptr_address) +
+                                        divider_capacity + new_branches_count);
+   }
+
+   /**
+    * Presumably this is being called because @param clone has 16 clines and the
+    * we need to split it into 2 nodes with the hope of reducing the number of clines.
+    * 
+    * Even if this produced exactly 8 clines, it is not gauranteed that they will be 
+    * consecutive, and thus this node may need space for 16 clines even though only
+    * 8 are used and only 1 happens to be in line 15 of the new node. 
+    * 
+    * To compress down the node and save up to 32 bytes we need to remap the branches
+    * to the clines, but first we must identify the minimum set of clines for the 
+    * new node. 
+    */
+   inline inner_node::inner_node(uint32_t                asize,
+                                 ptr_address_seq         seq,
+                                 const inner_node*       clone,
+                                 subrange                range,
+                                 const cline_freq_table& ftab) noexcept
+       : inner_node_base(asize, node_type::inner, seq)
+   {
+      assert(asize == alloc_size(clone, range, ftab));
+      init(asize, seq, clone, range, ftab);
+   }
+
 }  // namespace psitri

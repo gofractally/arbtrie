@@ -1,6 +1,8 @@
 #pragma once
+#include <psitri/node/node.hpp>
 
-namespace psitri {
+namespace psitri
+{
 
    /**
     * Value nodes no longer require prefix or
@@ -11,9 +13,12 @@ namespace psitri {
     * be split in half rather than spawn large numbers of branches when
     * full.
     */
-   struct value_node : public node {
-     uint32_t data_size; // becakse node size is always a multiple of 64 and values might not be
-     uint8_t  data[data_size];
+   struct value_node : public node
+   {
+      static constexpr node_type type_id = node_type::value;
+      uint32_t                   data_size : 31;
+      uint32_t                   is_subtree : 1;
+      uint8_t                    data[/*data_size*/];
    };
 
-}
+}  // namespace psitri

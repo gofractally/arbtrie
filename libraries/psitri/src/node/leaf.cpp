@@ -227,6 +227,16 @@ namespace psitri
       // TODO: implement
    }
 
+   /**
+    * Assuming we were to reallocate this node, would it be possible to fit the
+    * new key/value pair without having to split the node?
+    */
+   bool leaf_node::can_insert_with_defrag(key_view key, const value_type& value) const noexcept
+   {
+      int shortspace = can_insert(key, value);
+      return (leaf_node::cow_size() - size()) + _dead_space + shortspace >= 0;
+   }
+
    int leaf_node::can_insert(key_view key, const value_type& value) const noexcept
    {
       assert(key.size() <= 1024);  // TODO: max key size constant
@@ -293,8 +303,9 @@ namespace psitri
          value_offsets()[*bn] =
              add_address_ptr(value_branch::value_type::subtree, value.subtree_address());
       }
-      else if (value.is_value_node())
+      else  //if (value.is_value_node())
       {
+         assert(value.is_value_node());
          value_offsets()[*bn] =
              add_address_ptr(value_branch::value_type::value_node, value.value_address());
       }
@@ -462,6 +473,21 @@ namespace psitri
       return old_size;
    }
 
+   bool leaf_node::can_insert_address(ptr_address addr) const noexcept
+   {
+      ptr_address base_cline(*addr & ~0x0f);
+      if (clines().size() < 15)
+         return true;
+      bool       found_existing = false;
+      const auto cls            = clines();
+      // TODO: there is a scalar algo that can do this 2x at a time
+      // there is a neon algo that can do this 4x at a time
+      // there is a AVX2 algo that can do this 8x at a time
+      for (int i = 0; i < cls.size(); ++i)
+         found_existing |= cls[i] == base_cline;
+      return found_existing;
+   }
+
    /**
     * 
     */
@@ -471,11 +497,15 @@ namespace psitri
       ptr_address            base_cline(*addr & ~0x0f);
       std::span<ptr_address> cls         = clines();
       int                    found_empty = -1;
+      /// TODO: SIMD loop this bad boy, doing 2 compares and finding the index
+      /// we can process 4 at a time for up to 4 iterations and the number of iterations
+      /// can be known in advance and therefore predicted, just need to do one copy
+
       for (int i = 0; i < cls.size(); ++i)
       {
          if (cls[i] == base_cline)
             return value_branch(t, cline_offset(i), cline_index(*addr & 0x0f));
-         if (not cls[i] and found_empty < 0)
+         if (sal::null_ptr_address == cls[i])
             found_empty = i;
       }
       if (found_empty >= 0)
@@ -547,6 +577,15 @@ namespace psitri
       SAL_ERROR("  clines: {}", clines().size());
    }
 
+   key_view leaf_node::get_common_prefix() const noexcept
+   {
+      uint32_t nb = num_branches();
+      assert(nb > 1);
+      key_view front_key = get_key(branch_number(0));
+      key_view back_key  = get_key(branch_number(nb - 1));
+      return common_prefix(front_key, back_key);
+   }
+
    /**
     * Find the best position to split the node by minimizing the size difference
     * between the two resulting nodes after the split.
@@ -563,9 +602,7 @@ namespace psitri
       assert(nb > 1);
 
       // --- General case (nb >= 2) ---
-      auto front_key     = get_key(branch_number(0));
-      auto back_key      = get_key(branch_number(nb - 1));
-      result.cprefix     = common_prefix(front_key, back_key);
+      result.cprefix     = get_common_prefix();
       size_t cprefix_len = result.cprefix.size();
 
       // Initialize with the split just before the last element (index nb-2)

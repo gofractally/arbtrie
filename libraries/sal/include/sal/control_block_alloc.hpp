@@ -269,8 +269,6 @@ namespace sal
          [[likely]] throw std::runtime_error("failed to allocate");
       }
 
-      void ensure_capacity(uint32_t req_zones);
-
       /**
        * @brief first attempt to allocate with one of the hints, and if that fails,
        * then allocate on one of the least filled cachelines
@@ -351,6 +349,7 @@ namespace sal
       /// @pre address is a valid pointer address returned from alloc()
       control_block& get(ptr_address address) noexcept
       {
+         assert(address != null_ptr_address);
          assert((*address / detail::ptrs_per_zone) <
                 _header_ptr->allocated_zones.load(std::memory_order_relaxed));
 
@@ -388,6 +387,7 @@ namespace sal
        */
       control_block& get_or_alloc(ptr_address address)
       {
+         assert(address != null_ptr_address);
          SAL_WARN("get_or_alloc: {}", address);
          if (auto ptr = try_get(address))
             return *ptr;
@@ -440,7 +440,8 @@ namespace sal
          return detail::ptrs_per_zone * num_allocated_zones();
       }
 
-      //private:
+     private:
+      void        ensure_capacity(uint32_t req_zones);
       inline bool claim_address(ptr_address address)
       {
          assert(is_free(address));

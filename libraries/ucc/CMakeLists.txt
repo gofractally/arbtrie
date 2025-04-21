@@ -44,4 +44,9 @@ install(EXPORT ucc-targets
 #     ${CMAKE_CURRENT_BINARY_DIR}/ucc-config.cmake
 #     ${CMAKE_CURRENT_BINARY_DIR}/ucc-config-version.cmake
 #     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ucc
-# ) 
+# )
+
+# Add tests subdirectory if BUILD_TESTING is enabled
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif() 

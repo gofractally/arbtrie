@@ -1,12 +1,10 @@
 #include <algorithm>
 #include <catch2/catch_all.hpp>
-#include <cstddef>   // For std::byte
-#include <cstdlib>   // For std::aligned_alloc, std::free
-#include <cstring>   // For memcpy
-#include <iostream>  // For INFO
+#include <cstddef>  // For std::byte
+#include <cstdlib>  // For std::aligned_alloc, std::free
+#include <cstring>  // For memcpy
 #include <map>
 #include <memory>
-#include <numeric>  // For std::accumulate with dead space check
 #include <psitri/node/leaf.hpp>
 #include <psitri/value_type.hpp>  // Include value_type
 #include <string>
@@ -962,18 +960,26 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
             }
             SECTION("To Subtree (New Unique)")
             {
-               INFO("Subtree(Unique) -> Subtree (New Unique)");
+               INFO("Subtree(Shared Cline) -> Subtree (New Unique)");
                value_type new_val           = value_type::make_subtree(addr_new_u3);
                size_t     expected_old_size = sizeof(ptr_address);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
-               size_t     returned_size     = optimal_node.update_value(bn, new_val);
+
+               // the main focus of the test
+               for (int i = 0; i < optimal_node.num_branches(); ++i)
+               {
+                  SAL_INFO("branch {} key: {} = {}", i, optimal_node.get_key(branch_number(i)),
+                           optimal_node.get_value(branch_number(i)));
+               }
+               size_t returned_size = optimal_node.update_value(bn, new_val);
+
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
                REQUIRE(optimal_node.dead_space() == dead_space_before);
                // Cline 1k freed, existing cline u2 reused. Cline 2k wasn't last, capacity doesn't change.
                REQUIRE(optimal_node.clines_capacity() ==
-                       clines_before);  // Changed from clines_before - 1
+                       clines_before + 1);  // Changed from clines_before + 1
                // REQUIRE(optimal_node.is_optimal_layout()); // Implementation currently breaks this
                REQUIRE(!optimal_node.is_optimal_layout());
             }

@@ -2,21 +2,12 @@
 #include <sal/alloc_header.hpp>
 #include <sal/allocator.hpp>
 #include <sal/allocator_session.hpp>
+#include <sal/transaction.hpp>
 
 namespace sal
 {
-   class read_lock
-   {
-     public:
-      read_lock(allocator_session& s) : _session(s) { _session.retain_read_lock(); }
-      ~read_lock() { _session.release_read_lock(); }
-      read_lock(const read_lock& other) : _session(other._session) { _session.retain_read_lock(); }
 
-     private:
-      allocator_session& _session;
-   };
-
-   [[nodiscard]] read_lock allocator_session::lock() noexcept
+   [[nodiscard]] inline read_lock allocator_session::lock() noexcept
    {
       return read_lock(*this);
    }
@@ -67,7 +58,7 @@ namespace sal
       auto loc  = location::from_absolute_address((char*)head - _block_base_ptr);
       return {loc, head};
    }
-   void allocator_session::prepare_alloc(uint32_t size, msec_timestamp vage)
+   inline void allocator_session::prepare_alloc(uint32_t size, msec_timestamp vage)
    {
       assert(size < sizeof(mapped_memory::segment::data));
       assert(size == ucc::round_up_multiple<64>(size));
@@ -94,10 +85,11 @@ namespace sal
    {
       return _session_rng.next();
    }
+
    template <typename T>
-   [[nodiscard]] smart_ptr<T> allocator_session::alloc(uint32_t   size,
-                                                       alloc_hint hint,
-                                                       auto&&... args)
+   [[nodiscard]] ptr_address allocator_session::alloc(uint32_t   size,
+                                                      alloc_hint hint,
+                                                      auto&&... args) noexcept
    {
       assert(size >= sizeof(T));
       assert(size % 64 == 0);
@@ -110,7 +102,16 @@ namespace sal
 
       palloc.ptr->store(control_block_data().set_loc(loc).set_ref(1), std::memory_order_release);
 
-      return smart_ptr<T>(node_ptr, this);
+      return palloc.addr_seq.address;
+   }
+
+   template <typename T>
+   [[nodiscard]] smart_ptr<T> allocator_session::smart_alloc(uint32_t   size,
+                                                             alloc_hint hint,
+                                                             auto&&... args) noexcept
+   {
+      return smart_ptr<T>(allocator_session_ptr(this, true),
+                          alloc<T>(size, hint, std::forward<decltype(args)>(args)...));
    }
 
    /**
@@ -119,8 +120,8 @@ namespace sal
     * control block will be pointing to a new location.
     */
    template <typename To, typename From>
-   [[nodiscard]] smart_ptr<To> allocator_session::realloc(smart_ref<From>& from,
-                                                          uint32_t         size,
+   [[nodiscard]] smart_ref<To> allocator_session::realloc(const smart_ref<From>& from,
+                                                          uint32_t               size,
                                                           auto&&... args)
    {
       assert(size >= sizeof(To));
@@ -142,7 +143,8 @@ namespace sal
       // between when from read it and when we exchanged it.
       record_freed_space(get<From>(old_control.loc()));
 
-      return smart_ptr<To>(node_ptr, this);
+      return smart_ref<To>(get_session_ptr(), node_ptr, from.control(),
+                           from.control.load(std::memory_order_relaxed));
    }
    template <typename T>
    [[nodiscard]] T* allocator_session::copy_on_write(smart_ref<T>& ptr)
@@ -169,6 +171,24 @@ namespace sal
       return node_ptr;
    }
 
+   template <typename T>
+   [[nodiscard]] smart_ref<T> allocator_session::get_ref(ptr_address adr) noexcept
+   {
+      assert(adr != null_ptr_address);
+      auto& cb    = _ptr_alloc.get(adr);
+      auto  cread = cb.load(std::memory_order_acquire);
+      auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
+      assert(int(T::type_id) == int(ptr->type()));
+      return smart_ref<T>(get_session_ptr(), ptr, cb, cread);
+   }
+
+   inline bool allocator_session::is_read_only(ptr_address adr) const noexcept
+   {
+      assert(adr != null_ptr_address);
+      auto& cb    = _ptr_alloc.get(adr);
+      auto  cread = cb.load(std::memory_order_acquire);
+      return is_read_only(cread.loc());
+   }
    /**
     * Free an object in a segment
     * 
@@ -219,6 +239,10 @@ namespace sal
    {
       return _sega._mapped_state->_cache_difficulty_state.should_cache(get_random(), size);
    }
+   inline void allocator_session::retain(ptr_address adr) noexcept
+   {
+      get(adr).retain();
+   }
    inline void allocator_session::release(ptr_address adr) noexcept
    {
       auto prev = get(adr).release();
@@ -240,10 +264,82 @@ namespace sal
 
    /// called by the allocator_session_ptr destructor to release the session,
    /// notifies the allocator that the session is no longer in use when counter reaches 0
-   void allocator_session::end_session()
+   inline void allocator_session::end_session()
    {
+      SAL_INFO("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
       if (--_ref_count == 0)
+      {
+         SAL_ERROR("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
          _sega.end_session(this);
+      }
+   }
+
+   template <typename T>
+   smart_ptr<T> allocator_session::get_root(root_object_number ro) noexcept
+   {
+      return smart_ptr<T>(_sega.get(ro), this);
+   }
+   template <typename T>
+   inline smart_ptr<T> allocator_session::set_root(root_object_number ro,
+                                                   smart_ptr<T>       ptr,
+                                                   sync_type          st) noexcept
+   {
+      sync(st);
+      return smart_ptr<T>(_sega.set(ro, ptr.take(), st), this);
+   }
+
+   template <typename T, typename U>
+   inline smart_ptr<T> allocator_session::cas_root(root_object_number ro,
+                                                   smart_ptr<T>       expect,
+                                                   smart_ptr<U>       desired,
+                                                   sync_type          st) noexcept
+   {
+      sync(st);
+      if (_sega.cas_root(ro, expect.address(), desired.address(), st))
+      {
+         desired.take();  // _sega took it, so don't release it
+         // let the caller determine how and when to release prior value
+         return smart_ptr<T>(expect.address(), this);
+      }
+      return smart_ptr<T>();
+   }
+
+   inline transaction_ptr allocator_session::start_transaction(root_object_number ro) noexcept
+   {
+      return std::make_unique<transaction>(allocator_session_ptr(this, true), ro);
+   }
+
+   inline allocator_session_ptr allocator_session::get_session_ptr() noexcept
+   {
+      return allocator_session_ptr(this, true);
+   }
+
+   inline smart_ptr<alloc_header> allocator_session::transaction_commit(
+       root_object_number      ro,
+       smart_ptr<alloc_header> desired,
+       sync_type               st) noexcept
+   {
+      sync(st);
+      return smart_ptr<alloc_header>(get_session_ptr(),
+                                     _sega.transaction_commit(ro, desired.take(), st));
+   }
+   inline void allocator_session::transaction_abort(root_object_number ro) noexcept
+   {
+      _sega.transaction_abort(ro);
+   }
+
+   inline void allocator_session::retain_read_lock() noexcept
+   {
+      if (_nested_read_lock++)
+         return;
+      _session_rlock.lock();
+   }
+   inline void allocator_session::release_read_lock() noexcept
+   {
+      assert(_nested_read_lock > 0);
+      if (--_nested_read_lock)
+         return;
+      _session_rlock.unlock();
    }
 
 }  // namespace sal

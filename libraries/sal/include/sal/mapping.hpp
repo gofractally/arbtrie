@@ -42,7 +42,7 @@ namespace sal
       std::size_t           size() const { return _size; }
       bool                  pinned() const { return _pinned; }
       access_mode           mode() const { return _mode; }
-      void                  sync(sync_type type = sync_type::full) const;
+      void                  sync(sync_type type = sync_type::full) noexcept;
 
       template <typename T>
       T* as()

@@ -42,6 +42,7 @@ namespace sal
    {
       uint64_t prev = get_allocator_index().load();
       assert(prev & (1ull << idx));
+      (void)prev;  // release warning suppression
       get_allocator_index().fetch_sub(1ull << idx);
    }
 
@@ -106,7 +107,8 @@ namespace sal
    allocator::allocator(std::filesystem::path dir, runtime_config cfg)
        : _ptr_alloc(dir / "ptrs"),
          _block_alloc(dir / "segs", segment_size, max_segment_count),
-         _seg_alloc_state_file(dir / "header", access_mode::read_write, true)
+         _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
+         _root_object_file(dir / "roots", access_mode::read_write, true)
    {
       _allocator_index = alloc_allocator_index();
       if (_seg_alloc_state_file.size() == 0)
@@ -115,12 +117,23 @@ namespace sal
              system_config::round_to_page(sizeof(mapped_memory::allocator_state)));
          new (_seg_alloc_state_file.data()) mapped_memory::allocator_state();
       }
+      if (_root_object_file.size() == 0)
+      {
+         _root_object_file.resize(system_config::round_to_page(sizeof(root_object_array)));
+         auto arr = new (_root_object_file.data()) root_object_array();
+         for (auto& ro : *arr)
+            ro = null_ptr_address;
+      }
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
+      _root_objects = reinterpret_cast<root_object_array*>(_root_object_file.data());
+      assert(_root_objects);
       _mapped_state->_config = cfg;
 
       mlock_pinned_segments();
 
+      provider_populate_pinned_segments();
+      provider_populate_unpinned_segments();
       start_background_threads();
    }
 
@@ -154,11 +167,6 @@ namespace sal
    allocator_session_number allocator::alloc_session_num() noexcept
    {
       return _mapped_state->_session_data.alloc_session_num();
-   }
-
-   void allocator::release_session_num(allocator_session_number sn) noexcept
-   {
-      _mapped_state->_session_data.release_session_num(sn);
    }
 
    /**
@@ -288,7 +296,7 @@ namespace sal
          {
             auto state   = ses.lock();  // read only lock
             auto addr    = read_ids[i];
-            auto obj_ref = ses.get<alloc_header>(addr);
+            auto obj_ref = ses.get_ref<alloc_header>(addr);
             // reads the relaxed cached load of the location
             auto start_loc = obj_ref.loc();
 
@@ -455,7 +463,7 @@ namespace sal
       auto try_copy_node = [&](const alloc_header* nh, msec_timestamp vage)
       {
          // skip anything that has been freed
-         auto obj_ref = ses.get<alloc_header>(nh->address());
+         auto obj_ref = ses.get_ref<alloc_header>(nh->address());
          if (obj_ref.ref() == 0)
             return;  // object was freed
          if (obj_ref.obj() != nh)
@@ -906,26 +914,47 @@ namespace sal
       _mapped_state->_segment_data.set_pinned(seg_num, is_pinned);
    }
 
+   /// each thread has an array of allocator_session pointers, indexed by allocator_index
    static thread_local std::array<allocator_session*, 64>* current_session = nullptr;
    void allocator::end_session(allocator_session* ses)
    {
       assert(current_session and "end_session called with no current session");
       auto cs = current_session->at(_allocator_index);
       assert(cs == ses and "end_session called with a different thread's session");
+      (void)ses;  // release warning suppression
       delete cs;
       current_session->at(_allocator_index) = nullptr;
    }
    allocator_session_ptr allocator::get_session()
    {
       if (not current_session)
+      {
+         SAL_WARN("get_session: creating new session array {} ", _allocator_index);
          current_session = new std::array<allocator_session*, 64>();
+         for (auto& s : *current_session)
+            s = nullptr;
+      }
+
       if (not current_session->at(_allocator_index))
       {
-         return allocator_session_ptr(current_session->at(_allocator_index) =
+         SAL_WARN("get_session: creating new session {} ", _allocator_index);
+         return allocator_session_ptr((*current_session)[_allocator_index] =
                                           new allocator_session(*this, alloc_session_num()));
       }
+      SAL_WARN("get_session: returning existing session");
       auto cs = current_session->at(_allocator_index);
       cs->retain_session();
+      SAL_WARN("get_session: returning existing session {}  allocidx: {}  sessptr: {} ",
+               cs->get_session_num(), _allocator_index, current_session->at(_allocator_index));
       return allocator_session_ptr(cs);
+   }
+   void allocator::release_session_num(allocator_session_number sn) noexcept
+   {
+      SAL_WARN("release_session_num: {}  allocidx: {}  sessptr: {} ", sn, _allocator_index,
+               current_session->at(_allocator_index));
+      assert(current_session);
+      assert(current_session->at(_allocator_index));
+      (*current_session)[_allocator_index] = nullptr;
+      _mapped_state->_session_data.release_session_num(sn);
    }
 }  // namespace sal

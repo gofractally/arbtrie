@@ -17,6 +17,8 @@ add_library(sal
     src/allocator.cpp
     src/mapping.cpp
     src/control_block_alloc.cpp
+    src/allocator_session.cpp
+    src/segment_thread.cpp
 )
 target_compile_definitions(sal PUBLIC XXH_INLINE_ALL)
 

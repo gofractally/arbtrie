@@ -6,6 +6,8 @@
 #include <sal/mapped_memory/allocator_state.hpp>
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/segment_thread.hpp>
+#include <shared_mutex>
+#include "sal/config.hpp"
 
 namespace sal
 {
@@ -18,22 +20,36 @@ namespace sal
     * sal::alloc_header.  Objects returned are reference counted and
     * persistent on disk and when sync() is called they become write-locked
     * but users can continue to copy-on-write without blocking. 
+    * 
+    * Example Usage:
+    * ```
+    *  allocator a( "db")
+    *  alloc_session_ptr s = db.get_session();
+    *  smart_ptr<node> n = s->alloc<node>( size, alloc_hint(), constructor args...);
+    *  /// use n, then save it to a global #0 
+    *  s.set_root( root_object_number(0), std::move(n) );
+    *
+    *  /// any thread that wishes to modify root 0 without conflict 
+    *  transaction_ptr t = s->start_transaction(root_object_number(0));
+    *  smart_ptr<node>& r0 = t.root(); // modify this to update temp state
+    *  t->commit(sync_type::fsync); // to commit changes to r0 
+    *  t->abort(); // to abandon changes... or simply let t go out of scope.
+    *
+    * ```
     */
-   class allocator
+   class allocator : public std::enable_shared_from_this<allocator>
    {
      public:
       /// 64 bits for session id
       static constexpr uint32_t max_session_count = 64;
 
-      allocator(std::filesystem::path dir, runtime_config cfg);
+      allocator(std::filesystem::path dir, runtime_config cfg = runtime_config());
       ~allocator();
 
       void start_background_threads();
       void stop_background_threads();
 
       void set_runtime_config(const runtime_config& cfg);
-
-      void fsync(bool full = false);
 
       // gets the current thread's session, increments its ref count
       // becomes get_thread_session() returns a non-atomic smart pointer that will
@@ -50,22 +66,163 @@ namespace sal
        */
       [[nodiscard]] read_lock lock();
 
-      // release smart_ref.take() if you are doing manual memory management
+      void retain(ptr_address adr) noexcept { _ptr_alloc.get(adr).retain(); }
+
+      /// forwards to get_session()->release(adr)
       void release(ptr_address adr) noexcept;
+      /**
+       * Syncs the root object to disk.
+       * 
+       * @param st The sync type to use.
+       */
+      void sync(sync_type st) noexcept
+      {
+         if (st < sync_type::msync_sync)
+            return;
+
+         // we don't msync() the _block_alloc because that is done
+         // on a session-by-session basis, but we still need to fsync() it
+         // because that applies to the entire file. But we don't want to
+         // fsync(full=true) because _root_object_file also need to be synced
+         // and it will do a full (computer-wide) sync if needed and implicitly
+         // grab data synced by _block_alloc.
+         if (st >= sync_type::fsync)
+            _block_alloc.fsync(false);
+         _root_object_file.sync(st);
+
+         // we don't sync _ptr_alloc because that data can be recovered from data
+         // that is being synced. We also don't sync _mapped_state because it also
+         // can be recovered from data that is being synced.
+      }
 
      private:
+      friend class transaction;
+      /**
+       * @name Root Object Methods
+       * These methods set and get "global" root objects that can be looked up by
+       * a number, there are at most 1024 root objects that can be used and these
+       * objects are updated atomically and synced to disk when transactions are
+       * committed.
+       *
+       * Any number of readers can operate at the same time, and there are two ways
+       * of doing updates: compare and swap (CAS) that asserts the current value is
+       * the same as the initial value (thereby proving no one else wrote), or
+       * by starting a transaction which will block any others from attempting to
+       * start a transaction or compare and swap until it is committed. Note:
+       * compare and swap is essentially starting a transaction, setting the root,
+       * and committing the transaction. 
+       * These methods are private to be used by friend classes of allocator_session
+       * and transaction only.
+       *
+       * @group root_object_methods Root Object Methods
+       */
+      ///@{
+
+      /**
+       * Caller is responsible for releasing the returned address.
+       */
+      [[nodiscard]] ptr_address get(root_object_number ro) noexcept
+      {
+         assert(ro < _root_objects->size() && "invalid root object number");
+         std::shared_lock<std::shared_mutex> lock(_root_object_mutex[*ro]);
+         auto adr = _root_objects->at(*ro).load(std::memory_order_acquire);
+         SAL_WARN("get root object: {} adr: {}", ro, adr);
+         if (adr != null_ptr_address)
+            retain(adr);
+         return adr;
+      }
+
+      /**
+       * Caller is responsible for *giving* a valid reference, and releasing the returned address.
+       */
+      [[nodiscard]] ptr_address set(root_object_number ro, ptr_address adr, sync_type st) noexcept
+      {
+         std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
+         std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
+         auto result = _root_objects->at(*ro).exchange(adr, std::memory_order_release);
+         sync(st);
+         return result;
+      }
+
+      /**
+       * Caller is responsible for *giving* a valid desire reference, and releasing the 
+       * expected reference if successful.  On failure the caller remains responsible for
+       * the reference to the desired outcome.
+       */
+      bool cas_root(root_object_number ro,
+                    ptr_address        expect,
+                    ptr_address        desire,
+                    sync_type          st) noexcept
+      {
+         std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
+         std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
+         if (_root_objects->at(*ro).compare_exchange_strong(expect, desire,
+                                                            std::memory_order_release))
+         {
+            sync(st);
+            return true;
+         }
+         return false;
+      }
+
+      /**
+       * Grabs the write mutex for root object, which will ensure that no other 
+       * threads will be working on a update to this root object until this transaction
+       * is committed or aborted. 
+       */
+      [[nodiscard]] ptr_address start_transaction(root_object_number ro) noexcept
+      {
+         SAL_WARN("{}", _root_objects);
+         SAL_WARN("start_transaction: {} size: {}", ro, _root_objects->size());
+         assert(ro < _root_objects->size() && "invalid root object number");
+         _write_mutex[*ro].lock();
+         return get(ro);
+      }
+
+      /**
+       * Commits the transaction, and updates the root object with the desired reference.
+       * Caller is responsible for releasing the returned address.
+       */
+      [[nodiscard]] ptr_address transaction_commit(root_object_number ro,
+                                                   ptr_address        desired,
+                                                   sync_type          st) noexcept
+      {
+         assert(ro < _root_objects->size() && "invalid root object number");
+         auto result = _root_objects->at(*ro).exchange(desired, std::memory_order_release);
+         sync(st);
+         _write_mutex[*ro].unlock();
+         return result;
+      }
+
+      /**
+       * Aborts the transaction, and releases the write mutex.
+       */
+      void transaction_abort(root_object_number ro) noexcept
+      {
+         assert(ro < _root_objects->size() && "invalid root object number");
+         _write_mutex[*ro].unlock();
+      }
+      ///@}
+
       allocator_session_ptr get_session() const;
       void                  end_session(allocator_session* ses);
 
       friend class allocator_session;
       friend class read_lock;
+      using root_object_array = std::array<std::atomic<ptr_address>, 1024>;
 
       mapped_memory::allocator_state* _mapped_state;
       control_block_alloc             _ptr_alloc;
       sal::block_allocator            _block_alloc;
       uint32_t                        _allocator_index;
       mapping                         _seg_alloc_state_file;
+      mapping                         _root_object_file;
+      root_object_array*              _root_objects;
       std::mutex                      _sync_mutex;
+      /// used by readers/writers to grab/update a root object
+      std::array<std::shared_mutex, 1024> _root_object_mutex;
+      /// mutexes used by transactions to ensure that only one writer per root object
+      std::array<std::mutex, 1024> _write_mutex;
 
       inline bool config_validate_checksum_on_compact() const;
       inline bool config_update_checksum_on_compact() const;
@@ -196,6 +353,7 @@ namespace sal
          assert(seg < max_segment_count && "invalid segment passed to is_read_only");
          return get_segment(seg)->get_first_write_pos() > loc.segment_offset();
       }
+
       inline bool can_modify(allocator_session_number ses_num, location loc) const
       {
          auto seg = get_segment(loc.segment());
@@ -285,3 +443,11 @@ namespace sal
 };  // namespace sal
 
 #include <sal/allocator_session_impl.hpp>
+
+namespace sal
+{
+   inline void allocator::release(ptr_address adr) noexcept
+   {
+      get_session()->release(adr);
+   }
+}  // namespace sal

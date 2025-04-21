@@ -14,4 +14,3 @@ target_include_directories( psitri
 target_compile_definitions(psitri PUBLIC XXH_INLINE_ALL)
 
 target_link_libraries( psitri sal hash ucc)
-                            

@@ -1,6 +1,7 @@
 #include <sal/allocator.hpp>
 #include <sal/allocator_session.hpp>
 #include <sal/mapped_memory/read_lock_queue.hpp>
+#include <sal/mapped_memory/segment_impl.hpp>
 #include <sal/time.hpp>
 #include <ucc/round.hpp>
 
@@ -9,23 +10,25 @@ namespace sal
 
    allocator_session::allocator_session(allocator& a, allocator_session_number ses_num)
        : _block_base_ptr(a._block_alloc.get(offset_ptr(0))),
-         _control_block_base_ptr(a._ptr_alloc._ptr_base),
-         _session_rlock(a.get_session_rlock(ses_num)),
+         _control_block_base_ptr(a._ptr_alloc.try_get(ptr_address(0))),
          _nested_read_lock(0),
+         _session_num(ses_num),
          _rcache_queue(a.get_rcache_queue(ses_num)),
          _sega(a),
-         _session_num(ses_num),
-         _session_rng(0xABBA7777 ^ *ses_num),
          _ptr_alloc(a._ptr_alloc),
-         _alloc_seg_num(-1),
          _alloc_seg_ptr(nullptr),
+         _session_rng(0xABBA7777 ^ *ses_num),
          _dirty_segments(a._mapped_state->_session_data.dirty_segments(ses_num)),
+         _alloc_seg_num(-1),
+         _session_rlock(a.get_session_rlock(ses_num))
    {
+      SAL_INFO("allocator_session: constructor: {} {} ref: {}", this, ses_num, _ref_count);
       _block_base_ptr = a._block_alloc.get(offset_ptr(0));
    }
 
    allocator_session::~allocator_session()
    {
+      SAL_ERROR("allocator_session: destructor: {} {} ref: {}", this, _session_num, _ref_count);
       if (_session_num == allocator_session_number(-1))
          return;
       finalize_active_segment();
@@ -55,7 +58,7 @@ namespace sal
       _alloc_seg_ptr->_seg_sequence =
           _sega._mapped_state->_session_data.next_session_segment_seq(_session_num);
       _alloc_seg_ptr->_open_time_usec  = sal::get_current_time_msec();
-      _alloc_seg_ptr->_close_time_usec = 0;  // Will be set when segment is closed
+      _alloc_seg_ptr->_close_time_usec = msec_timestamp(0);  // Will be set when segment is closed
    }
 
    /**
@@ -76,10 +79,9 @@ namespace sal
       _alloc_seg_ptr->unalloc(size);
       return true;
    }
-
-   uint64_t allocator_session::count_ids_with_refs()
+   void allocator_session::sync(sync_type st)
    {
-      return _sega.count_ids_with_refs();
+      sync(st, _sega._mapped_state->_config, {});
    }
 
    void allocator_session::sync(sync_type st, const runtime_config& cfg, std::span<char> user_data)
@@ -102,7 +104,7 @@ namespace sal
          //   ARBTRIE_INFO("sync: segment: ", seg_num, " free_space: ", seg->free_space(),
          //                " ahead: ", ahead->_nsize);
 
-         _sega.record_freed_space(_session_num, seg_num, ahead);
+         _sega.record_freed_space(_session_num, ahead);
 
          /// if the segment is entirely read only (because sync() just moved _last_writable_pos
          /// to the end of the segment) then we can set the segment meta data to indicate that
@@ -110,10 +112,9 @@ namespace sal
          assert(seg->is_finalized() ? seg->is_read_only() : true);
          if (seg->is_read_only())  //or seg->is_finalized())
             _sega._mapped_state->_segment_data.prepare_for_compaction(
-                seg_num, seg->_vage_accumulator.average_age());
+                seg_num, seg->age_accumulator.average());
          seg_num = _dirty_segments.pop();
       }
-      if (st == sync_type::fsync)
-         _sega.fsync();
+      _sega.sync(st);
    }
 }  // namespace sal

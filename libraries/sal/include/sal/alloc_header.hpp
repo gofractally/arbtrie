@@ -32,6 +32,7 @@ namespace sal
    class alloc_header
    {
      public:
+      static constexpr header_type type_id = header_type::alloc_head;
       inline constexpr header_type type() const noexcept { return (header_type)_type; };
       inline constexpr uint32_t    size() const noexcept { return _size; }
       inline constexpr uint64_t    checksum() const noexcept { return _checksum; }
@@ -46,11 +47,11 @@ namespace sal
          return reinterpret_cast<const alloc_header*>(((char*)this) + size());
       }
 
-      alloc_header(uint32_t asize, header_type t, ptr_address_seq seq)
+      alloc_header(uint32_t asize, header_type t, ptr_address_seq seq) noexcept
           : _checksum(0), _address(seq), _size(asize), _type((uint8_t)t)
       {
       }
-      alloc_header() {}
+      alloc_header() noexcept : alloc_header(0, header_type::undefined, {}) {}
       constexpr ptr_address address() const noexcept { return _address.address; }
 
       /// the allocation sequence associated with address(), used to determine priority
@@ -93,6 +94,13 @@ namespace sal
 
      protected:
       void set_checksum(uint16_t c) noexcept { _checksum = c; }
+      void init(uint32_t asize, header_type t, ptr_address_seq seq) noexcept
+      {
+         _checksum = 0;
+         _address  = seq;
+         _size     = asize;
+         _type     = (uint8_t)t;
+      }
 
      private:
       uint16_t        _checksum;
@@ -147,7 +155,7 @@ namespace sal
          static_cast<const T*>(src)->compact_to(compact_dst);
       }
       /**
-       * dst->size() should be copy_size(src)
+       * dst->size() should be cow_size(src)
        */
       static void copy_to(const alloc_header* src, alloc_header* dst) noexcept
       {

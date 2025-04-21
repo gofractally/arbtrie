@@ -275,7 +275,7 @@ namespace sal
       }
    }
 
-   void block_allocator::fsync(bool full)
+   bool block_allocator::fsync(bool full) noexcept
    {
       if (_fd)
       {
@@ -285,17 +285,19 @@ namespace sal
             if (fcntl(_fd, F_FULLFSYNC) < 0)
             {
                SAL_ERROR("Failed to fsync file: {}", strerror(errno));
-               throw std::system_error(errno, std::generic_category());
+               return false;
             }
-            return;
+            return true;
          }
 #endif
          if (::fsync(_fd) < 0)
          {
             SAL_ERROR("Failed to fsync file: {}", strerror(errno));
-            throw std::system_error(errno, std::generic_category());
+            return false;
          }
+         return true;
       }
+      return false;
    }
 
    uint32_t block_allocator::reserve(uint32_t desired_num_blocks, bool mlock)

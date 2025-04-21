@@ -3,7 +3,7 @@
 #include <psitri/node/node.hpp>
 #include <psitri/util.hpp>
 #include <psitri/value_type.hpp>
-
+#include <sal/allocator_session.hpp>
 namespace psitri
 {
 
@@ -28,6 +28,32 @@ namespace psitri
    class leaf_node : public node
    {
      public:
+      struct op
+      {
+         struct insert
+         {
+            const leaf_node* src;
+            branch_number    lb;
+            key_view         key;
+            value_type       value;
+         };
+         struct update
+         {
+            const leaf_node* src;
+            branch_number    lb;
+            key_view         key;
+            value_type       value;
+         };
+         struct remove
+         {
+            const leaf_node* src;
+            branch_number    bn;
+         };
+      };
+      static constexpr node_type type_id = node_type::leaf;
+      leaf_node(size_t alloc_size, op::insert ins);
+      leaf_node(size_t alloc_size, op::update upd);
+      leaf_node(size_t alloc_size, op::remove rm);
       /// default constructor, contains one key, value pair
       leaf_node(size_t alloc_size, ptr_address_seq seq, key_view key, const value_type& value);
       /// clone and optimize
@@ -49,6 +75,17 @@ namespace psitri
                 const value_type& value);
       /// clone and remove bn
       leaf_node(size_t alloc_size, ptr_address_seq seq, const leaf_node* clone, branch_number bn);
+
+      key_view get_common_prefix() const noexcept;
+
+      uint32_t cow_size() const noexcept { return 4096; }  // TODO: make this config const
+
+      /**
+       *  A leaf can only have children on 16 unique cachelines, therefore,
+       * we need to check if we have less than 16 or if addr is already on
+       * an existing cacheline.
+       */
+      bool can_insert_address(ptr_address addr) const noexcept;
 
       void     dump() const;
       uint16_t alloc_pos() const noexcept { return _alloc_pos; }
@@ -94,7 +131,8 @@ namespace psitri
       /// determines whether there is enough space to insert the key
       /// @return the amount of free space after inserting the key,
       /// this will be negative if there is not enough space.
-      int can_insert(key_view key, const value_type& value) const noexcept;
+      int  can_insert(key_view key, const value_type& value) const noexcept;
+      bool can_insert_with_defrag(key_view key, const value_type& value) const noexcept;
 
       int free_space() const noexcept { return alloc_head() - clines_end(); }
 
@@ -165,6 +203,15 @@ namespace psitri
       }
 
       uint16_t num_branches() const noexcept { return _num_branches; }
+
+      std::span<ptr_address> clines() noexcept
+      {
+         return std::span<ptr_address>(
+             reinterpret_cast<ptr_address*>(value_offsets() + num_branches()), _cline_cap);
+      }
+      inline static uint32_t alloc_size(key_view key, const value_type& value) noexcept;
+      /// clone and optimize
+      inline static uint32_t alloc_size(const leaf_node* clone) noexcept;
 
      private:
       void set_num_branches(uint16_t n) noexcept { _num_branches = n; }
@@ -325,11 +372,6 @@ namespace psitri
       {
          return reinterpret_cast<const value_branch*>(value_offsets() + num_branches());
       }
-      std::span<ptr_address> clines() noexcept
-      {
-         return std::span<ptr_address>(
-             reinterpret_cast<ptr_address*>(value_offsets() + num_branches()), _cline_cap);
-      }
       const char* clines_end() const noexcept
       {
          return (const char*)(value_offsets() + num_branches()) + _cline_cap * sizeof(ptr_address);
@@ -444,4 +486,13 @@ namespace psitri
    } __attribute__((packed));
    static_assert(sizeof(leaf_node) == 20);
 
+   inline uint32_t leaf_node::alloc_size(key_view key, const value_type& value) noexcept
+   {
+      return ucc::round_up_multiple<64>(sizeof(leaf_node) + key.size() + value.size());
+   }
+   /// clone and optimize
+   inline uint32_t leaf_node::alloc_size(const leaf_node* clone) noexcept
+   {
+      return clone->size();
+   }
 }  // namespace psitri

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <sal/config.hpp>
 #include <sal/mapping.hpp>  // sync_type
 #include <ucc/typed_int.hpp>
 
@@ -52,12 +53,7 @@ namespace sal
        * Resizes the file and num_blocks() count to nblocks.
        */
       void truncate(uint32_t nblocks);
-
-      /**
-       * This method syncs all mapped memory to disk.
-       * @param full uses F_FULLFSYNC else just fsync()
-       */
-      void fsync(bool full = false);
+      bool fsync(bool full = false) noexcept;
 
       /**
        * Return a pointer to the block at the specified offset

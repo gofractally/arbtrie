@@ -75,6 +75,18 @@ namespace ucc
          return lhs.value <=> rhs.value;
       }
 
+      constexpr typed_int& operator>>=(int shift) noexcept
+      {
+         value >>= shift;
+         return *this;
+      }
+
+      constexpr typed_int& operator<<=(int shift) noexcept
+      {
+         value <<= shift;
+         return *this;
+      }
+
       // Comparison with raw value
       friend constexpr bool operator==(const typed_int& lhs, const T& rhs) noexcept
       {
@@ -234,6 +246,16 @@ namespace ucc
       friend constexpr typed_int operator>>(typed_int lhs, const typed_int& rhs) noexcept
       {
          lhs >>= rhs;
+         return lhs;
+      }
+      friend constexpr typed_int operator<<(typed_int lhs, int shift) noexcept
+      {
+         lhs <<= shift;
+         return lhs;
+      }
+      friend constexpr typed_int operator>>(typed_int lhs, int shift) noexcept
+      {
+         lhs >>= shift;
          return lhs;
       }
       friend constexpr typed_int operator~(const typed_int& val) noexcept
