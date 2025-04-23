@@ -49,12 +49,7 @@ namespace sal
       operator bool() const noexcept { return is_valid(); }
       ptr_address address() const noexcept { return _adr; }
       bool        is_valid() const noexcept { return _adr != null_ptr_address; }
-      bool        is_read_only() const noexcept
-      {
-         if (is_valid())
-            return _asession->is_read_only(_adr);
-         return true;
-      }
+      bool        is_read_only() const noexcept;
 
       smart_ptr_base(const smart_ptr_base& other) noexcept
           : _asession(other._asession), _adr(other._adr)
@@ -187,8 +182,8 @@ namespace sal
          return _asession->get_ref<U>(_adr);
       }
 
-      smart_ref<T> operator->() const noexcept { return _asession->get<T>(_adr); }
-      smart_ref<T> operator*() const noexcept { return _asession->get<T>(_adr); }
+      smart_ref<T> operator->() const noexcept { return _asession->get_ref<T>(_adr); }
+      smart_ref<T> operator*() const noexcept { return _asession->get_ref<T>(_adr); }
    };
 
    class smart_ref_base
@@ -215,7 +210,7 @@ namespace sal
       template <typename Type>
       smart_ref<Type>& as()
       {
-         assert(Type::type_id == _obj->type());
+         assert(int(Type::type_id) == int(_obj->type()));
          return *reinterpret_cast<smart_ref<Type>*>(this);
       }
 
@@ -346,15 +341,17 @@ namespace sal
       const T* obj() const noexcept { return reinterpret_cast<const T*>(_obj); }
       const T* operator->() const noexcept { return obj(); }
 
-      modify_guard<T> modify() const noexcept;
+      modify_guard<T> modify() noexcept;
       void modify(auto&& update_fn) const noexcept(noexcept(update_fn(std::declval<T*>())));
+
+      friend class allocator_session;
    };
 
    template <typename T>
    class modify_guard
    {
      public:
-      modify_guard(const smart_ref<T>& obj) noexcept : _obj(obj), _observed_ptr(nullptr) {}
+      modify_guard(smart_ref<T>& obj) noexcept : _obj(obj), _observed_ptr(nullptr) {}
       T* operator->() noexcept { return get(); }
       T* get() noexcept;
       ~modify_guard() noexcept;
@@ -365,7 +362,7 @@ namespace sal
    };  // modify_guard
 
    template <typename T>
-   modify_guard<T> smart_ref<T>::modify() const noexcept
+   modify_guard<T> smart_ref<T>::modify() noexcept
    {
       return modify_guard<T>(*this);
    }
@@ -383,7 +380,7 @@ namespace sal
       if (_observed_ptr)
          return _observed_ptr;
       if (_obj._asession->can_modify(_obj._cached.loc()))
-         return _observed_ptr = _obj._obj;
+         return _observed_ptr = static_cast<T*>(_obj._obj);
 
       return _observed_ptr = _obj._asession->copy_on_write(_obj);
    }

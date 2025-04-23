@@ -7,6 +7,31 @@
 namespace psitri
 {
 
+   class leaf_node;
+   namespace op
+   {
+      struct leaf_insert
+      {
+         const leaf_node& src;
+         branch_number    lb;
+         key_view         key;
+         value_type       value;
+         uint8_t          cline_idx = 0xff;
+      };
+      struct leaf_update
+      {
+         const leaf_node& src;
+         branch_number    lb;
+         key_view         key;
+         value_type       value;
+      };
+      struct leaf_remove
+      {
+         const leaf_node& src;
+         branch_number    bn;
+      };
+   }  // namespace op
+
    /**
    * Stores up to 4096 bytes 
    * fast insert doesn't wory about memory layout, but
@@ -28,32 +53,32 @@ namespace psitri
    class leaf_node : public node
    {
      public:
-      struct op
-      {
-         struct insert
-         {
-            const leaf_node* src;
-            branch_number    lb;
-            key_view         key;
-            value_type       value;
-         };
-         struct update
-         {
-            const leaf_node* src;
-            branch_number    lb;
-            key_view         key;
-            value_type       value;
-         };
-         struct remove
-         {
-            const leaf_node* src;
-            branch_number    bn;
-         };
-      };
       static constexpr node_type type_id = node_type::leaf;
-      leaf_node(size_t alloc_size, op::insert ins);
-      leaf_node(size_t alloc_size, op::update upd);
-      leaf_node(size_t alloc_size, op::remove rm);
+      inline static uint32_t     alloc_size(key_view key, const value_type& value) noexcept;
+      /// clone and optimize
+      inline static uint32_t alloc_size(const leaf_node* clone) noexcept;
+      inline static uint32_t alloc_size(const leaf_node* clone,
+                                        key_view         cprefix,
+                                        branch_number    start,
+                                        branch_number    end)
+      {
+         assert(cprefix.size() <= 1024);
+         return 4096;
+      }
+      inline static uint32_t alloc_size(const leaf_node* clone,
+                                        branch_number    start,
+                                        branch_number    end)
+      {
+         return 4096;
+      }
+      inline static uint32_t alloc_size(const leaf_node* src, const op::leaf_insert& ins)
+      {
+         return 4096;
+      }
+
+      //  leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_insert& ins);
+      // leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
+      //leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
       /// default constructor, contains one key, value pair
       leaf_node(size_t alloc_size, ptr_address_seq seq, key_view key, const value_type& value);
       /// clone and optimize
@@ -68,11 +93,11 @@ namespace psitri
                 branch_number    end);
 
       /// clone and insert key, value
-      leaf_node(size_t            alloc_size,
-                ptr_address_seq   seq,
-                const leaf_node*  clone,
-                key_view          ins,
-                const value_type& value);
+      leaf_node(size_t                 alloc_size,
+                ptr_address_seq        seq,
+                const leaf_node*       clone,
+                const op::leaf_insert& ins);
+
       /// clone and remove bn
       leaf_node(size_t alloc_size, ptr_address_seq seq, const leaf_node* clone, branch_number bn);
 
@@ -99,6 +124,7 @@ namespace psitri
          uint8_t  divider;           ///< byte to split on
          uint32_t less_than_count;   ///< number of keys less than divider
          uint32_t greater_eq_count;  ///< number of keys greater than or equal to divider
+         key_view divider_key() const noexcept { return key_view((const char*)&divider, 1); }
       };
       split_pos get_split_pos() const noexcept;
 
@@ -128,11 +154,21 @@ namespace psitri
       /// @return size of old value
       size_t update_value(branch_number bn, const value_type& value) noexcept;
 
+      enum class can_apply_mode
+      {
+         none   = 0,
+         modify = 1,
+         defrag = 2
+      };
+      can_apply_mode can_apply(const op::leaf_insert& ins) const noexcept;
+      can_apply_mode can_apply(const op::leaf_update& ins) const noexcept;
+      can_apply_mode can_apply(const op::leaf_remove& ins) const noexcept;
+
       /// determines whether there is enough space to insert the key
       /// @return the amount of free space after inserting the key,
       /// this will be negative if there is not enough space.
-      int  can_insert(key_view key, const value_type& value) const noexcept;
-      bool can_insert_with_defrag(key_view key, const value_type& value) const noexcept;
+      //int  can_insert(key_view key, const value_type& value) const noexcept;
+      //bool can_insert_with_defrag(key_view key, const value_type& value) const noexcept;
 
       int free_space() const noexcept { return alloc_head() - clines_end(); }
 
@@ -140,7 +176,7 @@ namespace psitri
       /// @pre key is not already in the node
       /// @pre can_insert(key) must be true
       /// @pre bn  == lower_bound(key)
-      branch_number insert(branch_number bn, key_view key, const value_type& value) noexcept;
+      branch_number apply(const op::leaf_insert& ins) noexcept;
 
       /// @pre bn != num_branches()
       void remove(branch_number bn) noexcept;
@@ -152,17 +188,36 @@ namespace psitri
       /// uses hash to find key
       branch_number get(key_view key) const noexcept
       {
+         //         SAL_INFO("get: key: {}", key);
          uint8_t        khash     = calc_key_hash(key);
          const uint8_t* khashes   = key_hashs().data();
          uint32_t       reamining = num_branches();
+
+         /*
+         for (uint32_t i = 0; i < reamining; ++i)
+         {
+            SAL_INFO("get_key({}) : hash: {} found: {}", i, int(khashes[i]),
+                     get_key(branch_number(i)));
+         }
+*/
+
+         uint32_t total_idx = 0;
          do
          {
             auto idx = find_byte(khashes, reamining, khash);
+            //          SAL_INFO("get: idx: {} reamining: {}", idx, reamining);
             if (idx == reamining)
+            {
+               ////            SAL_ERROR("not found");
                return branch_number(num_branches());
-            if (get_key(branch_number(idx)) == key)
-               return branch_number(idx);
+            }
+            total_idx += idx;
+            ////       SAL_INFO("rel idx: {} get_key({}) : found: {}", idx, total_idx,
+            //                get_key(branch_number(total_idx)));
+            if (get_key(branch_number(total_idx)) == key)
+               return branch_number(total_idx);
             ++idx;
+            ++total_idx;
             khashes += idx;
             reamining -= idx;
          } while (true);
@@ -196,6 +251,9 @@ namespace psitri
          }
       }
 
+      std::span<const ptr_address> hint() const noexcept { return clines(); }
+
+      // TODO: standardize this across inner nodes which clines returns const ptr_address*
       std::span<const ptr_address> clines() const noexcept
       {
          return std::span<const ptr_address>(
@@ -209,12 +267,17 @@ namespace psitri
          return std::span<ptr_address>(
              reinterpret_cast<ptr_address*>(value_offsets() + num_branches()), _cline_cap);
       }
-      inline static uint32_t alloc_size(key_view key, const value_type& value) noexcept;
-      /// clone and optimize
-      inline static uint32_t alloc_size(const leaf_node* clone) noexcept;
+
+      uint8_t find_cline_index(ptr_address addr) const noexcept
+      {
+         const ptr_address* clines    = this->clines().data();
+         uint32_t           adr_cline = *addr & ~0x0ful;
+         return ucc::find_u32x16((const uint32_t*)clines, _cline_cap, adr_cline);
+      }
 
      private:
       void set_num_branches(uint16_t n) noexcept { _num_branches = n; }
+      void clone_from(const leaf_node* clone);
 
       uint16_t _alloc_pos;
       uint16_t _dead_space;  // tracks freed data in alloc space
@@ -433,11 +496,12 @@ namespace psitri
       }
       key_offset alloc_key(key_view key) noexcept
       {
-         SAL_INFO("alloc pos: {} alloc_key: {}", _alloc_pos, key);
-         _alloc_pos += key.size() + sizeof(key);
+         //       SAL_INFO("alloc pos: {} alloc_key: {}", _alloc_pos, key);
+         _alloc_pos += key.size() + sizeof(leaf_node::key);
          key_offset off = key_offset(_alloc_pos);
-         SAL_INFO("off: {} offhead: {}  val_off_end: {} size: {}", off, size() - *off,
-                  (uint8_t*)value_offsets_end() - (uint8_t*)this, size());
+         //       SAL_INFO("off: {} offhead: {}  val_off_end: {} size: {}", off, size() - *off,
+         //               (uint8_t*)value_offsets_end() - (uint8_t*)this, size());
+         //        SAL_WARN("space: {}", (uint8_t*)get_key_ptr(off) - (uint8_t*)value_offsets_end());
          assert((uint8_t*)get_key_ptr(off) >= (uint8_t*)value_offsets_end() &&
                 "Allocation would overlap with value offsets");
          get_key_ptr(off)->set(key);
@@ -456,6 +520,7 @@ namespace psitri
       {
          _alloc_pos += value.size() + sizeof(value_data);
          value_offset off = value_offset(_alloc_pos);
+         //         SAL_WARN("space: {}", (uint8_t*)get_value_ptr(off) - (uint8_t*)value_offsets_end());
          assert((uint8_t*)get_value_ptr(off) >= (uint8_t*)value_offsets_end() &&
                 "Allocation would overlap with value offsets");
          get_value_ptr(off)->set(value);
@@ -488,7 +553,7 @@ namespace psitri
 
    inline uint32_t leaf_node::alloc_size(key_view key, const value_type& value) noexcept
    {
-      return ucc::round_up_multiple<64>(sizeof(leaf_node) + key.size() + value.size());
+      return 4096;  //ucc::round_up_multiple<64>(sizeof(leaf_node) + key.size() + value.size());
    }
    /// clone and optimize
    inline uint32_t leaf_node::alloc_size(const leaf_node* clone) noexcept

@@ -14,7 +14,8 @@ namespace psitri
    using value_view      = std::string_view;
    using branch_number   = ucc::typed_int<uint16_t, struct branch_number_tag>;
 
-   static constexpr uint8_t insufficient_clines = 0xff;
+   static constexpr uint8_t       insufficient_clines = 0xff;
+   static constexpr branch_number branch_zero         = branch_number(0);
 
    struct subrange
    {
@@ -33,6 +34,13 @@ namespace psitri
       leaf,
       value
    };
+   inline std::ostream& operator<<(std::ostream& os, node_type t)
+   {
+      static const char* names[] = {"inner", "inner_prefix", "leaf", "value", "unknown"};
+      auto               idx     = static_cast<size_t>(t) - static_cast<size_t>(node_type::inner);
+      os << (idx < 4 ? names[idx] : names[4]);
+      return os;
+   }
 
    /**
     * Each node maintains a list of ptr_address that point to the
@@ -86,12 +94,25 @@ namespace psitri
       branch_set() { div[0] = 0; }
       uint16_t count() const noexcept { return div[0]; }
 
+      branch_set(ptr_address branch)
+      {
+         branches[0] = branch;
+         div[0]      = 1;
+      }
+      branch_set(uint8_t divider, ptr_address branch, ptr_address branch2)
+      {
+         branches[0] = branch;
+         branches[1] = branch2;
+         div[0]      = 2;
+         div[1]      = divider;
+      }
       /** the first branch does not have a divider */
       void set_front(ptr_address branch)
       {
          branches[0] = branch;
          div[0]      = 1;
       }
+      ptr_address front() const noexcept { return branches[0]; }
       /** adds a 2nd+ branch which has a divider separating from
           the first branch.
          */
@@ -102,6 +123,15 @@ namespace psitri
          branches[count()] = branch;
          div[count()]      = d;
          div[0]++;
+      }
+      void push_front(ptr_address branch, uint8_t d)
+      {
+         assert(count() < 6);
+         memmove(branches + 1, branches, count() * sizeof(ptr_address));
+         memmove(div + 2, div + 1, count() * sizeof(uint8_t) - 1);
+         branches[0] = branch;
+         div[0]++;
+         div[1] = d;
       }
       ptr_address                     get_first_branch() const noexcept { return branches[0]; }
       std::pair<uint8_t, ptr_address> get_div_branch(int b) const noexcept
@@ -146,6 +176,14 @@ namespace psitri
             out << std::setw(8) << bs.branches[i] << " ";
          return out;
       }
+      bool contains(ptr_address branch) const noexcept
+      {
+         // TODO: use SIMD
+         for (int i = 0; i < count(); ++i)
+            if (branches[i] == branch)
+               return true;
+         return false;
+      }
 
      private:
       ptr_address branches[6];
@@ -187,9 +225,9 @@ namespace psitri
    inline uint8_t find_clines(std::span<const ptr_address> current_clines,
                               ptr_address                  old_branch,
                               std::span<const ptr_address> new_branches,
-                              uint8_t*                     out_cline_indices) noexcept
+                              std::array<uint8_t, 8>&      out_cline_indices) noexcept
    {
-      SAL_INFO("find_clines({}, {}, {})", current_clines.size(), old_branch, new_branches.size());
+      //      SAL_INFO("find_clines({}, {}, {})", current_clines.size(), old_branch, new_branches.size());
       assert(current_clines.size() <= 16);
       assert(new_branches.size() <= 8);
       // current clines uses lower 4 bits to store the occupancy count, so
@@ -204,38 +242,46 @@ namespace psitri
 
 // Shift all temp values 4 bits right to align cacheline addresses
 #if defined(__ARM_NEON)
+      // Load 4 vectors of 4 uint32s each from temp array
       uint32x4_t vec[4];
-      vec[0] = vld1q_u32((uint32_t*)(temp + 0));
+      vec[0] = vld1q_u32((uint32_t*)(temp + 0));  // load_4_u32
       vec[1] = vld1q_u32((uint32_t*)(temp + 4));
       vec[2] = vld1q_u32((uint32_t*)(temp + 8));
       vec[3] = vld1q_u32((uint32_t*)(temp + 12));
 
-      vec[0] = vshrq_n_u32(vec[0], 4);
+      // Shift right by 4 bits to align cacheline addresses
+      vec[0] = vshrq_n_u32(vec[0], 4);  // shift_right_4_u32
       vec[1] = vshrq_n_u32(vec[1], 4);
       vec[2] = vshrq_n_u32(vec[2], 4);
       vec[3] = vshrq_n_u32(vec[3], 4);
 
-      vst1q_u32((uint32_t*)(temp + 0), vec[0]);
+      // Store shifted vectors back to temp array
+      vst1q_u32((uint32_t*)(temp + 0), vec[0]);  // store_4_u32
       vst1q_u32((uint32_t*)(temp + 4), vec[1]);
       vst1q_u32((uint32_t*)(temp + 8), vec[2]);
       vst1q_u32((uint32_t*)(temp + 12), vec[3]);
 
-      uint32x4_t vec4 = vld1q_u32((uint32_t*)(new_clines + 0));
-      uint32x4_t vec5 = vld1q_u32((uint32_t*)(new_clines + 4));
+      // Load and shift new_clines array
+      uint32x4_t new_vec_lo = vld1q_u32((uint32_t*)(new_clines + 0));  // load lower 4 values
+      uint32x4_t new_vec_hi = vld1q_u32((uint32_t*)(new_clines + 4));  // load upper 4 values
 
-      vec4 = vshrq_n_u32(vec4, 4);
-      vec5 = vshrq_n_u32(vec5, 4);
+      new_vec_lo = vshrq_n_u32(new_vec_lo, 4);  // shift right by 4
+      new_vec_hi = vshrq_n_u32(new_vec_hi, 4);
 
-      vst1q_u32((uint32_t*)(new_clines + 0), vec4);
-      vst1q_u32((uint32_t*)(new_clines + 4), vec5);
+      vst1q_u32((uint32_t*)(new_clines + 0), new_vec_lo);  // store back
+      vst1q_u32((uint32_t*)(new_clines + 4), new_vec_hi);
 
-      // returns 16 if not found, otherwise 0 to 15 if found
+      // Handle old branch removal if enabled
       if constexpr (remove_old_branch)
       {
+         // Find index of old_branch_cline in temp array (returns 16 if not found)
          auto idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *old_branch_cline);
+         //         SAL_ERROR("find_clines: find_u32x16_neon: idx:   {} cur_cline: {}", idx,
+         ////                  current_clines.size());
+         //idx = std::min(idx, int(current_clines.size()));
 
-         // this branchless method sets temp[idx] to -1 aka null_ptr_address if the branch
-         // at idx is not shared with any other branches on this node.
+         // Branchless update: Set temp[idx] to null_ptr_address if branch not shared
+         // Only applies if idx is valid and branch count is 0 (single reference)
          temp[idx] |=
              ptr_address(-(idx < current_clines.size() and (*current_clines[idx] & 0x0f) == 0)) >>
              4;
@@ -273,17 +319,17 @@ namespace psitri
          int cur_idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *new_clines[i]);
          if (cur_idx < 16) [[likely]]
          {
-            SAL_INFO("find_clines: found existing at {}", cur_idx);
+            //            SAL_INFO("find_clines: found existing at {}", cur_idx);
             out_cline_indices[i] = cur_idx;
             continue;
          }
          cur_idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *null_cline);
          if (cur_idx == 16) [[unlikely]]
          {
-            SAL_ERROR("find_clines: insufficient clines");
+            //            SAL_ERROR("find_clines: insufficient clines");
             return insufficient_clines;
          }
-         SAL_WARN("find_clines: found null at {}", cur_idx);
+         //        SAL_WARN("find_clines: found null at {}", cur_idx);
 
          temp[cur_idx] = new_clines[i];
          // Reload just the vector containing the modified index
@@ -295,15 +341,21 @@ namespace psitri
    }
    inline uint8_t find_clines(std::span<const ptr_address> current_clines,
                               std::span<const ptr_address> new_branches,
-                              uint8_t*                     out_cline_indices) noexcept
+                              std::array<uint8_t, 8>&      out_cline_indices) noexcept
    {
       return find_clines<false>(current_clines, {}, new_branches, out_cline_indices);
    }
    inline uint8_t find_clines(std::span<const ptr_address> new_branches,
-                              uint8_t*                     out_cline_indices) noexcept
+                              std::array<uint8_t, 8>&      out_cline_indices) noexcept
    {
       ptr_address cur = sal::null_ptr_address;
       return find_clines<false>({&cur, 1}, {}, new_branches, out_cline_indices);
+   }
+   inline uint8_t find_clines(const branch_set&       branches,
+                              std::array<uint8_t, 8>& out_cline_indices) noexcept
+   {
+      ptr_address cur = sal::null_ptr_address;
+      return find_clines<false>({&cur, 1}, {}, branches.addresses(), out_cline_indices);
    }
 
    /**

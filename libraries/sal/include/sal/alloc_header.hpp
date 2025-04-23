@@ -68,6 +68,7 @@ namespace sal
                 _checksum == XXH3_64bits((const char*)&_address, _size - sizeof(_checksum));
       }
       bool has_checksum() const noexcept { return _checksum != 0; }
+      void clear_checksum() noexcept { _checksum = 0; }
 
       ptr_address_seq address_seq() const noexcept { return _address; }
 

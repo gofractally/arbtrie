@@ -357,7 +357,9 @@ namespace sal
       inline bool can_modify(allocator_session_number ses_num, location loc) const
       {
          auto seg = get_segment(loc.segment());
-         return seg->_session_id == ses_num && seg->get_first_write_pos() < loc.segment_offset();
+         //         SAL_INFO("can_modify: ses_num: {} == ses_ses: {}  loc-seg-off: {} >= seg-first-write: {}",
+         ////                 ses_num, seg->_session_id, loc.segment_offset(), seg->get_first_write_pos());
+         return seg->_session_id == ses_num && seg->get_first_write_pos() <= loc.segment_offset();
       }
 
       /**
@@ -441,13 +443,3 @@ namespace sal
    }
 
 };  // namespace sal
-
-#include <sal/allocator_session_impl.hpp>
-
-namespace sal
-{
-   inline void allocator::release(ptr_address adr) noexcept
-   {
-      get_session()->release(adr);
-   }
-}  // namespace sal

@@ -8,12 +8,25 @@ namespace psitri
    {
       struct replace_branch
       {
-         branch_number     br;
-         const branch_set& sub_branches;
-         int               needed_clines;  ///< return value of find_clines
-         uint8_t*          cline_indices;
+         branch_number           br;
+         const branch_set&       sub_branches;
+         int                     needed_clines;  ///< return value of find_clines
+         std::array<uint8_t, 8>& cline_indices;
       };
    };  // namespace op
+   class inner_node;
+   class inner_prefix_node;
+
+   template <typename T>
+   concept is_inner_node =
+       std::is_same_v<std::remove_cvref_t<std::remove_pointer_t<T>>, inner_node>;
+
+   template <typename T>
+   concept is_inner_prefix_node =
+       std::is_same_v<std::remove_cvref_t<std::remove_pointer_t<T>>, inner_prefix_node>;
+
+   template <typename T>
+   concept any_inner_node_type = is_inner_node<T> || is_inner_prefix_node<T>;
 
    /**
     * This base class is used to abstract the common functionality between
@@ -47,9 +60,9 @@ namespace psitri
        *         returns the number of clines needed for this node (including null clines in existing
        *         clines.
        */
-      uint8_t find_clines(branch_number     br,
-                          const branch_set& sub_branches,
-                          uint8_t*          cline_indices) const noexcept;
+      uint8_t find_clines(branch_number           br,
+                          const branch_set&       sub_branches,
+                          std::array<uint8_t, 8>& cline_indices) const noexcept;
 
       void destroy(const alloc_header* header, const sal::allocator_session_ptr& session) noexcept
       {
@@ -68,12 +81,14 @@ namespace psitri
          } while (nb);
       }
 
+      sal::alloc_hint hint() const noexcept { return sal::alloc_hint(clines(), num_clines()); }
+
      protected:
-      inline void init(uint32_t                asize,
-                       ptr_address_seq         seq,
-                       const Derived*          clone,
-                       subrange                range,
-                       const cline_freq_table& ftab) noexcept
+      inline void init(uint32_t                        asize,
+                       ptr_address_seq                 seq,
+                       const any_inner_node_type auto* clone,
+                       subrange                        range,
+                       const cline_freq_table&         ftab) noexcept
       {
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = *range.end - *range.begin;
@@ -132,7 +147,9 @@ namespace psitri
          } while (num_iterations);  // Check the decremented value
       }
 
-      inline void init(const branch_set& branches, int numcline, uint8_t* cline_indices) noexcept
+      inline void init(const branch_set&             branches,
+                       int                           numcline,
+                       const std::array<uint8_t, 8>& cline_indices) noexcept
       {
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = branches.count();
@@ -152,19 +169,19 @@ namespace psitri
             if (cl.is_null())
             {
                cl.set(sub_addr[i]);
-               SAL_WARN("setting cline_data[{}] to {} ref: {}", int(cline_indices[i]), cl.base(),
-                        cl.ref());
+               // SAL_WARN("setting cline_data[{}] to {} ref: {}", int(cline_indices[i]), cl.base(),
+               //          cl.ref());
             }
             else
             {
                assert(cl.base() == (sub_addr[i] & ~ptr_address(0x0f)));
                cl.inc_ref();
-               SAL_WARN("inc cline_data[{}] to {} ref: {}", int(cline_indices[i]), cl.base(),
-                        cl.ref());
+               // SAL_WARN("inc cline_data[{}] to {} ref: {}", int(cline_indices[i]), cl.base(),
+               //          cl.ref());
             }
-            SAL_WARN("address {} => cline[{}] ", sub_addr[i], int(cline_indices[i]));
+            // SAL_WARN("address {} => cline[{}] ", sub_addr[i], int(cline_indices[i]));
             sub_brs[i].set_line_index(cline_indices[i], *sub_addr[i] & uint32_t(0x0f));
-            SAL_INFO("{} new branch {} {}", sub_brs, i, sub_brs[i]);
+            // SAL_INFO("{} new branch {} {}", sub_brs, i, sub_brs[i]);
             assert(d.get_branch(branch_number(i)) == sub_addr[i]);
          }
       }
@@ -243,18 +260,18 @@ namespace psitri
          return ptr_address(*cd[br.line()].base() + br.index());
       }
 
-      void visit_branches(auto&& lam) const noexcept(lam(ptr_address()))
+      void visit_branches(std::invocable<ptr_address> auto&& lam) const
       {
-         const Derived&     d   = static_cast<const Derived&>(*this);
-         const branch*      pos = d.branches();
-         const branch*      end = d.branches_end();
-         const ptr_address* cls = d.clines_tail();
-         auto               cd  = reinterpret_cast<const cline_data*>(d.clines());
-         while (pos != end)
+         const Derived&    d   = static_cast<const Derived&>(*this);
+         const branch*     pos = d.const_branches();
+         const cline_data* cd  = reinterpret_cast<const cline_data*>(d.clines());
+         uint32_t          nb  = d.num_branches();
+         assert(nb > 0 && "num branches should always be greater than 0");
+         do
          {
             lam(ptr_address(*cd[pos->line()].base() + pos->index()));
             ++pos;
-         }
+         } while (--nb);
       }
       key_view divs() const noexcept
       {
@@ -283,8 +300,6 @@ namespace psitri
          // one cacheline at the end of the segment. All safe to read.
          uint16_t lbidx = ucc::lower_bound_padded(divs, num_divs, byte);
 
-         SAL_WARN("lower_bound idx: {} divs: {} query: {}", lbidx, d.divs(), byte);
-
          // num_divisions() is always 1 less than num_branches()
          // lower_bound() calculates the number of divisions that are "less than" the byte, which
          // gives us the index of the first division that is greater, which means the result is
@@ -301,7 +316,6 @@ namespace psitri
          // this adds 1 to the lowerbound index exactly when needed.
 
          lbidx += (byte >= (divs[lbidx])) * (lbidx < num_divs);
-         SAL_WARN("after fixup lower_bound idx: {} divs: {} query: {}", lbidx, d.divs(), byte);
          return branch_number(lbidx);
       }
       uint64_t descendents() const noexcept
@@ -318,9 +332,10 @@ namespace psitri
       }
    };
    template <typename Derived>
-   inline uint8_t inner_node_base<Derived>::find_clines(branch_number     br,
-                                                        const branch_set& sub_branches,
-                                                        uint8_t* cline_indices) const noexcept
+   inline uint8_t inner_node_base<Derived>::find_clines(
+       branch_number           br,
+       const branch_set&       sub_branches,
+       std::array<uint8_t, 8>& cline_indices) const noexcept
    {
       const Derived& d = static_cast<const Derived&>(*this);
       return psitri::find_clines(d.get_branch_clines(), d.get_branch(br), sub_branches.addresses(),
@@ -357,8 +372,8 @@ namespace psitri
       assert(std::is_sorted(up.sub_branches.dividers().begin(), up.sub_branches.dividers().end()));
       assert(d->can_apply(up));
       auto new_branch_count = d->_num_branches + up.sub_branches.count() - 1;
-      SAL_WARN("replace branch #{} with {} branches, current num branches: {} new num branches: {}",
-               up.br, up.sub_branches.count(), int(d->_num_branches), new_branch_count);
+      //SAL_WARN("replace branch #{} with {} branches, current num branches: {} new num branches: {}",
+      //        up.br, up.sub_branches.count(), int(d->_num_branches), new_branch_count);
       auto     new_divisions_cap   = ucc::round_up_multiple<1>(new_branch_count - 1);
       uint32_t tail_branches_count = d->_num_branches - *up.br - 1;
       uint32_t head_branches_count = *up.br;

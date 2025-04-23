@@ -144,14 +144,15 @@ namespace sal
       record_freed_space(get<From>(old_control.loc()));
 
       return smart_ref<To>(get_session_ptr(), node_ptr, from.control(),
-                           from.control.load(std::memory_order_relaxed));
+                           from.control().load(std::memory_order_relaxed));
    }
    template <typename T>
    [[nodiscard]] T* allocator_session::copy_on_write(smart_ref<T>& ptr)
    {
-      assert(can_read(ptr.loc()));
+      assert(not is_read_only(ptr.loc()));
       if (can_modify(ptr.loc()))
-         return ptr.get();
+         return const_cast<T*>(ptr.obj());
+
       uint32_t asize;
 
       if constexpr (std::is_same_v<T, alloc_header>)
@@ -159,7 +160,8 @@ namespace sal
       else
          asize = ptr->cow_size();
 
-      auto [loc, node_ptr] = alloc_data<T>(asize, ptr.address_seq());
+      auto [loc, node_ptr] =
+          alloc_data<alloc_header>(asize, (sal::header_type)ptr->type(), ptr->address_seq());
 
       if constexpr (std::is_same_v<T, alloc_header>)
          vcall::copy_to(ptr, node_ptr);
@@ -168,7 +170,7 @@ namespace sal
 
       ptr._cached = ptr._control.move(loc);
       ptr._obj    = node_ptr;
-      return node_ptr;
+      return static_cast<T*>(node_ptr);
    }
 
    template <typename T>
@@ -178,7 +180,7 @@ namespace sal
       auto& cb    = _ptr_alloc.get(adr);
       auto  cread = cb.load(std::memory_order_acquire);
       auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
-      assert(int(T::type_id) == int(ptr->type()));
+      assert(int(T::type_id) == int(alloc_header::type_id) or int(T::type_id) == int(ptr->type()));
       return smart_ref<T>(get_session_ptr(), ptr, cb, cread);
    }
 
@@ -239,7 +241,7 @@ namespace sal
    {
       return _sega._mapped_state->_cache_difficulty_state.should_cache(get_random(), size);
    }
-   inline void allocator_session::retain(ptr_address adr) noexcept
+   inline void allocator_session::retain(ptr_address adr)
    {
       get(adr).retain();
    }
@@ -266,7 +268,7 @@ namespace sal
    /// notifies the allocator that the session is no longer in use when counter reaches 0
    inline void allocator_session::end_session()
    {
-      SAL_INFO("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
+      //      SAL_INFO("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
       if (--_ref_count == 0)
       {
          SAL_ERROR("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
@@ -277,7 +279,7 @@ namespace sal
    template <typename T>
    smart_ptr<T> allocator_session::get_root(root_object_number ro) noexcept
    {
-      return smart_ptr<T>(_sega.get(ro), this);
+      return smart_ptr<T>(allocator_session_ptr(this, true), _sega.get(ro));
    }
    template <typename T>
    inline smart_ptr<T> allocator_session::set_root(root_object_number ro,

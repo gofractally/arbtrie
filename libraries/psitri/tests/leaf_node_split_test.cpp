@@ -115,9 +115,14 @@ TEST_CASE("LeafNode_Split", "[psitri][leaf_node][split]")
    // Insert data ensuring keys are sorted for predictable branch numbers
    for (const auto& pair : test_data)
    {
-      REQUIRE(source_node.can_insert(pair.first, pair.second) >= 0);
+      op::leaf_insert ins{.src   = source_node,
+                          .lb    = source_node.lower_bound(pair.first),
+                          .key   = pair.first,
+                          .value = pair.second};
+      REQUIRE(source_node.can_apply(ins) != leaf_node::can_apply_mode::none);
       branch_number bn = source_node.lower_bound(pair.first);
-      source_node.insert(bn, pair.first, pair.second);
+      ins.lb           = bn;  // Ensure lower_bound is correct
+      source_node.apply(ins);
    }
    REQUIRE(source_node.num_branches() == test_data.size() + 1);  // +1 for initial key
 
@@ -221,9 +226,14 @@ TEST_CASE("LeafNode_SplitPrefixKey", "[psitri][leaf_node][split][edge_case]")
    // Insert data
    for (const auto& pair : test_data)
    {
-      REQUIRE(source_node.can_insert(pair.first, pair.second) >= 0);
+      op::leaf_insert ins{.src   = source_node,
+                          .lb    = source_node.lower_bound(pair.first),
+                          .key   = pair.first,
+                          .value = pair.second};
+      REQUIRE(source_node.can_apply(ins) != leaf_node::can_apply_mode::none);
       branch_number bn = source_node.lower_bound(pair.first);
-      source_node.insert(bn, pair.first, pair.second);
+      ins.lb           = bn;  // Ensure lower_bound is correct
+      source_node.apply(ins);
    }
    REQUIRE(source_node.num_branches() == test_data.size() + 1);  // +1 for initial "abc" key
 

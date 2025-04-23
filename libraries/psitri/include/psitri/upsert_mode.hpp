@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 
 namespace psitri
 {
@@ -9,7 +10,6 @@ namespace psitri
          unique             = 1,  // ref count of all parent nodes and this is 1
          insert             = 2,  // fail if key does exist
          update             = 4,  // fail if key doesn't exist
-         same_region        = 8,
          remove             = 16,
          must_remove_f      = 32,
          upsert             = insert | update,
@@ -28,10 +28,9 @@ namespace psitri
 
       constexpr bool        is_unique() const { return flags & unique; }
       constexpr bool        is_shared() const { return not is_unique(); }
-      constexpr bool        is_same_region() const { return flags & same_region; }
       constexpr upsert_mode make_shared() const { return {flags & ~unique}; }
       constexpr upsert_mode make_unique() const { return {flags | unique}; }
-      constexpr upsert_mode make_same_region() const { return {flags | same_region}; }
+      constexpr upsert_mode make_shared_or_unique_only() const { return {flags & unique}; }
       constexpr bool        may_insert() const { return flags & insert; }
       constexpr bool        may_update() const { return flags & update; }
       constexpr bool        must_insert() const { return not(flags & (update | remove)); }

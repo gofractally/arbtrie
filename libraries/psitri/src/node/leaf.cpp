@@ -1,8 +1,6 @@
 #include <algorithm>  // Required for std::max, std::abs
 #include <cassert>    // Required for assert
-#include <cmath>      // Required for std::abs with int
 #include <cstdlib>    // Required for std::abs on int (safer than cmath ambiguity)
-#include <limits>     // Required for std::numeric_limits
 #include <psitri/node/leaf.hpp>
 
 namespace psitri
@@ -64,27 +62,10 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
-      insert(lower_bound(key), key, value);
+      apply(op::leaf_insert{*this, lower_bound(key), key, value});
    }
 
-   /*
-    * Each node has an optimal layout that looks something like this:
-    *   1. no dead space 
-    *   2. all keys are grouped together
-    *   3. all keys are ordered by lower-bound search visit probability
-    *   4. clines are sorted based upon order they appear in sorted keys,
-    *      so the prefetcher can get a jump on the most important lines
-    *      first. 
-    *
-    *  During normal updates these properties are not maintained because 
-    *  doing so would be expensive for the insert/update/remove operations; however,
-    *  when it comes time to copy a node we can choose to restore the optimal layout
-    *  or not.  memcpy() is going to be much faster than the optimal layout code,
-    *  but he delta cost vs memcpy() of the entire node is much less than the 
-    *  delta cost of doing it at any other time. 
-    */
-   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const leaf_node* clone)
-       : node(alloc_size, node_type::leaf, seq)
+   void leaf_node::clone_from(const leaf_node* clone)
    {
       set_num_branches(clone->num_branches());
       if (not clone->is_optimal_layout())
@@ -150,6 +131,44 @@ namespace psitri
       memcpy(_key_hashs, clone->_key_hashs, head_size);
       memcpy(alloc_head(), clone->alloc_head(), clone->_alloc_pos);
    }
+
+   /// TODO: this could be made more effecient by copying and inserting in one pass
+   /// and maintaining the optimal layout property, but for now it will just clone/opt
+   /// then insert
+   leaf_node::leaf_node(size_t                 alloc_size,
+                        ptr_address_seq        seq,
+                        const leaf_node*       clone,
+                        const op::leaf_insert& ins)
+       : node(alloc_size, node_type::leaf, seq),
+         _alloc_pos(0),
+         _dead_space(0),
+         _cline_cap(0),
+         _optimal_layout(true)
+   {
+      clone_from(clone);
+      apply(ins);
+   }
+   /*
+    * Each node has an optimal layout that looks something like this:
+    *   1. no dead space 
+    *   2. all keys are grouped together
+    *   3. all keys are ordered by lower-bound search visit probability
+    *   4. clines are sorted based upon order they appear in sorted keys,
+    *      so the prefetcher can get a jump on the most important lines
+    *      first. 
+    *
+    *  During normal updates these properties are not maintained because 
+    *  doing so would be expensive for the insert/update/remove operations; however,
+    *  when it comes time to copy a node we can choose to restore the optimal layout
+    *  or not.  memcpy() is going to be much faster than the optimal layout code,
+    *  but he delta cost vs memcpy() of the entire node is much less than the 
+    *  delta cost of doing it at any other time. 
+    */
+   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const leaf_node* clone)
+       : node(alloc_size, node_type::leaf, seq)
+   {
+      clone_from(clone);
+   }
    /**
     *  Construct an optimized node by cloning the existing node and truncating keys
     *  by the common prefix and only including keys in the range [start, end).
@@ -208,6 +227,7 @@ namespace psitri
       }
    }
 
+   /*
    leaf_node::leaf_node(size_t            alloc_size,
                         ptr_address_seq   seq,
                         const leaf_node*  clone,
@@ -217,6 +237,7 @@ namespace psitri
    {
       // TODO: implement
    }
+   */
 
    leaf_node::leaf_node(size_t           alloc_size,
                         ptr_address_seq  seq,
@@ -227,87 +248,93 @@ namespace psitri
       // TODO: implement
    }
 
-   /**
-    * Assuming we were to reallocate this node, would it be possible to fit the
-    * new key/value pair without having to split the node?
-    */
-   bool leaf_node::can_insert_with_defrag(key_view key, const value_type& value) const noexcept
+   leaf_node::can_apply_mode leaf_node::can_apply(const op::leaf_insert& ins) const noexcept
    {
-      int shortspace = can_insert(key, value);
-      return (leaf_node::cow_size() - size()) + _dead_space + shortspace >= 0;
-   }
-
-   int leaf_node::can_insert(key_view key, const value_type& value) const noexcept
-   {
-      assert(key.size() <= 1024);  // TODO: max key size constant
-      assert(not value.is_remove());
+      assert(ins.key.size() <= 1024);  // TODO: max key size constant
+      assert(not ins.value.is_remove());
+      // key hash(1), key_offset, value_branch(2),
       size_t size_required = sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
-      if (value.is_view())
+      if (ins.value.is_view())
       {
-         assert(value.view().size() <= 0xff);
-         value_view data = value.view();
+         assert(ins.value.view().size() <= 0xff);
+         value_view data = ins.value.view();
          size_required += data.size() + sizeof(value_data);
       }
+      size_required += ins.key.size() + 2;
       /// this over-estimates assuming worst case we must add a cline, but
       /// the calculating whether address() is on an existing cline requires
       /// scanning all clines to see if we can re-use one or have to add a new one.
-      size_required += 4 * value.is_address();
-      return free_space() - size_required;
+      size_required += 4 * ins.value.is_address();
+      int leftover = free_space() - size_required;
+      // SAL_WARN("size_required: {}  free_space: {}  leftover: {}", size_required, free_space(),
+      //          leftover);
+      if (leftover >= 0)
+         return can_apply_mode::modify;
+      if (leftover + int(dead_space()) + (int(leaf_node::cow_size()) - int(size())) >= 0)
+      {
+         // SAL_WARN("leftover: {}  dead_space: {}  cow_size: {}  size: {} == {}", leftover,
+         //          dead_space(), leaf_node::cow_size(), size(),
+         //          leftover + dead_space() + (leaf_node::cow_size() - size()));
+         return can_apply_mode::defrag;
+      }
+      return can_apply_mode::none;
    }
-
-   branch_number leaf_node::insert(branch_number bn, key_view key, const value_type& value) noexcept
+   branch_number leaf_node::apply(const op::leaf_insert& ins) noexcept
    {
-      assert(!value.is_remove());
-      assert(bn == lower_bound(key));
-      assert(bn == num_branches() or get_key(bn) != key);
+      auto init_free_space = free_space();
+      assert(can_apply(ins) == can_apply_mode::modify);
+      assert(!ins.value.is_remove());
+      assert(ins.lb == lower_bound(ins.key));
+      assert(ins.lb == num_branches() or get_key(ins.lb) != ins.key);
 
-      int tail_len = num_branches() - *bn;
+      int      tail_len = num_branches() - *ins.lb;
+      uint32_t bn       = *ins.lb;
 
       constexpr const int move_size = sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
 
-      char*  vo_tail          = (char*)(value_offsets() + *bn);
+      char*  vo_tail          = (char*)(value_offsets() + bn);
       size_t vo_tail_size     = tail_len * sizeof(value_branch);
       size_t clines_tail_size = _cline_cap * sizeof(ptr_address);
       memmove(vo_tail + move_size, vo_tail, vo_tail_size + clines_tail_size);
 
-      char*  ko_tail      = (char*)(keys_offsets().data() + *bn);
+      char*  ko_tail      = (char*)(keys_offsets().data() + bn);
       size_t ko_tail_size = tail_len * sizeof(key_offset);
-      size_t vo_head_size = *bn * sizeof(value_branch);
+      size_t vo_head_size = bn * sizeof(value_branch);
       memmove(ko_tail + move_size - sizeof(value_branch), ko_tail, ko_tail_size + vo_head_size);
 
-      char*  kh_tail      = (char*)(key_hashs().data() + *bn);
+      char*  kh_tail      = (char*)(key_hashs().data() + bn);
       size_t kh_tail_size = tail_len * sizeof(uint8_t);
-      size_t ko_head_size = *bn * sizeof(key_offset);
+      size_t ko_head_size = bn * sizeof(key_offset);
       memmove(kh_tail + move_size - sizeof(key_offset) - sizeof(value_branch), kh_tail,
               kh_tail_size + ko_head_size);
 
       set_num_branches(num_branches() + 1);
 
-      key_offset ko = alloc_key(key);
+      key_offset ko = alloc_key(ins.key);
 
-      key_hashs()[*bn]    = calc_key_hash(key);
-      keys_offsets()[*bn] = ko;
-      if (value.is_view())
+      key_hashs()[bn]    = calc_key_hash(ins.key);
+      keys_offsets()[bn] = ko;
+      if (ins.value.is_view())
       {
-         auto v = value.view();
+         auto v = ins.value.view();
          if (v.size())
          {
-            value_offset vo      = alloc_value(value.view());
-            value_offsets()[*bn] = value_branch(vo);
+            value_offset vo     = alloc_value(v);
+            value_offsets()[bn] = value_branch(vo);
          }
          else
-            value_offsets()[*bn] = value_branch();
+            value_offsets()[bn] = value_branch();
       }
-      else if (value.is_subtree())
+      else if (ins.value.is_subtree())
       {
-         value_offsets()[*bn] =
-             add_address_ptr(value_branch::value_type::subtree, value.subtree_address());
+         value_offsets()[bn] =
+             add_address_ptr(value_branch::value_type::subtree, ins.value.subtree_address());
       }
-      else  //if (value.is_value_node())
+      else  //if (ins.value.is_value_node())
       {
-         assert(value.is_value_node());
-         value_offsets()[*bn] =
-             add_address_ptr(value_branch::value_type::value_node, value.value_address());
+         assert(ins.value.is_value_node());
+         value_offsets()[bn] =
+             add_address_ptr(value_branch::value_type::value_node, ins.value.value_address());
       }
       /// if there is only one branch then you cannot get more optimal, if
       /// there is more than one branch, then the optimal layout would be to
@@ -317,11 +344,13 @@ namespace psitri
       _optimal_layout = num_branches() == 1;
 
       assert(free_space() >= 0);
-      assert(get(key) == bn);
-      assert(get_key(bn) == key);
-      SAL_WARN("insert:{} = {}  get_value:{}", key, value, get_value(bn));
-      assert(get_value(bn) == value);
-      return bn;
+      assert(get_key(get(ins.key)) == ins.key);
+      // kSAL_WARN("insert:{} = {}  get_value:{}", ins.key, ins.value, get_value(ins.lb));
+      assert(get_value(ins.lb) == ins.value);
+      auto final_free_space = free_space();
+      //      SAL_WARN("init free space: {} final free space: {}  delta: {}", init_free_space,
+      //               final_free_space, final_free_space - init_free_space);
+      return ins.lb;
    }
 
    void leaf_node::remove(branch_number bn) noexcept

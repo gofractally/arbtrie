@@ -1,4 +1,3 @@
-#include <errno.h>  // For errno and ESRCH
 #include <sys/mman.h>
 #include <algorithm>
 #include <array>
@@ -6,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <sal/allocator.hpp>
+#include <sal/allocator_impl.hpp>
 #include <sal/debug.hpp>
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/smart_ptr.hpp>

@@ -436,9 +436,10 @@ namespace ucc
    }
 
    /// this is about 3.5x faster than std::find
-   inline int find_u32x16_scalar_unrolled(const uint32_t* arr, uint32_t value)
+   inline int find_u32x16_scalar_unrolled(const uint32_t* arr, size_t size, uint32_t value)
    {
-      uint64_t result = 1 << 16;
+      assert(size <= 16);
+      uint64_t result = 1 << size;
       result |= (arr[0] == value) | ((arr[1] == value) << 1) | ((arr[2] == value) << 2) |
                 ((arr[3] == value) << 3) | ((arr[4] == value) << 4) | ((arr[5] == value) << 5) |
                 ((arr[6] == value) << 6) | ((arr[7] == value) << 7) | ((arr[8] == value) << 8) |
@@ -448,16 +449,71 @@ namespace ucc
       return __builtin_ctzll(result);
    }
 
-   inline int find_u32x16(const uint32_t* arr, uint32_t value)
-   {
 #if defined(__ARM_NEON)
+   /**
+    * Finds the first occurance of value in array of size, where size <= 16 and
+    * it is safe to read garbage values for up to size 16 (aka 64 bytes) from arr. 
+    */
+   inline uint32_t find_u32_padded16_neon(const uint32_t* arr, size_t size, uint32_t search_value)
+   {
+      uint32x4_t v0 = vld1q_u32(arr);
+      uint32x4_t v1 = vld1q_u32(arr + 4);
+      uint32x4_t v2 = vld1q_u32(arr + 8);
+      uint32x4_t v3 = vld1q_u32(arr + 12);
+
+      uint32x4_t search_vec = vdupq_n_u32(search_value);
+
+      // Compare
+      uint32x4_t cmp0 = vceqq_u32(v0, search_vec);  // e0-e3
+      uint32x4_t cmp1 = vceqq_u32(v1, search_vec);  // e4-e7
+      uint32x4_t cmp2 = vceqq_u32(v2, search_vec);  // e8-e11
+      uint32x4_t cmp3 = vceqq_u32(v3, search_vec);  // e12-e15
+
+      // Narrow to 16-bit
+      uint16x4_t narrow0 = vmovn_u32(cmp0);
+      uint16x4_t narrow1 = vmovn_u32(cmp1);
+      uint16x4_t narrow2 = vmovn_u32(cmp2);
+      uint16x4_t narrow3 = vmovn_u32(cmp3);
+
+      // Combine pairs of 16-bit vectors before narrowing
+      uint16x8_t combined01 = vcombine_u16(narrow0, narrow1);
+      uint16x8_t combined23 = vcombine_u16(narrow2, narrow3);
+
+      // Narrow to 8-bit
+      uint8x8_t bytes0_narrowed = vmovn_u16(combined01);  // e0-e7
+      uint8x8_t bytes1_narrowed = vmovn_u16(combined23);  // e8-e15
+
+      // Directly get the 64-bit masks from the 8-byte vectors
+      uint64_t low64  = vget_lane_u64(vreinterpret_u64_u8(bytes0_narrowed), 0);
+      uint64_t high64 = vget_lane_u64(vreinterpret_u64_u8(bytes1_narrowed), 0);
+
+      // Use user's formula: (ctz(mask | bit63) + 1) / 8
+      // This yields index 0-7 if found in the 64-bit mask, or 8 if not found.
+      auto low  = (__builtin_ctzll(low64 | (1ULL << 63)) + 1) / 8;
+      auto high = (__builtin_ctzll(high64 | (1ULL << 63)) + 1) / 8;
+
+      // Branchless calculation using optimized check for (low == 8):
+      // low + (high * (low >> 3))
+      // If low is 0-7, low >> 3 is 0, result is low.
+      // If low is 8, low >> 3 is 1, result is 8 + high (which is 8-15 or 16).
+      uint32_t result = low + (high * (low >> 3));
+      return size < result ? size : result;
+   }
+#endif
+   inline int find_u32x16(const uint32_t* arr, size_t size, uint32_t value)
+   {
+      assert(size <= 16);
+#if defined(__ARM_NEON)
+      /*
       uint32x4_t v0 = vld1q_u32(arr);
       uint32x4_t v1 = vld1q_u32(arr + 4);
       uint32x4_t v2 = vld1q_u32(arr + 8);
       uint32x4_t v3 = vld1q_u32(arr + 12);
       return find_u32x16_neon(v0, v1, v2, v3, value);
+      */
+      return find_u32_padded16_neon(arr, size, value);
 #else
-      return find_u32x16_scalar_unrolled(arr, value);
+      return find_u32x16_scalar_unrolled(arr, size, value);
 #endif
    }
 }  // namespace ucc

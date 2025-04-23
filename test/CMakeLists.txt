@@ -93,7 +93,11 @@ target_link_libraries(arbtrie-last-debug PRIVATE arbtrie Catch2::Catch2WithMain)
 # Add psitri test executable
 add_executable(psitri-tests
     ../libraries/psitri/tests/leaf_node_test.cpp
+    ../libraries/psitri/tests/inner_node_tests.cpp
+    ../libraries/psitri/tests/inner_node_util_tests.cpp
     ../libraries/psitri/tests/leaf_node_split_test.cpp
+    ../libraries/psitri/tests/trie_tests.cpp
+    ../libraries/psitri/tests/tree_context_tests.cpp
 )
 
 target_link_libraries(psitri-tests

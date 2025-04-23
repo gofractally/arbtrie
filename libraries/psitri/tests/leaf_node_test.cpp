@@ -137,13 +137,17 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
          const value_type& value = pair.second;
 
          INFO("Checking space for key: " << key);
-         REQUIRE(node.can_insert(key, value) >= 0);  // Check space before insert
+         op::leaf_insert ins{.src = node, .lb = node.lower_bound(key), .key = key, .value = value};
+         REQUIRE(node.can_apply(ins) !=
+                 leaf_node::can_apply_mode::none);  // Check space before insert
 
          branch_number expected_bn = node.lower_bound(key);
          INFO("Attempting to insert key: " << key << " at expected_bn: " << *expected_bn);
          REQUIRE(node.get(key) == branch_number(node.num_branches()));  // Key shouldn't exist yet
 
-         branch_number actual_bn = node.insert(expected_bn, key, value);
+         // Update ins with potentially recalculated lower_bound if needed, or just reuse expected_bn
+         ins.lb                  = expected_bn;
+         branch_number actual_bn = node.apply(ins);
 
          REQUIRE(actual_bn == expected_bn);
          expected_data[std::string(key)] = value;  // Add to our expected map
@@ -230,16 +234,20 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       value_type value_node_val = value_type::make_value_node(value_node_addr);
 
       // Insert subtree
-      branch_number expected_bn_sub = node.lower_bound(subtree_key);
-      REQUIRE(node.can_insert(subtree_key, subtree_val) >= 0);
-      branch_number actual_bn_sub = node.insert(expected_bn_sub, subtree_key, subtree_val);
+      branch_number   expected_bn_sub = node.lower_bound(subtree_key);
+      op::leaf_insert ins_sub{
+          .src = node, .lb = expected_bn_sub, .key = subtree_key, .value = subtree_val};
+      REQUIRE(node.can_apply(ins_sub) != leaf_node::can_apply_mode::none);
+      branch_number actual_bn_sub = node.apply(ins_sub);
       REQUIRE(actual_bn_sub == expected_bn_sub);
       REQUIRE(node.num_branches() == *initial_num_branches + 1);
 
       // Insert value_node
-      branch_number expected_bn_val = node.lower_bound(value_node_key);
-      REQUIRE(node.can_insert(value_node_key, value_node_val) >= 0);
-      branch_number actual_bn_val = node.insert(expected_bn_val, value_node_key, value_node_val);
+      branch_number   expected_bn_val = node.lower_bound(value_node_key);
+      op::leaf_insert ins_val{
+          .src = node, .lb = expected_bn_val, .key = value_node_key, .value = value_node_val};
+      REQUIRE(node.can_apply(ins_val) != leaf_node::can_apply_mode::none);
+      branch_number actual_bn_val = node.apply(ins_val);
       REQUIRE(actual_bn_val == expected_bn_val);
       REQUIRE(node.num_branches() == *initial_num_branches + 2);
 
@@ -299,18 +307,22 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
 
       // Insert first shared cline address
       INFO("Inserting key with shared cline base: " << key_sub_2);
-      branch_number expected_bn_sub_2 = node.lower_bound(key_sub_2);
-      REQUIRE(node.can_insert(key_sub_2, val_sub_2) >= 0);
-      branch_number actual_bn_sub_2 = node.insert(expected_bn_sub_2, key_sub_2, val_sub_2);
+      branch_number   expected_bn_sub_2 = node.lower_bound(key_sub_2);
+      op::leaf_insert ins_sub_2{
+          .src = node, .lb = expected_bn_sub_2, .key = key_sub_2, .value = val_sub_2};
+      REQUIRE(node.can_apply(ins_sub_2) != leaf_node::can_apply_mode::none);
+      branch_number actual_bn_sub_2 = node.apply(ins_sub_2);
       REQUIRE(actual_bn_sub_2 == expected_bn_sub_2);
       REQUIRE(node.num_branches() == *branches_before_sharing + 1);
       REQUIRE(node.clines_capacity() == 2);  // Cline count should NOT increase
 
       // Insert second shared cline address
       INFO("Inserting second key with shared cline base: " << key_sub_3);
-      branch_number expected_bn_sub_3 = node.lower_bound(key_sub_3);
-      REQUIRE(node.can_insert(key_sub_3, val_sub_3) >= 0);
-      branch_number actual_bn_sub_3 = node.insert(expected_bn_sub_3, key_sub_3, val_sub_3);
+      branch_number   expected_bn_sub_3 = node.lower_bound(key_sub_3);
+      op::leaf_insert ins_sub_3{
+          .src = node, .lb = expected_bn_sub_3, .key = key_sub_3, .value = val_sub_3};
+      REQUIRE(node.can_apply(ins_sub_3) != leaf_node::can_apply_mode::none);
+      branch_number actual_bn_sub_3 = node.apply(ins_sub_3);
       REQUIRE(actual_bn_sub_3 == expected_bn_sub_3);
       REQUIRE(node.num_branches() == *branches_before_sharing + 2);
       REQUIRE(node.clines_capacity() == 2);  // Cline count should STILL not increase
@@ -349,9 +361,11 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       REQUIRE(empty_val.is_view());
       REQUIRE(empty_val.view().empty());
 
-      branch_number expected_bn = node.lower_bound(empty_key);
-      REQUIRE(node.can_insert(empty_key, empty_val) >= 0);
-      branch_number actual_bn = node.insert(expected_bn, empty_key, empty_val);
+      branch_number   expected_bn = node.lower_bound(empty_key);
+      op::leaf_insert ins_empty{
+          .src = node, .lb = expected_bn, .key = empty_key, .value = empty_val};
+      REQUIRE(node.can_apply(ins_empty) != leaf_node::can_apply_mode::none);
+      branch_number actual_bn = node.apply(ins_empty);
       REQUIRE(actual_bn == expected_bn);
 
       INFO("Retrieving empty value for key: " << empty_key);
@@ -381,17 +395,25 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       std::vector<ptr_address> expected_addresses = {addr1, addr2, addr3};
 
       // Insert keys
-      REQUIRE(node.can_insert("key_view", val_view) >= 0);
-      node.insert(node.lower_bound("key_view"), "key_view", val_view);
+      op::leaf_insert ins_kv{
+          .src = node, .lb = node.lower_bound("key_view"), .key = "key_view", .value = val_view};
+      REQUIRE(node.can_apply(ins_kv) != leaf_node::can_apply_mode::none);
+      node.apply(ins_kv);
 
-      REQUIRE(node.can_insert("key_sub1", val_sub1) >= 0);
-      node.insert(node.lower_bound("key_sub1"), "key_sub1", val_sub1);
+      op::leaf_insert ins_ks1{
+          .src = node, .lb = node.lower_bound("key_sub1"), .key = "key_sub1", .value = val_sub1};
+      REQUIRE(node.can_apply(ins_ks1) != leaf_node::can_apply_mode::none);
+      node.apply(ins_ks1);
 
-      REQUIRE(node.can_insert("key_val2", val_val2) >= 0);
-      node.insert(node.lower_bound("key_val2"), "key_val2", val_val2);
+      op::leaf_insert ins_kv2{
+          .src = node, .lb = node.lower_bound("key_val2"), .key = "key_val2", .value = val_val2};
+      REQUIRE(node.can_apply(ins_kv2) != leaf_node::can_apply_mode::none);
+      node.apply(ins_kv2);
 
-      REQUIRE(node.can_insert("key_sub3", val_sub3) >= 0);
-      node.insert(node.lower_bound("key_sub3"), "key_sub3", val_sub3);
+      op::leaf_insert ins_ks3{
+          .src = node, .lb = node.lower_bound("key_sub3"), .key = "key_sub3", .value = val_sub3};
+      REQUIRE(node.can_apply(ins_ks3) != leaf_node::can_apply_mode::none);
+      node.apply(ins_ks3);
 
       // Collect visited addresses
       std::vector<ptr_address> visited_addresses;
@@ -407,9 +429,13 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
 
       // Test case with only view data (after re-creating the node)
       INFO("Testing visit_branches with only view data");
-      LeafNodePtr node_view_only = create_leaf_node("view1", value_type("v1"));
-      REQUIRE(node_view_only->can_insert("view2", value_type("v2")) >= 0);
-      node_view_only->insert(node_view_only->lower_bound("view2"), "view2", value_type("v2"));
+      LeafNodePtr     node_view_only = create_leaf_node("view1", value_type("v1"));
+      op::leaf_insert ins_vo{.src   = *node_view_only,
+                             .lb    = node_view_only->lower_bound("view2"),
+                             .key   = "view2",
+                             .value = value_type("v2")};
+      REQUIRE(node_view_only->can_apply(ins_vo) != leaf_node::can_apply_mode::none);
+      node_view_only->apply(ins_vo);
 
       std::vector<ptr_address> visited_view_only;
       node_view_only->visit_branches([&](ptr_address addr) { visited_view_only.push_back(addr); });
@@ -434,9 +460,13 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
 
       for (const auto& pair : data_to_insert)
       {
-         REQUIRE(source_node.can_insert(pair.first, pair.second) >= 0);
+         op::leaf_insert ins{.src   = source_node,
+                             .lb    = source_node.lower_bound(pair.first),
+                             .key   = pair.first,
+                             .value = pair.second};
+         REQUIRE(source_node.can_apply(ins) != leaf_node::can_apply_mode::none);
          branch_number bn = source_node.lower_bound(pair.first);
-         source_node.insert(bn, pair.first, pair.second);
+         source_node.apply(ins);
       }
       size_t source_branches = source_node.num_branches();
       REQUIRE(source_branches > 1);
@@ -534,9 +564,13 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       // Populate node
       for (const auto& pair : initial_data)
       {
-         REQUIRE(node.can_insert(pair.first, pair.second) >= 0);
+         op::leaf_insert ins{.src   = node,
+                             .lb    = node.lower_bound(pair.first),
+                             .key   = pair.first,
+                             .value = pair.second};
+         REQUIRE(node.can_apply(ins) != leaf_node::can_apply_mode::none);
          branch_number bn = node.lower_bound(pair.first);
-         node.insert(bn, pair.first, pair.second);
+         node.apply(ins);
       }
       REQUIRE(node.num_branches() == initial_data.size());
       uint32_t expected_initial_clines = 3;  // u1(1k), u2(2k), s1(3k)
@@ -713,9 +747,13 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       // Populate node
       for (const auto& pair : initial_data)
       {
-         REQUIRE(node.can_insert(pair.first, pair.second) >= 0);
+         op::leaf_insert ins{.src   = node,
+                             .lb    = node.lower_bound(pair.first),
+                             .key   = pair.first,
+                             .value = pair.second};
+         REQUIRE(node.can_apply(ins) != leaf_node::can_apply_mode::none);
          branch_number bn = node.lower_bound(pair.first);
-         node.insert(bn, pair.first, pair.second);
+         node.apply(ins);
       }
       REQUIRE(node.num_branches() == initial_data.size());
       uint32_t expected_initial_clines = 3;  // u1(1k), u2(2k), s1(3k)

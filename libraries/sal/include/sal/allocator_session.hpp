@@ -132,7 +132,7 @@ namespace sal
        * ptr_address via smart_ptr<T>::take() and is now using manual memory
        * management.
        */
-      void retain(ptr_address adr) noexcept;
+      void retain(ptr_address adr);
 
       template <typename T = alloc_header>
       [[nodiscard]] smart_ref<T> get_ref(ptr_address adr) noexcept;
@@ -153,6 +153,12 @@ namespace sal
       ~allocator_session();
       allocator&               get_allocator() const noexcept { return _sega; }
       allocator_session_number get_session_num() const noexcept { return _session_num; }
+
+      bool config_update_checksum_on_modify() const noexcept
+      {
+         // TODO: cache reference to runtime_config and return _update_checksum_on_modify;
+         return false;
+      }  //_update_checksum_on_modify; }
 
      private:
       friend class transaction;

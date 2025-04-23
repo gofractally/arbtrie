@@ -33,8 +33,8 @@ TEST_CASE("InnerNode", "[inner_node]")
 
       SAL_INFO("creat inner from branch set: {}", bs);
 
-      uint8_t out_clines[8];
-      auto    req_cline = find_clines(bs.addresses(), out_clines);
+      std::array<uint8_t, 8> out_clines;
+      auto                   req_cline = find_clines(bs.addresses(), out_clines);
       REQUIRE(req_cline == 1);
 
       auto asize = inner_node::alloc_size(bs, req_cline, out_clines);
@@ -51,8 +51,8 @@ TEST_CASE("InnerNode", "[inner_node]")
          branch_set bs2;
          bs2.set_front(ptr_address(10003));
          bs2.push_back('P', ptr_address(10004));
-         uint8_t cline_indices[8];
-         auto    req_cline = inode->find_clines(branch_number(1), bs2, cline_indices);
+         std::array<uint8_t, 8> cline_indices;
+         auto req_cline = inode->find_clines(branch_number(1), bs2, cline_indices);
          REQUIRE(req_cline == 1);
          op::replace_branch update_op{branch_number(1), bs2, req_cline, cline_indices};
          REQUIRE(inode->can_apply(update_op));
@@ -70,8 +70,8 @@ TEST_CASE("InnerNode", "[inner_node]")
          bs2.set_front(ptr_address(10006));
          bs2.push_back('N', ptr_address(10007));
          bs2.push_back('O', ptr_address(10008));
-         uint8_t cline_indices[8];
-         auto    req_cline = inode->find_clines(branch_number(1), bs2, cline_indices);
+         std::array<uint8_t, 8> cline_indices;
+         auto req_cline = inode->find_clines(branch_number(1), bs2, cline_indices);
          REQUIRE(req_cline == 1);
          op::replace_branch update_op{branch_number(1), bs2, req_cline, cline_indices};
          REQUIRE(inode->can_apply(update_op));
@@ -91,8 +91,8 @@ TEST_CASE("InnerNode", "[inner_node]")
          bs2.set_front(ptr_address(10009));
          bs2.push_back('X', ptr_address(10010));
          bs2.push_back('Y', ptr_address(10011));
-         uint8_t cline_indices[8];
-         auto    req_cline = inode->find_clines(branch_number(4), bs2, cline_indices);
+         std::array<uint8_t, 8> cline_indices;
+         auto req_cline = inode->find_clines(branch_number(4), bs2, cline_indices);
          REQUIRE(req_cline == 1);
          op::replace_branch update_op{branch_number(4), bs2, req_cline, cline_indices};
          REQUIRE(inode->can_apply(update_op));
@@ -153,8 +153,8 @@ TEST_CASE("InnerNode", "[inner_node]")
          bs2.push_back('3', ptr_address(10015));
          bs2.push_back('4', ptr_address(10016));
 
-         uint8_t cline_indices[8];
-         auto    req_cline = inode->find_clines(branch_number(0), bs2, cline_indices);
+         std::array<uint8_t, 8> cline_indices;
+         auto req_cline = inode->find_clines(branch_number(0), bs2, cline_indices);
          REQUIRE(req_cline == 2);
          op::replace_branch update_op{branch_number(0), bs2, req_cline, cline_indices};
          REQUIRE(inode->can_apply(update_op));
@@ -186,8 +186,8 @@ TEST_CASE("InnerNode", "[inner_node]")
          bs2.push_back('d', ptr_address(20015));
          bs2.push_back('e', ptr_address(20010));
 
-         uint8_t cline_indices[8];
-         auto    req_cline = inode->find_clines(branch_number(12), bs2, cline_indices);
+         std::array<uint8_t, 8> cline_indices;
+         auto req_cline = inode->find_clines(branch_number(12), bs2, cline_indices);
          REQUIRE(req_cline == 3);
 
          op::replace_branch update_op{branch_number(11), bs2, req_cline, cline_indices};
@@ -230,8 +230,8 @@ TEST_CASE("InnerNode", "[inner_node]")
       bs.set_front(ptr_address(10001));
       bs.push_back('m', ptr_address(20002));
 
-      uint8_t out_clines[8];
-      auto    req_cline = find_clines(bs.addresses(), out_clines);
+      std::array<uint8_t, 8> out_clines;
+      auto                   req_cline = find_clines(bs.addresses(), out_clines);
       REQUIRE(req_cline == 2);
 
       auto asize = inner_node::alloc_size(bs, req_cline, out_clines);
@@ -276,8 +276,8 @@ TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
             bs.set_front(ptr_address(10001));
             bs.push_back('M', ptr_address(10002));
 
-            uint8_t out_clines[8];
-            auto    req_cline = find_clines(bs.addresses(), out_clines);
+            std::array<uint8_t, 8> out_clines;
+            auto                   req_cline = find_clines(bs.addresses(), out_clines);
             REQUIRE(req_cline == 1);
 
             auto asize = inner_prefix_node::alloc_size(prefix_kv, bs, req_cline, out_clines);
@@ -303,8 +303,8 @@ TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
                branch_set bs2;
                bs2.set_front(ptr_address(10003));
                bs2.push_back('P', ptr_address(10004));
-               uint8_t cline_indices[8];
-               auto    req_cline = inode->find_clines(branch_number(1), bs2, cline_indices);
+               std::array<uint8_t, 8> cline_indices;
+               auto req_cline = inode->find_clines(branch_number(1), bs2, cline_indices);
                REQUIRE(req_cline == 1);
                op::replace_branch update_op{branch_number(1), bs2, req_cline, cline_indices};
 
@@ -352,7 +352,7 @@ TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
                bs2.set_front(ptr_address(10006));
                bs2.push_back('N', ptr_address(10007));
                bs2.push_back('O', ptr_address(10008));
-               uint8_t cline_indices[8];
+               std::array<uint8_t, 8> cline_indices;
                // Use current inode state (might have 3 branches now)
                branch_number target_bn = branch_number(1);
                auto          req_cline = inode->find_clines(target_bn, bs2, cline_indices);
@@ -400,8 +400,8 @@ TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
             bs.set_front(ptr_address(10001));       // Cline 1000x
             bs.push_back('m', ptr_address(20002));  // Cline 2000x
 
-            uint8_t out_clines[8];
-            auto    req_cline = find_clines(bs.addresses(), out_clines);
+            std::array<uint8_t, 8> out_clines;
+            auto                   req_cline = find_clines(bs.addresses(), out_clines);
             REQUIRE(req_cline == 2);  // Expecting two clines
 
             auto asize = inner_prefix_node::alloc_size(prefix_kv, bs, req_cline, out_clines);
@@ -483,7 +483,7 @@ TEST_CASE("InnerNodeSplit", "[inner_node]")
       bs_init.set_front(placeholder_addr);    // Zeroth branch
       bs_init.push_back('A', get_addr('A'));  // First divider 'A', first real branch 'A'
 
-      uint8_t clines_init[16];
+      std::array<uint8_t, 8> clines_init;
       // Need clines for placeholder_addr and get_addr('A')
       auto req_cline_init = find_clines(bs_init.addresses(), clines_init);
       REQUIRE(req_cline_init > 0);
@@ -520,7 +520,7 @@ TEST_CASE("InnerNodeSplit", "[inner_node]")
       bs_replace.set_front(target_branch_addr);  // Keep the previous branch address
       bs_replace.push_back(new_divider_char, get_addr(new_branch_char));  // Add the new branch
 
-      uint8_t clines_replace[16];
+      std::array<uint8_t, 8> clines_replace;
       auto req_cline_replace = inode_ptr->find_clines(target_branch_bn, bs_replace, clines_replace);
 
       REQUIRE(req_cline_replace != insufficient_clines);  // Must be able to find clines
