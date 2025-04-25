@@ -279,6 +279,10 @@ namespace sal
       {
          if (auto alloc = try_alloc(hint))
             return *alloc;
+         //         if (hint.size() > 0)
+         //         {
+         //            SAL_ERROR("unable to allocate even with {} hints:", hint.size());
+         //         }
          return alloc();
       }
 
@@ -329,6 +333,8 @@ namespace sal
       {
          for (auto addr : hint)
          {
+            if (addr == null_ptr_address)
+               continue;
             if (auto alloc = try_alloc(addr))
                return alloc;
          }

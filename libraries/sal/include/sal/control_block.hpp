@@ -101,7 +101,10 @@ namespace sal
       {
          control_block_data prior = _data.fetch_add(1, std::memory_order_relaxed);
          if (prior.ref >= max_ref_count)
+         {
+            control_block_data prior = _data.fetch_sub(1, std::memory_order_relaxed);
             throw std::runtime_error("reference count exceeded limits");
+         }
          assert(prior.ref > 0);
          return prior;
       };
@@ -203,7 +206,7 @@ namespace sal
 
       // used by the allocator to claim this pointer to use, uses the
       // cacheline_offset max value to indicate the pointer alloc/free.
-      [[nodiscard]] bool claim() noexcept
+      /*  [[nodiscard]] bool claim() noexcept
       {
          uint64_t           expect_data = _data.load(std::memory_order_relaxed);
          control_block_data prior;
@@ -223,7 +226,7 @@ namespace sal
          prior.cacheline_offset = max_cacheline_offset;
          _data.store(prior.to_int(), std::memory_order_relaxed);
       }
-
+*/
       /**
        * Moves the location without regard to the prior location, but
        * without disrupting any other fields that may be updated by
@@ -240,8 +243,10 @@ namespace sal
          do
          {
             updated.from_int(expected);
+            assert(updated.loc() != loc);
             updated.set_loc(loc);
          } while (not _data.compare_exchange_weak(expected, updated.to_int(), order));
+         updated.from_int(expected);
          return updated;
       }
 

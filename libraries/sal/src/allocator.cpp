@@ -241,6 +241,7 @@ namespace sal
    {
       // Set thread name for sal debug system
       sal::set_current_thread_name("compactor");
+      return;
 
       auto ses = get_session();
       // compact them in order into a new session
@@ -445,7 +446,7 @@ namespace sal
 
    void allocator::compact_segment(allocator_session& ses, segment_number seg_num)
    {
-      //      ARBTRIE_ERROR("compact_segment: ", seg_num);
+      SAL_ERROR("compact_segment: {:L}", seg_num);
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
 
@@ -758,7 +759,7 @@ namespace sal
          {
             if (mlock(sp, segment_size) != 0) [[unlikely]]
             {
-               SAL_ERROR("mlock error(", errno, ") ", strerror(errno));
+               SAL_ERROR("mlock error({}) {}", errno, strerror(errno));
                update_segment_pinned_state(seg_num, false);
             }
             else
@@ -820,7 +821,7 @@ namespace sal
          }
       }
 
-      if (oldest_age == uint32_t(-1))
+      if (oldest_age == uint64_t(-1))
          return;
 
       void* seg_ptr = get_segment(segment_number(oldest_seg));
@@ -957,4 +958,16 @@ namespace sal
       (*current_session)[_allocator_index] = nullptr;
       _mapped_state->_session_data.release_session_num(sn);
    }
+   std::array<vtable_pointers, 128>& get_type_vtables()
+   {
+      static std::array<vtable_pointers, 128> _type_vtables = []()
+      {
+         std::array<vtable_pointers, 128> vtables;
+         for (uint8_t i = 0; i < vtables.size(); ++i)
+            vtables[i] = vtable_pointers::create<vtable<alloc_header>>();
+         return vtables;
+      }();
+      return _type_vtables;
+   }
+
 }  // namespace sal

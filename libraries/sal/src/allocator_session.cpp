@@ -1,4 +1,5 @@
 #include <sal/allocator.hpp>
+#include <sal/allocator_impl.hpp>
 #include <sal/allocator_session.hpp>
 #include <sal/mapped_memory/read_lock_queue.hpp>
 #include <sal/mapped_memory/segment_impl.hpp>

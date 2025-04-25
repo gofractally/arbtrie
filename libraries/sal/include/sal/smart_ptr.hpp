@@ -46,6 +46,14 @@ namespace sal
       }
       smart_ptr_base() noexcept : _asession(nullptr), _adr(null_ptr_address) {}
 
+      ~smart_ptr_base() noexcept
+      {
+         if (is_valid())
+         {
+            release();
+         }
+      }
+
       operator bool() const noexcept { return is_valid(); }
       ptr_address address() const noexcept { return _adr; }
       bool        is_valid() const noexcept { return _adr != null_ptr_address; }
@@ -101,7 +109,9 @@ namespace sal
       void retain() noexcept
       {
          if (_adr != null_ptr_address)
+         {
             _asession->retain(_adr);
+         }
       }
 
       void release() noexcept
@@ -141,7 +151,7 @@ namespace sal
           : smart_ptr_base(asession, adr, retain)
       {
       }
-      smart_ptr(const smart_ptr& other) noexcept : smart_ptr_base(other) { retain(); }
+      smart_ptr(const smart_ptr& other) noexcept : smart_ptr_base(other) {}
       smart_ptr() noexcept : smart_ptr_base() {}
       smart_ptr(smart_ptr&& other) noexcept : smart_ptr_base(std::move(other)) {}
       smart_ptr& operator=(smart_ptr&& other) noexcept
@@ -204,13 +214,15 @@ namespace sal
       template <typename Type>
       const smart_ref<Type>& as() const
       {
-         assert(Type::type_id == _obj->type());
+         assert(int(Type::type_id) == int(alloc_header::type_id) or
+                int(Type::type_id) == int(_obj->type()));
          return *reinterpret_cast<const smart_ref<Type>*>(this);
       }
       template <typename Type>
       smart_ref<Type>& as()
       {
-         assert(int(Type::type_id) == int(_obj->type()));
+         assert(int(Type::type_id) == int(alloc_header::type_id) or
+                int(Type::type_id) == int(_obj->type()));
          return *reinterpret_cast<smart_ref<Type>*>(this);
       }
 

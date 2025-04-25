@@ -64,10 +64,10 @@ namespace psitri
                           const branch_set&       sub_branches,
                           std::array<uint8_t, 8>& cline_indices) const noexcept;
 
-      void destroy(const alloc_header* header, const sal::allocator_session_ptr& session) noexcept
+      void destroy(const sal::allocator_session_ptr& session) const noexcept
       {
          const Derived& d   = static_cast<const Derived&>(*this);
-         const branch*  pos = d.branches();
+         const branch*  pos = d.const_branches();
          auto           cd  = reinterpret_cast<const cline_data*>(d.clines());
 
          uint32_t nb = d.num_branches();
@@ -76,6 +76,7 @@ namespace psitri
          {
             --nb;
             auto addr = ptr_address(*cd[pos->line()].base() + pos->index());
+            //            SAL_WARN("releasing branch {} at {}", *pos, addr);
             session->release(addr);
             ++pos;
          } while (nb);
@@ -155,6 +156,7 @@ namespace psitri
          d._num_branches = branches.count();
          d._num_cline    = numcline;
          d._descendents  = 0;
+         assert(d._num_cline >= numcline);
 
          memcpy(d.divisions(), branches.dividers().data(), branches.dividers().size());
          memset(d.clines(), 0xff, numcline * sizeof(ptr_address));
@@ -184,6 +186,7 @@ namespace psitri
             // SAL_INFO("{} new branch {} {}", sub_brs, i, sub_brs[i]);
             assert(d.get_branch(branch_number(i)) == sub_addr[i]);
          }
+         assert(d.validate_invariants());
       }
       inline void init(const Derived* clone, const op::replace_branch& update) noexcept
       {
@@ -191,6 +194,7 @@ namespace psitri
          d._num_branches = clone->_num_branches + update.sub_branches.count() - 1;
          d._num_cline    = update.needed_clines;
          d._descendents  = clone->_descendents;
+         assert(d._num_cline >= clone->_num_cline);
 
          sal::ptr_address*       d_clines_data = reinterpret_cast<sal::ptr_address*>(d.clines());
          const uint16_t          d_num_clines  = d._num_cline;
@@ -237,8 +241,10 @@ namespace psitri
             }
             sub_brs[i].set_line_index(update.cline_indices[i],
                                       *update.sub_branches.addresses()[i] & 0x0f);
+            assert(sub_brs[i].line() < d._num_cline);
          }
          assert(std::is_sorted(d.divisions(), d.divisions() + d.num_divisions()));
+         assert(d.validate_invariants());
       }
 
      public:
@@ -257,6 +263,7 @@ namespace psitri
          const Derived& d  = static_cast<const Derived&>(*this);
          auto           br = d.const_branches()[*n];
          auto           cd = reinterpret_cast<const cline_data*>(d.clines());
+         assert(br.line() < d.num_clines() && "branch line index out of bounds");
          return ptr_address(*cd[br.line()].base() + br.index());
       }
 
@@ -433,6 +440,7 @@ namespace psitri
       //_division_capacity = new_divisions_cap;
       d->_num_cline = up.needed_clines;
       assert(std::is_sorted(d->divisions(), d->divisions() + d->num_divisions()));
+      assert(d->validate_invariants());
    }
    template <typename Derived>
    [[nodiscard]] inline bool inner_node_base<Derived>::validate_invariants() const noexcept
@@ -458,15 +466,21 @@ namespace psitri
          // Count branches referencing this cline
          for (uint32_t branch_idx = 0; branch_idx < d._num_branches; ++branch_idx)
          {
+            assert(d.const_branches()[branch_idx].line() < d._num_cline);
             if (d.const_branches()[branch_idx].line() == cline_idx)
                ++actual_refs;
          }
 
-         bool ref_count_matches = (cline_ptr->ref() == actual_refs);
-         // Assert in debug builds (standard assert does this automatically)
-         assert(ref_count_matches && "Cline reference count mismatch");
-         if (!ref_count_matches)
-            return false;  // Return false in all builds if check fails
+         if (cline_ptr->is_null())
+            assert(actual_refs == 0 && "Cline reference count mismatch");
+         else
+         {
+            bool ref_count_matches = (cline_ptr->ref() == actual_refs);
+            // Assert in debug builds (standard assert does this automatically)
+            assert(ref_count_matches && "Cline reference count mismatch");
+            if (!ref_count_matches)
+               return false;  // Return false in all builds if check fails
+         }
       }
       return true;
    }

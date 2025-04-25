@@ -67,10 +67,11 @@ namespace psitri
 
    void leaf_node::clone_from(const leaf_node* clone)
    {
+      //SAL_INFO("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
       set_num_branches(clone->num_branches());
       if (not clone->is_optimal_layout())
       {
-         SAL_INFO("cloning to optimal layout, num_branches: {}", num_branches());
+         //SAL_INFO("cloning to optimal layout, num_branches: {}", num_branches());
          _alloc_pos      = 0;
          _dead_space     = 0;
          _cline_cap      = 0;

@@ -227,7 +227,7 @@ namespace psitri
                               std::span<const ptr_address> new_branches,
                               std::array<uint8_t, 8>&      out_cline_indices) noexcept
    {
-      //      SAL_INFO("find_clines({}, {}, {})", current_clines.size(), old_branch, new_branches.size());
+      //SAL_INFO("find_clines({}, {}, {})", current_clines.size(), old_branch, new_branches.size());
       assert(current_clines.size() <= 16);
       assert(new_branches.size() <= 8);
       // current clines uses lower 4 bits to store the occupancy count, so
@@ -276,8 +276,6 @@ namespace psitri
       {
          // Find index of old_branch_cline in temp array (returns 16 if not found)
          auto idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *old_branch_cline);
-         //         SAL_ERROR("find_clines: find_u32x16_neon: idx:   {} cur_cline: {}", idx,
-         ////                  current_clines.size());
          //idx = std::min(idx, int(current_clines.size()));
 
          // Branchless update: Set temp[idx] to null_ptr_address if branch not shared
@@ -285,6 +283,9 @@ namespace psitri
          temp[idx] |=
              ptr_address(-(idx < current_clines.size() and (*current_clines[idx] & 0x0f) == 0)) >>
              4;
+         //         SAL_ERROR(
+         //            "find_clines: replace br index find_u32x16_neon: idx:   {} cur_cline: {} temp[idx]={}",
+         //           idx, current_clines.size(), temp[idx]);
       }
       //temp[idx] = sal::null_ptr_address;
       /// TODO: ensure that control_block_alloc never returns a ptr_address on cline 0
@@ -335,9 +336,9 @@ namespace psitri
          // Reload just the vector containing the modified index
          vec[cur_idx / 4]     = vld1q_u32((uint32_t*)(temp + (cur_idx & ~3)));
          out_cline_indices[i] = cur_idx;
-         max_branch_index     = 1 << cur_idx;
+         max_branch_index |= 1 << cur_idx;
       }
-      return (32 - __builtin_clz(max_branch_index));
+      return 32 - __builtin_clz(max_branch_index);
    }
    inline uint8_t find_clines(std::span<const ptr_address> current_clines,
                               std::span<const ptr_address> new_branches,

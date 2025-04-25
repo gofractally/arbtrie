@@ -330,10 +330,22 @@ namespace sal
         * @param seg The segment number containing the object
         */
       template <typename T>
-      inline void record_freed_space(allocator_session_number /*ses_num*/, T* obj)
+      inline void record_freed_space(allocator_session_number /*ses_num*/, T* obj);
+      /*
       {
+         //static std::vector<T*> ptrs;
+         //ptrs.push_back(obj);
+         if (*obj->address() == 873472)
+         {
+            SAL_WARN("record_freed_space: {} adr: {} ptr: {}", obj->size(), obj->address(),
+                     int64_t(obj));
+            auto nref = get_session()->get_ref<leaf_node>(obj->address());
+            SAL_WARN("record_freed_space: {} adr: {} ptr: {}", obj->size(), obj->address(),
+                     int64_t(nref.obj()));
+         }
          _mapped_state->_segment_data.add_freed_space(get_segment_for_object(obj), obj);
-      }
+      }  
+      */
 
       inline void record_session_write(allocator_session_number session_num,
                                        uint64_t                 bytes) noexcept

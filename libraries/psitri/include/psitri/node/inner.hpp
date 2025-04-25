@@ -115,7 +115,11 @@ namespace psitri
       const uint8_t* divisions() const noexcept { return _prefix + _prefix_cap; }
       branch*        branches() noexcept { return (branch*)(divisions() + num_divisions()); }
       branch*        branches_end() noexcept { return branches() + num_branches(); }
-      const branch*  const_branches() const noexcept
+      const branch*  branches_end() const noexcept
+      {
+         return const_cast<inner_prefix_node*>(this)->branches() + num_branches();
+      }
+      const branch* const_branches() const noexcept
       {
          return (const branch*)(divisions() + num_divisions());
       }
@@ -138,7 +142,11 @@ namespace psitri
          return alloc_size(prefix(), this, up) == size();
       }
 
+      using inner_node_base<inner_prefix_node>::destroy;
+
      protected:
+      static int reg_type;  // =sal::register_type_vtable<inner_prefix_node>();
+
       template <typename T>
       friend class inner_node_base;
       uint64_t _descendents : 39;  ///< 500 billion keys max
@@ -234,6 +242,8 @@ namespace psitri
       {
          return (const branch*)(divisions() + num_divisions());
       }
+
+      using inner_node_base<inner_node>::destroy;
 
      protected:
       branch* branches() noexcept { return (branch*)(divisions() + num_divisions()); }

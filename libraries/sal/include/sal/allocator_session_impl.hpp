@@ -1,6 +1,7 @@
 #pragma once
 #include <sal/alloc_header.hpp>
 #include <sal/allocator.hpp>
+#include <sal/allocator_impl.hpp>
 #include <sal/allocator_session.hpp>
 #include <sal/transaction.hpp>
 
@@ -135,9 +136,13 @@ namespace sal
 
       auto [loc, node_ptr] =
           alloc_data<To>(size, from->address_seq(), std::forward<decltype(args)>(args)...);
+      assert(loc != from.loc());
 
       control_block_data old_control = from.control().move(loc);
       assert(old_control.ref == 1);
+
+      assert(old_control.loc() != loc);
+      //      SAL_WARN("realloc from: {:#x} to: {:#x} ", get<From>(old_control.loc()), get<To>(loc));
 
       // we have to refetch the pointer just incase the compactor moved the object
       // between when from read it and when we exchanged it.
@@ -181,6 +186,7 @@ namespace sal
       auto  cread = cb.load(std::memory_order_acquire);
       auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
       assert(int(T::type_id) == int(alloc_header::type_id) or int(T::type_id) == int(ptr->type()));
+      // assert(cread.ref > 0);
       return smart_ref<T>(get_session_ptr(), ptr, cb, cread);
    }
 
@@ -243,10 +249,12 @@ namespace sal
    }
    inline void allocator_session::retain(ptr_address adr)
    {
+      //     SAL_WARN("retaining {} pre ref: {}", adr, get(adr).ref());
       get(adr).retain();
    }
    inline void allocator_session::release(ptr_address adr) noexcept
    {
+      //      SAL_WARN("releasing {} ref: {}", adr, get(adr).ref());
       auto prev = get(adr).release();
       if (prev.ref > 1)
          return;
@@ -258,6 +266,7 @@ namespace sal
          allocator_session_ptr ptr(this);
 
          const alloc_header* nptr = get<alloc_header>(loc);
+         //       SAL_ERROR("destroying {}", adr);
          vcall::destroy(nptr, ptr);
          record_freed_space(nptr);
       }
@@ -287,7 +296,7 @@ namespace sal
                                                    sync_type          st) noexcept
    {
       sync(st);
-      return smart_ptr<T>(_sega.set(ro, ptr.take(), st), this);
+      return smart_ptr<T>(allocator_session_ptr(this, true), _sega.set(ro, ptr.take(), st), false);
    }
 
    template <typename T, typename U>
@@ -342,6 +351,11 @@ namespace sal
       if (--_nested_read_lock)
          return;
       _session_rlock.unlock();
+   }
+
+   inline uint64_t allocator_session::get_total_allocated_objects() const noexcept
+   {
+      return _ptr_alloc.used();
    }
 
 }  // namespace sal

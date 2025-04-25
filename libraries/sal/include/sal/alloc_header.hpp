@@ -202,23 +202,16 @@ namespace sal
                              const std::function<void(ptr_address)>& visitor) noexcept;
    };
 
-   inline static auto& get_type_vtables()
-   {
-      static std::array<vtable_pointers, 128> _type_vtables = []()
-      {
-         std::array<vtable_pointers, 128> vtables;
-         for (uint8_t i = 0; i < vtables.size(); ++i)
-            vtables[i] = vtable_pointers::create<vtable<alloc_header>>();
-         return vtables;
-      }();
-      return _type_vtables;
-   }
+   std::array<vtable_pointers, 128>& get_type_vtables();
 
    template <typename T>
-   inline static void register_type_vtable()
+   inline static int register_type_vtable()
    {
       static_assert(uint8_t(T::type_id) < 128, "type_id out of range");
       get_type_vtables()[uint8_t(T::type_id)] = vtable_pointers::create<vtable<T>>();
+      SAL_WARN("register_type_vtable {} {} destroy ptr: {}", T::type_id, int(T::type_id),
+               get_type_vtables()[uint8_t(T::type_id)].destroy);
+      return int(T::type_id);
    }
 
    namespace vcall
