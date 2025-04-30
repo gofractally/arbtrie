@@ -20,6 +20,8 @@ namespace psitri
       {
          return ucc::round_up_multiple<64>(sizeof(value_node) + v.size());
       }
+      uint32_t num_branches() const { return 1; }
+
       static uint32_t alloc_size(const value_type& v)
       {
          if (v.is_view())
@@ -48,9 +50,13 @@ namespace psitri
             lam(*(const ptr_address*)data);
       }
 
+      value_view get_data() const { return value_view((const char*)data, data_size); }
+
       uint32_t data_size : 31;
       uint32_t is_subtree : 1;
       uint8_t  data[/*data_size*/];
    };
 
+   template <typename T>
+   concept is_value_node = std::same_as<std::remove_cvref_t<std::remove_pointer_t<T>>, value_node>;
 }  // namespace psitri

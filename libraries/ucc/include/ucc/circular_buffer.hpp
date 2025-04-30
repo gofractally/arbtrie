@@ -73,6 +73,18 @@ namespace ucc
          push_pos.store(current_push, std::memory_order_release);
          return current_push;
       }
+      bool try_push(T data)
+      {
+         uint64_t current_push = push_pos.load(std::memory_order_relaxed);
+         uint64_t current_read = read_pos.load(std::memory_order_acquire);
+         if (current_push - current_read >= buffer_size)
+            return false;
+
+         buf[current_push & mask] = data;
+         current_push++;
+         push_pos.store(current_push, std::memory_order_release);
+         return true;
+      }
 
       // Pop a single element from the buffer, only one thread can call it
       std::optional<T> try_pop()

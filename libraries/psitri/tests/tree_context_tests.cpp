@@ -1,6 +1,6 @@
 #include <catch2/catch_all.hpp>
 #include <fstream>
-#include <locale>
+#include <psitri/cursor.hpp>
 #include <psitri/tree_ops.hpp>
 #include <random>
 #include <sal/sal.hpp>
@@ -26,6 +26,111 @@ std::vector<std::string> load_words(uint32_t limit = -1)
    return words;
 }
 
+TEST_CASE("cursor-prev-next", "[cursor]")
+{
+   sal::set_current_thread_name("main");
+   std::filesystem::remove_all("db");
+   sal::register_type_vtable<leaf_node>();
+   sal::register_type_vtable<inner_prefix_node>();
+   sal::register_type_vtable<inner_node>();
+   sal::register_type_vtable<value_node>();
+
+   sal::allocator salloc("db", sal::runtime_config());
+   auto           ses  = salloc.get_session();
+   auto           root = ses->get_root<>(sal::root_object_number(0));
+
+   SAL_WARN("root: {} {}", &root, root.address());
+   tree_context ctx(root);
+
+   auto words   = load_words();
+   auto start   = std::chrono::high_resolution_clock::now();
+   int  inspect = words.size();  //5333;
+   for (int i = 0; i < words.size(); i++)
+   {
+      //   if (i == words.size() - 1)
+      //     SAL_INFO("inserting word[{}]: {}", i, words[i]);
+      ctx.insert(to_key_view(words[i]), to_value_view(words[i]));
+   }
+   auto end = std::chrono::high_resolution_clock::now();
+   SAL_ERROR("inserted {:L} words in {:L} ms, {:L} words/sec", words.size(),
+             std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+             (words.size() * 1000.0) /
+                 std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+
+   std::sort(words.begin(), words.end());
+   auto cur = cursor(ctx.get_root());
+
+   start = std::chrono::high_resolution_clock::now();
+   for (int i = 0; i < words.size(); ++i)
+   {
+      //   SAL_WARN("lower bound {}", words[i]);
+      cur.lower_bound(to_key_view(words[i]));
+      auto itr = std::lower_bound(words.begin(), words.end(), words[i]);
+      REQUIRE(not cur.is_end());
+      if (cur.key() != key_view(*itr))
+         ctx.print();
+      assert(cur.key() == key_view(*itr));
+      REQUIRE(cur.key() == key_view(*itr));
+   }
+   end = std::chrono::high_resolution_clock::now();
+   SAL_WARN("lower bound: {:L} ms {:L} words/sec",
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+            (words.size() * 1000.0) /
+                std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+
+   uint32_t count = 0;
+   start          = std::chrono::high_resolution_clock::now();
+   cur.seek_rend();
+   int i = 0;
+   while (cur.next())
+   {
+      REQUIRE(cur.key() == key_view(words[i++]));
+      count++;
+   }
+   end = std::chrono::high_resolution_clock::now();
+   SAL_WARN("count: {} {:L} ms {:L} words/sec", count,
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+            uint64_t((words.size() * 1000.0) /
+                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()));
+   REQUIRE(count == words.size());
+   REQUIRE(cur.is_end());
+   count = 0;
+   start = std::chrono::high_resolution_clock::now();
+   while (cur.prev())
+   {
+      count++;
+   }
+   end = std::chrono::high_resolution_clock::now();
+   SAL_WARN("count: {} {:L} ms {:L} words/sec", count,
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+            uint64_t((words.size() * 1000.0) /
+                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()));
+   REQUIRE(count == words.size());
+   REQUIRE(cur.is_rend());
+
+   SAL_WARN("lower bound hello");
+   cur.lower_bound(to_key_view("hello"));
+   REQUIRE(not cur.is_end());
+   REQUIRE(cur.key() == key_view("hello"));
+
+   auto itr = std::lower_bound(words.begin(), words.end(), "boyz");
+   SAL_WARN("lower bound boyz");
+   cur.lower_bound(to_key_view("boyz"));
+   REQUIRE(not cur.is_end());
+   REQUIRE(cur.key() == key_view(*itr));
+   SAL_WARN("lower bound Ancerata");
+   cur.lower_bound(to_key_view("Ancerata"));
+   assert(cur.key() == key_view("Ancerata"));
+}
+
+TEST_CASE("cursor-lowerbound", "[cursor]")
+{
+   sal::set_current_thread_name("main");
+   std::filesystem::remove_all("db");
+   sal::allocator salloc("db", sal::runtime_config());
+   auto           ses = salloc.get_session();
+}
+
 TEST_CASE("tree_context", "[tree_context]")
 {
    sal::set_current_thread_name("main");
@@ -49,39 +154,7 @@ TEST_CASE("tree_context", "[tree_context]")
       ctx.insert("hellohello", "world");
 
       smart_ptr<alloc_header> last_version;
-      /*
-   auto                    start = std::chrono::high_resolution_clock::now();
-   for (int i = 0; i < words.size(); i++)
-   {
-      if (i == 163)
-      {
-         SAL_ERROR("break point");
-      }
-      //      SAL_INFO("inserting word[{}]: {}", i, words[i]);
-      ctx.insert(to_key_view(words[i]), to_value_view(words[i]));
-     
-      SAL_INFO("----------new version-----------");
-      ctx.print();
-      if (last_version)
-      {
-         SAL_INFO("----------last version------");
-         ctx.print(*last_version);
-         SAL_INFO("----------end last version------");
-      }
-   // ses->set_root(sal::root_object_number(1), ctx.get_root(), sal::sync_type::mprotect);
-   last_version = ctx.get_root();
-}
-   auto end = std::chrono::high_resolution_clock::now();
-   ctx.print();
-   SAL_ERROR("loaded {:L} words in {:L} ms", words.size(),
-             std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
-   auto duration_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-   auto words_per_sec = (words.size() * 1000.0) / duration_ms;
-
-   SAL_ERROR("Performance: {:L.10f} words/sec", uint64_t(words_per_sec));
-   */
-
-      auto print_stats = [&]()
+      auto                    print_stats = [&]()
       {
          auto stats = ctx.get_stats();
          SAL_ERROR(
@@ -147,6 +220,24 @@ TEST_CASE("tree_context", "[tree_context]")
                   ses->get_total_allocated_objects());
       }
       print_stats();
+      cursor cur(ctx.get_root());
+      for (int r = 0; r < 3; ++r)
+      {
+         auto start = std::chrono::high_resolution_clock::now();
+         for (int i = 0; i < round_size; i++)
+         {
+            key                      = rand64();
+            uint64_t   bigendian_key = __builtin_bswap64(key);
+            key_view   kstr((char*)&bigendian_key, sizeof(bigendian_key));
+            value_view vstr(big_value.data(), big_value.size());
+            cur.lower_bound(kstr);
+         }
+         auto end = std::chrono::high_resolution_clock::now();
+         auto duration_ms =
+             std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+         auto lower_bound_per_sec = (round_size * 1000.) / duration_ms;
+         SAL_ERROR("lower bound: {:L} ms {:L} words/sec", duration_ms, lower_bound_per_sec);
+      }
    }
    SAL_ERROR("total allocated after context exit : {:L}", ses->get_total_allocated_objects());
    ses->set_root(sal::root_object_number(0), sal::smart_ptr<alloc_header>(),

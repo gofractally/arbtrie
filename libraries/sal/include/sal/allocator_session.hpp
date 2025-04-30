@@ -130,6 +130,12 @@ namespace sal
       void release(ptr_address adr) noexcept;
 
       /**
+       * This is to be used if and only if the address is the last reference to the
+       * object.
+       */
+      void final_release(ptr_address adr) noexcept;
+
+      /**
        * This is to be used if and only if the user has taken ownership of the
        * ptr_address via smart_ptr<T>::take() and is now using manual memory
        * management.
@@ -255,6 +261,7 @@ namespace sal
       int                          _nested_read_lock = 0;
       allocator_session_number     _session_num;  // index into _sega's active sessions list
       rcache_queue_type&           _rcache_queue;
+      rcache_queue_type&           _release_queue;
       allocator&                   _sega;
       control_block_alloc&         _ptr_alloc;
       mapped_memory::segment*      _alloc_seg_ptr  = nullptr;

@@ -447,6 +447,7 @@ namespace psitri
    {
       const Derived& d      = static_cast<const Derived&>(*this);
       bool divisions_sorted = std::is_sorted(d.divisions(), d.divisions() + d.num_divisions());
+      assert(d.num_branches() == d.divs().size() + 1);
       // Assert in debug builds (standard assert does this automatically)
       assert(divisions_sorted && "Divisions are not sorted");
       if (!divisions_sorted)

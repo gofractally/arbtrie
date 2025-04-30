@@ -53,7 +53,16 @@ namespace psitri
    class leaf_node : public node
    {
      public:
-      static constexpr node_type type_id = node_type::leaf;
+      enum value_type_flag : uint16_t
+      {
+         null,
+         inline_data,
+         value_node,
+         subtree
+      };
+
+      static constexpr uint32_t  max_leaf_size = 4096 / 2;
+      static constexpr node_type type_id       = node_type::leaf;
       inline static uint32_t     alloc_size(key_view key, const value_type& value) noexcept;
       /// clone and optimize
       inline static uint32_t alloc_size(const leaf_node* clone) noexcept;
@@ -63,17 +72,17 @@ namespace psitri
                                         branch_number    end)
       {
          assert(cprefix.size() <= 1024);
-         return 4096;
+         return max_leaf_size;
       }
       inline static uint32_t alloc_size(const leaf_node* clone,
                                         branch_number    start,
                                         branch_number    end)
       {
-         return 4096;
+         return max_leaf_size;
       }
       inline static uint32_t alloc_size(const leaf_node* src, const op::leaf_insert& ins)
       {
-         return 4096;
+         return max_leaf_size;
       }
 
       //  leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_insert& ins);
@@ -103,8 +112,6 @@ namespace psitri
 
       key_view get_common_prefix() const noexcept;
 
-      uint32_t cow_size() const noexcept { return 4096; }  // TODO: make this config const
-
       /**
        *  A leaf can only have children on 16 unique cachelines, therefore,
        * we need to check if we have less than 16 or if addr is already on
@@ -117,6 +124,10 @@ namespace psitri
       uint16_t dead_space() const noexcept { return _dead_space; }
       uint32_t clines_capacity() const noexcept { return _cline_cap; }
       bool     is_optimal_layout() const noexcept { return _optimal_layout; }
+
+      uint32_t compact_size() const noexcept;
+      void     compact_to(alloc_header* compact_dst) const noexcept;
+      uint32_t cow_size() const noexcept { return max_leaf_size; }  // TODO: make this config const
 
       struct split_pos
       {
@@ -139,16 +150,30 @@ namespace psitri
          value_branch vb = value_offsets()[*bn];
          switch (vb.type())
          {
-            case value_branch::value_type::subtree:
+            case value_type_flag::subtree:
                return value_type::make_subtree(get_address(vb));
-            case value_branch::value_type::value_node:
+            case value_type_flag::value_node:
                return value_type::make_value_node(get_address(vb));
-            case value_branch::value_type::inline_data:
+            case value_type_flag::inline_data:
                return get_value_ptr(vb.offset())->get();
-            case value_branch::value_type::null:
+            case value_type_flag::null:
                return value_type(value_view());
          }
          std::unreachable();
+      }
+      value_view get_value_view(branch_number bn) const noexcept
+      {
+         assert(value_offsets()[*bn].type() == value_type_flag::inline_data);
+         return get_value_ptr(value_offsets()[*bn].offset())->get();
+      }
+      ptr_address get_value_address(branch_number bn) const noexcept
+      {
+         assert(value_offsets()[*bn].type() == value_type_flag::value_node);
+         return get_address(value_offsets()[*bn]);
+      }
+      value_type_flag get_value_type(branch_number bn) const noexcept
+      {
+         return value_offsets()[*bn].type();
       }
 
       /// @return size of old value
@@ -246,7 +271,7 @@ namespace psitri
          const uint32_t      n   = num_branches();
          for (int i = 0; i < n; ++i)
          {
-            if (cvb[i].type() != value_branch::value_type::inline_data)
+            if (cvb[i].type() != value_type_flag::inline_data)
                lam(get_address(cvb[i]));
          }
       }
@@ -331,57 +356,50 @@ namespace psitri
       class value_branch
       {
         public:
-         enum value_type : uint16_t
-         {
-            null,
-            inline_data,
-            value_node,
-            subtree
-         };
          value_branch() noexcept : _type(null), _offset(0) {}
          value_branch(value_offset offset) noexcept : _type(inline_data), _offset(*offset) {}
-         value_branch(value_type t, cline_offset cl, cline_index idx) noexcept
+         value_branch(value_type_flag t, cline_offset cl, cline_index idx) noexcept
              : _type(t), _offset(*cl << 4 | *idx & 0xF)
          {
-            assert(t == value_type::subtree or t == value_type::value_node);
+            assert(t == value_type_flag::subtree or t == value_type_flag::value_node);
          }
 
          void clear() noexcept
          {
-            _type   = value_type::null;
+            _type   = value_type_flag::null;
             _offset = 0;
          }
 
-         bool         is_null() const noexcept { return _type == null; }
-         bool         is_inline() const noexcept { return _type == inline_data; }
-         bool         is_address() const noexcept { return _type >= value_node; }
-         value_type   type() const noexcept { return (value_type)_type; }
-         value_offset offset() const noexcept
+         bool            is_null() const noexcept { return _type == null; }
+         bool            is_inline() const noexcept { return _type == inline_data; }
+         bool            is_address() const noexcept { return _type >= value_node; }
+         value_type_flag type() const noexcept { return (value_type_flag)_type; }
+         value_offset    offset() const noexcept
          {
-            assert(type() == value_type::inline_data);
+            assert(type() == value_type_flag::inline_data);
             return value_offset(_offset);
          }
          void set_offset(value_offset off) noexcept
          {
-            _type   = value_type::inline_data;
+            _type   = value_type_flag::inline_data;
             _offset = *off;
          }
          cline_offset cline() const noexcept
          {
-            assert(type() == value_type::subtree or type() == value_type::value_node);
+            assert(type() == value_type_flag::subtree or type() == value_type_flag::value_node);
             return cline_offset(_offset >> 4);  // Get upper 10 bits
          }
-         void set_cline_and_idx(cline_offset cl,
-                                cline_index  idx,
-                                value_type   t = value_type::subtree) noexcept
+         void set_cline_and_idx(cline_offset    cl,
+                                cline_index     idx,
+                                value_type_flag t = value_type_flag::subtree) noexcept
          {
-            assert(t == value_type::subtree or t == value_type::value_node);
+            assert(t == value_type_flag::subtree or t == value_type_flag::value_node);
             _type   = t;
             _offset = (*cl << 4) | (*idx & 0xF);
          }
          cline_index cline_idx() const noexcept
          {
-            assert(type() == value_type::subtree or type() == value_type::value_node);
+            assert(type() == value_type_flag::subtree or type() == value_type_flag::value_node);
             return cline_index(_offset & 0xF);  // Get lower 4 bits
          }
 
@@ -442,7 +460,7 @@ namespace psitri
 
       /// determine if addr is on an existing cline, or allocate a new one and
       /// return the value_branch for the new cline
-      value_branch add_address_ptr(value_branch::value_type t, ptr_address addr) noexcept;
+      value_branch add_address_ptr(value_type_flag t, ptr_address addr) noexcept;
 
       /// remove the address ptr from the cline index, if there are no references
       void remove_address_ptr(cline_offset cl_off) noexcept;
@@ -553,11 +571,14 @@ namespace psitri
 
    inline uint32_t leaf_node::alloc_size(key_view key, const value_type& value) noexcept
    {
-      return 4096;  //ucc::round_up_multiple<64>(sizeof(leaf_node) + key.size() + value.size());
+      return max_leaf_size;  //ucc::round_up_multiple<64>(sizeof(leaf_node) + key.size() + value.size());
    }
    /// clone and optimize
    inline uint32_t leaf_node::alloc_size(const leaf_node* clone) noexcept
    {
       return clone->size();
    }
+
+   template <typename T>
+   concept is_leaf_node = std::same_as<std::remove_cvref_t<std::remove_pointer_t<T>>, leaf_node>;
 }  // namespace psitri

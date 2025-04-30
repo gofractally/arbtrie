@@ -15,6 +15,7 @@ namespace sal
          _nested_read_lock(0),
          _session_num(ses_num),
          _rcache_queue(a.get_rcache_queue(ses_num)),
+         _release_queue(a.get_release_queue(ses_num)),
          _sega(a),
          _ptr_alloc(a._ptr_alloc),
          _alloc_seg_ptr(nullptr),

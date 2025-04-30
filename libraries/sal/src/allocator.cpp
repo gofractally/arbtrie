@@ -241,7 +241,6 @@ namespace sal
    {
       // Set thread name for sal debug system
       sal::set_current_thread_name("compactor");
-      return;
 
       auto ses = get_session();
       // compact them in order into a new session
@@ -260,11 +259,31 @@ namespace sal
        */
       while (thread.yield())
       {
+         compactor_release_objects(sesr);
          compactor_promote_rcache_data(sesr);
          compact_pinned_segment(sesr);
          compactor_promote_rcache_data(sesr);
          compact_unpinned_segment(sesr);
       }
+   }
+   bool allocator::compactor_release_objects(allocator_session& ses)
+   {
+      bool        more_work = false;
+      ptr_address read_ids[1024];
+      for (uint32_t snum = 0; snum < _mapped_state->_session_data.session_capacity(); ++snum)
+      {
+         auto& rcache = _mapped_state->_session_data.release_queue(allocator_session_number(snum));
+         // only process up to 1024 objects so that we can yield to
+         // other tasks the compactor is doing without too much delay
+         auto num_loaded = rcache.pop(read_ids, 1024);
+         for (uint32_t i = 0; i < num_loaded; ++i)
+         {
+            auto addr    = read_ids[i];
+            auto obj_ref = ses.get_ref<alloc_header>(addr);
+            ses.final_release(addr);
+         }
+      }
+      return more_work;
    }
 
    /**
@@ -446,7 +465,7 @@ namespace sal
 
    void allocator::compact_segment(allocator_session& ses, segment_number seg_num)
    {
-      SAL_ERROR("compact_segment: {:L}", seg_num);
+      //      SAL_ERROR("compact_segment: {:L}", seg_num);
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
 
@@ -474,12 +493,17 @@ namespace sal
          if (config_validate_checksum_on_compact())
          {
             if (vcall::has_checksum(nh) and not vcall::verify_checksum(nh))
+            {
+               SAL_ERROR("checksum is invalid {} size: {} checksum: {} calculated: {}",
+                         nh->address(), nh->size(), nh->checksum(), nh->calculate_checksum());
                throw std::runtime_error("checksum is invalid");
+            }
          }
 
          /// acquires the modify lock on the segment, we must release it
          auto [loc, head] = ses.alloc_data_vage<alloc_header>(vcall::compact_size(nh), vage,
                                                               nh->type(), nh->address_seq());
+         vcall::compact_to(nh, head);
          // update checksum if needed, because the user may
          // have used config::update_checksum_on_upsert = false
          // to get better user performance and offload the checksum

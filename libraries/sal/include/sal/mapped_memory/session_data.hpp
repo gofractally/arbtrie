@@ -9,7 +9,8 @@
 
 namespace sal
 {
-   using rcache_queue_type = ucc::circular_buffer<ptr_address, 1024 * 256>;
+   using rcache_queue_type  = ucc::circular_buffer<ptr_address, 1024 * 256>;
+   using release_queue_type = ucc::circular_buffer<ptr_address, 1024 * 256>;
 
    namespace mapped_memory
    {
@@ -56,6 +57,7 @@ namespace sal
          allocator_session_number alloc_session_num();
          void                     release_session_num(allocator_session_number num) noexcept;
          rcache_queue_type&       rcache_queue(allocator_session_number session_num);
+         release_queue_type&      release_queue(allocator_session_number session_num);
          uint32_t                 max_session_num() const;
 
          // the maximum number of sessions that can be supported
@@ -96,7 +98,8 @@ namespace sal
          // their thread-local circular buffer and the compactor pops from
          // them and moves the referenced address to a pinned segment with
          // recent age.
-         rcache_queue_type _rcache_queue[session_cap];
+         rcache_queue_type  _rcache_queue[session_cap];
+         release_queue_type _release_queue[session_cap];
 
          /// each transaction
          dirty_segment_queue _dirty_segments[session_cap];
@@ -117,6 +120,10 @@ namespace sal
       inline rcache_queue_type& session_data::rcache_queue(allocator_session_number session_num)
       {
          return _rcache_queue[*session_num];
+      }
+      inline release_queue_type& session_data::release_queue(allocator_session_number session_num)
+      {
+         return _release_queue[*session_num];
       }
 
       inline uint32_t session_data::max_session_num() const

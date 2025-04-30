@@ -58,14 +58,14 @@ namespace sal
       /// during recovery from a crash.
       constexpr uint16_t sequence() const noexcept { return _address.sequence; }
 
-      void update_checksum() noexcept
+      void     update_checksum() noexcept { _checksum = calculate_checksum(); }
+      uint16_t calculate_checksum() const noexcept
       {
-         _checksum = XXH3_64bits((const char*)&_address, _size - sizeof(_checksum));
+         return XXH3_64bits((const char*)&_address, _size - sizeof(_checksum));
       }
       bool verify_checksum() const noexcept
       {
-         return !_checksum or
-                _checksum == XXH3_64bits((const char*)&_address, _size - sizeof(_checksum));
+         return !_checksum or _checksum == calculate_checksum();
       }
       bool has_checksum() const noexcept { return _checksum != 0; }
       void clear_checksum() noexcept { _checksum = 0; }

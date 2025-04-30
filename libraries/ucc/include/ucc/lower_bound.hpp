@@ -164,6 +164,10 @@ namespace ucc
          uint8x16_t cmp_lt_byte = vcltq_u8(data_vec, search_val);
 
          // Mask the comparison result to get 0x01 for matches instead of 0xFF
+         // if the "one" mask used bit 2 for the second half... then we can
+         // use popcount( high | low ) rather than horizontal add, but that would
+         // involve several dependent instructions to fetch the high and low + or them
+         // beofre popcount so vandq_u8 may still be faster
          uint8x16_t masked_result = vandq_u8(cmp_lt_byte, one_mask);
 
          // Count elements in this chunk that are < value using horizontal add
@@ -208,6 +212,8 @@ namespace ucc
          uint8x16_t masked_result = vandq_u8(combined_mask, one_mask);
 
          // Count elements in the masked final chunk using horizontal add
+         // this instruction may have a latency of 2-4 cycles, which means
+         // a smart "popcount"
          uint16_t chunk_count = vaddlvq_u8(masked_result);
 
          // Add count from the final chunk to the total

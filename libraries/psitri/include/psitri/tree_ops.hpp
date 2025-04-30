@@ -24,6 +24,7 @@ namespace psitri
       tree_context(sal::smart_ptr<alloc_header> root)
           : _root(std::move(root)), _session(*(root.session()))
       {
+         SAL_WARN("tree_context constructor: {} {}", &_root, _root.address());
       }
       /**
        * Given a value type, if it is too large for inline converts it to a value_node,
@@ -608,14 +609,19 @@ namespace psitri
             ptr_address new_ipn_addr = _session.alloc<inner_prefix_node>(
                 {&new_leaf_addr, 1}, in.obj(), in->prefix().substr(cpre.size()));
 
-            auto divider = in->prefix()[cpre.size()];
-            if (key.size() == cpre.size() or key[cpre.size()] < divider)
+            uint8_t ipn_div  = in->prefix()[cpre.size()];
+            uint8_t leaf_div = key.size() > cpre.size() ? key[cpre.size()] : ipn_div;
+            uint8_t divider  = ipn_div;
+            if (leaf_div > ipn_div)
+            {
+               divider = leaf_div;
                std::swap(new_leaf_addr, new_ipn_addr);
+            }
 
             if constexpr (mode.is_unique())
             {
                return remake_inner_prefix(in, cpre,
-                                          branch_set(divider, new_ipn_addr, new_leaf_addr))
+                                          branch_set(divider, new_leaf_addr, new_ipn_addr))
                    .address();
             }
             else if constexpr (mode.is_shared())
@@ -623,7 +629,7 @@ namespace psitri
                //               SAL_WARN("retaining children after cloning to new inner_prefix with smaller prefix");
                retain_children(in);
                return make_inner_prefix(parent_hint, cpre,
-                                        branch_set(divider, new_ipn_addr, new_leaf_addr));
+                                        branch_set(divider, new_leaf_addr, new_ipn_addr));
             }
             std::unreachable();
          }
@@ -702,7 +708,6 @@ namespace psitri
          //         SAL_WARN(" insert: retaining children before inserting");
          retain_children(leaf);
       }
-
       uint8_t cline_idx = 0xff;
 
       if (_new_value.is_view())

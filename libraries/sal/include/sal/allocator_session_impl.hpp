@@ -249,15 +249,28 @@ namespace sal
    }
    inline void allocator_session::retain(ptr_address adr)
    {
-      //     SAL_WARN("retaining {} pre ref: {}", adr, get(adr).ref());
+      //   SAL_WARN("retaining {} pre ref: {}", adr, get(adr).ref());
       get(adr).retain();
    }
    inline void allocator_session::release(ptr_address adr) noexcept
    {
-      //      SAL_WARN("releasing {} ref: {}", adr, get(adr).ref());
-      auto prev = get(adr).release();
-      if (prev.ref > 1)
+      auto& cb = get(adr);
+      //    SAL_WARN("release: {} pre ref: {}", adr, cb.ref());
+      if (cb.fast_release()) [[likely]]
          return;
+
+      //      SAL_WARN(" queue release: {} pre ref: {}", adr, cb.ref());
+      if (_release_queue.try_push(adr)) [[likely]]
+         return;
+
+      //     SAL_ERROR(" try push failed, final_release: {}", adr);
+      final_release(adr);
+   }
+   inline void allocator_session::final_release(ptr_address adr) noexcept
+   {
+      //  SAL_ERROR("final_release: {} ", adr);
+      auto& cb   = get(adr);
+      auto  prev = cb.release();
 
       location loc = prev.loc();
       if (loc != location::null()) [[likely]]

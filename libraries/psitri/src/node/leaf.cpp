@@ -2,6 +2,7 @@
 #include <cassert>    // Required for assert
 #include <cstdlib>    // Required for std::abs on int (safer than cmath ambiguity)
 #include <psitri/node/leaf.hpp>
+#include "ucc/fast_memcpy.hpp"
 
 namespace psitri
 {
@@ -64,58 +65,78 @@ namespace psitri
    {
       apply(op::leaf_insert{*this, lower_bound(key), key, value});
    }
+   uint32_t leaf_node::compact_size() const noexcept
+   {
+      return max_leaf_size;
+      auto ccline     = clines();
+      auto ccline_end = ccline.data() + ccline.size();
+      auto head_size  = (char*)ccline_end - (char*)this;
+      return ucc::round_up_multiple<64>(_alloc_pos) + ucc::round_up_multiple<64>(head_size);
+   }
+
+   void leaf_node::compact_to(alloc_header* compact_dst) const noexcept
+   {
+      //  SAL_WARN("compacting from {} to {} {}", address(), compact_dst->address(), compact_size());
+      assert(compact_dst->size() == compact_size());
+      ucc::memcpy_aligned_64byte(compact_dst, this, size());
+   }
 
    void leaf_node::clone_from(const leaf_node* clone)
    {
       //SAL_INFO("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
       set_num_branches(clone->num_branches());
-      if (not clone->is_optimal_layout())
+      if (clone->dead_space())
       {
-         //SAL_INFO("cloning to optimal layout, num_branches: {}", num_branches());
-         _alloc_pos      = 0;
-         _dead_space     = 0;
-         _cline_cap      = 0;
-         _optimal_layout = true;
-
-         const uint16_t nb = clone->num_branches();
-         /// copy the key hashes
-         memcpy(_key_hashs, clone->_key_hashs, nb * sizeof(uint8_t));
-
-         /// copy the keys in the optimal layout order
-         const uint8_t* seq = search_seq_table.data() + ((nb - 1) * nb) / 2;
-         auto           kos = keys_offsets();
-
-         /// allocate the keys in the optimal layout order
-         for (uint16_t x = nb; x-- > 0;)
+         // let the compactor do this work, it has a major slowdown of updates/inserts when
+         // put in the critical path.
+         //if (not clone->is_optimal_layout())
          {
-            auto idx = seq[x];
-            kos[idx] = alloc_key(clone->get_key(branch_number(idx)));
-         }
+            //SAL_INFO("cloning to optimal layout, num_branches: {}", num_branches());
+            _alloc_pos      = 0;
+            _dead_space     = 0;
+            _cline_cap      = 0;
+            _optimal_layout = true;
 
-         auto vos       = value_offsets();
-         auto clone_vos = clone->value_offsets();
+            const uint16_t nb = clone->num_branches();
+            /// copy the key hashes
+            memcpy(_key_hashs, clone->_key_hashs, nb * sizeof(uint8_t));
 
-         // now copy the values in order, adding address pointers in order
-         // this has to be forward order so that address_ptrs() are added in order
-         for (uint16_t x = 0; x < nb; ++x)
-         {
-            value_type val = clone->get_value(branch_number(x));
-            if (val.is_view())
+            /// copy the keys in the optimal layout order
+            const uint8_t* seq = search_seq_table.data() + ((nb - 1) * nb) / 2;
+            auto           kos = keys_offsets();
+
+            /// allocate the keys in the optimal layout order
+            for (uint16_t x = nb; x-- > 0;)
             {
-               if (val.view().empty())
-                  vos[x] = value_branch();
-               else
-                  vos[x] = alloc_value(val.view());
+               auto idx = seq[x];
+               kos[idx] = alloc_key(clone->get_key(branch_number(idx)));
             }
-            else if (val.is_subtree())
-               vos[x] = add_address_ptr(value_branch::value_type::subtree, val.subtree_address());
-            else if (val.is_value_node())
-               vos[x] = add_address_ptr(value_branch::value_type::value_node, val.value_address());
-            else
-               vos[x] = value_branch();
+
+            auto vos       = value_offsets();
+            auto clone_vos = clone->value_offsets();
+
+            // now copy the values in order, adding address pointers in order
+            // this has to be forward order so that address_ptrs() are added in order
+            for (uint16_t x = 0; x < nb; ++x)
+            {
+               value_type val = clone->get_value(branch_number(x));
+               if (val.is_view())
+               {
+                  if (val.view().empty())
+                     vos[x] = value_branch();
+                  else
+                     vos[x] = alloc_value(val.view());
+               }
+               else if (val.is_subtree())
+                  vos[x] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+               else if (val.is_value_node())
+                  vos[x] = add_address_ptr(value_type_flag::value_node, val.value_address());
+               else
+                  vos[x] = value_branch();
+            }
+            assert(is_optimal_layout());
+            return;
          }
-         assert(is_optimal_layout());
-         return;
       }
 
       _alloc_pos      = clone->_alloc_pos;
@@ -130,7 +151,11 @@ namespace psitri
       auto head_size  = (char*)ccline_end - (char*)clone->_key_hashs;
 
       memcpy(_key_hashs, clone->_key_hashs, head_size);
-      memcpy(alloc_head(), clone->alloc_head(), clone->_alloc_pos);
+
+      auto  apos = ucc::round_up_multiple<64>(_alloc_pos);
+      char* aptr = ((char*)tail()) - apos;
+      ucc::memcpy_aligned_64byte(aptr, ((char*)clone->tail()) - apos, apos);
+      //memcpy(alloc_head(), clone->alloc_head(), clone->_alloc_pos);
    }
 
    /// TODO: this could be made more effecient by copying and inserting in one pass
@@ -218,11 +243,9 @@ namespace psitri
                vos[x - *start] = alloc_value(val.view());
          }
          else if (val.is_subtree())
-            vos[x - *start] =
-                add_address_ptr(value_branch::value_type::subtree, val.subtree_address());
+            vos[x - *start] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
          else if (val.is_value_node())
-            vos[x - *start] =
-                add_address_ptr(value_branch::value_type::value_node, val.value_address());
+            vos[x - *start] = add_address_ptr(value_type_flag::value_node, val.value_address());
          else
             vos[x - *start] = value_branch();
       }
@@ -329,13 +352,13 @@ namespace psitri
       else if (ins.value.is_subtree())
       {
          value_offsets()[bn] =
-             add_address_ptr(value_branch::value_type::subtree, ins.value.subtree_address());
+             add_address_ptr(value_type_flag::subtree, ins.value.subtree_address());
       }
       else  //if (ins.value.is_value_node())
       {
          assert(ins.value.is_value_node());
          value_offsets()[bn] =
-             add_address_ptr(value_branch::value_type::value_node, ins.value.value_address());
+             add_address_ptr(value_type_flag::value_node, ins.value.value_address());
       }
       /// if there is only one branch then you cannot get more optimal, if
       /// there is more than one branch, then the optimal layout would be to
@@ -450,13 +473,13 @@ namespace psitri
          }
          else if (value.is_subtree())
          {
-            vb = add_address_ptr(value_branch::value_type::subtree, value.subtree_address());
+            vb = add_address_ptr(value_type_flag::subtree, value.subtree_address());
             _dead_space += old_size + sizeof(value_data);
             _optimal_layout = false;
          }
          else if (value.is_value_node())
          {
-            vb = add_address_ptr(value_branch::value_type::value_node, value.value_address());
+            vb = add_address_ptr(value_type_flag::value_node, value.value_address());
             _dead_space += old_size + sizeof(value_data);
             _optimal_layout = false;
          }
@@ -492,11 +515,11 @@ namespace psitri
       }
       else if (value.is_subtree())
       {
-         vb = add_address_ptr(value_branch::value_type::subtree, value.subtree_address());
+         vb = add_address_ptr(value_type_flag::subtree, value.subtree_address());
       }
       else if (value.is_value_node())
       {
-         vb = add_address_ptr(value_branch::value_type::value_node, value.value_address());
+         vb = add_address_ptr(value_type_flag::value_node, value.value_address());
       }
       _optimal_layout = false;
       assert(get_value(bn) == value);
@@ -521,8 +544,7 @@ namespace psitri
    /**
     * 
     */
-   leaf_node::value_branch leaf_node::add_address_ptr(value_branch::value_type t,
-                                                      ptr_address              addr) noexcept
+   leaf_node::value_branch leaf_node::add_address_ptr(value_type_flag t, ptr_address addr) noexcept
    {
       ptr_address            base_cline(*addr & ~0x0f);
       std::span<ptr_address> cls         = clines();
@@ -635,6 +657,37 @@ namespace psitri
       result.cprefix     = get_common_prefix();
       size_t cprefix_len = result.cprefix.size();
 
+      uint8_t  bytes[nb];
+      uint16_t last_idx  = nb - 1;
+      uint8_t  last_byte = get_key(branch_number(1))[cprefix_len];
+      uint16_t idx       = 1;
+      uint8_t  byte      = last_byte;
+      uint16_t delta     = nb;
+      int      mid       = nb / 2;
+      for (int x = 2; x < nb; ++x)
+      {
+         uint8_t next_byte = get_key(branch_number(x))[cprefix_len];
+         if (next_byte != last_byte)
+         {
+            last_byte      = next_byte;
+            auto cur_delta = abs(mid - x);
+            if (cur_delta < delta)
+            {
+               idx   = x;
+               byte  = next_byte;
+               delta = cur_delta;
+            }
+            else
+               break;
+         }
+      }
+      result.divider          = byte;
+      result.less_than_count  = idx;
+      result.greater_eq_count = nb - idx;
+      //  SAL_ERROR("get_split_pos: cpre: '{}' divider: '{}' before: '{}' after: '{}'", result.cprefix,
+      //            byte, idx, nb - idx);
+      return result;
+#if 0
       // Initialize with the split just before the last element (index nb-2)
       int best_split_idx = nb - 1;
 
@@ -656,7 +709,8 @@ namespace psitri
          }
       }
 
-      const int max_back = mid - (best_split_idx - mid) + 1;
+      int max_back = mid - (best_split_idx - mid);
+      max_back += max_back == 0;
       assert(max_back >= 1);  // so we don't have to check key sizes before key[cpefix_len]
 
       for (int x = mid - 1; x >= max_back; --x)
@@ -672,8 +726,11 @@ namespace psitri
       result.less_than_count  = best_split_idx;
       result.greater_eq_count = nb - best_split_idx;
       result.divider          = get_key(branch_number(best_split_idx))[cprefix_len];
+      SAL_ERROR("get_split_pos: {} {} {} {}", result.cprefix, result.divider,
+                result.less_than_count, result.greater_eq_count);
 
       return result;
+#endif
    }
 
 }  // namespace psitri

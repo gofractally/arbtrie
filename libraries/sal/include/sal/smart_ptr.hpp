@@ -350,9 +350,9 @@ namespace sal
                 uint8_t(T::type_id) == uint8_t(_obj->type()));
       }
 
-      const T* obj() const noexcept { return reinterpret_cast<const T*>(_obj); }
-      const T* operator->() const noexcept { return obj(); }
-
+      const T*        obj() const noexcept { return reinterpret_cast<const T*>(_obj); }
+      const T*        operator->() const noexcept { return obj(); }
+      const T&        operator*() const noexcept { return *obj(); }
       modify_guard<T> modify() noexcept;
       void modify(auto&& update_fn) const noexcept(noexcept(update_fn(std::declval<T*>())));
 
@@ -401,10 +401,10 @@ namespace sal
    {
       if (_observed_ptr) [[likely]]
       {
-         if (_obj._asession->config_update_checksum_on_modify())
-            _observed_ptr->update_checksum();
-         else
-            _observed_ptr->clear_checksum();
+         // if (_obj._asession->config_update_checksum_on_modify())
+         //    _observed_ptr->update_checksum();
+         // else
+         _observed_ptr->clear_checksum();
       }
       // perform post modify actions here, like update checksum
    }

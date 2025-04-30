@@ -229,6 +229,7 @@ namespace sal
       inline bool config_update_checksum_on_modify() const;
 
       void mlock_pinned_segments();
+      bool compactor_release_objects(allocator_session& ses);
 
       /**
        * Utilized by allocator_session 
@@ -404,6 +405,10 @@ namespace sal
       inline auto& get_rcache_queue(allocator_session_number session_num) const
       {
          return _mapped_state->_session_data.rcache_queue(session_num);
+      }
+      inline auto& get_release_queue(allocator_session_number session_num) const
+      {
+         return _mapped_state->_session_data.release_queue(session_num);
       }
 
       /**
