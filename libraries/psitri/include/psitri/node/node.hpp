@@ -316,7 +316,7 @@ namespace psitri
       ptr_address null_cline       = sal::null_ptr_address >> 4;
       for (int i = 0; i < new_branches.size(); ++i)
       {
-         // TODO: provide scalar and SSE versions
+         /// TODO: provide scalar and SSE versions
          int cur_idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *new_clines[i]);
          if (cur_idx < 16) [[likely]]
          {

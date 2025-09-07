@@ -83,7 +83,7 @@ namespace psitri
 
    void leaf_node::clone_from(const leaf_node* clone)
    {
-      //SAL_INFO("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
+      //    SAL_ERROR("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
       set_num_branches(clone->num_branches());
       if (clone->dead_space())
       {
@@ -91,7 +91,7 @@ namespace psitri
          // put in the critical path.
          //if (not clone->is_optimal_layout())
          {
-            //SAL_INFO("cloning to optimal layout, num_branches: {}", num_branches());
+            //         SAL_ERROR("cloning to optimal layout, num_branches: {}", num_branches());
             _alloc_pos      = 0;
             _dead_space     = 0;
             _cline_cap      = 0;
@@ -146,6 +146,9 @@ namespace psitri
 
       assert(free_space() >= 0);
 
+      // We cannot use the faster aligned memcpy unless we are copying from a leaf node
+      // that has an optimal layout, otherwise we could end up copying data that is not
+      // aligned to the cacheline size.
       auto ccline     = clone->clines();
       auto ccline_end = ccline.data() + ccline.size();
       auto head_size  = (char*)ccline_end - (char*)clone->_key_hashs;
@@ -154,8 +157,15 @@ namespace psitri
 
       auto  apos = ucc::round_up_multiple<64>(_alloc_pos);
       char* aptr = ((char*)tail()) - apos;
-      ucc::memcpy_aligned_64byte(aptr, ((char*)clone->tail()) - apos, apos);
-      //memcpy(alloc_head(), clone->alloc_head(), clone->_alloc_pos);
+      //SAL_ERROR(" this.size:{} clone.size:{}", size(), clone->size());
+      //SAL_ERROR(" memcpy_aligned_64byte( {}, {}, {})", aptr, ((char*)clone->tail()) - apos, apos);
+
+      // in order to use the faster, aligned memcpy we need to handle the case where this would
+      // overwrite the first 64 bytes of the node where the header info is stored. Using the slower
+      // memcpy to copy exactly what is needed solves the problem for now.
+      //ucc::memcpy_aligned_64byte(aptr, ((char*)clone->tail()) - apos, apos);
+
+      memcpy(alloc_head(), clone->alloc_head(), clone->_alloc_pos);
    }
 
    /// TODO: this could be made more effecient by copying and inserting in one pass
@@ -193,6 +203,7 @@ namespace psitri
    leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const leaf_node* clone)
        : node(alloc_size, node_type::leaf, seq)
    {
+      SAL_ERROR("cloning alloc_size: {} clone.size:{}", alloc_size, clone->size());
       clone_from(clone);
    }
    /**
@@ -664,6 +675,7 @@ namespace psitri
       uint8_t  byte      = last_byte;
       uint16_t delta     = nb;
       int      mid       = nb / 2;
+      int      end       = nb;
       for (int x = 2; x < nb; ++x)
       {
          uint8_t next_byte = get_key(branch_number(x))[cprefix_len];
@@ -676,6 +688,8 @@ namespace psitri
                idx   = x;
                byte  = next_byte;
                delta = cur_delta;
+               assert(mid + delta <= nb);
+               end = mid + delta;  //std::min<uint16_t>(nb, mid + delta);
             }
             else
                break;
@@ -687,50 +701,6 @@ namespace psitri
       //  SAL_ERROR("get_split_pos: cpre: '{}' divider: '{}' before: '{}' after: '{}'", result.cprefix,
       //            byte, idx, nb - idx);
       return result;
-#if 0
-      // Initialize with the split just before the last element (index nb-2)
-      int best_split_idx = nb - 1;
-
-      // Calculate initial divider based on the key *after* the initial best_split_idx
-      key_view initial_split_key = get_key(branch_number(best_split_idx));  // key[nb-1]
-      assert(initial_split_key.size() > cprefix_len &&
-             "Last key must differ from first key after common prefix if nb >= 2");
-      result.divider = initial_split_key[cprefix_len];
-
-      auto mid = nb / 2;
-      for (int x = mid; x < best_split_idx; ++x)
-      {
-         key_view key_x  = get_key(branch_number(x));
-         key_view key_x1 = get_key(branch_number(x + 1));
-         if (key_x[cprefix_len] != key_x1[cprefix_len])
-         {
-            best_split_idx = x + 1;
-            break;
-         }
-      }
-
-      int max_back = mid - (best_split_idx - mid);
-      max_back += max_back == 0;
-      assert(max_back >= 1);  // so we don't have to check key sizes before key[cpefix_len]
-
-      for (int x = mid - 1; x >= max_back; --x)
-      {
-         key_view key_x  = get_key(branch_number(x));
-         key_view key_x1 = get_key(branch_number(x + 1));
-         if (key_x[cprefix_len] != key_x1[cprefix_len])
-         {
-            best_split_idx = x + 1;
-            break;
-         }
-      }
-      result.less_than_count  = best_split_idx;
-      result.greater_eq_count = nb - best_split_idx;
-      result.divider          = get_key(branch_number(best_split_idx))[cprefix_len];
-      SAL_ERROR("get_split_pos: {} {} {} {}", result.cprefix, result.divider,
-                result.less_than_count, result.greater_eq_count);
-
-      return result;
-#endif
    }
 
 }  // namespace psitri

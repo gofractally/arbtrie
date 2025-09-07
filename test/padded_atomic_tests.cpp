@@ -1,9 +1,9 @@
-#include <arbtrie/padded_atomic.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <thread>
+#include <ucc/padded_atomic.hpp>
 #include <vector>
 
-using namespace arbtrie;
+using namespace ucc;
 
 TEST_CASE("padded_atomic<uint64_t> basic operations", "[atomic]")
 {

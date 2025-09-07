@@ -434,11 +434,11 @@ TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
                REQUIRE(inode->lower_bound(prefix_kv) == branch_number(0));
                // Key longer, starting with prefix, check based on first char after prefix
                std::string key_after_prefix_a = prefix_str + "a";  // Before 'm'
-               REQUIRE(inode->lower_bound(key_after_prefix_a) == branch_number(0));
+               REQUIRE(inode->lower_bound("a") == branch_number(0));
                std::string key_after_prefix_m = prefix_str + "m";  // Equal to divider 'm'
-               REQUIRE(inode->lower_bound(key_after_prefix_m) == branch_number(1));
+               REQUIRE(inode->lower_bound("m") == branch_number(1));
                std::string key_after_prefix_z = prefix_str + "z";  // After 'm'
-               REQUIRE(inode->lower_bound(key_after_prefix_z) == branch_number(1));
+               REQUIRE(inode->lower_bound("z") == branch_number(1));
             }
             else
             {

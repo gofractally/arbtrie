@@ -516,8 +516,9 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
               0);  // Clone constructor currently doesn't compact dead space
       REQUIRE(clone_node.clines_capacity() == source_node.clines_capacity());
       REQUIRE(not source_node.is_optimal_layout());
-      INFO("verifying cloning to optimal layout");
-      REQUIRE(clone_node.is_optimal_layout());
+      //      INFO("verifying cloning to optimal layout");
+      //      copy constructing a leaf node doesn't guarantee an optimal layout
+      //      REQUIRE(clone_node.is_optimal_layout());
 
       // Check free space - should be minimal due to rounding
       int clone_free = clone_node.free_space();

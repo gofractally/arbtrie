@@ -6,6 +6,7 @@
 #include <psitri/upsert_mode.hpp>
 #include <sal/allocator_session.hpp>
 #include <sal/smart_ptr.hpp>
+#include "sal/numbers.hpp"
 
 namespace psitri
 {
@@ -96,9 +97,6 @@ namespace psitri
          assert(result == -1);
       }
 
-      /// @return the size of the prior value, or -1 if the value was not found.
-      int remove(key_view key) { return upsert<upsert_mode::unique_remove>(key, value_type()); }
-
       /// @return the size of the prior value, or -1 if the value was inserted.
       template <upsert_mode mode = upsert_mode::unique_upsert>
       int upsert(key_view key, value_type value)
@@ -121,6 +119,25 @@ namespace psitri
             _root.give(make_inner(result));
          return _old_value_size;
       }
+
+      /// @return the size of the prior value, or -1 if the value was not found.
+      int remove(key_view key)
+      {
+         if (not _root)
+            return -1;
+         sal::read_lock lock = _session.lock();
+         auto           rref = *_root;
+         _root.take();
+         /// ironically, if we are in shared mode removing a key could force a split because the new
+         /// branch address might not be sharable with the 16 existing clines.
+         branch_set result = upsert<upsert_mode::unique_remove>({}, rref, key);
+         if (result.count() == 1)
+            _root.give(result.get_first_branch());
+         else
+            _root.give(make_inner(result));
+         return _old_value_size;
+      }
+
       void print() { print(_session.get_ref(_root.address())); }
       void validate() { validate(_session.get_ref(_root.address())); }
       void validate(const smart_ptr<alloc_header>& r)
@@ -364,18 +381,9 @@ namespace psitri
                         smart_ref<alloc_header>& r,
                         key_view                 key)
       {
-         //SAL_INFO("upsert: r: {} ref: {}", r.address(), r.ref());
          if constexpr (mode.is_unique())
-         {
-            //SAL_INFO("  upsert: unique mode");
             if (r.ref() > 1)
-            {
                return upsert<mode.make_shared()>(parent_hint, r, key);
-            }
-         }
-         //         else if constexpr (mode.is_shared())
-         //            SAL_INFO("  upsert: shared mode");
-         //            ;
 
          branch_set result;
          switch (node_type(r->type()))
@@ -395,21 +403,9 @@ namespace psitri
                std::unreachable();
          }
          if constexpr (mode.is_unique())
-         {
             assert(result.contains(r.address()));
-         }
-         else
-         {
-            //SAL_ERROR("upsert {} returned: {}", r.address(), result);
-            // when inserting to an inner it may add a new branch without modifying the existing
-            // one so we cannot "always release" here.
-            //assert(not result.contains(r.address()));
-            if (not result.contains(r.address())) [[likely]]
-            {
-               //SAL_ERROR("releasing result {}  pre ref: {}", r.address(), r.ref());
-               r.release();
-            }
-         }
+         else if (not result.contains(r.address())) [[likely]]
+            r.release();
 
          return result;
       }
@@ -496,7 +492,7 @@ namespace psitri
                                            branch_number             br,
                                            const branch_set&         sub_branches)
    {
-      // at this point we don't care about insert vs upsert so prevent code bloat
+      // at this point we don't care about insert vs upsert vs update vs remove so prevent code bloat
       static_assert(mode.flags <= upsert_mode::type::unique, "mode must be unique or shared");
       //SAL_INFO("merge_branches: in: {} br: {} sub: {}", in.address(), br, sub_branches);
       //print(in, 10);
@@ -574,6 +570,9 @@ namespace psitri
          auto cpre = common_prefix(key, in->prefix());
          if (cpre != in->prefix()) [[unlikely]]
          {
+            if constexpr (mode.is_remove())
+               return in.address();
+
             //          SAL_ERROR("        cpre  != in->prefix() '{}' != '{}'  key: {}", cpre, in->prefix(),
             //                   key);
             assert(in->prefix().size() >= 1);  // or else it should have been an inner_node
@@ -645,32 +644,40 @@ namespace psitri
       //print(in, 10);
 
       if constexpr (mode.is_shared())
-      {
-         //         SAL_WARN("retaining children before releasing bref {}", bref.address());
          retain_children(in);  // all children have been copied to new node, retain them
-         //SAL_ERROR("releasing bref {}", bref.address());
-         //bref.release();  // the reference has been replaced because it was modified
-      }
 
       // recursive upsert, give it this nodes clines as the parent hint
       branch_set sub_branches = upsert<mode>(in->get_branch_clines(), bref, key);
       //SAL_INFO("in after updating branch '{}' address {} ptr: {}", br, badr, in.obj());
       //print(in, 10);
-
-      if constexpr (mode.is_shared())
+      if constexpr (mode.is_remove())
       {
-         /// TODO: fi sub_branches.count == 1, then in theory we could assert sbu_branches.contains
-         // assert(not sub_branches.contains(badr));
-         if (not sub_branches.contains(badr)) [[unlikely]]
+         if (in->num_branches() == 1)
          {
-            //SAL_ERROR("releasing bref {}", bref.address());
-            //bref.release();  // the reference has been replaced because it was modified
+            // if the child is a leaf node,
+         }
+         if (sub_branches.count() == 0) [[unlikely]]
+         {
+            if (in->num_branches() == 2)
+            {
+               // then we are going from 2 to 1 branch which makes this
+               // inner node potentially redundant. If not prefix node,
+               // we can simply return the sole branch as the new child for
+               // the parent; however, in that case the child will need a new address
+               // allocated using the parent hint of our parent rather than the hint
+               // of this node it was likely allocated under.
+            }
+            // this happens when this node has a common prefix that cannot be prepended
+            // to all the keys of the sole leaf node.
+            else if (in->num_branches() == 1)
+               return {};
          }
       }
 
       // the happy path where there is nothing to do.
-      if constexpr (mode.is_unique())
+      if constexpr (mode.is_unique() or mode.is_remove())
       {
+         // even in shared mode it is possible for remove to do nothing if key was not found
          // assert(badr == bref->address());
          if (sub_branches.count() == 1) [[likely]]
          {
