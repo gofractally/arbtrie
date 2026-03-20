@@ -132,19 +132,20 @@ endif()
 # Sanitizer configuration
 if(ENABLE_SANITIZER)
     message(STATUS "Enabling Thread Sanitizer")
-    target_compile_options(arbtrie PUBLIC -fsanitize=thread -g)
-    target_link_options(arbtrie PUBLIC -fsanitize=thread -g)
+    # arbtrie target commented out — re-enable for psitri
+    # target_compile_options(arbtrie PUBLIC -fsanitize=thread -g)
+    # target_link_options(arbtrie PUBLIC -fsanitize=thread -g)
 endif()
 
 # Coverage configuration
 if(ENABLE_COVERAGE)
     message(STATUS "Enabling coverage reporting")
-    
-    # Add coverage flags - using more specific flags
-    target_compile_options(arbtrie PUBLIC 
-        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
-    target_link_options(arbtrie PUBLIC 
-        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+
+    # arbtrie target commented out — re-enable for psitri
+    # target_compile_options(arbtrie PUBLIC
+    #     $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
+    # target_link_options(arbtrie PUBLIC
+    #     $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
     
     # Find required tools
     find_program(LCOV lcov REQUIRED)

@@ -6,7 +6,7 @@
 #include <string_view>
 
 #define XXH_INLINE_ALL
-#include <arbtrie/hash/xxhash.h>
+#include <hash/xxhash.h>
 
 namespace arbtrie
 {

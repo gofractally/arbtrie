@@ -1,10 +1,10 @@
 #pragma once
-#include <arbtrie/hash/lehmer64.h>
+#include <hash/lehmer64.h>
 #include <assert.h>
 #include <arbtrie/address.hpp>
 #include <arbtrie/circular_buffer.hpp>
 #include <arbtrie/config.hpp>
-#include <arbtrie/hash/xxh32.hpp>
+#include <hash/xxh32.hpp>
 #include <arbtrie/mapped_memory/cache_difficulty_state.hpp>
 #include <arbtrie/mapped_memory/read_lock_queue.hpp>
 #include <arbtrie/mapped_memory/segment.hpp>

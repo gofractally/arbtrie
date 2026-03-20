@@ -1,4 +1,4 @@
-#include <arbtrie/hash/xxhash.h>
+#include <hash/xxhash.h>
 #include <algorithm>
 #include <arbtrie/binary_node.hpp>
 #include <arbtrie/database.hpp>

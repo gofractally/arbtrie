@@ -1,6 +1,6 @@
 #pragma once
 #include <unistd.h>
-#include <arbtrie/hash/xxh32.hpp>
+#include <hash/xxh32.hpp>
 #include <bit>
 #include <cstddef>
 #include <iostream>

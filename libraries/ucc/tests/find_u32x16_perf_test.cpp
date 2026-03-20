@@ -41,9 +41,9 @@ TEST_CASE("Performance comparison for find_u32x16 variants", "[benchmark][find_u
    auto verify = [&](uint32_t value, int expected_index)
    {
       INFO("Verifying value: " << value << " Expected index: " << expected_index);
-      int res_neon     = ucc::find_u32x16(data_ptr, value);
+      int res_neon     = ucc::find_u32x16(data_ptr, 16, value);
       int res_scalar   = ucc::find_u32x16_scalar(data_ptr, value);
-      int res_unrolled = ucc::find_u32x16_scalar_unrolled(data_ptr, value);
+      int res_unrolled = ucc::find_u32x16_scalar_unrolled(data_ptr, 16, value);
       REQUIRE(res_neon == expected_index);
       REQUIRE(res_scalar == expected_index);
       REQUIRE(res_unrolled == expected_index);
@@ -70,7 +70,7 @@ TEST_CASE("Performance comparison for find_u32x16 variants", "[benchmark][find_u
       static size_t i             = 0;
       uint32_t      value_to_find = search_values[i % num_search_values];
       i++;
-      return ucc::find_u32x16(data_ptr, value_to_find);
+      return ucc::find_u32x16(data_ptr, 16, value_to_find);
    };
 
    BENCHMARK("find_u32x16_scalar (random)")
@@ -86,6 +86,6 @@ TEST_CASE("Performance comparison for find_u32x16 variants", "[benchmark][find_u
       static size_t i             = 0;
       uint32_t      value_to_find = search_values[i % num_search_values];
       i++;
-      return ucc::find_u32x16_scalar_unrolled(data_ptr, value_to_find);
+      return ucc::find_u32x16_scalar_unrolled(data_ptr, 16, value_to_find);
    };
 }
