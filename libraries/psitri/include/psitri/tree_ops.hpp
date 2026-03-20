@@ -220,6 +220,12 @@ namespace psitri
                               branch_number          lb);
 
       template <upsert_mode mode>
+      branch_set remove(const sal::alloc_hint& parent_hint,
+                        smart_ref<leaf_node>&  leaf,
+                        key_view               key,
+                        branch_number          lb);
+
+      template <upsert_mode mode>
       branch_set insert(const sal::alloc_hint& parent_hint,
                         smart_ref<leaf_node>&  leaf,
                         key_view               key,
@@ -686,6 +692,22 @@ namespace psitri
          }
          // else fall through to merge branches.
       }
+      if constexpr (mode.is_remove())
+      {
+         if (sub_branches.count() == 0) [[unlikely]]
+         {
+            if (in->num_branches() == 1)
+               return {};
+
+            SAL_ERROR("remove: sub_branches.count() == 0");
+            /// we need to modify inner node in to remove the branch
+            abort();
+         }
+      }
+      else
+      {
+         assert(sub_branches.count() > 0);
+      }
       //      SAL_ERROR(" merge branches: {}", sub_branches);
       // integrate the sub_branches into the current node, and return the resulting branch set
       // to the parent node.
@@ -702,6 +724,74 @@ namespace psitri
       throw std::runtime_error("update: not implemented");
    }
    */
+   template <upsert_mode mode>
+   branch_set tree_context::remove(const sal::alloc_hint& parent_hint,
+                                   smart_ref<leaf_node>&  leaf,
+                                   key_view               key,
+                                   branch_number          lb)
+   {
+      // make sure the key exists and is an exact match, if it isn't
+      // an exact match then no changes are made, simply return itself unmodified.
+      if constexpr (not mode.must_remove())
+      {
+         if (leaf->get_key(lb) != key) [[unlikely]]
+            return leaf.address();
+      }
+      // if we must remove, then if the key does not exist, throw an error
+      /// TODO: is this path even possible or does it abort in the caller,
+      /// if it aborts in the caller then this code is redundant bloat
+      if constexpr (mode.must_remove())
+      {
+         if (leaf->get_key(lb) != key) [[unlikely]]
+            throw std::runtime_error("remove: key does not exist");
+      }
+      auto old_value = leaf->get_value(lb);
+      if (old_value.is_value_node())
+         this->_old_value_size = _session.get_ref(old_value.value_address())->size();
+      else
+         this->_old_value_size = leaf->get_value(lb).size();
+      // at this point we know the key exists and must be removed
+
+      if constexpr (mode.is_unique())
+      {
+         if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
+         {
+            auto addr = leaf->get_value_address(lb);
+            _session.release(addr);
+         }
+
+         if (leaf->num_branches() == 1) [[unlikely]]
+         {
+            SAL_ERROR("remove unique: leaf has only one branch");
+            return {};
+         }
+
+         leaf.modify()->remove(lb);
+         return leaf.address();
+      }
+      else  // constexpr mode.is_shared()
+      {
+         if (leaf->num_branches() == 1) [[unlikely]]
+         {
+            SAL_ERROR("remove shared: leaf has only one branch");
+            return {};
+         }
+
+         retain_children(leaf);
+         op::leaf_remove remove_op{.src = *leaf.obj(), .bn = lb};
+         auto            new_leaf = _session.alloc<leaf_node>(parent_hint, remove_op);
+
+         // if bn is an address, we need to release the address and (maybe) cline
+         if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
+         {
+            auto addr = leaf->get_value_address(lb);
+            _session.release(addr);
+         }
+
+         // if bn is the last branch, return null
+         return new_leaf;
+      }
+   }
 
    template <upsert_mode mode>
    branch_set tree_context::insert(const sal::alloc_hint& parent_hint,
@@ -888,6 +978,13 @@ namespace psitri
             throw std::runtime_error("update: key does not exist");
          return update<mode>(parent_hint, leaf, key, br);
       }
+      if constexpr (mode.must_remove())
+      {
+         branch_number br = leaf->get(key);
+         if (br == leaf->num_branches()) [[unlikely]]
+            throw std::runtime_error("remove: key does not exist");
+         return remove<mode>(parent_hint, leaf, key, br);
+      }
       else
       {
          branch_number lb = leaf->lower_bound(key);
@@ -908,6 +1005,13 @@ namespace psitri
                else
                   return insert<mode>(parent_hint, leaf, key, lb);
             }
+         }
+         else if constexpr (mode.is_remove())
+         {
+            if (lb != leaf->num_branches())
+               return remove<mode>(parent_hint, leaf, key, lb);
+            else
+               return leaf.address();
          }
       }
       std::unreachable();

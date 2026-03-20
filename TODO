@@ -1,0 +1,33 @@
+0. provider sequence number needs to be assigned at alloc.. or perhaps on commit, each commit could have its own sequence.
+
+6. Complete remove() implementation (branch: redress)
+   Status: ~60% complete — leaf-level removal works, inner node removal incomplete.
+   Done:
+     - leaf_node: constructor, apply(), alloc_size() for op::leaf_remove
+     - tree_context dispatch: upsert_mode flags (is_remove, must_remove) route to remove()
+     - tree_context::remove() handles mutable in-place and COW paths for leaves
+     - Value cleanup (value_node address release) before removal
+     - Basic test: insert ~1000 keys, remove all, verify empty
+   Remaining:
+     - inner_node::remove_branch() is a stub (comments only, no implementation)
+       Location: libraries/psitri/include/psitri/node/inner.hpp
+     - apply_to_inner calls abort() when a child leaf empties and inner has >1 branches
+       Location: libraries/psitri/include/psitri/tree_ops.hpp ~line 700
+     - Node collapse/merge when inner node goes from 2 branches to 1
+     - Expose remove() on transaction and/or write_session public API
+     - Edge case tests: mixed insert/remove, multi-level cascading, prefix nodes
+
+1. figure out inconsistent state during recovery
+4. move cache processing to its own thread with its own session so it doesn't mix with compactor's work
+5. grow binary node and setlist on cow, shrink on compact 
+     - figure out why a larger initial binary node size (4096) causes update binary large value test to fail with
+       a reference count error. 
+     - going forward binary node will be in 1 of two states, 4096, or compact... or some dead space from alloc/free of
+       key/values within the binary node... which will still get recovered on next COW or compact. 
+3. build currency simulator 
+
+
+Fixed:
+2. figure out why difficulty stops adjusting and data stops caching
+   - read_transactions (aka iterators) were hard coded non-caching
+

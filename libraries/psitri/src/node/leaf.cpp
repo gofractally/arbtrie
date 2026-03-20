@@ -184,6 +184,20 @@ namespace psitri
       clone_from(clone);
       apply(ins);
    }
+
+   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm)
+       : node(alloc_size, node_type::leaf, seq),
+         _alloc_pos(0),
+         _dead_space(0),
+         _cline_cap(0),
+         _optimal_layout(true)
+   {
+      /// TODO: could be more effecient by copying node values in order and just skipping the
+      /// removed branch, it would leave the leaf in a better layout without dead space
+      /// but putting this work onto the compactor might make more sense.
+      clone_from(&rm.src);
+      apply(rm);
+   }
    /*
     * Each node has an optimal layout that looks something like this:
     *   1. no dead space 
@@ -314,6 +328,13 @@ namespace psitri
       }
       return can_apply_mode::none;
    }
+   void leaf_node::apply(const op::leaf_remove& rm) noexcept
+   {
+      auto init_free_space = free_space();
+      assert(rm.bn < num_branches());
+      remove(rm.bn);
+   }
+
    branch_number leaf_node::apply(const op::leaf_insert& ins) noexcept
    {
       auto init_free_space = free_space();

@@ -3,3 +3,13 @@ scratch
 .tmpcommit
 .vscode
 compile_commands.json
+.cache/
+.DS_Store
+db/
+external/
+
+# scratch binaries and experiments at repo root
+maxpop
+mtest
+tfb
+*.csv

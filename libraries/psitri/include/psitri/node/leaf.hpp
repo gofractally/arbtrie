@@ -84,10 +84,15 @@ namespace psitri
       {
          return max_leaf_size;
       }
+      inline static uint32_t alloc_size(const op::leaf_remove& rm)
+      {
+         // no point in growing the node when we are removing a value
+         return rm.src.size();
+      }
 
-      //  leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_insert& ins);
       // leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
-      //leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
+      leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
+
       /// default constructor, contains one key, value pair
       leaf_node(size_t alloc_size, ptr_address_seq seq, key_view key, const value_type& value);
       /// clone and optimize
@@ -187,7 +192,7 @@ namespace psitri
       };
       can_apply_mode can_apply(const op::leaf_insert& ins) const noexcept;
       can_apply_mode can_apply(const op::leaf_update& ins) const noexcept;
-      can_apply_mode can_apply(const op::leaf_remove& ins) const noexcept;
+      //      can_apply_mode can_apply(const op::leaf_remove& ins) const noexcept;
 
       /// determines whether there is enough space to insert the key
       /// @return the amount of free space after inserting the key,
@@ -202,6 +207,7 @@ namespace psitri
       /// @pre can_insert(key) must be true
       /// @pre bn  == lower_bound(key)
       branch_number apply(const op::leaf_insert& ins) noexcept;
+      void          apply(const op::leaf_remove& rm) noexcept;
 
       /// @pre bn != num_branches()
       void remove(branch_number bn) noexcept;

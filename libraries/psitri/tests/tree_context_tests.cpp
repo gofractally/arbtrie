@@ -131,6 +131,75 @@ TEST_CASE("cursor-lowerbound", "[cursor]")
    auto           ses = salloc.get_session();
 }
 
+TEST_CASE("tree_context-insert-remove", "[tree_context][remove]")
+{
+   sal::set_current_thread_name("main");
+   std::filesystem::remove_all("db");
+   sal::register_type_vtable<leaf_node>();
+   sal::register_type_vtable<inner_prefix_node>();
+   sal::register_type_vtable<inner_node>();
+   sal::register_type_vtable<value_node>();
+
+   sal::allocator salloc("db", sal::runtime_config());
+   auto           ses  = salloc.get_session();
+   auto           root = ses->get_root<>(sal::root_object_number(0));
+
+   tree_context ctx(root);
+
+   auto words = load_words();
+   SAL_INFO("loaded {} words for insert-remove test", words.size());
+
+   // Insert all words
+   auto start = std::chrono::high_resolution_clock::now();
+   for (const auto& word : words)
+   {
+      ctx.insert(to_key_view(word), to_value_view(word));
+   }
+   auto end = std::chrono::high_resolution_clock::now();
+   SAL_ERROR("inserted {:L} words in {:L} ms, {:L} words/sec", words.size(),
+             std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+             (words.size() * 1000.0) /
+                 std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+
+   // Sort words for ordered removal
+   std::sort(words.begin(), words.end());
+
+   // Remove all words in order
+   start             = std::chrono::high_resolution_clock::now();
+   int removed_count = 0;
+   for (const auto& word : words)
+   {
+      // First verify the key exists before removing it
+      auto cur   = cursor(ctx.get_root());
+      bool found = cur.lower_bound(to_key_view(word));
+      REQUIRE(not cur.is_end());             // Should not be at end if key exists
+      REQUIRE(cur.key() == key_view(word));  // Verify we found the correct key
+
+      // Now remove the key
+      int result = ctx.remove(to_key_view(word));
+      REQUIRE(result > 0);  // Should return size of removed value (word length)
+      removed_count++;
+   }
+   end = std::chrono::high_resolution_clock::now();
+   SAL_ERROR("removed {:L} words in {:L} ms, {:L} words/sec", removed_count,
+             std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+             (removed_count * 1000.0) /
+                 std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+
+   REQUIRE(removed_count == words.size());
+
+   // Verify tree is empty by trying to remove a known word
+   int result = ctx.remove(to_key_view("hello"));
+   REQUIRE(result == -1);  // Should return -1 for non-existent key
+
+   // Verify tree is empty by checking cursor
+   auto cur = cursor(ctx.get_root());
+   cur.seek_begin();
+   REQUIRE(cur.is_end());  // Should be at end if tree is empty
+
+   SAL_INFO("Successfully inserted and removed {} words", words.size());
+}
+
 TEST_CASE("tree_context", "[tree_context]")
 {
    sal::set_current_thread_name("main");

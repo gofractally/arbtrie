@@ -10,7 +10,8 @@
 namespace sal
 {
    /**
-    * A control block for a shared pointer to a location in shared memory
+    * A control block for a shared pointer to a location in shared memory,
+    * modeled after std::control_block but adapted for the needs of the psitri.
     */
    struct control_block
    {
