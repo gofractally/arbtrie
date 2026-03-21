@@ -826,7 +826,7 @@ namespace psitri
             //          SAL_ERROR("        cpre  != in->prefix() '{}' != '{}'  key: {}", cpre, in->prefix(),
             //                   key);
             assert(in->prefix().size() >= 1);  // or else it should have been an inner_node
-            if constexpr (mode.is_update())
+            if constexpr (mode.must_update())
                throw std::runtime_error("update: key does not exist");
 
             _delta_descendents = 1;  // inserting a new key via prefix mismatch
@@ -1491,7 +1491,7 @@ namespace psitri
                                    key_view               key)
    {
       //SAL_INFO("upsert: leaf {} key: {}", leaf.address(), key);
-      if constexpr (mode.is_update())
+      if constexpr (mode.must_update())
       {
          branch_number br = leaf->get(key);
          if (br == leaf->num_branches()) [[unlikely]]
@@ -1508,23 +1508,18 @@ namespace psitri
       else
       {
          branch_number lb = leaf->lower_bound(key);
-         if constexpr (mode.is_insert())
+         if constexpr (mode.is_upsert())
+         {
+            if (lb != leaf->num_branches() and leaf->get_key(lb) == key)
+               return update<mode>(parent_hint, leaf, key, lb);
+            else
+               return insert<mode>(parent_hint, leaf, key, lb);
+         }
+         else if constexpr (mode.is_insert())
          {
             if (not(lb == leaf->num_branches() or leaf->get_key(lb) != key)) [[unlikely]]
                throw std::runtime_error("insert: key already exists");
             return insert<mode>(parent_hint, leaf, key, lb);
-         }
-         else if constexpr (mode.is_upsert())
-         {
-            if (lb != leaf->num_branches())
-               return update<mode>(parent_hint, leaf, key, lb);
-            else
-            {
-               if (leaf->get_key(lb) == key)
-                  return update<mode>(parent_hint, leaf, key, lb);
-               else
-                  return insert<mode>(parent_hint, leaf, key, lb);
-            }
          }
          else if constexpr (mode.is_remove())
          {

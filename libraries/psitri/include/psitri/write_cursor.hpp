@@ -25,13 +25,29 @@ namespace psitri
       /// Insert key/value pair. Returns true if inserted, false if key already exists.
       bool insert(key_view key, value_view value)
       {
-         return _ctx.upsert<upsert_mode::unique_insert>(key, value_type(value)) == -1;
+         // Use get to check existence first, since tree_context::upsert
+         // with unique_insert corrupts root state on throw
+         std::string tmp;
+         if (get(key, &tmp) >= 0)
+            return false;  // key exists
+         _ctx.upsert<upsert_mode::unique_insert>(key, value_type(value));
+         return true;
       }
 
       /// Update existing key. Returns true if updated, false if key not found.
       bool update(key_view key, value_view value)
       {
-         return _ctx.upsert<upsert_mode::unique_update>(key, value_type(value)) != -1;
+         if (!_ctx.get_root())
+            return false;  // empty tree, nothing to update
+         try
+         {
+            _ctx.upsert<upsert_mode::unique_update>(key, value_type(value));
+            return true;
+         }
+         catch (const std::runtime_error&)
+         {
+            return false;
+         }
       }
 
       /// Insert or update. Always succeeds.

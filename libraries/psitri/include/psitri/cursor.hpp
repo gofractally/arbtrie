@@ -287,10 +287,21 @@ namespace psitri
    int32_t cursor::get(key_view key, Buffer auto* buffer)
    {
       if (sal::null_ptr_address == _node.address()) [[unlikely]]
-         return false;
+         return cursor::value_not_found;
       auto read_lock = _node.session()->lock();
       return get_impl(key, buffer);
    }
+   template <ConstructibleBuffer ConstructibleBufferType>
+   std::optional<ConstructibleBufferType> cursor::get(key_view key) const
+   {
+      // Create a mutable copy to perform the seek
+      cursor tmp(*this);
+      ConstructibleBufferType buf;
+      if (tmp.get(key, &buf) >= 0)
+         return buf;
+      return std::nullopt;
+   }
+
    int32_t cursor::get_impl(key_view key, Buffer auto* buffer) noexcept
    {
       seek_rend();
