@@ -30,6 +30,11 @@ namespace psitri
          const leaf_node& src;
          branch_number    bn;
       };
+      struct leaf_prepend_prefix
+      {
+         const leaf_node& src;
+         key_view         prefix;
+      };
    }  // namespace op
 
    /**
@@ -89,9 +94,14 @@ namespace psitri
          // no point in growing the node when we are removing a value
          return rm.src.size();
       }
+      inline static uint32_t alloc_size(const op::leaf_prepend_prefix&)
+      {
+         return max_leaf_size;
+      }
 
       // leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
+      leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_prepend_prefix& pp);
 
       /// default constructor, contains one key, value pair
       leaf_node(size_t alloc_size, ptr_address_seq seq, key_view key, const value_type& value);

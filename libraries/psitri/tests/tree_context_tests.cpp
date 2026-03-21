@@ -205,6 +205,112 @@ TEST_CASE("tree_context-insert-remove", "[tree_context][remove]")
    SAL_INFO("Successfully inserted and removed {} words", words.size());
 }
 
+TEST_CASE("tree_context-single-branch-collapse", "[tree_context][remove][collapse]")
+{
+   sal::set_current_thread_name("main");
+   std::filesystem::remove_all("db");
+   sal::register_type_vtable<leaf_node>();
+   sal::register_type_vtable<inner_prefix_node>();
+   sal::register_type_vtable<inner_node>();
+   sal::register_type_vtable<value_node>();
+
+   sal::allocator salloc("db", sal::runtime_config());
+   auto           ses  = salloc.get_session();
+   auto           root = ses->get_root<>(sal::root_object_number(0));
+
+   tree_context ctx(root);
+
+   // Phase 1: Test inner_node collapse
+   // Insert 50 keys each for groups "a", "b", "c"
+   std::vector<std::string> a_keys, b_keys, c_keys;
+   for (int i = 0; i < 50; ++i)
+   {
+      std::string ak = "a" + std::to_string(i);
+      std::string bk = "b" + std::to_string(i);
+      std::string ck = "c" + std::to_string(i);
+      a_keys.push_back(ak);
+      b_keys.push_back(bk);
+      c_keys.push_back(ck);
+      ctx.insert(to_key_view(ak), to_value_view(ak));
+      ctx.insert(to_key_view(bk), to_value_view(bk));
+      ctx.insert(to_key_view(ck), to_value_view(ck));
+   }
+   ctx.validate();
+
+   // Remove all "b" keys
+   for (const auto& k : b_keys)
+   {
+      int result = ctx.remove(to_key_view(k));
+      REQUIRE(result > 0);
+   }
+   ctx.validate();
+
+   // Remove all "c" keys -> should trigger collapse
+   for (const auto& k : c_keys)
+   {
+      int result = ctx.remove(to_key_view(k));
+      REQUIRE(result > 0);
+   }
+   ctx.validate();
+
+   // Check no single-branch inner nodes remain
+   auto stats = ctx.get_stats();
+   REQUIRE(stats.single_branch_inners == 0);
+
+   // Verify all "a" keys still accessible via cursor
+   auto cur = cursor(ctx.get_root());
+   std::sort(a_keys.begin(), a_keys.end());
+   cur.seek_rend();
+   for (const auto& k : a_keys)
+   {
+      REQUIRE(cur.next());
+      REQUIRE(cur.key() == key_view(k));
+   }
+   REQUIRE_FALSE(cur.next());
+
+   // Phase 2: Test inner_prefix_node collapse
+   // Insert keys with shared prefix
+   std::vector<std::string> px_keys, py_keys;
+   for (int i = 0; i < 50; ++i)
+   {
+      std::string xk = "prefix_x" + std::to_string(i);
+      std::string yk = "prefix_y" + std::to_string(i);
+      px_keys.push_back(xk);
+      py_keys.push_back(yk);
+      ctx.insert(to_key_view(xk), to_value_view(xk));
+      ctx.insert(to_key_view(yk), to_value_view(yk));
+   }
+   ctx.validate();
+
+   // Remove all "prefix_y" keys -> should collapse inner_prefix_node
+   for (const auto& k : py_keys)
+   {
+      int result = ctx.remove(to_key_view(k));
+      REQUIRE(result > 0);
+   }
+   ctx.validate();
+
+   stats = ctx.get_stats();
+   REQUIRE(stats.single_branch_inners == 0);
+
+   // Verify all remaining keys accessible via cursor
+   std::vector<std::string> all_remaining;
+   all_remaining.insert(all_remaining.end(), a_keys.begin(), a_keys.end());
+   all_remaining.insert(all_remaining.end(), px_keys.begin(), px_keys.end());
+   std::sort(all_remaining.begin(), all_remaining.end());
+
+   cur = cursor(ctx.get_root());
+   cur.seek_rend();
+   int count = 0;
+   while (cur.next())
+   {
+      REQUIRE(count < all_remaining.size());
+      REQUIRE(cur.key() == key_view(all_remaining[count]));
+      count++;
+   }
+   REQUIRE(count == all_remaining.size());
+}
+
 TEST_CASE("tree_context", "[tree_context]")
 {
    sal::set_current_thread_name("main");

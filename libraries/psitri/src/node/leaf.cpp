@@ -198,6 +198,61 @@ namespace psitri
       clone_from(&rm.src);
       apply(rm);
    }
+
+   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_prepend_prefix& pp)
+       : node(alloc_size, node_type::leaf, seq),
+         _alloc_pos(0),
+         _dead_space(0),
+         _cline_cap(0),
+         _optimal_layout(true)
+   {
+      const leaf_node& src = pp.src;
+      const uint16_t   nb  = src.num_branches();
+      set_num_branches(nb);
+
+      if (nb == 0)
+         return;
+
+      const uint8_t* aseq = search_seq_table.data() + ((nb - 1) * nb) / 2;
+      auto           kos  = keys_offsets();
+      auto           kh   = key_hashs();
+
+      // Stack buffer for key with prepended prefix
+      char key_buf[2048];
+      assert(pp.prefix.size() < 1024);
+      memcpy(key_buf, pp.prefix.data(), pp.prefix.size());
+
+      // Allocate keys in optimal layout order (reverse for allocation)
+      for (uint16_t x = nb; x-- > 0;)
+      {
+         auto idx       = aseq[x];
+         auto orig_key  = src.get_key(branch_number(idx));
+         memcpy(key_buf + pp.prefix.size(), orig_key.data(), orig_key.size());
+         key_view new_key(key_buf, pp.prefix.size() + orig_key.size());
+         kos[idx] = alloc_key(new_key);
+         kh[idx]  = calc_key_hash(new_key);
+      }
+
+      // Copy values in forward order
+      auto vos = value_offsets();
+      for (uint16_t x = 0; x < nb; ++x)
+      {
+         value_type val = src.get_value(branch_number(x));
+         if (val.is_view())
+         {
+            if (val.view().empty())
+               vos[x] = value_branch();
+            else
+               vos[x] = alloc_value(val.view());
+         }
+         else if (val.is_subtree())
+            vos[x] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+         else if (val.is_value_node())
+            vos[x] = add_address_ptr(value_type_flag::value_node, val.value_address());
+         else
+            vos[x] = value_branch();
+      }
+   }
    /*
     * Each node has an optimal layout that looks something like this:
     *   1. no dead space 

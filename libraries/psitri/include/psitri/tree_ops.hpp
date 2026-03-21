@@ -218,6 +218,7 @@ namespace psitri
          uint64_t max_depth             = 1;
          uint64_t total_inner_node_size = 0;
          uint64_t total_keys            = 0;
+         uint64_t single_branch_inners  = 0;
          double   branch_per_cline      = 0;
          int      average_inner_node_size() const
          {
@@ -410,6 +411,8 @@ namespace psitri
          s.clines += r->num_clines();
          s.branches += r->num_branches();
          s.branch_per_cline += double(r->num_branches()) / r->num_clines();
+         if (r->num_branches() == 1)
+            ++s.single_branch_inners;
          for (int i = 0; i < r->num_branches(); ++i)
          {
             auto br  = r->get_branch(branch_number(i));
@@ -468,7 +471,12 @@ namespace psitri
                std::unreachable();
          }
          if constexpr (mode.is_unique())
-            assert(result.contains(r.address()));
+         {
+            if constexpr (mode.is_remove())
+               assert(result.count() == 0 || result.contains(r.address()));
+            else
+               assert(result.contains(r.address()));
+         }
          else if (not result.contains(r.address())) [[likely]]
             r.release();
 
@@ -732,9 +740,175 @@ namespace psitri
                       n->remove_branch(br);
                       n->add_descendents(_delta_descendents);
                    });
+
+               // Phase 2: Collapse single-branch inner node
+               if (in->num_branches() == 1)
+               {
+                  auto child_addr = in->get_branch(branch_number(0));
+                  auto child_ref  = _session.get_ref(child_addr);
+
+                  switch (node_type(child_ref->type()))
+                  {
+                     case node_type::leaf:
+                     {
+                        auto leaf_ref = child_ref.template as<leaf_node>();
+                        if constexpr (is_inner_node<InnerNodeType>)
+                        {
+                           retain_children(leaf_ref);
+                           (void)_session.realloc<leaf_node>(in, leaf_ref.obj());
+                           _session.release(child_addr);
+                        }
+                        else if constexpr (is_inner_prefix_node<InnerNodeType>)
+                        {
+                           // Skip collapse if prepending prefix would overflow leaf capacity
+                           auto     pfx   = in->prefix();
+                           uint16_t nb    = leaf_ref->num_branches();
+                           uint32_t avail = leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * nb;
+                           if (leaf_ref->alloc_pos() + (uint32_t)pfx.size() * nb <= avail)
+                           {
+                              retain_children(leaf_ref);
+                              char prefix_buf[2048];
+                              memcpy(prefix_buf, pfx.data(), pfx.size());
+                              (void)_session.realloc<leaf_node>(
+                                  in, op::leaf_prepend_prefix{*leaf_ref.obj(),
+                                                              key_view(prefix_buf, pfx.size())});
+                              _session.release(child_addr);
+                           }
+                           // else: skip collapse, inner_prefix_node stays with 1 branch
+                        }
+                        break;
+                     }
+                     case node_type::inner:
+                     {
+                        auto        inner_ref = child_ref.template as<inner_node>();
+                        retain_children(inner_ref);
+                        const auto* child_ptr = inner_ref.obj();
+                        const branch* brs =
+                            child_ptr->const_branches();
+                        auto freq =
+                            create_cline_freq_table(brs, brs + child_ptr->num_branches());
+                        auto range = subrange(branch_number(0),
+                                              branch_number(child_ptr->num_branches()));
+                        if constexpr (is_inner_node<InnerNodeType>)
+                        {
+                           (void)_session.realloc<inner_node>(in, child_ptr, range, freq,
+                                                              child_ptr->descendents());
+                        }
+                        else if constexpr (is_inner_prefix_node<InnerNodeType>)
+                        {
+                           char prefix_buf[2048];
+                           auto pfx = in->prefix();
+                           memcpy(prefix_buf, pfx.data(), pfx.size());
+                           (void)_session.realloc<inner_prefix_node>(
+                               in, child_ptr, key_view(prefix_buf, pfx.size()), range, freq,
+                               child_ptr->descendents());
+                        }
+                        _session.release(child_addr);
+                        break;
+                     }
+                     case node_type::inner_prefix:
+                     {
+                        auto ipn_ref = child_ref.template as<inner_prefix_node>();
+                        retain_children(ipn_ref);
+                        if constexpr (is_inner_node<InnerNodeType>)
+                        {
+                           (void)_session.realloc<inner_prefix_node>(in, ipn_ref.obj(),
+                                                                     ipn_ref->prefix());
+                        }
+                        else if constexpr (is_inner_prefix_node<InnerNodeType>)
+                        {
+                           char prefix_buf[2048];
+                           auto p = in->prefix();
+                           auto q = ipn_ref->prefix();
+                           memcpy(prefix_buf, p.data(), p.size());
+                           memcpy(prefix_buf + p.size(), q.data(), q.size());
+                           (void)_session.realloc<inner_prefix_node>(
+                               in, ipn_ref.obj(),
+                               key_view(prefix_buf, p.size() + q.size()));
+                        }
+                        _session.release(child_addr);
+                        break;
+                     }
+                     default:
+                        std::unreachable();
+                  }
+               }
+               return in.address();
             }
             else if constexpr (mode.is_shared())
             {
+               // Phase 2: Collapse single-branch result in shared mode
+               if (in->num_branches() == 2) [[unlikely]]
+               {
+                  branch_number remaining_br =
+                      (*br == 0) ? branch_number(1) : branch_number(0);
+                  auto remaining_addr = in->get_branch(remaining_br);
+
+                  if constexpr (is_inner_node<InnerNodeType>)
+                  {
+                     // retain_children(in) already gave +1 to remaining_addr.
+                     // in's destroy will give -1, transferring ownership to caller.
+                     return remaining_addr;
+                  }
+                  else if constexpr (is_inner_prefix_node<InnerNodeType>)
+                  {
+                     auto child_ref = _session.get_ref(remaining_addr);
+                     switch (node_type(child_ref->type()))
+                     {
+                        case node_type::leaf:
+                        {
+                           auto     leaf_ref = child_ref.template as<leaf_node>();
+                           auto     pfx     = in->prefix();
+                           uint16_t nb      = leaf_ref->num_branches();
+                           uint32_t avail   = leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * nb;
+                           if (leaf_ref->alloc_pos() + (uint32_t)pfx.size() * nb <= avail)
+                           {
+                              retain_children(leaf_ref);
+                              auto result = _session.alloc<leaf_node>(
+                                  parent_hint,
+                                  op::leaf_prepend_prefix{*leaf_ref.obj(), pfx});
+                              _session.release(remaining_addr);
+                              return result;
+                           }
+                           break;  // fall through to inner_remove_branch
+                        }
+                        case node_type::inner:
+                        {
+                           auto        inner_ref = child_ref.template as<inner_node>();
+                           retain_children(inner_ref);
+                           const auto* child_ptr = inner_ref.obj();
+                           const branch* brs     = child_ptr->const_branches();
+                           auto          freq =
+                               create_cline_freq_table(brs, brs + child_ptr->num_branches());
+                           auto range = subrange(branch_number(0),
+                                                 branch_number(child_ptr->num_branches()));
+                           auto result = _session.alloc<inner_prefix_node>(
+                               parent_hint, child_ptr, in->prefix(), range, freq,
+                               child_ptr->descendents());
+                           _session.release(remaining_addr);
+                           return result;
+                        }
+                        case node_type::inner_prefix:
+                        {
+                           auto ipn_ref = child_ref.template as<inner_prefix_node>();
+                           retain_children(ipn_ref);
+                           char prefix_buf[2048];
+                           auto p = in->prefix();
+                           auto q = ipn_ref->prefix();
+                           memcpy(prefix_buf, p.data(), p.size());
+                           memcpy(prefix_buf + p.size(), q.data(), q.size());
+                           auto result = _session.alloc<inner_prefix_node>(
+                               parent_hint, ipn_ref.obj(),
+                               key_view(prefix_buf, p.size() + q.size()));
+                           _session.release(remaining_addr);
+                           return result;
+                        }
+                        default:
+                           std::unreachable();
+                     }
+                  }
+               }
+
                // retain_children gave +1 to all children including the removed one.
                // The removed child's extra retain will be balanced by the original
                // node's destroy() when the snapshot chain is released.
