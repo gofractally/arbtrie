@@ -161,6 +161,9 @@ TEST_CASE("tree_context-insert-remove", "[tree_context][remove]")
              (words.size() * 1000.0) /
                  std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
 
+   // Validate descendant counts after insert
+   ctx.validate();
+
    // Sort words for ordered removal
    std::sort(words.begin(), words.end());
 

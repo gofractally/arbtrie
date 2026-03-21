@@ -19,6 +19,7 @@ namespace psitri
       sal::allocator_session&      _session;
       sal::smart_ptr<alloc_header> _root;
       int                          _old_value_size = -1;
+      int                          _delta_descendents          = 0;  // +1 insert, -1 remove, 0 update/not-found
 
      public:
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
@@ -45,11 +46,36 @@ namespace psitri
          assert(!"only value_view or subtree values are supported");
          abort();
       }
+      uint64_t count_child_keys(ptr_address addr) noexcept
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::inner:
+               return ref.as<inner_node>()->descendents();
+            case node_type::inner_prefix:
+               return ref.as<inner_prefix_node>()->descendents();
+            case node_type::leaf:
+               return ref.as<leaf_node>()->num_branches();
+            default:
+               std::unreachable();
+         }
+      }
+      uint64_t count_branch_keys(const branch_set& branches) noexcept
+      {
+         uint64_t total = 0;
+         auto     addrs = branches.addresses();
+         for (int i = 0; i < addrs.size(); ++i)
+            total += count_child_keys(addrs[i]);
+         return total;
+      }
+
       ptr_address make_inner(const branch_set& branches) noexcept
       {
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
-         return _session.alloc<inner_node>(branches, needed_clines, out_cline_idx);
+         return _session.alloc<inner_node>(branches, needed_clines, out_cline_idx,
+                                           count_branch_keys(branches));
       }
       ptr_address make_inner_prefix(sal::alloc_hint   hint,
                                     key_view          prefix,
@@ -58,7 +84,7 @@ namespace psitri
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
          return _session.alloc<inner_prefix_node>(hint, prefix, branches, needed_clines,
-                                                  out_cline_idx);
+                                                  out_cline_idx, count_branch_keys(branches));
       }
       template <typename NodeType>
       smart_ref<inner_prefix_node> remake_inner_prefix(const smart_ref<NodeType>& in,
@@ -68,7 +94,16 @@ namespace psitri
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
          return _session.realloc<inner_prefix_node>(in, prefix, branches, needed_clines,
-                                                    out_cline_idx);
+                                                    out_cline_idx, count_branch_keys(branches));
+      }
+
+      template <typename InnerNodeType>
+      uint64_t count_subrange_keys(const InnerNodeType* in, subrange range) noexcept
+      {
+         uint64_t total = 0;
+         for (int i = *range.begin; i < *range.end; ++i)
+            total += count_child_keys(in->get_branch(branch_number(i)));
+         return total;
       }
 
       template <typename InnerNodeType>
@@ -78,7 +113,8 @@ namespace psitri
       {
          const branch* brs  = in->const_branches();
          auto          freq = create_cline_freq_table(brs + *range.begin, brs + *range.end);
-         return _session.alloc<inner_node>(parent_hint, in, range, freq);
+         return _session.alloc<inner_node>(parent_hint, in, range, freq,
+                                           count_subrange_keys(in, range));
       }
       template <typename NodeType, any_inner_node_type InnerNodeType>
       smart_ref<inner_node> remake_inner_node(const smart_ref<NodeType>& in,
@@ -87,12 +123,14 @@ namespace psitri
       {
          const branch* brs  = in->const_branches();
          auto          freq = create_cline_freq_table(brs + *range.begin, brs + *range.end);
-         return _session.realloc<inner_node>(in, in_obj, range, freq);
+         return _session.realloc<inner_node>(in, in_obj, range, freq,
+                                             count_subrange_keys(in_obj, range));
       }
 
       void insert(key_view key, value_type value)
       {
          _old_value_size = -1;
+         _delta_descendents          = 0;
          auto result     = upsert<upsert_mode::unique_insert>(key, value);
          assert(result == -1);
       }
@@ -102,6 +140,7 @@ namespace psitri
       int upsert(key_view key, value_type value)
       {
          sal::read_lock lock = _session.lock();
+         _delta_descendents  = 0;
          _new_value          = std::move(value);
          if (not _root)
          {
@@ -126,6 +165,7 @@ namespace psitri
          if (not _root)
             return -1;
          sal::read_lock lock = _session.lock();
+         _delta_descendents  = 0;
          auto           rref = *_root;
          _root.take();
          /// ironically, if we are in shared mode removing a key could force a split because the new
@@ -321,28 +361,44 @@ namespace psitri
          //            << r->get_value(branch_number(i)) << "'\n";
          // }
       }
-      template <any_inner_node_type NodeType>
-      void validate(smart_ref<NodeType> r, int depth = 0)
-      {
-         r->visit_branches([this](ptr_address br) { assert(_session.get_ref(br).ref() > 0); });
-      }
-      void validate(smart_ref<alloc_header> r, int depth = 0)
+      /// validates tree structure and returns total key count for this subtree
+      uint64_t validate_subtree(smart_ref<alloc_header> r, int depth = 0)
       {
          switch (node_type(r->type()))
          {
             case node_type::inner:
-               print(r.as<inner_node>(), depth + 1);
-               break;
+               return validate_inner(r.as<inner_node>(), depth + 1);
             case node_type::inner_prefix:
-               print(r.as<inner_prefix_node>(), depth + 1);
-               break;
+               return validate_inner(r.as<inner_prefix_node>(), depth + 1);
             case node_type::leaf:
-               print(r.as<leaf_node>(), depth + 1);
-               break;
+               return r.as<leaf_node>()->num_branches();
             case node_type::value:
             default:
                std::unreachable();
          }
+      }
+      template <any_inner_node_type NodeType>
+      uint64_t validate_inner(smart_ref<NodeType> r, int depth = 0)
+      {
+         uint64_t total_keys = 0;
+         for (int i = 0; i < r->num_branches(); ++i)
+         {
+            auto br  = r->get_branch(branch_number(i));
+            auto ref = _session.get_ref(br);
+            assert(ref.ref() > 0);
+            total_keys += validate_subtree(ref, depth);
+         }
+         if (r->descendents() != total_keys)
+         {
+            SAL_ERROR("validate: descendents mismatch at depth {}: stored={} actual={} num_branches={}",
+                      depth, r->descendents(), total_keys, r->num_branches());
+            assert(r->descendents() == total_keys);
+         }
+         return total_keys;
+      }
+      void validate(smart_ref<alloc_header> r, int depth = 0)
+      {
+         validate_subtree(r, depth);
       }
       template <any_inner_node_type NodeType>
       void calc_stats(stats& s, smart_ref<NodeType> r, int depth = 0)
@@ -529,7 +585,7 @@ namespace psitri
 
       if constexpr (mode.is_unique())
       {
-         op::replace_branch update = {br, sub_branches, needed_clines, cline_indices};
+         op::replace_branch update = {br, sub_branches, needed_clines, cline_indices, _delta_descendents};
          /// this is the likely path because realloc grows by cachelines and
          /// most updates don't force a node to grow.
          if (in->can_apply(update)) [[likely]]
@@ -550,12 +606,12 @@ namespace psitri
          if constexpr (is_inner_node<InnerNodeType>)
             return _session.alloc<InnerNodeType>(
                 parent_hint, in.obj(),
-                op::replace_branch(br, sub_branches, needed_clines, cline_indices));
+                op::replace_branch{br, sub_branches, needed_clines, cline_indices, _delta_descendents});
          else if constexpr (is_inner_prefix_node<InnerNodeType>)
          {
             return _session.alloc<InnerNodeType>(
                 parent_hint, in->prefix(), in.obj(),
-                op::replace_branch(br, sub_branches, needed_clines, cline_indices));
+                op::replace_branch{br, sub_branches, needed_clines, cline_indices, _delta_descendents});
          }
       }
    }
@@ -584,6 +640,8 @@ namespace psitri
             assert(in->prefix().size() >= 1);  // or else it should have been an inner_node
             if constexpr (mode.is_update())
                throw std::runtime_error("update: key does not exist");
+
+            _delta_descendents = 1;  // inserting a new key via prefix mismatch
 
             if (cpre.size() == 0)
             {
@@ -688,7 +746,11 @@ namespace psitri
          if (sub_branches.count() == 1) [[likely]]
          {
             if (bref->address() == sub_branches.get_first_branch())
+            {
+               if (_delta_descendents != 0)
+                  in.modify()->add_descendents(_delta_descendents);
                return in.address();
+            }
          }
          // else fall through to merge branches.
       }
@@ -750,6 +812,7 @@ namespace psitri
          this->_old_value_size = _session.get_ref(old_value.value_address())->size();
       else
          this->_old_value_size = leaf->get_value(lb).size();
+      _delta_descendents = -1;  // removing an existing key
       // at this point we know the key exists and must be removed
 
       if constexpr (mode.is_unique())
@@ -799,6 +862,7 @@ namespace psitri
                                    key_view               key,
                                    branch_number          lb)
    {
+      _delta_descendents = 1;  // inserting a new key
       //     SAL_INFO("insert: leaf {} key: {} ptr: {}", leaf.address(), key, leaf.obj());
       if constexpr (mode.is_shared())
       {

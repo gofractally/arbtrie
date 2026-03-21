@@ -18,7 +18,8 @@ namespace psitri
       static inline uint32_t alloc_size(key_view                      prefix,
                                         const branch_set&             branches,
                                         int                           numcline,
-                                        const std::array<uint8_t, 8>& cline_indices) noexcept
+                                        const std::array<uint8_t, 8>& cline_indices,
+                                        uint64_t                      = 0) noexcept
       {
          return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
                                            2 * branches.count() - 1 +
@@ -43,7 +44,8 @@ namespace psitri
       static inline uint32_t alloc_size(const any_inner_node_type auto* clone,
                                         key_view                        prefix,
                                         subrange                        range,
-                                        const cline_freq_table&         ftab) noexcept
+                                        const cline_freq_table&         ftab,
+                                        uint64_t                        = 0) noexcept
       {
          return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
                                            2 * (*range.end - *range.begin) - 1 +
@@ -55,13 +57,14 @@ namespace psitri
                         key_view                      prefix,
                         const branch_set&             branches,
                         int                           numcline,
-                        const std::array<uint8_t, 8>& cline_indices) noexcept
+                        const std::array<uint8_t, 8>& cline_indices,
+                        uint64_t                      descendents) noexcept
           : inner_node_base(asize, node_type::inner_prefix, seq)
       {
-         assert(asize == alloc_size(prefix, branches, numcline, cline_indices));
+         assert(asize == alloc_size(prefix, branches, numcline, cline_indices, descendents));
          // set cap once so offsets are valid
          _prefix_cap = prefix.size();
-         init(branches, numcline, cline_indices);
+         init(branches, numcline, cline_indices, descendents);
          set_prefix(prefix);
       }
 
@@ -70,11 +73,12 @@ namespace psitri
                         const any_inner_node_type auto* clone,
                         key_view                        prefix,
                         subrange                        range,
-                        const cline_freq_table&         ftab) noexcept
+                        const cline_freq_table&         ftab,
+                        uint64_t                        descendents) noexcept
           : inner_node_base(asize, node_type::inner_prefix, seq)
       {
          _prefix_cap = prefix.size();
-         init(asize, seq, clone, range, ftab);
+         init(asize, seq, clone, range, ftab, descendents);
          _prefix_cap = prefix.size();
          set_prefix(prefix);
       }
@@ -101,6 +105,7 @@ namespace psitri
          assert(asize == alloc_size(clone, prefix));
          _num_branches = clone->_num_branches;
          _num_cline    = clone->_num_cline;
+         _descendents  = clone->_descendents;
          _prefix_cap   = prefix.size();
          set_prefix(prefix);
          memcpy(divisions(), clone->divisions(), clone->num_branches() - 1);
@@ -191,13 +196,15 @@ namespace psitri
                  ptr_address_seq               seq,
                  const branch_set&             branches,
                  int                           numcline,
-                 const std::array<uint8_t, 8>& cline_indices) noexcept;
+                 const std::array<uint8_t, 8>& cline_indices,
+                 uint64_t                      descendents) noexcept;
 
       inner_node(uint32_t                        asize,
                  ptr_address_seq                 seq,
                  const any_inner_node_type auto* clone,
                  subrange                        range,
-                 const cline_freq_table&         ftab) noexcept;
+                 const cline_freq_table&         ftab,
+                 uint64_t                        descendents) noexcept;
 
       inner_node(uint32_t                        asize,
                  ptr_address_seq                 seq,
@@ -214,10 +221,12 @@ namespace psitri
       ///@{
       inline static uint32_t alloc_size(const branch_set&             branches,
                                         int                           numcline,
-                                        const std::array<uint8_t, 8>& cline_indices) noexcept;
+                                        const std::array<uint8_t, 8>& cline_indices,
+                                        uint64_t                      descendents = 0) noexcept;
       inline static uint32_t alloc_size(const any_inner_node_type auto* clone,
                                         subrange                        range,
-                                        const cline_freq_table&         ftab) noexcept;
+                                        const cline_freq_table&         ftab,
+                                        uint64_t                        descendents = 0) noexcept;
       inline static uint32_t alloc_size(const any_inner_node_type auto* clone,
                                         const op::replace_branch&       update) noexcept;
       ///@}
@@ -272,7 +281,8 @@ namespace psitri
 
    inline uint32_t inner_node::alloc_size(const branch_set&             branches,
                                           int                           numcline,
-                                          const std::array<uint8_t, 8>& cline_indices) noexcept
+                                          const std::array<uint8_t, 8>& cline_indices,
+                                          uint64_t) noexcept
    {
       auto divider_capacity = ucc::round_up_multiple<1>(branches.count() - 1);
       return ucc::round_up_multiple<64>(inner_node_size + numcline * sizeof(ptr_address) +
@@ -292,11 +302,12 @@ namespace psitri
                                  ptr_address_seq               seq,
                                  const branch_set&             init_branches,
                                  int                           numcline,
-                                 const std::array<uint8_t, 8>& cline_indices) noexcept
+                                 const std::array<uint8_t, 8>& cline_indices,
+                                 uint64_t                      descendents) noexcept
        : inner_node_base(asize, node_type::inner, seq)
    {
-      assert(asize == alloc_size(init_branches, numcline, cline_indices));
-      init(init_branches, numcline, cline_indices);
+      assert(asize == alloc_size(init_branches, numcline, cline_indices, descendents));
+      init(init_branches, numcline, cline_indices, descendents);
    }
 
    inline inner_node::inner_node(uint32_t                        asize,
@@ -324,7 +335,8 @@ namespace psitri
     */
    inline uint32_t inner_node::alloc_size(const any_inner_node_type auto* clone,
                                           subrange                        range,
-                                          const cline_freq_table&         ftab) noexcept
+                                          const cline_freq_table&         ftab,
+                                          uint64_t) noexcept
    {
       auto new_branches_count = *range.end - *range.begin;
       auto divider_capacity   = ucc::round_up_multiple<1>(new_branches_count - 1);
@@ -349,11 +361,12 @@ namespace psitri
                                  ptr_address_seq                 seq,
                                  const any_inner_node_type auto* clone,
                                  subrange                        range,
-                                 const cline_freq_table&         ftab) noexcept
+                                 const cline_freq_table&         ftab,
+                                 uint64_t                        descendents) noexcept
        : inner_node_base(asize, node_type::inner, seq)
    {
-      assert(asize == alloc_size(clone, range, ftab));
-      init(asize, seq, clone, range, ftab);
+      assert(asize == alloc_size(clone, range, ftab, descendents));
+      init(asize, seq, clone, range, ftab, descendents);
    }
 
 }  // namespace psitri

@@ -12,6 +12,7 @@ namespace psitri
          const branch_set&       sub_branches;
          int                     needed_clines;  ///< return value of find_clines
          std::array<uint8_t, 8>& cline_indices;
+         int64_t                 delta_descendents = 0;
       };
    };  // namespace op
    class inner_node;
@@ -89,7 +90,8 @@ namespace psitri
                        ptr_address_seq                 seq,
                        const any_inner_node_type auto* clone,
                        subrange                        range,
-                       const cline_freq_table&         ftab) noexcept
+                       const cline_freq_table&         ftab,
+                       uint64_t                        descendents) noexcept
       {
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = *range.end - *range.begin;
@@ -106,7 +108,7 @@ namespace psitri
 
          d._num_branches = *range.end - *range.begin;
          d._num_cline    = ftab.compressed_clines();
-         d._descendents  = clone->_descendents;
+         d._descendents  = descendents;
 
          copy_masked_cline_data(ftab.clines_referenced, clone->clines(), d.clines());
 
@@ -150,12 +152,13 @@ namespace psitri
 
       inline void init(const branch_set&             branches,
                        int                           numcline,
-                       const std::array<uint8_t, 8>& cline_indices) noexcept
+                       const std::array<uint8_t, 8>& cline_indices,
+                       uint64_t                      descendents) noexcept
       {
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = branches.count();
          d._num_cline    = numcline;
-         d._descendents  = 0;
+         d._descendents  = descendents;
          assert(d._num_cline >= numcline);
 
          memcpy(d.divisions(), branches.dividers().data(), branches.dividers().size());
@@ -193,7 +196,7 @@ namespace psitri
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = clone->_num_branches + update.sub_branches.count() - 1;
          d._num_cline    = update.needed_clines;
-         d._descendents  = clone->_descendents;
+         d._descendents  = clone->_descendents + update.delta_descendents;
          assert(d._num_cline >= clone->_num_cline);
 
          sal::ptr_address*       d_clines_data = reinterpret_cast<sal::ptr_address*>(d.clines());
@@ -330,6 +333,16 @@ namespace psitri
          const Derived& d = static_cast<const Derived&>(*this);
          return d._descendents;
       }
+      void add_descendents(int64_t delta) noexcept
+      {
+         Derived& d = static_cast<Derived&>(*this);
+         d._descendents += delta;
+      }
+      void set_descendents(uint64_t count) noexcept
+      {
+         Derived& d = static_cast<Derived&>(*this);
+         d._descendents = count;
+      }
       uint32_t free_space() const noexcept
       {
          const Derived& d         = static_cast<const Derived&>(*this);
@@ -439,6 +452,7 @@ namespace psitri
       d->_num_branches = new_branch_count;
       //_division_capacity = new_divisions_cap;
       d->_num_cline = up.needed_clines;
+      d->_descendents += up.delta_descendents;
       assert(std::is_sorted(d->divisions(), d->divisions() + d->num_divisions()));
       assert(d->validate_invariants());
    }

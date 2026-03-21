@@ -41,7 +41,7 @@ TEST_CASE("InnerNode", "[inner_node]")
       REQUIRE(asize == 64);
 
       char buffer[asize];
-      auto inode = new (buffer) inner_node(asize, ptr_address_seq(), bs, req_cline, out_clines);
+      auto inode = new (buffer) inner_node(asize, ptr_address_seq(), bs, req_cline, out_clines, 0);
       REQUIRE(inode->get_branch(branch_number(0)) == ptr_address(10001));
       REQUIRE(inode->get_branch(branch_number(1)) == ptr_address(10002));
       REQUIRE(inode->num_branches() == 2);
@@ -187,7 +187,7 @@ TEST_CASE("InnerNode", "[inner_node]")
          bs2.push_back('e', ptr_address(20010));
 
          std::array<uint8_t, 8> cline_indices;
-         auto req_cline = inode->find_clines(branch_number(12), bs2, cline_indices);
+         auto req_cline = inode->find_clines(branch_number(11), bs2, cline_indices);
          REQUIRE(req_cline == 3);
 
          op::replace_branch update_op{branch_number(11), bs2, req_cline, cline_indices};
@@ -238,7 +238,7 @@ TEST_CASE("InnerNode", "[inner_node]")
       REQUIRE(asize == 64);
 
       char buffer[asize];
-      auto inode = new (buffer) inner_node(asize, ptr_address_seq(), bs, req_cline, out_clines);
+      auto inode = new (buffer) inner_node(asize, ptr_address_seq(), bs, req_cline, out_clines, 0);
       REQUIRE(inode->get_branch(branch_number(0)) == ptr_address(10001));
       REQUIRE(inode->get_branch(branch_number(1)) == ptr_address(20002));
    }
@@ -288,7 +288,7 @@ TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
 
             char buffer[asize];
             auto inode = new (buffer)
-                inner_prefix_node(asize, ptr_address_seq(), prefix_kv, bs, req_cline, out_clines);
+                inner_prefix_node(asize, ptr_address_seq(), prefix_kv, bs, req_cline, out_clines, 0);
 
             REQUIRE(inode->type() == node_type::inner_prefix);
             REQUIRE(inode->prefix_len() == prefix_size);
@@ -411,7 +411,7 @@ TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
 
             char buffer[asize];
             auto inode = new (buffer)
-                inner_prefix_node(asize, ptr_address_seq(), prefix_kv, bs, req_cline, out_clines);
+                inner_prefix_node(asize, ptr_address_seq(), prefix_kv, bs, req_cline, out_clines, 0);
 
             REQUIRE(inode->type() == node_type::inner_prefix);
             REQUIRE(inode->prefix_len() == prefix_size);
@@ -492,7 +492,7 @@ TEST_CASE("InnerNodeSplit", "[inner_node]")
       auto asize_init = inner_node::alloc_size(bs_init, req_cline_init, clines_init);
       buffer.resize(asize_init);
       inode_ptr = new (buffer.data())
-          inner_node(asize_init, ptr_address_seq(), bs_init, req_cline_init, clines_init);
+          inner_node(asize_init, ptr_address_seq(), bs_init, req_cline_init, clines_init, 0);
 
       REQUIRE(inode_ptr->num_branches() == 2);
       REQUIRE(inode_ptr->num_divisions() == 1);
@@ -604,9 +604,9 @@ TEST_CASE("InnerNodeSplit", "[inner_node]")
    std::vector<char> buffer2(asize2);
 
    inner_node* node1 =
-       new (buffer1.data()) inner_node(asize1, ptr_address_seq(), inode_ptr, range1, ftab1);
+       new (buffer1.data()) inner_node(asize1, ptr_address_seq(), inode_ptr, range1, ftab1, 0);
    inner_node* node2 =
-       new (buffer2.data()) inner_node(asize2, ptr_address_seq(), inode_ptr, range2, ftab2);
+       new (buffer2.data()) inner_node(asize2, ptr_address_seq(), inode_ptr, range2, ftab2, 0);
 
    // 5. Assertions for Node 1 (Placeholder, A-Z)
    REQUIRE(node1->num_branches() == 27);
