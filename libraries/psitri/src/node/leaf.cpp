@@ -63,6 +63,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
+      set_num_branches(0);  // Must initialize before lower_bound reads it
       apply(op::leaf_insert{*this, lower_bound(key), key, value});
    }
    uint32_t leaf_node::compact_size() const noexcept
@@ -84,6 +85,7 @@ namespace psitri
    void leaf_node::clone_from(const leaf_node* clone)
    {
       //    SAL_ERROR("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
+      assert(clone->validate_invariants());
       set_num_branches(clone->num_branches());
       if (clone->dead_space())
       {
@@ -166,6 +168,7 @@ namespace psitri
       //ucc::memcpy_aligned_64byte(aptr, ((char*)clone->tail()) - apos, apos);
 
       memcpy(alloc_head(), clone->alloc_head(), clone->_alloc_pos);
+      assert(validate_invariants());
    }
 
    /// TODO: this could be made more effecient by copying and inserting in one pass
@@ -263,6 +266,7 @@ namespace psitri
          else
             vos[x] = value_branch();
       }
+      assert(validate_invariants());
    }
    /*
     * Each node has an optimal layout that looks something like this:
@@ -283,7 +287,6 @@ namespace psitri
    leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const leaf_node* clone)
        : node(alloc_size, node_type::leaf, seq)
    {
-      SAL_ERROR("cloning alloc_size: {} clone.size:{}", alloc_size, clone->size());
       clone_from(clone);
    }
    /**
@@ -318,6 +321,8 @@ namespace psitri
          kos[idx] = alloc_key(key);
          kh[idx]  = calc_key_hash(key);
       }
+
+
       auto vos       = value_offsets();
       auto clone_vos = clone->value_offsets();
 
@@ -340,6 +345,7 @@ namespace psitri
          else
             vos[x - *start] = value_branch();
       }
+      assert(validate_invariants());
    }
 
    /*
@@ -401,6 +407,7 @@ namespace psitri
       vis.init(ins, vis.ctx);
 
       assert(ins._idx == vis.count);
+      assert(validate_invariants());
    }
 
    leaf_node::can_apply_mode leaf_node::can_apply(const op::leaf_insert& ins) const noexcept
@@ -509,9 +516,7 @@ namespace psitri
       assert(get_key(get(ins.key)) == ins.key);
       // kSAL_WARN("insert:{} = {}  get_value:{}", ins.key, ins.value, get_value(ins.lb));
       assert(get_value(ins.lb) == ins.value);
-      auto final_free_space = free_space();
-      //      SAL_WARN("init free space: {} final free space: {}  delta: {}", init_free_space,
-      //               final_free_space, final_free_space - init_free_space);
+      assert(validate_invariants());
       return ins.lb;
    }
 
@@ -573,6 +578,7 @@ namespace psitri
 
       // 5. Update Optimal Flag
       _optimal_layout = false;  // Removing always breaks optimal layout
+      assert(validate_invariants());
    }
 
    size_t leaf_node::update_value(branch_number bn, const value_type& value) noexcept
@@ -661,6 +667,7 @@ namespace psitri
       }
       _optimal_layout = false;
       assert(get_value(bn) == value);
+      assert(validate_invariants());
       return old_size;
    }
 
@@ -760,6 +767,129 @@ namespace psitri
             SAL_ERROR("       vb.cline():{}  type:{}", vb.cline(), vb.type());
       }
       SAL_ERROR("  clines: {}", clines().size());
+   }
+
+   bool leaf_node::validate_invariants() const noexcept
+   {
+      // 0a. Type must be leaf
+      if (type() != node_type::leaf)
+      {
+         SAL_ERROR("leaf validate: type {} != leaf", (int)type());
+         return false;
+      }
+
+      // 0b. Size must be valid (multiple of 64, <= max_leaf_size)
+      if (size() > max_leaf_size || size() < sizeof(leaf_node) || size() % 64 != 0)
+      {
+         SAL_ERROR("leaf validate: size {} invalid (max:{} min:{})", size(), max_leaf_size,
+                   sizeof(leaf_node));
+         return false;
+      }
+
+      uint16_t nb = num_branches();
+
+      // 0c. num_branches must fit within the node
+      if (nb > (size() - sizeof(leaf_node)) / 5)
+      {
+         SAL_ERROR("leaf validate: num_branches {} too large for size {}", nb, size());
+         return false;
+      }
+
+      // 1. Layout sanity: clines must not overlap with alloc area
+      if (free_space() < 0)
+      {
+         SAL_ERROR("leaf validate: free_space {} < 0  cline_cap:{} nb:{}", free_space(), _cline_cap, nb);
+         return false;
+      }
+
+      // 2. Cline count should be reasonable (max 16 unique cachelines per leaf)
+      if (_cline_cap > 16)
+      {
+         SAL_ERROR("leaf validate: _cline_cap {} > 16  nb:{}", _cline_cap, nb);
+         return false;
+      }
+
+      // 3. Check that all keys are retrievable and offsets point within alloc area
+      for (uint16_t i = 0; i < nb; ++i)
+      {
+         auto ko = keys_offsets()[i];
+         if (*ko >= _alloc_pos && _alloc_pos > 0)
+         {
+            SAL_ERROR("leaf validate: key_offset[{}]={} >= alloc_pos={}", i, *ko, _alloc_pos);
+            return false;
+         }
+      }
+
+      // 4. Value type consistency: address-type values must reference valid cline indices
+      for (uint16_t i = 0; i < nb; ++i)
+      {
+         value_branch vb = value_offsets()[i];
+         if (vb.is_address())
+         {
+            auto cl = vb.cline();
+            if (*cl >= _cline_cap)
+            {
+               SAL_ERROR("leaf validate: branch[{}] cline {} >= cline_cap {}", i, *cl, _cline_cap);
+               return false;
+            }
+            // The cline entry should not be null
+            if (clines()[*cl] == sal::null_ptr_address)
+            {
+               SAL_ERROR("leaf validate: branch[{}] references null cline {}", i, *cl);
+               return false;
+            }
+         }
+         else if (vb.is_inline())
+         {
+            auto off = vb.offset();
+            if (*off > _alloc_pos && _alloc_pos > 0)
+            {
+               SAL_ERROR("leaf validate: branch[{}] value_offset {} > alloc_pos {}", i, *off,
+                         _alloc_pos);
+               return false;
+            }
+         }
+      }
+
+      // 5. Cline ref counts: each non-null cline should be referenced by at least one value_branch
+      for (uint16_t c = 0; c < _cline_cap; ++c)
+      {
+         if (clines()[c] == sal::null_ptr_address)
+            continue;
+         int refs = 0;
+         for (uint16_t i = 0; i < nb; ++i)
+         {
+            value_branch vb = value_offsets()[i];
+            if (vb.is_address() && *vb.cline() == c)
+               ++refs;
+         }
+         if (refs == 0)
+         {
+            SAL_ERROR("leaf validate: cline[{}] non-null but has 0 references", c);
+            return false;
+         }
+      }
+
+      // 6. No duplicate cline bases
+      for (uint16_t i = 0; i < _cline_cap; ++i)
+      {
+         if (clines()[i] == sal::null_ptr_address)
+            continue;
+         ptr_address base_i = clines()[i] & ~ptr_address(0x0f);
+         for (uint16_t j = i + 1; j < _cline_cap; ++j)
+         {
+            if (clines()[j] == sal::null_ptr_address)
+               continue;
+            ptr_address base_j = clines()[j] & ~ptr_address(0x0f);
+            if (base_i == base_j)
+            {
+               SAL_ERROR("leaf validate: duplicate cline base at [{}] and [{}]: {}", i, j, base_i);
+               return false;
+            }
+         }
+      }
+
+      return true;
    }
 
    key_view leaf_node::get_common_prefix() const noexcept

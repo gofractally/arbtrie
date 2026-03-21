@@ -183,6 +183,7 @@ namespace psitri
     * @param N The number of elements to process.
     * @param lut The 16-byte lookup table.
     */
+#ifdef __ARM_NEON
    inline void copy_branches_and_update_cline_index_neon(
        const uint8_t*                 input_data,
        uint8_t*                       output_data,
@@ -224,6 +225,7 @@ namespace psitri
          vst1q_u8(output_data + i, result_vec);
       }
    }
+#endif
    inline void copy_branches_and_update_cline_index(const branch*                  input_data,
                                                     branch*                        output_data,
                                                     size_t                         N,

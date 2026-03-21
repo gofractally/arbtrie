@@ -236,8 +236,8 @@ namespace ucc
     */
    inline uint16_t lower_bound_unpadded(const uint8_t* data, size_t size, uint8_t byte) noexcept
    {
-      return lower_bound_neon(data, size, byte);
 #if defined(__ARM_NEON)
+      return lower_bound_neon(data, size, byte);
       const uint8_t* start_data =
           data;  // Keep original start pointer for partial chunk calculation/fallback
       uint16_t         total_count = 0;
@@ -321,7 +321,7 @@ namespace ucc
 
 #else
       // Fallback if NEON is not available
-      return lower_bound_scalar(start_data, size, byte);  // Use original pointer for fallback
+      return lower_bound_scalar(data, size, byte);
 #endif
    }
 
@@ -388,8 +388,8 @@ namespace ucc
       // Value not found
       return size;
    }
-#include <arm_neon.h>
 #if defined(__ARM_NEON)
+#include <arm_neon.h>
    /// this is about 4.8x faster than std::find
    inline int find_u32x16_neon(uint32x4_t v0,
                                uint32x4_t v1,

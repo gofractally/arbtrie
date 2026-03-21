@@ -64,6 +64,13 @@ option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_VISUALIZER "Build segment visualizer" )
+option(DISABLE_NEON "Disable all ARM NEON SIMD optimizations (for debugging)" OFF)
+
+if(DISABLE_NEON)
+    message(STATUS "NEON SIMD optimizations DISABLED")
+    # Force-include a header that undefs __ARM_NEON before any source code runs
+    add_compile_options(-include ${CMAKE_SOURCE_DIR}/libraries/ucc/include/ucc/disable_neon.hpp)
+endif()
 
 # Find required packages
 find_package(Threads REQUIRED)

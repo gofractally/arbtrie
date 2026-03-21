@@ -70,6 +70,7 @@ int run_scalar_32(uint16_t* counters, int start);
 int run_scalar_64(uint16_t* counters, int start);
 int run_tournament_32(uint16_t* counters, int start);
 int run_tournament_64(uint16_t* counters, int start);
+#ifdef __ARM_NEON
 int run_neon_v11_32(uint16_t* counters, int start);
 int run_neon_v11_64(uint16_t* counters, int start);
 int run_neon_v11a_32(uint16_t* counters, int start);
@@ -81,6 +82,7 @@ int run_neon_v14_32(uint16_t* counters, int start);
 int run_neon_v14_64(uint16_t* counters, int start);
 int run_neon_v15_32(uint16_t* counters, int start);
 int run_neon_v15_64(uint16_t* counters, int start);
+#endif
 int run_sse41_64(uint16_t* counters, int start);
 int run_global_32(uint16_t* counters, int start);
 int run_global_64(uint16_t* counters, int start);
@@ -720,6 +722,7 @@ int run_tournament_64(uint16_t* counters, int start)
    return find_approx_min_index_tournament_64(counters, start);
 }
 
+#ifdef __ARM_NEON
 int run_neon_v11_32(uint16_t* counters, int start)
 {
    return find_approx_min_index_neon_v11_32(counters, start);
@@ -774,6 +777,7 @@ int run_neon_v15_64(uint16_t* counters, int start)
 {
    return find_approx_min_index_neon_v15_64(counters, start);
 }
+#endif
 
 int run_sse41_64(uint16_t* counters, int start)
 {

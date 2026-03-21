@@ -102,7 +102,7 @@ namespace psitri
          d._num_branches = *range.end - *range.begin;
          d._num_cline    = ftab.compressed_clines();
 
-         auto nth_set_bit_table = create_nth_set_bit_table_neon(ftab.freq_table);
+         auto nth_set_bit_table = create_nth_set_bit_table(ftab.freq_table);
          // note that this method is allowed to write to data up to 15 bytes before branches() as part of
          // the branchless SIMD implementation that processes 16 bytes at a time. This is fine, we just have to reset the
          // header information that may have been overwritten.

@@ -287,58 +287,69 @@ namespace psitri
          //            "find_clines: replace br index find_u32x16_neon: idx:   {} cur_cline: {} temp[idx]={}",
          //           idx, current_clines.size(), temp[idx]);
       }
-      //temp[idx] = sal::null_ptr_address;
-      /// TODO: ensure that control_block_alloc never returns a ptr_address on cline 0
-      /// we use the lower 4 bits to store the count on each branch, 0 means a count of
-      /// 1 (becaus it is present at all), 0x0f means a count of 16 meaning all 16 slots
-      /// in the cline are occupied by branches on this node. if the old_branch is the
-      /// only reference it becomes a null_ptr_address because we can reuse it.
+      assert(current_clines.size() > 0);
+      uint32_t    max_branch_index = 1 << (current_clines.size() - 1);
+      ptr_address null_cline       = sal::null_ptr_address >> 4;
+      for (int i = 0; i < new_branches.size(); ++i)
+      {
+         int cur_idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *new_clines[i]);
+         if (cur_idx < 16) [[likely]]
+         {
+            out_cline_indices[i] = cur_idx;
+            continue;
+         }
+         cur_idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *null_cline);
+         if (cur_idx == 16) [[unlikely]]
+            return insufficient_clines;
+
+         temp[cur_idx] = new_clines[i];
+         vec[cur_idx / 4]     = vld1q_u32((uint32_t*)(temp + (cur_idx & ~3)));
+         out_cline_indices[i] = cur_idx;
+         max_branch_index |= 1 << cur_idx;
+      }
+      return 32 - __builtin_clz(max_branch_index);
 #else
+      // Shift temp and new_clines to cacheline addresses BEFORE old branch removal,
+      // matching the NEON path where shifts happen before the find_u32x16 search.
+      for (size_t i = 0; i < new_branches.size(); i++)
+         new_clines[i] >>= 4;
+      for (size_t i = 0; i < current_clines.size(); i++)
+         temp[i] >>= 4;
+      std::fill(temp + current_clines.size(), temp + 16, sal::null_ptr_address >> 4);
+
       if constexpr (remove_old_branch)
       {
          for (size_t i = 0; i < current_clines.size(); i++)
          {
             if (temp[i] == old_branch_cline and (*current_clines[i] & 0x0f) == 0)
             {
-               temp[i] = sal::null_ptr_address;
+               temp[i] = sal::null_ptr_address >> 4;
                break;
             }
          }
       }
-      for (size_t i = 0; i < new_branches.size(); i++)
-         new_clines[i] >>= 4;
-      for (size_t i = 0; i < current_clines.size(); i++)
-         temp[i] >>= 4;
-#endif
 
       assert(current_clines.size() > 0);
       uint32_t    max_branch_index = 1 << (current_clines.size() - 1);
       ptr_address null_cline       = sal::null_ptr_address >> 4;
       for (int i = 0; i < new_branches.size(); ++i)
       {
-         /// TODO: provide scalar and SSE versions
-         int cur_idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *new_clines[i]);
+         int cur_idx = ucc::find_u32x16((const uint32_t*)temp, 16, *new_clines[i]);
          if (cur_idx < 16) [[likely]]
          {
-            //            SAL_INFO("find_clines: found existing at {}", cur_idx);
             out_cline_indices[i] = cur_idx;
             continue;
          }
-         cur_idx = ucc::find_u32x16_neon(vec[0], vec[1], vec[2], vec[3], *null_cline);
+         cur_idx = ucc::find_u32x16((const uint32_t*)temp, 16, *null_cline);
          if (cur_idx == 16) [[unlikely]]
-         {
-            //            SAL_ERROR("find_clines: insufficient clines");
             return insufficient_clines;
-         }
-         //        SAL_WARN("find_clines: found null at {}", cur_idx);
 
          temp[cur_idx] = new_clines[i];
-         // Reload just the vector containing the modified index
-         vec[cur_idx / 4]     = vld1q_u32((uint32_t*)(temp + (cur_idx & ~3)));
          out_cline_indices[i] = cur_idx;
          max_branch_index |= 1 << cur_idx;
       }
       return 32 - __builtin_clz(max_branch_index);
+#endif
    }
    inline uint8_t find_clines(std::span<const ptr_address> current_clines,
                               std::span<const ptr_address> new_branches,

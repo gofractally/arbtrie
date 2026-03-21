@@ -149,6 +149,7 @@ namespace psitri
       bool can_insert_address(ptr_address addr) const noexcept;
 
       void     dump() const;
+      [[nodiscard]] bool validate_invariants() const noexcept;
       uint16_t alloc_pos() const noexcept { return _alloc_pos; }
       uint16_t dead_space() const noexcept { return _dead_space; }
       uint32_t clines_capacity() const noexcept { return _cline_cap; }
@@ -339,8 +340,8 @@ namespace psitri
       uint32_t _cline_cap : 9;
       uint32_t _optimal_layout : 1;  ///< a bit that gets set when the node is optimized,
                                      /// cleared when optimized invariants broken
-      uint64_t _num_branches : 9;
-      uint64_t _unused : 13;
+      uint32_t _num_branches : 9;
+      uint32_t _unused : 13;
       uint8_t  _key_hashs[/*num_branches()*/];
       // the following fields are dynamic, but follow sequentially after clines
       //   uint8_t      key_hash[num_branch]  // align on 16 byte boundary and 64 byte boundary
