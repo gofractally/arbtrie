@@ -438,6 +438,9 @@ namespace psitri
       uint32_t head_branches_count = *up.br;
 
       // release the cline data for the branch being replaced
+      // DEBUG: verify branch line index consistency before dec_ref (investigating intermittent assert at line ~484)
+      assert(reinterpret_cast<cline_data*>(d->clines())[d->branches()[*up.br].line()].base() ==
+             (d->get_branch(up.br) & ~sal::ptr_address(0x0f)));
       d->get_cline_data()[d->branches()[*up.br].line()].dec_ref();
 
       branch* cur_branches_end      = d->branches_end();

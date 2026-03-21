@@ -352,6 +352,46 @@ namespace psitri
       // TODO: implement
    }
 
+   void leaf_node::entry_inserter::add(key_view key, value_type val)
+   {
+      auto kos = _leaf.keys_offsets();
+      auto kh  = _leaf.key_hashs();
+      auto vos = _leaf.value_offsets();
+
+      kos[_idx] = _leaf.alloc_key(key);
+      kh[_idx]  = _leaf.calc_key_hash(key);
+
+      if (val.is_view())
+      {
+         if (val.view().empty())
+            vos[_idx] = value_branch();
+         else
+            vos[_idx] = _leaf.alloc_value(val.view());
+      }
+      else if (val.is_subtree())
+         vos[_idx] = _leaf.add_address_ptr(value_type_flag::subtree, val.subtree_address());
+      else if (val.is_value_node())
+         vos[_idx] = _leaf.add_address_ptr(value_type_flag::value_node, val.value_address());
+      else
+         vos[_idx] = value_branch();
+
+      ++_idx;
+   }
+
+   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq,
+                        const op::leaf_from_visitor& vis)
+       : node(alloc_size, node_type::leaf, seq),
+         _alloc_pos(0), _dead_space(0), _cline_cap(0), _optimal_layout(true)
+   {
+      set_num_branches(vis.count);
+      if (vis.count == 0) return;
+
+      entry_inserter ins(*this);
+      vis.init(ins, vis.ctx);
+
+      assert(ins._idx == vis.count);
+   }
+
    leaf_node::can_apply_mode leaf_node::can_apply(const op::leaf_insert& ins) const noexcept
    {
       assert(ins.key.size() <= 1024);  // TODO: max key size constant

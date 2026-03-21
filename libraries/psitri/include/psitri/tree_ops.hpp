@@ -20,8 +20,10 @@ namespace psitri
       sal::smart_ptr<alloc_header> _root;
       int                          _old_value_size = -1;
       int                          _delta_descendents          = 0;  // +1 insert, -1 remove, 0 update/not-found
+      uint32_t                     _collapse_threshold = 24;
 
      public:
+      void set_collapse_threshold(uint32_t t) { _collapse_threshold = t; }
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
       tree_context(sal::smart_ptr<alloc_header> root)
           : _root(std::move(root)), _session(*(root.session()))
@@ -219,6 +221,7 @@ namespace psitri
          uint64_t total_inner_node_size = 0;
          uint64_t total_keys            = 0;
          uint64_t single_branch_inners  = 0;
+         uint64_t sparse_subtree_inners = 0;
          double   branch_per_cline      = 0;
          int      average_inner_node_size() const
          {
@@ -245,6 +248,172 @@ namespace psitri
       }
 
      private:
+      struct subtree_sizer
+      {
+         uint16_t count = 0;
+         uint32_t key_data_size = 0;
+         uint32_t value_data_size = 0;
+         uint16_t addr_values = 0;
+         bool     overflow = false;
+         uint32_t max_entries;
+
+         subtree_sizer(uint32_t max) : max_entries(max) {}
+
+         bool fits_in_leaf() const
+         {
+            if (overflow || count == 0) return false;
+            uint32_t data = key_data_size + count * 2u  // sizeof(leaf_node::key) == 2
+                          + value_data_size
+                          + addr_values * sizeof(ptr_address);
+            uint32_t avail = leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * count;
+            return data <= avail;
+         }
+      };
+
+      void size_subtree(ptr_address addr, uint16_t prefix_len, subtree_sizer& out)
+      {
+         if (out.overflow) return;
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::leaf:
+            {
+               auto leaf = ref.template as<leaf_node>();
+               uint16_t nb = leaf->num_branches();
+               if (out.count + nb > out.max_entries) { out.overflow = true; return; }
+               for (uint16_t i = 0; i < nb; ++i)
+               {
+                  out.key_data_size += prefix_len + leaf->get_key(branch_number(i)).size();
+                  auto val = leaf->get_value(branch_number(i));
+                  if (val.is_view() && !val.view().empty())
+                     out.value_data_size += 2u + val.view().size();  // sizeof(value_data) == 2
+                  else if (val.is_subtree() || val.is_value_node())
+                     ++out.addr_values;
+               }
+               out.count += nb;
+               break;
+            }
+            case node_type::inner:
+            {
+               auto in = ref.template as<inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  size_subtree(in->get_branch(branch_number(i)), prefix_len, out);
+               break;
+            }
+            case node_type::inner_prefix:
+            {
+               auto ip = ref.template as<inner_prefix_node>();
+               for (uint16_t i = 0; i < ip->num_branches(); ++i)
+                  size_subtree(ip->get_branch(branch_number(i)),
+                              prefix_len + ip->prefix().size(), out);
+               break;
+            }
+            default: out.overflow = true;
+         }
+      }
+
+      // --- Phase 3: Subtree collapse helpers ---
+
+      struct collapse_context
+      {
+         sal::allocator_session& session;
+         const ptr_address*      branches;
+         uint16_t                num_branches;
+         key_view                root_prefix;
+      };
+
+      static void walk_subtree_insert(ptr_address addr, char* prefix_buf,
+                                      uint16_t prefix_len,
+                                      leaf_node::entry_inserter& ins,
+                                      sal::allocator_session& session)
+      {
+         auto ref = session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::leaf:
+            {
+               auto leaf = ref.template as<leaf_node>();
+               for (uint16_t i = 0; i < leaf->num_branches(); ++i)
+               {
+                  auto k = leaf->get_key(branch_number(i));
+                  memcpy(prefix_buf + prefix_len, k.data(), k.size());
+                  ins.add(key_view(prefix_buf, prefix_len + k.size()),
+                          leaf->get_value(branch_number(i)));
+               }
+               break;
+            }
+            case node_type::inner:
+            {
+               auto in = ref.template as<inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  walk_subtree_insert(in->get_branch(branch_number(i)),
+                                     prefix_buf, prefix_len, ins, session);
+               break;
+            }
+            case node_type::inner_prefix:
+            {
+               auto ip = ref.template as<inner_prefix_node>();
+               auto pfx = ip->prefix();
+               memcpy(prefix_buf + prefix_len, pfx.data(), pfx.size());
+               for (uint16_t i = 0; i < ip->num_branches(); ++i)
+                  walk_subtree_insert(ip->get_branch(branch_number(i)),
+                                     prefix_buf, prefix_len + pfx.size(), ins, session);
+               break;
+            }
+            default: break;
+         }
+      }
+
+      static void collapse_visitor(leaf_node::entry_inserter& ins, void* raw)
+      {
+         auto* ctx = static_cast<collapse_context*>(raw);
+         char prefix_buf[2048];
+         uint16_t pfx_len = 0;
+         if (ctx->root_prefix.size() > 0)
+         {
+            memcpy(prefix_buf, ctx->root_prefix.data(), ctx->root_prefix.size());
+            pfx_len = ctx->root_prefix.size();
+         }
+         for (uint16_t i = 0; i < ctx->num_branches; ++i)
+            walk_subtree_insert(ctx->branches[i], prefix_buf, pfx_len,
+                                ins, ctx->session);
+      }
+
+      void retain_subtree_leaf_values_by_addr(ptr_address addr)
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::leaf:
+               retain_children(ref.template as<leaf_node>());
+               break;
+            case node_type::inner:
+            {
+               auto in = ref.template as<inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  retain_subtree_leaf_values_by_addr(in->get_branch(branch_number(i)));
+               break;
+            }
+            case node_type::inner_prefix:
+            {
+               auto ip = ref.template as<inner_prefix_node>();
+               for (uint16_t i = 0; i < ip->num_branches(); ++i)
+                  retain_subtree_leaf_values_by_addr(ip->get_branch(branch_number(i)));
+               break;
+            }
+            default: break;
+         }
+      }
+
+      template <typename NodeRef>
+      void retain_subtree_leaf_values(NodeRef& node_ref)
+      {
+         for (uint16_t i = 0; i < node_ref->num_branches(); ++i)
+            retain_subtree_leaf_values_by_addr(node_ref->get_branch(branch_number(i)));
+      }
+
+      // --- End Phase 3 helpers ---
+
       template <typename NodeType>
       void retain_children(smart_ref<NodeType>& node)
       {
@@ -413,6 +582,8 @@ namespace psitri
          s.branch_per_cline += double(r->num_branches()) / r->num_clines();
          if (r->num_branches() == 1)
             ++s.single_branch_inners;
+         if (r->descendents() <= 24)
+            ++s.sparse_subtree_inners;
          for (int i = 0; i < r->num_branches(); ++i)
          {
             auto br  = r->get_branch(branch_number(i));
@@ -833,6 +1004,45 @@ namespace psitri
                         std::unreachable();
                   }
                }
+
+               // Phase 3: Collapse sparse multi-branch subtree into a single leaf
+               if (_collapse_threshold > 0 && in->num_branches() > 1 &&
+                   in->descendents() <= _collapse_threshold)
+               {
+                  subtree_sizer sizer(_collapse_threshold);
+                  uint16_t pfx_len = 0;
+                  if constexpr (is_inner_prefix_node<InnerNodeType>)
+                     pfx_len = in->prefix().size();
+                  for (uint16_t i = 0; i < in->num_branches(); ++i)
+                     size_subtree(in->get_branch(branch_number(i)), pfx_len, sizer);
+
+                  if (sizer.fits_in_leaf())
+                  {
+                     retain_subtree_leaf_values(in);
+
+                     // Save state before realloc invalidates the node
+                     ptr_address branches[256];
+                     uint16_t nb = in->num_branches();
+                     for (uint16_t i = 0; i < nb; ++i)
+                        branches[i] = in->get_branch(branch_number(i));
+
+                     char prefix_save[2048];
+                     key_view root_prefix;
+                     if constexpr (is_inner_prefix_node<InnerNodeType>)
+                     {
+                        auto pfx = in->prefix();
+                        memcpy(prefix_save, pfx.data(), pfx.size());
+                        root_prefix = key_view(prefix_save, pfx.size());
+                     }
+
+                     collapse_context cctx{_session, branches, nb, root_prefix};
+                     (void)_session.realloc<leaf_node>(
+                         in, op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+
+                     for (uint16_t i = 0; i < nb; ++i)
+                        _session.release(branches[i]);
+                  }
+               }
                return in.address();
             }
             else if constexpr (mode.is_shared())
@@ -905,6 +1115,46 @@ namespace psitri
                         }
                         default:
                            std::unreachable();
+                     }
+                  }
+               }
+
+               // Phase 3: Collapse sparse subtree in shared mode
+               {
+                  uint64_t new_desc = in->descendents() + _delta_descendents;
+                  if (_collapse_threshold > 0 && in->num_branches() > 2 &&
+                      new_desc <= _collapse_threshold)
+                  {
+                     ptr_address remaining[256];
+                     uint16_t rb_count = 0;
+                     uint16_t pfx_len = 0;
+                     if constexpr (is_inner_prefix_node<InnerNodeType>)
+                        pfx_len = in->prefix().size();
+
+                     for (uint16_t i = 0; i < in->num_branches(); ++i)
+                     {
+                        if (branch_number(i) == br) continue;
+                        remaining[rb_count++] = in->get_branch(branch_number(i));
+                     }
+
+                     subtree_sizer sizer(_collapse_threshold);
+                     for (uint16_t i = 0; i < rb_count; ++i)
+                        size_subtree(remaining[i], pfx_len, sizer);
+
+                     if (sizer.fits_in_leaf())
+                     {
+                        for (uint16_t i = 0; i < rb_count; ++i)
+                           retain_subtree_leaf_values_by_addr(remaining[i]);
+
+                        key_view root_prefix;
+                        if constexpr (is_inner_prefix_node<InnerNodeType>)
+                           root_prefix = in->prefix();  // safe: in still alive in shared mode
+
+                        collapse_context cctx{_session, remaining, rb_count, root_prefix};
+                        auto result = _session.alloc<leaf_node>(
+                            parent_hint,
+                            op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+                        return result;
                      }
                   }
                }

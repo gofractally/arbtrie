@@ -311,6 +311,150 @@ TEST_CASE("tree_context-single-branch-collapse", "[tree_context][remove][collaps
    REQUIRE(count == all_remaining.size());
 }
 
+TEST_CASE("tree_context-subtree-collapse", "[tree_context][remove][collapse]")
+{
+   sal::set_current_thread_name("main");
+   std::filesystem::remove_all("db");
+   sal::register_type_vtable<leaf_node>();
+   sal::register_type_vtable<inner_prefix_node>();
+   sal::register_type_vtable<inner_node>();
+   sal::register_type_vtable<value_node>();
+
+   sal::allocator salloc("db", sal::runtime_config());
+   auto           ses  = salloc.get_session();
+   auto           root = ses->get_root<>(sal::root_object_number(0));
+
+   tree_context ctx(root);
+
+   // Insert 4 groups of 6 keys with shared prefixes to create multi-level trie
+   // Total = 24 keys. After removing 2 groups (12 keys), 12 remain < threshold (24)
+   std::vector<std::string> g1_keys, g2_keys, g3_keys, g4_keys;
+   for (int i = 0; i < 6; ++i)
+   {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "group1_%03d", i);
+      g1_keys.push_back(buf);
+      snprintf(buf, sizeof(buf), "group2_%03d", i);
+      g2_keys.push_back(buf);
+      snprintf(buf, sizeof(buf), "group3_%03d", i);
+      g3_keys.push_back(buf);
+      snprintf(buf, sizeof(buf), "group4_%03d", i);
+      g4_keys.push_back(buf);
+   }
+
+   for (const auto& k : g1_keys) ctx.insert(to_key_view(k), to_value_view(k));
+   for (const auto& k : g2_keys) ctx.insert(to_key_view(k), to_value_view(k));
+   for (const auto& k : g3_keys) ctx.insert(to_key_view(k), to_value_view(k));
+   for (const auto& k : g4_keys) ctx.insert(to_key_view(k), to_value_view(k));
+   ctx.validate();
+
+   auto stats_before = ctx.get_stats();
+   REQUIRE(stats_before.total_keys == 24);
+
+   // Remove groups 3 and 4 under "group3_" and "group4_" prefixes
+   // This should bring descendants below threshold and trigger collapse
+   for (const auto& k : g3_keys)
+   {
+      int result = ctx.remove(to_key_view(k));
+      REQUIRE(result > 0);
+   }
+   ctx.validate();
+
+   for (const auto& k : g4_keys)
+   {
+      int result = ctx.remove(to_key_view(k));
+      REQUIRE(result > 0);
+   }
+   ctx.validate();
+
+   // Verify remaining keys still accessible via cursor
+   std::vector<std::string> remaining;
+   remaining.insert(remaining.end(), g1_keys.begin(), g1_keys.end());
+   remaining.insert(remaining.end(), g2_keys.begin(), g2_keys.end());
+   std::sort(remaining.begin(), remaining.end());
+
+   auto cur = cursor(ctx.get_root());
+   cur.seek_rend();
+   int count = 0;
+   while (cur.next())
+   {
+      REQUIRE(count < remaining.size());
+      REQUIRE(cur.key() == key_view(remaining[count]));
+      count++;
+   }
+   REQUIRE(count == remaining.size());
+
+   auto stats_after = ctx.get_stats();
+   REQUIRE(stats_after.total_keys == 12);
+   REQUIRE(stats_after.sparse_subtree_inners == 0);
+
+   // Re-insert removed keys — verify leaf splits correctly
+   for (const auto& k : g3_keys) ctx.insert(to_key_view(k), to_value_view(k));
+   for (const auto& k : g4_keys) ctx.insert(to_key_view(k), to_value_view(k));
+   ctx.validate();
+
+   auto stats_reinsert = ctx.get_stats();
+   REQUIRE(stats_reinsert.total_keys == 24);
+
+   // Verify all keys accessible
+   std::vector<std::string> all_keys;
+   all_keys.insert(all_keys.end(), g1_keys.begin(), g1_keys.end());
+   all_keys.insert(all_keys.end(), g2_keys.begin(), g2_keys.end());
+   all_keys.insert(all_keys.end(), g3_keys.begin(), g3_keys.end());
+   all_keys.insert(all_keys.end(), g4_keys.begin(), g4_keys.end());
+   std::sort(all_keys.begin(), all_keys.end());
+
+   cur = cursor(ctx.get_root());
+   cur.seek_rend();
+   count = 0;
+   while (cur.next())
+   {
+      REQUIRE(count < all_keys.size());
+      REQUIRE(cur.key() == key_view(all_keys[count]));
+      count++;
+   }
+   REQUIRE(count == all_keys.size());
+
+   // Edge case: large keys should skip collapse (wouldn't fit in a single leaf)
+   tree_context ctx2(ses->get_root<>(sal::root_object_number(1)));
+   std::string large_prefix(500, 'x');
+   std::vector<std::string> large_keys;
+   for (int i = 0; i < 5; ++i)
+   {
+      std::string k = large_prefix + std::to_string(i);
+      large_keys.push_back(k);
+      ctx2.insert(to_key_view(k), to_value_view(k));
+   }
+   // Add keys on a different branch to create inner nodes
+   for (int i = 0; i < 5; ++i)
+   {
+      std::string k = "y" + std::to_string(i);
+      ctx2.insert(to_key_view(k), to_value_view(k));
+   }
+   ctx2.validate();
+
+   // Remove all "y" keys - with large prefix keys, collapse should be skipped
+   for (int i = 0; i < 5; ++i)
+   {
+      std::string k = "y" + std::to_string(i);
+      ctx2.remove(to_key_view(k));
+   }
+   ctx2.validate();
+
+   // Verify large-key entries still intact
+   cur = cursor(ctx2.get_root());
+   cur.seek_rend();
+   std::sort(large_keys.begin(), large_keys.end());
+   count = 0;
+   while (cur.next())
+   {
+      REQUIRE(count < large_keys.size());
+      REQUIRE(cur.key() == key_view(large_keys[count]));
+      count++;
+   }
+   REQUIRE(count == large_keys.size());
+}
+
 TEST_CASE("tree_context", "[tree_context]")
 {
    sal::set_current_thread_name("main");

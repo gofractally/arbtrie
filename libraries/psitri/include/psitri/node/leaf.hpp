@@ -35,6 +35,7 @@ namespace psitri
          const leaf_node& src;
          key_view         prefix;
       };
+      struct leaf_from_visitor;
    }  // namespace op
 
    /**
@@ -64,6 +65,16 @@ namespace psitri
          inline_data,
          value_node,
          subtree
+      };
+
+      class entry_inserter
+      {
+         leaf_node& _leaf;
+         uint16_t   _idx = 0;
+        public:
+         entry_inserter(leaf_node& l) : _leaf(l) {}
+         void add(key_view key, value_type val);
+         friend class leaf_node;
       };
 
       static constexpr uint32_t  max_leaf_size = 4096 / 2;
@@ -98,10 +109,12 @@ namespace psitri
       {
          return max_leaf_size;
       }
+      inline static uint32_t alloc_size(const struct op::leaf_from_visitor&) { return max_leaf_size; }
 
       // leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_prepend_prefix& pp);
+      leaf_node(size_t alloc_size, ptr_address_seq seq, const struct op::leaf_from_visitor& vis);
 
       /// default constructor, contains one key, value pair
       leaf_node(size_t alloc_size, ptr_address_seq seq, key_view key, const value_type& value);
@@ -594,6 +607,17 @@ namespace psitri
    {
       return clone->size();
    }
+
+   namespace op
+   {
+      struct leaf_from_visitor
+      {
+         using init_fn = void (*)(leaf_node::entry_inserter&, void*);
+         init_fn  init;
+         void*    ctx;
+         uint16_t count;
+      };
+   }  // namespace op
 
    template <typename T>
    concept is_leaf_node = std::same_as<std::remove_cvref_t<std::remove_pointer_t<T>>, leaf_node>;

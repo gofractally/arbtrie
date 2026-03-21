@@ -432,7 +432,7 @@ namespace psitri
       _key_len -= _path_back->prefix_len;
       std::copy(key.begin(), key.end(), _key_buf.begin() + _key_len);
       _key_len += (_path_back->prefix_len = key.size());
-      assert(_key_len <= 32);
+      assert(_key_len <= 1024);
    }
    inline bool cursor::next() noexcept
    {
