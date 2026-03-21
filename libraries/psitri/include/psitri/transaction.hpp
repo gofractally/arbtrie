@@ -1,51 +1,92 @@
 #pragma once
 #include <functional>
-#include <psitri/util.hpp>
-#include <psitri/value_type.hpp>
-#include <sal/allocator_session.hpp>
-#include <sal/smart_ptr.hpp>
+#include <optional>
+#include <psitri/write_cursor.hpp>
 
 namespace psitri
 {
+   class write_session;
+
    class transaction
    {
      public:
-      transaction(sal::smart_ptr<>                      root,
-                  std::function<void(sal::smart_ptr<>)> commit_func,
-                  std::function<void()>                 rollback_func)
-          : _root(std::move(root)), _commit_func(commit_func), _rollback_func(rollback_func)
+      transaction(sal::allocator_session_ptr                            session,
+                  sal::smart_ptr<sal::alloc_header>                     root,
+                  std::function<void(sal::smart_ptr<sal::alloc_header>)> commit_func,
+                  std::function<void()>                                  rollback_func)
+          : _commit_func(std::move(commit_func)), _rollback_func(std::move(rollback_func))
       {
+         if (root)
+            _cursor.emplace(std::move(root));
+         else
+            _cursor.emplace(std::move(session));
       }
-      transaction(const transaction&)                = delete;
-      transaction& operator=(const transaction&)     = delete;
-      transaction(transaction&&) noexcept            = default;
-      transaction& operator=(transaction&&) noexcept = default;
+
+      transaction(const transaction&)            = delete;
+      transaction& operator=(const transaction&) = delete;
+      transaction(transaction&&) noexcept        = default;
+      transaction& operator=(transaction&&)      = delete;
 
       ~transaction() { abort(); }
 
-      void commit() noexcept
+      // -- Mutations --
+
+      bool insert(key_view key, value_view value) { return _cursor->insert(key, value); }
+      bool update(key_view key, value_view value) { return _cursor->update(key, value); }
+      void upsert(key_view key, value_view value) { _cursor->upsert(key, value); }
+      int  remove(key_view key) { return _cursor->remove(key); }
+
+      // -- Read access --
+
+      cursor read_cursor() const { return _cursor->read_cursor(); }
+
+      template <ConstructibleBuffer T>
+      std::optional<T> get(key_view key) const
       {
-         _commit_func(std::move(_root));
-         _rollback_func = std::function<void()>();
+         return _cursor->get<T>(key);
+      }
+
+      int32_t get(key_view key, Buffer auto* buffer) const { return _cursor->get(key, buffer); }
+
+      // -- Transaction control --
+
+      void commit(sal::sync_type sync = sal::sync_type::none) noexcept
+      {
+         if (_commit_func)
+         {
+            _commit_func(std::move(_cursor->root()));
+            _commit_func   = nullptr;
+            _rollback_func = nullptr;
+         }
       }
 
       void abort() noexcept
       {
          if (_rollback_func)
+         {
             _rollback_func();
+            _rollback_func = nullptr;
+            _commit_func   = nullptr;
+         }
       }
-      void set_root(sal::smart_ptr<> root) { _root = std::move(root); }
 
+      /// Create a sub-transaction that commits back to this transaction's cursor
       [[nodiscard]] transaction sub_transaction() noexcept
       {
-         return transaction(_root, [this](sal::smart_ptr<> ptr) { set_root(std::move(ptr)); }, {});
+         auto root = _cursor->root();
+         return transaction(
+             root.session(), root,
+             [this](sal::smart_ptr<sal::alloc_header> ptr) { _cursor.emplace(std::move(ptr)); },
+             {});
       }
 
-      bool insert(key_view key, value_view value);
+      // -- Diagnostics --
+
+      tree_context::stats get_stats() { return _cursor->get_stats(); }
 
      private:
-      sal::smart_ptr<>                      _root;
-      std::function<void(sal::smart_ptr<>)> _commit_func;
-      std::function<void()>                 _rollback_func;
+      std::optional<write_cursor>                              _cursor;
+      std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
+      std::function<void()>                                    _rollback_func;
    };
 }  // namespace psitri

@@ -100,6 +100,7 @@ namespace psitri
       {
          return max_leaf_size;
       }
+      inline static uint32_t alloc_size(const op::leaf_update& upd) { return upd.src.size(); }
       inline static uint32_t alloc_size(const op::leaf_remove& rm)
       {
          // no point in growing the node when we are removing a value
@@ -111,7 +112,7 @@ namespace psitri
       }
       inline static uint32_t alloc_size(const struct op::leaf_from_visitor&) { return max_leaf_size; }
 
-      // leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
+      leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_prepend_prefix& pp);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const struct op::leaf_from_visitor& vis);

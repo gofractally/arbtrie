@@ -1,13 +1,12 @@
 #pragma once
 #include <psitri/read_session.hpp>
-//#include <psitri/write_cursor.hpp>
+#include <psitri/write_cursor.hpp>
 
 namespace psitri
 {
-   class write_cursor;
+   class transaction;
    class write_session;
    using write_session_ptr = std::shared_ptr<write_session>;
-   using write_cursor_ptr  = std::shared_ptr<write_cursor>;
 
    class write_session : public read_session
    {
@@ -16,9 +15,25 @@ namespace psitri
       write_session(database& db);
       ~write_session();
 
-      //      write_cursor_ptr create_write_cursor(sal::smart_ref root = sal::smart_ref());
+      /// Create a write cursor on an empty (transient) tree
+      write_cursor_ptr create_write_cursor();
+
+      /// Create a write cursor on an existing root
+      write_cursor_ptr create_write_cursor(sal::smart_ptr<sal::alloc_header> root);
+
+      /// Get the root at the given top-level index
+      sal::smart_ptr<sal::alloc_header> get_root(uint32_t root_index);
+
+      /// Atomically set the root at the given top-level index
+      void set_root(uint32_t              root_index,
+                    sal::smart_ptr<sal::alloc_header> root,
+                    sal::sync_type        sync = sal::sync_type::none);
+
+      /// Start a transaction on the given top-level root index
+      transaction start_transaction(uint32_t root_index);
 
      private:
+      friend class transaction;
    };
 
 }  // namespace psitri

@@ -185,6 +185,17 @@ namespace psitri
       apply(ins);
    }
 
+   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd)
+       : node(alloc_size, node_type::leaf, seq),
+         _alloc_pos(0),
+         _dead_space(0),
+         _cline_cap(0),
+         _optimal_layout(true)
+   {
+      clone_from(&upd.src);
+      update_value(upd.lb, upd.value);
+   }
+
    leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm)
        : node(alloc_size, node_type::leaf, seq),
          _alloc_pos(0),
@@ -568,7 +579,7 @@ namespace psitri
    {
       assert(bn < num_branches());
       assert(not value.is_remove());
-      SAL_INFO("update: {} = '{}'", int(*bn), value);
+      //SAL_INFO("update: {} = '{}'", int(*bn), value);
 
       size_t        old_size = 0;
       value_branch& vb       = value_offsets()[*bn];

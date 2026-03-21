@@ -125,7 +125,7 @@ namespace psitri
        *   iterator::value_nothing: Value not found
        *   iterator::value_subtree: Found subtree value (use subtree() or subtree_cursor() instead)
        */
-      int32_t get(key_view key, Buffer auto* buffer) const;
+      int32_t get(key_view key, Buffer auto* buffer);
 
       bool is_subtree() const noexcept;
 
@@ -284,7 +284,7 @@ namespace psitri
          }
       }
    }
-   int32_t cursor::get(key_view key, Buffer auto* buffer) const
+   int32_t cursor::get(key_view key, Buffer auto* buffer)
    {
       if (sal::null_ptr_address == _node.address()) [[unlikely]]
          return false;

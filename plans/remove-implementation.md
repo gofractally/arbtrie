@@ -7,11 +7,12 @@ The `redress` branch has remove() ~60% complete: leaf-level removal works (uniqu
 ### Key design decisions
 
 1. **Unique path (ref == 1) restructures inline** — modify in-place or realloc (preserves ptr_address). Fast single-writer path.
-2. **Shared path (ref > 1) defers optimization to compactor** via `restructure_queue` (SPSC circular_buffer, same pattern as release/rcache queues). Correctness is immediate; structural optimization is deferred.
-3. **No dynamic memory allocation** — stack-allocated buffers with compile-time bounds. No `std::vector`, `new`, or heap alloc in hot paths.
-4. **No flag bits in node headers** — sparseness determined by inspecting `num_branches`/`descendants`.
-5. **control_block ≈ shared_ptr** — `ptr_address` = handle, `retain/release` = copy/destroy, `realloc` = replace managed data preserving handle, `cas_move` = thread-safe atomic variant.
-6. **Three address strategies** — (a) realloc: same control block, new data (preserves ptr_address); (b) re-home: new control block, existing data (changes ptr_address, zero data copy — **new API needed**); (c) alloc: new control block + new data. Re-home is cheapest when cline affinity is the only problem (data is fine, ptr_address isn't).
+2. **Shared path (ref > 1) restructures inline via COW** — allocates new nodes with restructured layout. Both paths perform the same structural optimizations (branch removal, single-branch elimination, subtree collapse).
+3. **Optional deferred mode** (`_defer_restructure`) — skips inline restructuring and queues addresses for background compactor. Trades tree compactness for lower per-remove latency. Orthogonal to ref count — applies to both unique and shared paths.
+4. **No dynamic memory allocation** — stack-allocated buffers with compile-time bounds. No `std::vector`, `new`, or heap alloc in hot paths.
+5. **No flag bits in node headers** — sparseness determined by inspecting `num_branches`/`descendants`.
+6. **control_block ≈ shared_ptr** — `ptr_address` = handle, `retain/release` = copy/destroy, `realloc` = replace managed data preserving handle, `cas_move` = thread-safe atomic variant.
+7. **Three address strategies** — (a) realloc: same control block, new data (preserves ptr_address); (b) re-home: new control block, existing data (changes ptr_address, zero data copy — **new API needed**); (c) alloc: new control block + new data. Re-home is cheapest when cline affinity is the only problem (data is fine, ptr_address isn't).
 
 ### Known state
 
@@ -92,8 +93,8 @@ Cases by node types:
 - **B+D** (inner_prefix → inner/inner_prefix child): `realloc<inner_prefix_node>(X, merged_prefix, child_branches)` — prefix = `my_prefix + div_byte + child.prefix` (child.prefix empty for Case D). Unified.
 - **C** (inner_prefix → leaf child): `realloc<leaf_node>(X, child_leaf, op::prepend_prefix{prefix})` — rebuild leaf with prepended prefix bytes. Bounded: ≤58 keys, microseconds.
 
-**Tier 4 — Defer to compactor** (shared path, ref > 1):
-`queue_restructure(X.address())` — retain X, push to restructure queue. Compactor rebuilds via `cas_move`. X remains functional (one extra indirection) until processed.
+**Tier 4 — Defer to compactor** (when `_defer_restructure` is enabled, or as fallback for unresolvable cline pressure):
+`queue_restructure(X.address())` — retain X, push to restructure queue. Compactor rebuilds via `cas_move`. X remains functional (one extra indirection) until processed. This is a latency optimization, not tied to ref count — applies to both unique and shared paths when deferred mode is configured.
 
 ---
 
@@ -112,13 +113,23 @@ Cline affinity is determined by **ptr_address** (control block location), NOT da
 
 ---
 
-## Level 3: Subtree Collapse to Leaf (Phase 3, deferred)
+## Level 3: Subtree Collapse to Leaf (Phase 3, complete)
 
-When `descendants() <= collapse_threshold` (~28), collect entries from the sparse subtree into a stack-allocated buffer and realloc the root as a single leaf. Requires accurate descendant tracking (prerequisite). Details deferred until Phase 1-2 validated.
+When `descendants() <= collapse_threshold` (default 24, configurable), collect entries from the sparse subtree into a single leaf via two-pass callback-based construction. Pass 1 (`size_subtree`) counts entries and sizes without copying. Pass 2 (`walk_subtree_insert`) writes directly into the new leaf via `entry_inserter`. Implemented for both unique (realloc) and shared (alloc) paths.
 
 ## Restructure Queue + Compactor (Phase 4, deferred)
 
-New SPSC `circular_buffer<ptr_address, 64K>` per session. Session retains address before push; compactor pops, inspects (bail if stale/orphaned), rebuilds via `cas_move`, releases retain. Queue-full is non-error (optimization, not correctness). `vcall::restructure` dispatches type-specific handlers. Testing uses `sleep(100ms)` to give compactor time. Details deferred until Phase 3 validated.
+**Purpose**: Optional deferred-mode optimization to reduce per-remove latency at the cost of temporarily bloated tree structure. Governed by a configurable policy (`_defer_restructure`), **orthogonal to ref count** — applies equally to unique and shared paths.
+
+**Motivation**: Phases 1-3 perform all restructuring (branch removal, single-branch elimination, subtree collapse) inline for both unique and shared modes. This keeps the tree compact but adds latency to each remove. For latency-sensitive workloads (e.g., millions of removes in a tight loop), deferring restructuring to a background compactor trades tree compactness for lower per-remove latency.
+
+**Configuration**: `_defer_restructure = false` (default) — restructure inline as Phases 1-3 do today. `_defer_restructure = true` — skip inline restructuring, push addresses onto restructure queue for background processing.
+
+**Mechanism**: New SPSC `circular_buffer<ptr_address, 64K>` per session. Session retains address before push; compactor pops, inspects (bail if stale/orphaned), rebuilds via `cas_move`, releases retain. Queue-full is non-error (optimization, not correctness). `vcall::restructure` dispatches type-specific handlers.
+
+**Also handles**: The rare cline pressure edge case (all 16 clines full, all inline strategies fail) — regardless of defer mode, these get queued for the compactor as a fallback.
+
+Details deferred until Phase 3 validated.
 
 ---
 
@@ -219,7 +230,7 @@ When shared-mode COW returns a changed address, use `update_branch_address` inst
 
 ---
 
-### Phase 2: Single-branch elimination (unique path)
+### Phase 2: Single-branch elimination (both paths)
 
 **Step 2.1 — Level 2 Tier 2, Case A (plain inner → sole child, realloc X)**
 
@@ -254,13 +265,16 @@ Unified: `merged_prefix = my_prefix + div_byte + child.prefix` (child.prefix may
 
 ---
 
-### Phase 3-5 (deferred)
+### Phase 3: Subtree collapse to leaf (complete)
 
-- Phase 3: Subtree collapse to leaf (Level 3) — stack-allocated collection, threshold check
-- Phase 4: Restructure queue + compactor integration (shared path optimization)
+Implemented. Two-pass collapse (size check + direct construction via `entry_inserter` callback) for both unique and shared paths. Configurable `_collapse_threshold` (default 24, 0 = disabled). Also fixed pre-existing cursor key_len assert bug.
+
+### Phase 4-5 (deferred)
+
+- Phase 4: Restructure queue + compactor — optional deferred-mode optimization governed by `_defer_restructure` config (not tied to shared/unique mode). Reduces per-remove latency by deferring restructuring to a background thread. Also serves as fallback for the rare cline pressure edge case.
 - Phase 5: Full integration testing (1M keys, concurrent access, performance)
 
-Details will be planned after Phase 2 is complete and validated.
+Details will be planned after Phase 3 is validated.
 
 ---
 

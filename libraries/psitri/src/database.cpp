@@ -1,16 +1,32 @@
 #include <psitri/database.hpp>
 #include <psitri/database_impl.hpp>
-#include <psitri/read_session.hpp>
-#include <psitri/write_session.hpp>
+#include <psitri/node/inner.hpp>
+#include <psitri/node/leaf.hpp>
+#include <psitri/node/value_node.hpp>
+#include <psitri/read_session_impl.hpp>
+#include <psitri/write_session_impl.hpp>
 
 namespace psitri
 {
+   static void register_node_types()
+   {
+      static bool registered = false;
+      if (registered)
+         return;
+      registered = true;
+      sal::register_type_vtable<leaf_node>();
+      sal::register_type_vtable<inner_node>();
+      sal::register_type_vtable<inner_prefix_node>();
+      sal::register_type_vtable<value_node>();
+   }
+
    database::database(const std::filesystem::path& dir, const runtime_config& cfg)
        : _dir(dir),
          _cfg(cfg),
          _allocator(dir, cfg),
          _dbfile(dir / "dbfile.bin", sal::access_mode::read_write)
    {
+      register_node_types();
       if (_dbfile.size() == 0)
       {
          _dbfile.resize(sizeof(detail::database_state));
@@ -52,6 +68,9 @@ namespace psitri
       _cfg = cfg;
       _allocator.set_runtime_config(cfg);
    }
+
+   read_session::~read_session()  = default;
+   write_session::~write_session() = default;
 
    std::shared_ptr<write_session> database::start_write_session()
    {

@@ -315,6 +315,15 @@ if(BUILD_MDBX_TEST)
     endif()
 endif()
 
+# Psitri benchmark
+add_executable(psitri-benchmark programs/psitri_bench.cpp)
+target_link_libraries(psitri-benchmark PUBLIC Boost::program_options psitri)
+target_include_directories(psitri-benchmark PUBLIC ${Boost_INCLUDE_DIRS})
+set_target_properties(psitri-benchmark
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 # Only add test directory if testing is enabled
 if(BUILD_TESTS)
     add_subdirectory(test)

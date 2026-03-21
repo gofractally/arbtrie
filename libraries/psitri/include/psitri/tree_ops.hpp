@@ -432,6 +432,12 @@ namespace psitri
                               branch_number          lb);
 
       template <upsert_mode mode>
+      branch_set update(const sal::alloc_hint& parent_hint,
+                        smart_ref<leaf_node>&  leaf,
+                        key_view               key,
+                        branch_number          br);
+
+      template <upsert_mode mode>
       branch_set remove(const sal::alloc_hint& parent_hint,
                         smart_ref<leaf_node>&  leaf,
                         key_view               key,
@@ -1197,16 +1203,45 @@ namespace psitri
       return merge_branches<mode.make_shared_or_unique_only()>(parent_hint, in, br, sub_branches);
    }
 
-   /**
    template <upsert_mode mode>
-   branch_set tree_context::update(const sal::alloc_hint&      parent_hint,
-                                   const smart_ref<leaf_node>& leaf,
-                                   key_view                    key,
-                                   branch_number               br)
+   branch_set tree_context::update(const sal::alloc_hint& parent_hint,
+                                   smart_ref<leaf_node>&  leaf,
+                                   key_view               key,
+                                   branch_number          br)
    {
-      throw std::runtime_error("update: not implemented");
+      _delta_descendents = 0;  // updating an existing key, no count change
+
+      // Record old value size and release old external value if needed
+      auto old_value = leaf->get_value(br);
+      if (old_value.is_value_node())
+         _old_value_size = _session.get_ref(old_value.value_address())->size();
+      else
+         _old_value_size = old_value.size();
+
+      // Convert large values to value_nodes
+      auto new_val = make_value(_new_value, parent_hint);
+
+      if constexpr (mode.is_unique())
+      {
+         // Release old external value
+         if (leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node)
+            _session.release(leaf->get_value_address(br));
+
+         leaf.modify()->update_value(br, new_val);
+         return leaf.address();
+      }
+      else  // shared mode
+      {
+         retain_children(leaf);
+
+         // Release old external value (retained above, so release brings it back to original)
+         if (leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node)
+            _session.release(leaf->get_value_address(br));
+
+         op::leaf_update update_op{.src = *leaf.obj(), .lb = br, .key = key, .value = new_val};
+         return _session.alloc<leaf_node>(parent_hint, update_op);
+      }
    }
-   */
    template <upsert_mode mode>
    branch_set tree_context::remove(const sal::alloc_hint& parent_hint,
                                    smart_ref<leaf_node>&  leaf,

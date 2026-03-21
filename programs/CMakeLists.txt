@@ -41,5 +41,23 @@ if(ENABLE_COVERAGE)
     target_link_options(arbtrie-benchmark PUBLIC --coverage)
 endif()
 
+add_executable(psitri-benchmark psitri_bench.cpp)
+target_link_libraries(psitri-benchmark PUBLIC Boost::program_options psitri)
+target_include_directories(psitri-benchmark PUBLIC ${Boost_INCLUDE_DIRS})
+set_target_properties(psitri-benchmark
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+if(ENABLE_SANITIZER)
+    target_compile_options(psitri-benchmark PUBLIC -fsanitize=thread -g)
+    target_link_options(psitri-benchmark PUBLIC -fsanitize=thread -g)
+endif()
+
+if(ENABLE_COVERAGE)
+    target_compile_options(psitri-benchmark PUBLIC --coverage)
+    target_link_options(psitri-benchmark PUBLIC --coverage)
+endif()
+
 # Add the arbtrie_sql program subdirectory
 add_subdirectory(arbtrie_sql)
