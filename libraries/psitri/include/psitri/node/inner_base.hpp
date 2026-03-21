@@ -1,6 +1,7 @@
 #pragma once
 #include <psitri/node/inner_node_util.hpp>
 #include <psitri/node/node.hpp>
+#include <psitri/util.hpp>
 
 namespace psitri
 {
@@ -496,7 +497,7 @@ namespace psitri
       d->_num_cline = up.needed_clines;
       d->_descendents += up.delta_descendents;
       assert(std::is_sorted(d->divisions(), d->divisions() + d->num_divisions()));
-      assert(d->validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(d->validate_invariants());
    }
    template <typename Derived>
    inline void inner_node_base<Derived>::remove_branch(branch_number bn) noexcept
@@ -526,7 +527,7 @@ namespace psitri
       memmove(new_branches + *bn, old_branches + *bn + 1, old_nb - *bn - 1);
 
       d->_num_branches = old_nb - 1;
-      assert(d->validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(d->validate_invariants());
    }
 
    template <typename Derived>

@@ -4,6 +4,7 @@
 #include <psitri/util.hpp>
 #include <psitri/value_type.hpp>
 #include <sal/allocator_session.hpp>
+
 namespace psitri
 {
 

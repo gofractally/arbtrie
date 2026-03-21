@@ -558,7 +558,7 @@ namespace psitri
       template <any_inner_node_type NodeType>
       uint64_t validate_inner(smart_ref<NodeType> r, int depth = 0)
       {
-         assert(r->validate_invariants());
+         PSITRI_ASSERT_INVARIANTS(r->validate_invariants());
          uint64_t total_keys = 0;
          for (int i = 0; i < r->num_branches(); ++i)
          {

@@ -85,7 +85,7 @@ namespace psitri
    void leaf_node::clone_from(const leaf_node* clone)
    {
       //    SAL_ERROR("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
-      assert(clone->validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(clone->validate_invariants());
       set_num_branches(clone->num_branches());
       if (clone->dead_space())
       {
@@ -168,7 +168,7 @@ namespace psitri
       //ucc::memcpy_aligned_64byte(aptr, ((char*)clone->tail()) - apos, apos);
 
       memcpy(alloc_head(), clone->alloc_head(), clone->_alloc_pos);
-      assert(validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
 
    /// TODO: this could be made more effecient by copying and inserting in one pass
@@ -266,7 +266,7 @@ namespace psitri
          else
             vos[x] = value_branch();
       }
-      assert(validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
    /*
     * Each node has an optimal layout that looks something like this:
@@ -345,7 +345,7 @@ namespace psitri
          else
             vos[x - *start] = value_branch();
       }
-      assert(validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
 
    /*
@@ -407,7 +407,7 @@ namespace psitri
       vis.init(ins, vis.ctx);
 
       assert(ins._idx == vis.count);
-      assert(validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
 
    leaf_node::can_apply_mode leaf_node::can_apply(const op::leaf_insert& ins) const noexcept
@@ -516,7 +516,7 @@ namespace psitri
       assert(get_key(get(ins.key)) == ins.key);
       // kSAL_WARN("insert:{} = {}  get_value:{}", ins.key, ins.value, get_value(ins.lb));
       assert(get_value(ins.lb) == ins.value);
-      assert(validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
       return ins.lb;
    }
 
@@ -578,7 +578,7 @@ namespace psitri
 
       // 5. Update Optimal Flag
       _optimal_layout = false;  // Removing always breaks optimal layout
-      assert(validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
 
    size_t leaf_node::update_value(branch_number bn, const value_type& value) noexcept
@@ -667,7 +667,7 @@ namespace psitri
       }
       _optimal_layout = false;
       assert(get_value(bn) == value);
-      assert(validate_invariants());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
       return old_size;
    }
 

@@ -65,6 +65,12 @@ option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_VISUALIZER "Build segment visualizer" )
 option(DISABLE_NEON "Disable all ARM NEON SIMD optimizations (for debugging)" OFF)
+option(ENABLE_DEEP_INVARIANTS "Enable expensive invariant checks in debug builds" OFF)
+
+if(ENABLE_DEEP_INVARIANTS)
+    message(STATUS "Deep invariant checks ENABLED")
+    add_compile_definitions(PSITRI_DEEP_INVARIANTS=1)
+endif()
 
 if(DISABLE_NEON)
     message(STATUS "NEON SIMD optimizations DISABLED")

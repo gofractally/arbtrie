@@ -3,6 +3,13 @@
 #include <cassert>
 #include <cstring>
 #include <string_view>
+
+/// Expensive invariant checks, enabled via cmake -DENABLE_DEEP_INVARIANTS=ON
+#ifdef PSITRI_DEEP_INVARIANTS
+#define PSITRI_ASSERT_INVARIANTS(expr) assert(expr)
+#else
+#define PSITRI_ASSERT_INVARIANTS(expr) ((void)0)
+#endif
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
