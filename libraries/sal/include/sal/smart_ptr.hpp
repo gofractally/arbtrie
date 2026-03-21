@@ -354,7 +354,7 @@ namespace sal
       const T*        operator->() const noexcept { return obj(); }
       const T&        operator*() const noexcept { return *obj(); }
       modify_guard<T> modify() noexcept;
-      void modify(auto&& update_fn) const noexcept(noexcept(update_fn(std::declval<T*>())));
+      void modify(auto&& update_fn) noexcept(noexcept(update_fn(std::declval<T*>())));
 
       friend class allocator_session;
    };
@@ -379,10 +379,10 @@ namespace sal
       return modify_guard<T>(*this);
    }
    template <typename T>
-   void smart_ref<T>::modify(auto&& update_fn) const
+   void smart_ref<T>::modify(auto&& update_fn)
        noexcept(noexcept(update_fn(std::declval<T*>())))
    {
-      auto guard = modify<T>(this);
+      auto guard = modify();
       update_fn(guard.get());
    }
 

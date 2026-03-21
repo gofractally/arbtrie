@@ -14,6 +14,11 @@ namespace psitri
          std::array<uint8_t, 8>& cline_indices;
          int64_t                 delta_descendents = 0;
       };
+      struct inner_remove_branch
+      {
+         branch_number br;
+         int64_t       delta_descendents;
+      };
    };  // namespace op
    class inner_node;
    class inner_prefix_node;
@@ -250,9 +255,43 @@ namespace psitri
          assert(d.validate_invariants());
       }
 
+      inline void init(const any_inner_node_type auto* clone,
+                        const op::inner_remove_branch&  rm) noexcept
+      {
+         Derived&       d          = static_cast<Derived&>(*this);
+         d._num_branches           = clone->_num_branches - 1;
+         d._num_cline              = clone->_num_cline;  // keep same cline count
+         d._descendents            = clone->_descendents + rm.delta_descendents;
+
+         const branch*  c_branches = clone->const_branches();
+         const uint8_t* c_divs     = clone->divisions();
+         branch*        d_branches = d.branches();
+         uint8_t*       d_divs     = d.divisions();
+
+         // Copy clines from clone, then dec_ref the removed branch's cline
+         std::copy(clone->clines(), clone->clines() + clone->_num_cline, d.clines());
+         auto cl_head = reinterpret_cast<cline_data*>(d.clines());
+         cl_head[c_branches[*rm.br].line()].dec_ref();
+
+         // Copy divisions: skip div at (br==0 ? 0 : br-1)
+         uint32_t div_rm = (*rm.br == 0) ? 0 : *rm.br - 1;
+         uint32_t old_nd = clone->num_branches() - 1;
+         memcpy(d_divs, c_divs, div_rm);
+         memcpy(d_divs + div_rm, c_divs + div_rm + 1, old_nd - div_rm - 1);
+
+         // Copy branches: skip the removed one (cline indices unchanged)
+         memcpy(d_branches, c_branches, *rm.br);
+         memcpy(d_branches + *rm.br, c_branches + *rm.br + 1,
+                clone->_num_branches - *rm.br - 1);
+
+         assert(std::is_sorted(d.divisions(), d.divisions() + d.num_divisions()));
+         assert(d.validate_invariants());
+      }
+
      public:
       [[nodiscard]] inline bool can_apply(const op::replace_branch& up) const noexcept;
       inline void               apply(const op::replace_branch& up) noexcept;
+      inline void               remove_branch(branch_number bn) noexcept;
       [[nodiscard]] inline bool validate_invariants() const noexcept;
 
       std::span<const ptr_address> get_branch_clines() const noexcept
@@ -456,6 +495,37 @@ namespace psitri
       assert(std::is_sorted(d->divisions(), d->divisions() + d->num_divisions()));
       assert(d->validate_invariants());
    }
+   template <typename Derived>
+   inline void inner_node_base<Derived>::remove_branch(branch_number bn) noexcept
+   {
+      Derived* d = static_cast<Derived*>(this);
+      assert(*bn < d->_num_branches);
+      assert(d->_num_branches > 1 && "cannot remove the last branch");
+
+      // 1. Dec cline ref for the removed branch (auto-nulls when ref hits 0)
+      d->get_cline_data()[d->branches()[*bn].line()].dec_ref();
+
+      // 2. Compute old positions (before changing _num_branches)
+      uint8_t* old_divs     = d->divisions();
+      branch*  old_branches = d->branches();
+      uint32_t old_nb       = d->_num_branches;
+      uint32_t old_nd       = old_nb - 1;
+
+      // 3. Remove one division: bn==0 removes div[0], bn>0 removes div[bn-1]
+      uint32_t div_rm = (*bn == 0) ? 0 : *bn - 1;
+      memmove(old_divs + div_rm, old_divs + div_rm + 1, old_nd - div_rm - 1);
+
+      // 4. New branches start 1 byte earlier (divisions shrank by 1)
+      branch* new_branches = old_branches - 1;
+      // Copy branches before bn to new position
+      memmove(new_branches, old_branches, *bn);
+      // Copy branches after bn to new position (skipping bn)
+      memmove(new_branches + *bn, old_branches + *bn + 1, old_nb - *bn - 1);
+
+      d->_num_branches = old_nb - 1;
+      assert(d->validate_invariants());
+   }
+
    template <typename Derived>
    [[nodiscard]] inline bool inner_node_base<Derived>::validate_invariants() const noexcept
    {

@@ -411,7 +411,7 @@ namespace psitri
 
    void leaf_node::remove(branch_number bn) noexcept
    {
-      SAL_ERROR("remove:{} key:{} size: {}", bn, get_key(bn), get_key(bn).size());
+      //SAL_ERROR("remove:{} key:{} size: {}", bn, get_key(bn), get_key(bn).size());
       assert(bn < num_branches());
 
       value_branch vb = value_offsets()[*bn];
@@ -422,7 +422,7 @@ namespace psitri
       if (vb.is_inline())
       {
          value_offset vo = vb.offset();
-         SAL_ERROR("    value size: {}", get_value_ptr(vo)->get().size());
+         //SAL_ERROR("    value size: {}", get_value_ptr(vo)->get().size());
          _dead_space += sizeof(value_data) + get_value_ptr(vo)->get().size();
       }
       else if (vb.is_address())
@@ -620,18 +620,14 @@ namespace psitri
    /// removes the address ptr if and only if no branches are found to reference it
    void leaf_node::remove_address_ptr(cline_offset cl_off) noexcept
    {
-      SAL_ERROR("remove_address_ptr:{}", cl_off);
+      //SAL_ERROR("remove_address_ptr:{}", cl_off);
       for (uint16_t i = 0; i < num_branches(); ++i)
       {
-         SAL_ERROR(" [{}]  key: {} = {}", i, get_key(branch_number(i)),
-                   get_value(branch_number(i)));
          value_branch vb = value_offsets()[i];
          if (vb.is_address())
          {
-            SAL_ERROR("       vb.cline():{}  cl_off:{}", vb.cline(), cl_off);
             if (vb.cline() == cl_off)
             {
-               SAL_ERROR("        found");
                return;
             }
          }
@@ -640,7 +636,6 @@ namespace psitri
       //_cline_cap -= (cl_off == _cline_cap - 1);
       while (_cline_cap > 0 && clines()[_cline_cap - 1] == ptr_address(0))
       {
-         SAL_ERROR("   remove tail cline");
          --_cline_cap;
       }
    }

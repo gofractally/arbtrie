@@ -51,6 +51,15 @@ namespace psitri
                                            2 * (*range.end - *range.begin) - 1 +
                                            ftab.compressed_clines() * sizeof(cline_data));
       }
+      static inline uint32_t alloc_size(key_view                        prefix,
+                                        const any_inner_node_type auto* clone,
+                                        const op::inner_remove_branch&) noexcept
+      {
+         auto new_branches = clone->num_branches() - 1;
+         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+                                           2 * new_branches - 1 +
+                                           clone->num_clines() * sizeof(cline_data));
+      }
 
       inner_prefix_node(uint32_t                      asize,
                         ptr_address_seq               seq,
@@ -96,6 +105,19 @@ namespace psitri
          init(clone, update);
          set_prefix(prefix);
       }
+      inner_prefix_node(uint32_t                        asize,
+                        ptr_address_seq                 seq,
+                        key_view                        prefix,
+                        const any_inner_node_type auto* clone,
+                        const op::inner_remove_branch&  rm) noexcept
+          : inner_node_base(asize, node_type::inner_prefix, seq)
+      {
+         assert(asize == alloc_size(prefix, clone, rm));
+         _prefix_cap = prefix.size();
+         init(clone, rm);
+         set_prefix(prefix);
+      }
+
       inner_prefix_node(uint32_t                        asize,
                         ptr_address_seq                 seq,
                         const any_inner_node_type auto* clone,
@@ -211,6 +233,11 @@ namespace psitri
                  const any_inner_node_type auto* clone,
                  const op::replace_branch&       update) noexcept;
 
+      inner_node(uint32_t                        asize,
+                 ptr_address_seq                 seq,
+                 const any_inner_node_type auto* clone,
+                 const op::inner_remove_branch&  rm) noexcept;
+
       /**
        * Calculate the size of an inner_node object, the first param is always null and used for
        * type-based dispatch from sal::allocator_session::alloc and the remaining params match the
@@ -229,6 +256,8 @@ namespace psitri
                                         uint64_t                        descendents = 0) noexcept;
       inline static uint32_t alloc_size(const any_inner_node_type auto* clone,
                                         const op::replace_branch&       update) noexcept;
+      inline static uint32_t alloc_size(const any_inner_node_type auto* clone,
+                                        const op::inner_remove_branch&  rm) noexcept;
       ///@}
 
       branch_number lower_bound(key_view key) const noexcept
@@ -238,13 +267,7 @@ namespace psitri
          return inner_node_base<inner_node>::lower_bound(key[0]);
       }
 
-      void remove_branch(branch_number)
-      {
-         // if this is the only branch ref a cline,
-         // then set the cline to null.
-         // shift all branches after bn left 1 byte
-         // shift all dividers after bn-1 left 1 byte
-      }
+      using inner_node_base<inner_node>::remove_branch;
       uint16_t num_branches() const noexcept { return _num_branches; }
 
       const branch* const_branches() const noexcept
@@ -367,6 +390,26 @@ namespace psitri
    {
       assert(asize == alloc_size(clone, range, ftab, descendents));
       init(asize, seq, clone, range, ftab, descendents);
+   }
+
+   inline uint32_t inner_node::alloc_size(const any_inner_node_type auto* clone,
+                                          const op::inner_remove_branch&) noexcept
+   {
+      auto new_branches_count = clone->num_branches() - 1;
+      auto divider_capacity   = new_branches_count - 1;
+      return ucc::round_up_multiple<64>(inner_node_size +
+                                        clone->num_clines() * sizeof(ptr_address) +
+                                        divider_capacity + new_branches_count);
+   }
+
+   inline inner_node::inner_node(uint32_t                        asize,
+                                 ptr_address_seq                 seq,
+                                 const any_inner_node_type auto* clone,
+                                 const op::inner_remove_branch&  rm) noexcept
+       : inner_node_base(asize, node_type::inner, seq)
+   {
+      assert(asize == alloc_size(clone, rm));
+      init(clone, rm);
    }
 
 }  // namespace psitri

@@ -171,7 +171,9 @@ namespace psitri
          /// ironically, if we are in shared mode removing a key could force a split because the new
          /// branch address might not be sharable with the 16 existing clines.
          branch_set result = upsert<upsert_mode::unique_remove>({}, rref, key);
-         if (result.count() == 1)
+         if (result.count() == 0)
+            ;  // root already taken, nothing to give back — tree is empty
+         else if (result.count() == 1)
             _root.give(result.get_first_branch());
          else
             _root.give(make_inner(result));
@@ -380,6 +382,7 @@ namespace psitri
       template <any_inner_node_type NodeType>
       uint64_t validate_inner(smart_ref<NodeType> r, int depth = 0)
       {
+         assert(r->validate_invariants());
          uint64_t total_keys = 0;
          for (int i = 0; i < r->num_branches(); ++i)
          {
@@ -716,25 +719,32 @@ namespace psitri
       //print(in, 10);
       if constexpr (mode.is_remove())
       {
-         if (in->num_branches() == 1)
-         {
-            // if the child is a leaf node,
-         }
          if (sub_branches.count() == 0) [[unlikely]]
          {
-            if (in->num_branches() == 2)
+            if (in->num_branches() == 1)
+               return {};  // cascade empty to parent
+
+            if constexpr (mode.is_unique())
             {
-               // then we are going from 2 to 1 branch which makes this
-               // inner node potentially redundant. If not prefix node,
-               // we can simply return the sole branch as the new child for
-               // the parent; however, in that case the child will need a new address
-               // allocated using the parent hint of our parent rather than the hint
-               // of this node it was likely allocated under.
+               in.modify(
+                   [&](auto* n)
+                   {
+                      n->remove_branch(br);
+                      n->add_descendents(_delta_descendents);
+                   });
             }
-            // this happens when this node has a common prefix that cannot be prepended
-            // to all the keys of the sole leaf node.
-            else if (in->num_branches() == 1)
-               return {};
+            else if constexpr (mode.is_shared())
+            {
+               // retain_children gave +1 to all children including the removed one.
+               // The removed child's extra retain will be balanced by the original
+               // node's destroy() when the snapshot chain is released.
+               op::inner_remove_branch rm{br, _delta_descendents};
+               if constexpr (is_inner_node<InnerNodeType>)
+                  return _session.alloc<InnerNodeType>(parent_hint, in.obj(), rm);
+               else if constexpr (is_inner_prefix_node<InnerNodeType>)
+                  return _session.alloc<InnerNodeType>(parent_hint, in->prefix(), in.obj(), rm);
+            }
+            std::unreachable();
          }
       }
 
@@ -742,7 +752,6 @@ namespace psitri
       if constexpr (mode.is_unique() or mode.is_remove())
       {
          // even in shared mode it is possible for remove to do nothing if key was not found
-         // assert(badr == bref->address());
          if (sub_branches.count() == 1) [[likely]]
          {
             if (bref->address() == sub_branches.get_first_branch())
@@ -753,18 +762,6 @@ namespace psitri
             }
          }
          // else fall through to merge branches.
-      }
-      if constexpr (mode.is_remove())
-      {
-         if (sub_branches.count() == 0) [[unlikely]]
-         {
-            if (in->num_branches() == 1)
-               return {};
-
-            SAL_ERROR("remove: sub_branches.count() == 0");
-            /// we need to modify inner node in to remove the branch
-            abort();
-         }
       }
       else
       {
@@ -825,7 +822,7 @@ namespace psitri
 
          if (leaf->num_branches() == 1) [[unlikely]]
          {
-            SAL_ERROR("remove unique: leaf has only one branch");
+            //SAL_ERROR("remove unique: leaf has only one branch");
             return {};
          }
 
@@ -836,7 +833,7 @@ namespace psitri
       {
          if (leaf->num_branches() == 1) [[unlikely]]
          {
-            SAL_ERROR("remove shared: leaf has only one branch");
+            //SAL_ERROR("remove shared: leaf has only one branch");
             return {};
          }
 

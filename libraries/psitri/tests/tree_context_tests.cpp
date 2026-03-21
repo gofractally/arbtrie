@@ -182,6 +182,10 @@ TEST_CASE("tree_context-insert-remove", "[tree_context][remove]")
       int result = ctx.remove(to_key_view(word));
       REQUIRE(result > 0);  // Should return size of removed value (word length)
       removed_count++;
+
+      // Validate invariants periodically (every 10K removals)
+      if (ctx.get_root() && (removed_count % 10000 == 0))
+         ctx.validate();
    }
    end = std::chrono::high_resolution_clock::now();
    SAL_ERROR("removed {:L} words in {:L} ms, {:L} words/sec", removed_count,
@@ -195,10 +199,8 @@ TEST_CASE("tree_context-insert-remove", "[tree_context][remove]")
    int result = ctx.remove(to_key_view("hello"));
    REQUIRE(result == -1);  // Should return -1 for non-existent key
 
-   // Verify tree is empty by checking cursor
-   auto cur = cursor(ctx.get_root());
-   cur.seek_begin();
-   REQUIRE(cur.is_end());  // Should be at end if tree is empty
+   // Verify tree is empty by checking root is null
+   REQUIRE_FALSE(ctx.get_root());
 
    SAL_INFO("Successfully inserted and removed {} words", words.size());
 }
