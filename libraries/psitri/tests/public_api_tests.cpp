@@ -1,4 +1,9 @@
 #include <catch2/catch_all.hpp>
+#include <algorithm>
+#include <chrono>
+#include <numeric>
+#include <random>
+#include <thread>
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
 #include <psitri/tree_ops.hpp>
@@ -922,4 +927,454 @@ TEST_CASE("interleaved insert and remove in same transaction", "[public-api][rem
    }
    t.validate_unique_refs();
    REQUIRE(count_keys(t) == 100);  // removed 50, added 50
+}
+
+// ============================================================
+// Orphan / leak detection tests
+//
+// These tests verify that after removing keys, no unreachable
+// (orphaned) nodes remain allocated.  The key invariant:
+//   reachable nodes (via tree walk) == total allocated objects
+// When the tree is empty, both should be 0.
+//
+// Important: the SAL allocator uses an async release queue
+// drained by a compactor thread.  After releasing refs we must
+// wait for the queue to drain before comparing counts.
+// ============================================================
+
+/// Wait for the compactor to drain the release queue and for
+/// get_total_allocated_objects() to stabilize.
+static void wait_for_compactor(test_db& t, int max_ms = 5000)
+{
+   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_ms);
+   while (std::chrono::steady_clock::now() < deadline)
+   {
+      uint64_t pending = t.ses->get_pending_release_count();
+      if (pending == 0)
+      {
+         // Give the compactor one more pass to finish any cascaded releases
+         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+         if (t.ses->get_pending_release_count() == 0)
+            return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+   }
+   WARN("compactor did not drain within " << max_ms << "ms, pending="
+        << t.ses->get_pending_release_count());
+}
+
+/// Helper: count reachable nodes by walking the tree from root
+static uint64_t reachable_nodes(test_db& t)
+{
+   auto root = t.ses->get_root(0);
+   if (!root)
+      return 0;
+   tree_context ctx(root);
+   return ctx.get_stats().total_nodes();
+}
+
+/// Helper: assert no orphaned nodes exist.
+/// reachable (tree walk) must equal total allocated objects.
+static void require_no_orphans(test_db& t, const char* context = "")
+{
+   wait_for_compactor(t);
+   auto root      = t.ses->get_root(0);
+   uint64_t reachable = 0;
+   if (root)
+   {
+      tree_context ctx(root);
+      reachable = ctx.get_stats().total_nodes();
+   }
+   uint64_t allocated = t.ses->get_total_allocated_objects();
+   INFO(context << " reachable=" << reachable << " allocated=" << allocated);
+   REQUIRE(reachable == allocated);
+}
+
+/// Helper: assert tree is completely empty and nothing is allocated
+static void require_empty_no_leaks(test_db& t, const char* context = "")
+{
+   wait_for_compactor(t);
+   REQUIRE(count_keys(t) == 0);
+   auto root = t.ses->get_root(0);
+   INFO(context << " root should be null after removing all keys");
+   REQUIRE_FALSE(root);
+   uint64_t allocated = t.ses->get_total_allocated_objects();
+   INFO(context << " allocated=" << allocated << " (expected 0)");
+   REQUIRE(allocated == 0);
+}
+
+TEST_CASE("leak: insert then release root leaves zero allocated objects",
+          "[public-api][leak]")
+{
+   test_db t;
+   const int N = 2000;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after insert");
+
+   // Release root — should cascade-release all nodes
+   t.ses->set_root(0, {}, sal::sync_type::none);
+
+   // Wait for compactor to drain any queued releases
+   wait_for_compactor(t);
+
+   uint64_t allocated = t.ses->get_total_allocated_objects();
+   INFO("allocated after root release=" << allocated << " (expected 0)");
+   REQUIRE(allocated == 0);
+}
+
+TEST_CASE("leak: insert large values then release root leaves zero allocated",
+          "[public-api][leak]")
+{
+   test_db t;
+   const int N = 500;
+   std::string big_val(300, 'V');  // forces value_node allocation
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(big_val));
+      }
+      tx.commit();
+   }
+   require_no_orphans(t, "after insert large values");
+
+   // Release root
+   t.ses->set_root(0, {}, sal::sync_type::none);
+   wait_for_compactor(t);
+
+   uint64_t allocated = t.ses->get_total_allocated_objects();
+   INFO("allocated after root release=" << allocated << " (expected 0)");
+   REQUIRE(allocated == 0);
+}
+
+TEST_CASE("leak: insert-release-reinsert cycles via root release",
+          "[public-api][leak]")
+{
+   test_db t;
+   const int N      = 500;
+   const int CYCLES = 5;
+
+   for (int cycle = 0; cycle < CYCLES; ++cycle)
+   {
+      INFO("cycle " << cycle);
+      insert_keys(t, N);
+      require_no_orphans(t, "after insert");
+
+      // Release root
+      t.ses->set_root(0, {}, sal::sync_type::none);
+      wait_for_compactor(t);
+
+      uint64_t allocated = t.ses->get_total_allocated_objects();
+      INFO("cycle " << cycle << " allocated after root release=" << allocated);
+      REQUIRE(allocated == 0);
+   }
+}
+
+TEST_CASE("leak: remove-all sequential leaves zero allocated objects",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N = 2000;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after insert");
+
+   remove_keys(t, N);
+   require_empty_no_leaks(t, "after sequential remove-all");
+}
+
+TEST_CASE("leak: remove-all random order leaves zero allocated objects",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N = 2000;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after insert");
+
+   // Build shuffled index list
+   std::vector<int> indices(N);
+   std::iota(indices.begin(), indices.end(), 0);
+   std::mt19937 rng(42);  // deterministic seed
+   std::shuffle(indices.begin(), indices.end(), rng);
+
+   // Remove in random order
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int idx : indices)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", idx);
+         REQUIRE(tx.remove(to_key_view(std::string(key))) >= 0);
+      }
+      tx.commit();
+   }
+
+   require_empty_no_leaks(t, "after random-order remove-all");
+}
+
+TEST_CASE("leak: remove-all reverse order leaves zero allocated objects",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N = 2000;
+
+   insert_keys(t, N);
+
+   // Remove in reverse order (exercises different collapse paths)
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = N - 1; i >= 0; --i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         REQUIRE(tx.remove(to_key_view(std::string(key))) >= 0);
+      }
+      tx.commit();
+   }
+
+   require_empty_no_leaks(t, "after reverse remove-all");
+}
+
+TEST_CASE("leak: remove half - reachable equals allocated",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N = 2000;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after insert");
+
+   // Remove odd-indexed keys
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 1; i < N; i += 2)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      tx.commit();
+   }
+
+   REQUIRE(count_keys(t) == N / 2);
+   require_no_orphans(t, "after removing odd keys");
+   t.validate_unique_refs();
+}
+
+TEST_CASE("leak: insert-remove-reinsert cycles have no cumulative leaks",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N      = 500;
+   const int CYCLES = 10;
+
+   for (int cycle = 0; cycle < CYCLES; ++cycle)
+   {
+      INFO("cycle " << cycle);
+      insert_keys(t, N);
+      require_no_orphans(t, "after insert");
+      remove_keys(t, N);
+      require_empty_no_leaks(t, "after remove-all");
+   }
+}
+
+TEST_CASE("leak: large values - remove-all leaves zero allocated",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N = 500;
+   std::string big_val(300, 'V');  // forces value_node allocation
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(big_val));
+      }
+      tx.commit();
+   }
+   require_no_orphans(t, "after insert large values");
+
+   remove_keys(t, N);
+   require_empty_no_leaks(t, "after remove-all large values");
+}
+
+TEST_CASE("leak: mixed key sizes - remove-all leaves zero allocated",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+
+   // Insert keys with varying lengths to exercise different leaf layouts
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         // Short keys
+         char key[64];
+         snprintf(key, sizeof(key), "s%d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value("v"));
+      }
+      for (int i = 0; i < 200; ++i)
+      {
+         // Medium keys with shared prefix
+         std::string key = "medium_prefix_" + std::to_string(i);
+         tx.upsert(to_key_view(key), to_value("val"));
+      }
+      for (int i = 0; i < 100; ++i)
+      {
+         // Long keys
+         std::string key(100, 'k');
+         key += std::to_string(i);
+         tx.upsert(to_key_view(key), to_value("longval"));
+      }
+      tx.commit();
+   }
+   require_no_orphans(t, "after mixed insert");
+
+   // Remove all in one transaction
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "s%d", i);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      for (int i = 0; i < 200; ++i)
+      {
+         std::string key = "medium_prefix_" + std::to_string(i);
+         tx.remove(to_key_view(key));
+      }
+      for (int i = 0; i < 100; ++i)
+      {
+         std::string key(100, 'k');
+         key += std::to_string(i);
+         tx.remove(to_key_view(key));
+      }
+      tx.commit();
+   }
+   require_empty_no_leaks(t, "after mixed remove-all");
+}
+
+TEST_CASE("leak: batched remove across transactions - no orphans",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N     = 3000;
+   const int BATCH = 100;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after insert");
+
+   // Remove in batches, each batch in its own transaction
+   for (int i = 0; i < N; i += BATCH)
+   {
+      auto tx  = t.ses->start_transaction(0);
+      int  end = std::min(i + BATCH, N);
+      for (int j = i; j < end; ++j)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", j);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      tx.commit();
+
+      // Check no orphans after each batch
+      require_no_orphans(t, "after batch remove");
+   }
+
+   require_empty_no_leaks(t, "after all batches");
+}
+
+TEST_CASE("leak: snapshot held during remove - no orphans after release",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N = 1000;
+
+   insert_keys(t, N);
+
+   // Take a snapshot (retain the root)
+   auto snapshot = t.ses->get_root(0);
+   REQUIRE(snapshot);
+
+   // Remove all keys while snapshot is held
+   remove_keys(t, N);
+
+   // Tree should be empty from the current root's perspective
+   REQUIRE(count_keys(t) == 0);
+
+   // But allocated objects may be non-zero because snapshot holds refs
+   // The snapshot should still be readable
+   {
+      cursor c(snapshot);
+      c.seek_begin();
+      int snap_count = 0;
+      if (!c.is_end())
+         do { ++snap_count; } while (c.next());
+      REQUIRE(snap_count == N);
+   }
+
+   // Release the snapshot
+   snapshot = {};
+
+   // Now set root to null to release all references
+   t.ses->set_root(0, {}, sal::sync_type::none);
+
+   // After releasing snapshot, everything should be freed
+   uint64_t allocated = t.ses->get_total_allocated_objects();
+   INFO("allocated after snapshot release=" << allocated << " (expected 0)");
+   REQUIRE(allocated == 0);
+}
+
+TEST_CASE("leak: interleaved insert/remove in same tx - no orphans",
+          "[public-api][remove][leak]")
+{
+   test_db t;
+   const int N = 500;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after initial insert");
+
+   // In one tx: remove first half, insert new keys
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N / 2; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      for (int i = N; i < N + N / 2; ++i)
+      {
+         char key[64], val[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         snprintf(val, sizeof(val), "val%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(std::string(val)));
+      }
+      tx.commit();
+   }
+
+   REQUIRE(count_keys(t) == N);
+   require_no_orphans(t, "after interleaved insert/remove");
+
+   // Now remove everything
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = N / 2; i < N + N / 2; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      tx.commit();
+   }
+   require_empty_no_leaks(t, "after final remove-all");
 }

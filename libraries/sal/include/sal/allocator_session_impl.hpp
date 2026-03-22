@@ -369,4 +369,9 @@ namespace sal
       return _ptr_alloc.used();
    }
 
+   inline uint64_t allocator_session::get_pending_release_count() const noexcept
+   {
+      return _release_queue.usage();
+   }
+
 }  // namespace sal

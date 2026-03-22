@@ -46,6 +46,7 @@ namespace sal
       [[nodiscard]] read_lock lock() noexcept;
 
       uint64_t get_total_allocated_objects() const noexcept;
+      uint64_t get_pending_release_count() const noexcept;
 
       template <typename T>
       [[nodiscard]] ptr_address alloc(auto&&... args) noexcept

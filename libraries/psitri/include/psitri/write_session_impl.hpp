@@ -31,6 +31,16 @@ namespace psitri
       _allocator_session->set_root(sal::root_object_number(root_index), std::move(root), sync);
    }
 
+   inline uint64_t write_session::get_total_allocated_objects() const
+   {
+      return _allocator_session->get_total_allocated_objects();
+   }
+
+   inline uint64_t write_session::get_pending_release_count() const
+   {
+      return _allocator_session->get_pending_release_count();
+   }
+
    inline transaction write_session::start_transaction(uint32_t root_index)
    {
       auto& lock = _db->modify_lock(root_index);

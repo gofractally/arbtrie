@@ -160,6 +160,27 @@ namespace psitri
       void     compact_to(alloc_header* compact_dst) const noexcept;
       uint32_t cow_size() const noexcept { return max_leaf_size; }  // TODO: make this config const
 
+      /// Release value_node and subtree addresses held by this leaf.
+      void destroy(const sal::allocator_session_ptr& session) const noexcept
+      {
+         // TODO: restructure to avoid branch prediction miss per iteration
+         // (e.g. gather address indices first, then release in a second pass)
+         const value_branch* vb = value_offsets();
+         for (uint32_t i = 0; i < num_branches(); ++i)
+            if (vb[i].is_address())
+               session->release(get_address(vb[i]));
+      }
+
+      /// Visit all child addresses (value_nodes and subtrees) held by this leaf.
+      void visit_children(const std::function<void(sal::ptr_address)>& visitor) const noexcept
+      {
+         // TODO: restructure to avoid branch prediction miss per iteration
+         const value_branch* vb = value_offsets();
+         for (uint32_t i = 0; i < num_branches(); ++i)
+            if (vb[i].is_address())
+               visitor(get_address(vb[i]));
+      }
+
       struct split_pos
       {
          key_view cprefix;           ///< common prefix of all keys

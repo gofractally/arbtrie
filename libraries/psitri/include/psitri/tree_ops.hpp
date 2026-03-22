@@ -693,9 +693,16 @@ namespace psitri
                calc_stats(s, r.as<inner_prefix_node>(), depth + 1);
                break;
             case node_type::leaf:
+            {
                s.leaf_nodes++;
-               s.total_keys += r.as<leaf_node>()->num_branches();
+               auto leaf = r.as<leaf_node>();
+               s.total_keys += leaf->num_branches();
+               for (uint32_t i = 0; i < leaf->num_branches(); ++i)
+                  if (leaf->get_value_type(branch_number(i)) ==
+                      leaf_node::value_type_flag::value_node)
+                     s.value_nodes++;
                break;
+            }
             case node_type::value:
             default:
                std::unreachable();

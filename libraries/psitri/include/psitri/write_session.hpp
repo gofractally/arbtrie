@@ -35,6 +35,14 @@ namespace psitri
       /// Get the current sync mode
       sal::sync_type get_sync() const { return _sync; }
 
+      /// Return the number of live objects tracked by the allocator session.
+      /// Useful for leak detection: after removing all keys the count should be 0.
+      uint64_t get_total_allocated_objects() const;
+
+      /// Return the number of objects pending in the release queue.
+      /// The compactor thread drains this asynchronously.
+      uint64_t get_pending_release_count() const;
+
       /// Start a transaction on the given top-level root index
       transaction start_transaction(uint32_t root_index);
 
