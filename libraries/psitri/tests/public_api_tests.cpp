@@ -369,9 +369,10 @@ TEST_CASE("database reopen preserves data", "[public-api][database]")
    {
       auto db  = std::make_shared<database>(dir, runtime_config());
       auto ses = db->start_write_session();
+      ses->set_sync(sal::sync_type::full);
       auto tx  = ses->start_transaction(0);
       tx.upsert(to_key("survive"), to_value("reopen"));
-      tx.commit(sal::sync_type::full);
+      tx.commit();
    }
 
    // Reopen and verify

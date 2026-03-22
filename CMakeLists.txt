@@ -44,7 +44,7 @@ if(CMAKE_EXPORT_COMPILE_COMMANDS)
         ${CMAKE_SOURCE_DIR}/compile_commands.json)
 endif()
 
-project(arbtrie VERSION 0.1.0 LANGUAGES CXX)
+project(arbtrie VERSION 0.1.0 LANGUAGES CXX C)
 
 # Set global properties
 set(CMAKE_CXX_STANDARD 20)
@@ -292,16 +292,18 @@ if(BUILD_MDBX_TEST)
     # Look for header directly in external/libmdbx
     find_path(MDBX_INCLUDE_DIR mdbx.h PATHS external/libmdbx HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_CACHE)
     
-    # Look for library directly in external/libmdbx, prefer static
-    find_library(MDBX_LIBRARY NAMES libmdbx-static.a libmdbx.a mdbx 
-                 PATHS external/libmdbx 
-                 HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_DEFAULT_PATH NO_CACHE)
+    # Look for library directly in external/libmdbx or its build dir, prefer static
+    find_library(MDBX_LIBRARY NAMES libmdbx-static.a libmdbx.a mdbx
+                 PATHS external/libmdbx external/libmdbx/build
+                 HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" "${CMAKE_SOURCE_DIR}/external/libmdbx/build"
+                 NO_DEFAULT_PATH NO_CACHE)
 
     # If static wasn't found, maybe dynamic exists (less preferred but okay for testing)
     if(NOT MDBX_LIBRARY)
-         find_library(MDBX_LIBRARY NAMES mdbx 
-                      PATHS external/libmdbx 
-                      HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_DEFAULT_PATH NO_CACHE)
+         find_library(MDBX_LIBRARY NAMES mdbx
+                      PATHS external/libmdbx external/libmdbx/build
+                      HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" "${CMAKE_SOURCE_DIR}/external/libmdbx/build"
+                      NO_DEFAULT_PATH NO_CACHE)
     endif()
 
 
@@ -323,6 +325,20 @@ if(BUILD_MDBX_TEST)
          # Install the test executable if needed
          install(TARGETS lmdbx_arb_test RUNTIME DESTINATION bin)
 
+        # New standardized benchmark (mirrors psitri-benchmark)
+        add_executable(mdbx-benchmark programs/mdbx_bench.cpp)
+        target_compile_definitions(mdbx-benchmark PRIVATE XXH_INLINE_ALL)
+        target_include_directories(mdbx-benchmark PRIVATE ${MDBX_INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
+        target_link_libraries(mdbx-benchmark PRIVATE
+            ${MDBX_LIBRARY} Boost::program_options hash Threads::Threads)
+        set_target_properties(mdbx-benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+        if(ENABLE_SANITIZER)
+            target_compile_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
+            target_link_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
+        endif()
+
     else()
         message(WARNING "MDBX library or includes not found. Skipping lmdbx_arb_test build. Looked in external/libmdbx")
         if(NOT MDBX_INCLUDE_DIR)
@@ -342,6 +358,65 @@ set_target_properties(psitri-benchmark
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+# TidesDB benchmark (optional — requires tidesdb installed or in external/)
+option(BUILD_TIDESDB_BENCH "Build the TidesDB comparison benchmark" OFF)
+if(BUILD_TIDESDB_BENCH)
+    message(STATUS "Building TidesDB benchmark")
+
+    # Look for tidesdb header — prefer the build/include/tidesdb/ directory
+    # which has all headers (including ini.h, uthash.h, etc.)
+    find_path(TIDESDB_INCLUDE_DIR tidesdb.h
+        PATHS
+            "${CMAKE_SOURCE_DIR}/external/tidesdb/build/include/tidesdb"
+            "${CMAKE_SOURCE_DIR}/external/tidesdb/src"
+        PATH_SUFFIXES include/tidesdb src
+        NO_CACHE)
+
+    # Look for tidesdb library (shared or static)
+    find_library(TIDESDB_LIBRARY NAMES tidesdb libtidesdb
+        PATHS "${CMAKE_SOURCE_DIR}/external/tidesdb/build"
+        NO_CACHE)
+
+    # Also try system paths if external/ didn't work
+    if(NOT TIDESDB_INCLUDE_DIR)
+        find_path(TIDESDB_INCLUDE_DIR tidesdb.h PATH_SUFFIXES include/tidesdb include src NO_CACHE)
+    endif()
+    if(NOT TIDESDB_LIBRARY)
+        find_library(TIDESDB_LIBRARY NAMES tidesdb libtidesdb NO_CACHE)
+    endif()
+
+    if(TIDESDB_INCLUDE_DIR AND TIDESDB_LIBRARY)
+        message(STATUS "Found TidesDB include: ${TIDESDB_INCLUDE_DIR}")
+        message(STATUS "Found TidesDB library: ${TIDESDB_LIBRARY}")
+
+        # The C wrapper is compiled as C to avoid C++ type-checking issues
+        # with TidesDB's headers (implicit void* casts).
+        add_executable(tidesdb-benchmark
+            programs/tidesdb_bench.cpp
+            programs/tidesdb_c_wrapper.c)
+        target_compile_definitions(tidesdb-benchmark PRIVATE XXH_INLINE_ALL)
+        target_include_directories(tidesdb-benchmark PRIVATE
+            ${TIDESDB_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/programs ${Boost_INCLUDE_DIRS})
+        target_link_libraries(tidesdb-benchmark PRIVATE
+            ${TIDESDB_LIBRARY} Boost::program_options hash Threads::Threads)
+        set_target_properties(tidesdb-benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+        if(ENABLE_SANITIZER)
+            target_compile_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
+            target_link_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
+        endif()
+    else()
+        message(WARNING "TidesDB not found. Skipping tidesdb-benchmark build.")
+        if(NOT TIDESDB_INCLUDE_DIR)
+            message(WARNING "  tidesdb.h not found — try: git clone https://github.com/tidesdb/tidesdb external/tidesdb && cd external/tidesdb && cmake -B build && cmake --build build")
+        endif()
+        if(NOT TIDESDB_LIBRARY)
+            message(WARNING "  tidesdb library not found.")
+        endif()
+    endif()
+endif()
 
 # Only add test directory if testing is enabled
 if(BUILD_TESTS)

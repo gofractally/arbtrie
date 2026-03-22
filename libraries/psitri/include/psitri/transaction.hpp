@@ -50,7 +50,7 @@ namespace psitri
 
       // -- Transaction control --
 
-      void commit(sal::sync_type sync = sal::sync_type::none) noexcept
+      void commit() noexcept
       {
          if (_commit_func)
          {
@@ -86,7 +86,7 @@ namespace psitri
 
      private:
       std::optional<write_cursor>                              _cursor;
-      std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
+      std::function<void(sal::smart_ptr<sal::alloc_header>)> _commit_func;
       std::function<void()>                                    _rollback_func;
    };
 }  // namespace psitri

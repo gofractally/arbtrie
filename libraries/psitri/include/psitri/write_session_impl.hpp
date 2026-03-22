@@ -48,7 +48,7 @@ namespace psitri
           // commit: save root and unlock
           [self, root_index, &lock](sal::smart_ptr<sal::alloc_header> new_root)
           {
-             self->set_root(root_index, std::move(new_root), sal::sync_type::none);
+             self->set_root(root_index, std::move(new_root), self->_sync);
              lock.unlock();
           },
           // rollback: just unlock

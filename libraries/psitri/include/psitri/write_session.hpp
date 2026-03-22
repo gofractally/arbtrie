@@ -29,11 +29,18 @@ namespace psitri
                     sal::smart_ptr<sal::alloc_header> root,
                     sal::sync_type        sync = sal::sync_type::none);
 
+      /// Set the sync mode used when transactions commit
+      void set_sync(sal::sync_type sync) { _sync = sync; }
+
+      /// Get the current sync mode
+      sal::sync_type get_sync() const { return _sync; }
+
       /// Start a transaction on the given top-level root index
       transaction start_transaction(uint32_t root_index);
 
      private:
       friend class transaction;
+      sal::sync_type _sync = sal::sync_type::none;
    };
 
 }  // namespace psitri
