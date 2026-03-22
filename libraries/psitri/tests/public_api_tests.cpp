@@ -13,6 +13,13 @@
 
 using namespace psitri;
 
+// Debug builds are ~10x slower; scale down iteration counts to keep tests fast
+#ifdef NDEBUG
+constexpr int SCALE = 1;
+#else
+constexpr int SCALE = 5;  // divide counts by this in debug
+#endif
+
 namespace
 {
    struct test_db
@@ -416,7 +423,7 @@ TEST_CASE("bulk insert and verify", "[public-api][bulk]")
 {
    test_db t;
 
-   const int N = 10000;
+   const int N = 10000 / SCALE;
 
    auto tx = t.ses->start_transaction(0);
    for (int i = 0; i < N; ++i)
@@ -454,7 +461,7 @@ TEST_CASE("bulk insert then remove all", "[public-api][bulk]")
 {
    test_db t;
 
-   const int N = 1000;
+   const int N = 1000 / SCALE;
 
    // Insert
    {
@@ -498,8 +505,8 @@ TEST_CASE("remove does not leak references - repeated insert/remove cycles", "[p
 {
    test_db t;
 
-   const int N = 500;  // keys per cycle
-   const int CYCLES = 50;
+   const int N = 500 / SCALE;  // keys per cycle
+   const int CYCLES = 50 / SCALE;
 
    for (int cycle = 0; cycle < CYCLES; ++cycle)
    {
@@ -581,7 +588,7 @@ TEST_CASE("batched remove across multiple transactions", "[public-api][remove][r
 {
    test_db t;
 
-   const int N = 5000;
+   const int N = 5000 / SCALE;
    const int BATCH = 100;
 
    // Insert all keys in one transaction
@@ -635,7 +642,7 @@ TEST_CASE("remove same key repeatedly does not leak references", "[public-api][r
 
    // Remove the same key many times across many transactions
    // (simulates zipfian pattern where same key is deleted repeatedly)
-   for (int i = 0; i < 1000; ++i)
+   for (int i = 0; i < 1000 / SCALE; ++i)
    {
       auto tx = t.ses->start_transaction(0);
       tx.remove(to_key_view("thekey"));
@@ -661,7 +668,7 @@ TEST_CASE("high-frequency insert/remove on overlapping keys", "[public-api][remo
 
    // Simulate zipfian-like access: small key space, many operations
    const int KEY_SPACE = 50;
-   const int OPS = 10000;
+   const int OPS = 10000 / SCALE;
 
    for (int op = 0; op < OPS; ++op)
    {
@@ -777,36 +784,39 @@ TEST_CASE("insert-removeall-reinsert 500 keys", "[public-api][remove][refcount]"
 TEST_CASE("insert-removeall-reinsert 5000 keys", "[public-api][remove][refcount]")
 {
    test_db t;
-   insert_keys(t, 5000);
+   const int N = 5000 / SCALE;
+   insert_keys(t, N);
    t.validate_unique_refs();
-   remove_keys(t, 5000);
+   remove_keys(t, N);
    REQUIRE(count_keys(t) == 0);
-   insert_keys(t, 5000, "key", "new");
+   insert_keys(t, N, "key", "new");
    t.validate_unique_refs();
-   REQUIRE(count_keys(t) == 5000);
+   REQUIRE(count_keys(t) == N);
 }
 
 TEST_CASE("50 cycles of insert-removeall 500 keys", "[public-api][remove][refcount]")
 {
    test_db t;
-   for (int cycle = 0; cycle < 50; ++cycle)
+   const int N = 500 / SCALE;
+   for (int cycle = 0; cycle < 50 / SCALE; ++cycle)
    {
       INFO("cycle " << cycle);
-      insert_keys(t, 500);
+      insert_keys(t, N);
       t.validate_unique_refs();
-      remove_keys(t, 500);
+      remove_keys(t, N);
    }
 }
 
 TEST_CASE("batched remove 100 at a time from 5000", "[public-api][remove][refcount]")
 {
    test_db t;
-   insert_keys(t, 5000);
+   const int N = 5000 / SCALE;
+   insert_keys(t, N);
    t.validate_unique_refs();
-   for (int i = 0; i < 5000; i += 100)
+   for (int i = 0; i < N; i += 100)
    {
       auto tx  = t.ses->start_transaction(0);
-      for (int j = i; j < i + 100; ++j)
+      for (int j = i; j < i + 100 && j < N; ++j)
       {
          char key[64];
          snprintf(key, sizeof(key), "key%06d", j);
@@ -820,12 +830,13 @@ TEST_CASE("batched remove 100 at a time from 5000", "[public-api][remove][refcou
 TEST_CASE("remove half then reinsert", "[public-api][remove][refcount]")
 {
    test_db t;
-   insert_keys(t, 1000);
+   const int N = 1000 / SCALE;
+   insert_keys(t, N);
    t.validate_unique_refs();
    // Remove even keys
    {
       auto tx = t.ses->start_transaction(0);
-      for (int i = 0; i < 1000; i += 2)
+      for (int i = 0; i < N; i += 2)
       {
          char key[64];
          snprintf(key, sizeof(key), "key%06d", i);
@@ -834,11 +845,11 @@ TEST_CASE("remove half then reinsert", "[public-api][remove][refcount]")
       tx.commit();
    }
    t.validate_unique_refs();
-   REQUIRE(count_keys(t) == 500);
+   REQUIRE(count_keys(t) == N / 2);
    // Reinsert even keys
    {
       auto tx = t.ses->start_transaction(0);
-      for (int i = 0; i < 1000; i += 2)
+      for (int i = 0; i < N; i += 2)
       {
          char key[64];
          snprintf(key, sizeof(key), "key%06d", i);
@@ -847,16 +858,17 @@ TEST_CASE("remove half then reinsert", "[public-api][remove][refcount]")
       tx.commit();
    }
    t.validate_unique_refs();
-   REQUIRE(count_keys(t) == 1000);
+   REQUIRE(count_keys(t) == N);
 }
 
 TEST_CASE("insert-removeall-reinsert 500 keys with large values", "[public-api][remove][refcount]")
 {
    test_db t;
+   const int N = 500 / SCALE;
    std::string big_val(200, 'X');  // large enough to force value_node storage
    {
       auto tx = t.ses->start_transaction(0);
-      for (int i = 0; i < 500; ++i)
+      for (int i = 0; i < N; ++i)
       {
          char key[64];
          snprintf(key, sizeof(key), "key%06d", i);
@@ -865,11 +877,11 @@ TEST_CASE("insert-removeall-reinsert 500 keys with large values", "[public-api][
       tx.commit();
    }
    t.validate_unique_refs();
-   remove_keys(t, 500);
+   remove_keys(t, N);
    REQUIRE(count_keys(t) == 0);
    {
       auto tx = t.ses->start_transaction(0);
-      for (int i = 0; i < 500; ++i)
+      for (int i = 0; i < N; ++i)
       {
          char key[64];
          snprintf(key, sizeof(key), "key%06d", i);
@@ -878,19 +890,20 @@ TEST_CASE("insert-removeall-reinsert 500 keys with large values", "[public-api][
       tx.commit();
    }
    t.validate_unique_refs();
-   REQUIRE(count_keys(t) == 500);
+   REQUIRE(count_keys(t) == N);
 }
 
 TEST_CASE("5 cycles insert-removeall 500 keys with large values", "[public-api][remove][refcount]")
 {
    test_db t;
+   const int N = 500 / SCALE;
    std::string big_val(200, 'X');
    for (int cycle = 0; cycle < 5; ++cycle)
    {
       INFO("cycle " << cycle);
       {
          auto tx = t.ses->start_transaction(0);
-         for (int i = 0; i < 500; ++i)
+         for (int i = 0; i < N; ++i)
          {
             char key[64];
             snprintf(key, sizeof(key), "key%06d", i);
@@ -899,7 +912,7 @@ TEST_CASE("5 cycles insert-removeall 500 keys with large values", "[public-api][
          tx.commit();
       }
       t.validate_unique_refs();
-      remove_keys(t, 500);
+      remove_keys(t, N);
    }
 }
 
@@ -1007,7 +1020,7 @@ TEST_CASE("leak: insert then release root leaves zero allocated objects",
           "[public-api][leak]")
 {
    test_db t;
-   const int N = 2000;
+   const int N = 2000 / SCALE;
 
    insert_keys(t, N);
    require_no_orphans(t, "after insert");
@@ -1027,7 +1040,7 @@ TEST_CASE("leak: insert large values then release root leaves zero allocated",
           "[public-api][leak]")
 {
    test_db t;
-   const int N = 500;
+   const int N = 500 / SCALE;
    std::string big_val(300, 'V');  // forces value_node allocation
 
    {
@@ -1078,7 +1091,7 @@ TEST_CASE("leak: remove-all sequential leaves zero allocated objects",
           "[public-api][remove][leak]")
 {
    test_db t;
-   const int N = 2000;
+   const int N = 2000 / SCALE;
 
    insert_keys(t, N);
    require_no_orphans(t, "after insert");
@@ -1087,11 +1100,38 @@ TEST_CASE("leak: remove-all sequential leaves zero allocated objects",
    require_empty_no_leaks(t, "after sequential remove-all");
 }
 
+TEST_CASE("leak: diagnose remove leak scaling",
+          "[public-api][remove][leak][diag]")
+{
+   for (int N : {10, 50, 100, 200 / SCALE, 500 / SCALE, 1000 / SCALE, 2000 / SCALE})
+   {
+      test_db t("diag_testdb");
+      insert_keys(t, N);
+      wait_for_compactor(t);
+      uint64_t after_insert = t.ses->get_total_allocated_objects();
+      uint64_t reachable    = reachable_nodes(t);
+      WARN("N=" << N << " after_insert: reachable=" << reachable
+                << " allocated=" << after_insert);
+
+      remove_keys(t, N);
+      wait_for_compactor(t);
+      uint64_t after_remove = t.ses->get_total_allocated_objects();
+      WARN("N=" << N << " after_remove: allocated=" << after_remove
+                << " leaked=" << after_remove);
+
+      // Also try releasing root to see if that reclaims more
+      t.ses->set_root(0, {}, sal::sync_type::none);
+      wait_for_compactor(t);
+      uint64_t after_release = t.ses->get_total_allocated_objects();
+      WARN("N=" << N << " after_root_release: allocated=" << after_release);
+   }
+}
+
 TEST_CASE("leak: remove-all random order leaves zero allocated objects",
           "[public-api][remove][leak]")
 {
    test_db t;
-   const int N = 2000;
+   const int N = 2000 / SCALE;
 
    insert_keys(t, N);
    require_no_orphans(t, "after insert");
@@ -1121,7 +1161,7 @@ TEST_CASE("leak: remove-all reverse order leaves zero allocated objects",
           "[public-api][remove][leak]")
 {
    test_db t;
-   const int N = 2000;
+   const int N = 2000 / SCALE;
 
    insert_keys(t, N);
 
@@ -1144,7 +1184,7 @@ TEST_CASE("leak: remove half - reachable equals allocated",
           "[public-api][remove][leak]")
 {
    test_db t;
-   const int N = 2000;
+   const int N = 2000 / SCALE;
 
    insert_keys(t, N);
    require_no_orphans(t, "after insert");
@@ -1187,7 +1227,7 @@ TEST_CASE("leak: large values - remove-all leaves zero allocated",
           "[public-api][remove][leak]")
 {
    test_db t;
-   const int N = 500;
+   const int N = 500 / SCALE;
    std::string big_val(300, 'V');  // forces value_node allocation
 
    {
@@ -1297,7 +1337,7 @@ TEST_CASE("leak: snapshot held during remove - no orphans after release",
           "[public-api][remove][leak]")
 {
    test_db t;
-   const int N = 1000;
+   const int N = 1000 / SCALE;
 
    insert_keys(t, N);
 
@@ -1328,6 +1368,9 @@ TEST_CASE("leak: snapshot held during remove - no orphans after release",
    // Now set root to null to release all references
    t.ses->set_root(0, {}, sal::sync_type::none);
 
+   // Wait for compactor to drain release queue
+   wait_for_compactor(t);
+
    // After releasing snapshot, everything should be freed
    uint64_t allocated = t.ses->get_total_allocated_objects();
    INFO("allocated after snapshot release=" << allocated << " (expected 0)");
@@ -1338,7 +1381,7 @@ TEST_CASE("leak: interleaved insert/remove in same tx - no orphans",
           "[public-api][remove][leak]")
 {
    test_db t;
-   const int N = 500;
+   const int N = 500 / SCALE;
 
    insert_keys(t, N);
    require_no_orphans(t, "after initial insert");

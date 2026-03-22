@@ -175,7 +175,7 @@ namespace psitri
          /// branch address might not be sharable with the 16 existing clines.
          branch_set result = upsert<upsert_mode::unique_remove>({}, rref, key);
          if (result.count() == 0)
-            ;  // root already taken, nothing to give back — tree is empty
+            ;  // tree is empty — node already released by upsert dispatch
          else if (result.count() == 1)
             _root.give(result.get_first_branch());
          else
@@ -738,7 +738,13 @@ namespace psitri
          if constexpr (mode.is_unique())
          {
             if constexpr (mode.is_remove())
+            {
                assert(result.count() == 0 || result.contains(r.address()));
+               // In unique remove, an empty result means this node became empty
+               // and was not realloc'd.  Release it so we don't leak.
+               if (result.count() == 0)
+                  _session.release(r.address());
+            }
             else
                assert(result.contains(r.address()));
          }
@@ -995,7 +1001,12 @@ namespace psitri
          if (sub_branches.count() == 0) [[unlikely]]
          {
             if (in->num_branches() == 1)
-               return {};  // cascade empty to parent
+            {
+               if constexpr (mode.is_unique())
+                  _session.retain(badr);  // child already released by dispatch; retain so
+                                          // parent's destroy() release balances correctly
+               return {};  // cascade empty to parent — dispatch releases this node
+            }
 
             if constexpr (mode.is_unique())
             {
@@ -1361,16 +1372,18 @@ namespace psitri
 
       if constexpr (mode.is_unique())
       {
+         if (leaf->num_branches() == 1) [[unlikely]]
+         {
+            // Don't release the value_node here — the dispatch function will
+            // release this leaf (because result.count()==0), and leaf::destroy()
+            // will cascade-release any value_node/subtree addresses.
+            return {};
+         }
+
          if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
          {
             auto addr = leaf->get_value_address(lb);
             _session.release(addr);
-         }
-
-         if (leaf->num_branches() == 1) [[unlikely]]
-         {
-            //SAL_ERROR("remove unique: leaf has only one branch");
-            return {};
          }
 
          leaf.modify()->remove(lb);
