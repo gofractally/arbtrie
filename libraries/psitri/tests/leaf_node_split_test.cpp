@@ -78,7 +78,7 @@ namespace
    // Overload for the initial key/value constructor
    LeafNodePtr create_leaf_node_ptr(psitri::key_view          initial_key,
                                     const psitri::value_type& initial_value,
-                                    size_t                    node_size = 4096)
+                                    size_t                    node_size = psitri::leaf_node::max_leaf_size)
    {
       constexpr size_t alignment = 64;
       void*            buffer    = std::aligned_alloc(alignment, node_size);
@@ -98,7 +98,7 @@ TEST_CASE("LeafNode_Split", "[psitri][leaf_node][split]")
 {
    using namespace psitri;
 
-   constexpr size_t node_size = 4096;
+   constexpr size_t node_size = leaf_node::max_leaf_size;
 
    // 1. Create and populate source node
    LeafNodePtr source_node_ptr = create_leaf_node_ptr("prefix/common/key_a", value_type("value_a"));
@@ -209,7 +209,7 @@ TEST_CASE("LeafNode_SplitPrefixKey", "[psitri][leaf_node][split][edge_case]")
 {
    using namespace psitri;
 
-   constexpr size_t node_size = 4096;
+   constexpr size_t node_size = leaf_node::max_leaf_size;
 
    // 1. Create and populate source node with a key exactly matching the common prefix
    LeafNodePtr source_node_ptr = create_leaf_node_ptr("abc", value_type("value_abc"));

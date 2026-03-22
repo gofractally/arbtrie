@@ -959,21 +959,11 @@ TEST_CASE("interleaved insert and remove in same transaction", "[public-api][rem
 /// get_total_allocated_objects() to stabilize.
 static void wait_for_compactor(test_db& t, int max_ms = 5000)
 {
-   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_ms);
-   while (std::chrono::steady_clock::now() < deadline)
+   if (!t.db->wait_for_compactor(std::chrono::milliseconds(max_ms)))
    {
-      uint64_t pending = t.ses->get_pending_release_count();
-      if (pending == 0)
-      {
-         // Give the compactor one more pass to finish any cascaded releases
-         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-         if (t.ses->get_pending_release_count() == 0)
-            return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      WARN("compactor did not drain within " << max_ms << "ms, pending="
+           << t.ses->get_pending_release_count());
    }
-   WARN("compactor did not drain within " << max_ms << "ms, pending="
-        << t.ses->get_pending_release_count());
 }
 
 /// Helper: count reachable nodes by walking the tree from root
@@ -1251,25 +1241,22 @@ TEST_CASE("leak: mixed key sizes - remove-all leaves zero allocated",
 {
    test_db t;
 
-   // Insert keys with varying lengths to exercise different leaf layouts
+   // Insert short and medium keys to trigger inner_prefix_node creation
    {
       auto tx = t.ses->start_transaction(0);
-      for (int i = 0; i < 500; ++i)
+      for (int i = 0; i < 500 / SCALE; ++i)
       {
-         // Short keys
          char key[64];
          snprintf(key, sizeof(key), "s%d", i);
          tx.upsert(to_key_view(std::string(key)), to_value("v"));
       }
-      for (int i = 0; i < 200; ++i)
+      for (int i = 0; i < 200 / SCALE; ++i)
       {
-         // Medium keys with shared prefix
          std::string key = "medium_prefix_" + std::to_string(i);
          tx.upsert(to_key_view(key), to_value("val"));
       }
-      for (int i = 0; i < 100; ++i)
+      for (int i = 0; i < 100 / SCALE; ++i)
       {
-         // Long keys
          std::string key(100, 'k');
          key += std::to_string(i);
          tx.upsert(to_key_view(key), to_value("longval"));
@@ -1281,18 +1268,18 @@ TEST_CASE("leak: mixed key sizes - remove-all leaves zero allocated",
    // Remove all in one transaction
    {
       auto tx = t.ses->start_transaction(0);
-      for (int i = 0; i < 500; ++i)
+      for (int i = 0; i < 500 / SCALE; ++i)
       {
          char key[64];
          snprintf(key, sizeof(key), "s%d", i);
          tx.remove(to_key_view(std::string(key)));
       }
-      for (int i = 0; i < 200; ++i)
+      for (int i = 0; i < 200 / SCALE; ++i)
       {
          std::string key = "medium_prefix_" + std::to_string(i);
          tx.remove(to_key_view(key));
       }
-      for (int i = 0; i < 100; ++i)
+      for (int i = 0; i < 100 / SCALE; ++i)
       {
          std::string key(100, 'k');
          key += std::to_string(i);

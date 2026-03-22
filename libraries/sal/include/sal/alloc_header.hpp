@@ -209,8 +209,8 @@ namespace sal
    {
       static_assert(uint8_t(T::type_id) < 128, "type_id out of range");
       get_type_vtables()[uint8_t(T::type_id)] = vtable_pointers::create<vtable<T>>();
-      SAL_WARN("register_type_vtable {} {} destroy ptr: {}", T::type_id, int(T::type_id),
-               get_type_vtables()[uint8_t(T::type_id)].destroy);
+      SAL_TRACE("register_type_vtable {} {} destroy ptr: {}", T::type_id, int(T::type_id),
+                get_type_vtables()[uint8_t(T::type_id)].destroy);
       return int(T::type_id);
    }
 

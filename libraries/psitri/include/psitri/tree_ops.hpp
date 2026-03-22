@@ -927,12 +927,21 @@ namespace psitri
 
             if (cpre.size() == 0)
             {
-               //             SAL_WARN("adding peer without modifying this one");
-               // return 2 branches to the parent node
+               // return 2 branches to the parent node, ordered by first byte
                ptr_address new_leaf_addr =
                    _session.alloc<leaf_node>(parent_hint, key, make_value(_new_value, parent_hint));
-               result.set_front(in->address());
-               result.push_back(key[0], new_leaf_addr);
+               uint8_t ipn_byte  = in->prefix()[0];
+               uint8_t leaf_byte = key[0];
+               if (leaf_byte > ipn_byte)
+               {
+                  result.set_front(in->address());
+                  result.push_back(leaf_byte, new_leaf_addr);
+               }
+               else
+               {
+                  result.set_front(new_leaf_addr);
+                  result.push_back(ipn_byte, in->address());
+               }
                return result;
             }
             /// any new value node is an only child of the new leaf, so has no hints

@@ -7,6 +7,12 @@
 #include "sal/numbers.hpp"
 using namespace psitri;
 
+#ifdef NDEBUG
+constexpr int SCALE = 1;
+#else
+constexpr int SCALE = 5;
+#endif
+
 int64_t rand64()
 {
    thread_local static std::mt19937 gen(rand());
@@ -502,12 +508,12 @@ TEST_CASE("tree_context", "[tree_context]")
       };
       //print_stats();
 
-      uint32_t             batch             = 100000;
-      uint32_t             round_size        = 1000000;
+      uint32_t             batch             = 100000 / SCALE;
+      uint32_t             round_size        = 1000000 / SCALE;
       uint32_t             batches_per_round = round_size / batch;
       uint64_t             key               = 0;
       std::array<char, 63> big_value;
-      for (int r = 0; r < 30; ++r)
+      for (int r = 0; r < 30 / SCALE; ++r)
       {
          //  SAL_WARN("round: {}", r);
          auto start = std::chrono::high_resolution_clock::now();

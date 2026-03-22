@@ -626,7 +626,10 @@ static void run_pattern(const char*                                             
              end_time - start_time, (num_deletes / (end_time - start_time)) * 1000);
    }
 
-   // Report allocator stats before closing
+   // Wait for compactor to drain before reporting stats
+   db->wait_for_compactor();
+
+   // Report allocator stats after compactor has drained
    {
       auto stats = db->dump();
       uint64_t file_size = stats.total_segments * sal::segment_size;

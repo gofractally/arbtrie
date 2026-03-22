@@ -954,7 +954,7 @@ namespace sal
    {
       if (not current_session)
       {
-         SAL_WARN("get_session: creating new session array {} ", _allocator_index);
+         SAL_INFO("get_session: creating new session array {} ", _allocator_index);
          current_session = new std::array<allocator_session*, 64>();
          for (auto& s : *current_session)
             s = nullptr;
@@ -962,20 +962,20 @@ namespace sal
 
       if (not current_session->at(_allocator_index))
       {
-         SAL_WARN("get_session: creating new session {} ", _allocator_index);
+         SAL_INFO("get_session: creating new session {} ", _allocator_index);
          return allocator_session_ptr((*current_session)[_allocator_index] =
                                           new allocator_session(*this, alloc_session_num()));
       }
-      SAL_WARN("get_session: returning existing session");
+      SAL_INFO("get_session: returning existing session");
       auto cs = current_session->at(_allocator_index);
       cs->retain_session();
-      SAL_WARN("get_session: returning existing session {}  allocidx: {}  sessptr: {} ",
+      SAL_INFO("get_session: returning existing session {}  allocidx: {}  sessptr: {} ",
                cs->get_session_num(), _allocator_index, current_session->at(_allocator_index));
       return allocator_session_ptr(cs);
    }
    void allocator::release_session_num(allocator_session_number sn) noexcept
    {
-      SAL_WARN("release_session_num: {}  allocidx: {}  sessptr: {} ", sn, _allocator_index,
+      SAL_INFO("release_session_num: {}  allocidx: {}  sessptr: {} ", sn, _allocator_index,
                current_session->at(_allocator_index));
       assert(current_session);
       assert(current_session->at(_allocator_index));

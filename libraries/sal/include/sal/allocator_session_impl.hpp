@@ -291,7 +291,7 @@ namespace sal
       //      SAL_INFO("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
       if (--_ref_count == 0)
       {
-         SAL_ERROR("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
+         SAL_INFO("allocator_session: end_session: {} {} ref: {}", this, _session_num, _ref_count);
          _sega.end_session(this);
       }
    }

@@ -30,7 +30,7 @@ namespace sal
 
    allocator_session::~allocator_session()
    {
-      SAL_ERROR("allocator_session: destructor: {} {} ref: {}", this, _session_num, _ref_count);
+      SAL_INFO("allocator_session: destructor: {} {} ref: {}", this, _session_num, _ref_count);
       if (_session_num == allocator_session_number(-1))
          return;
       finalize_active_segment();
