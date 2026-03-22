@@ -307,19 +307,59 @@ void lower_bound_test(benchmark_config   cfg,
    std::cout << format_comma(lps) << " lower_bounds/sec  (" << format_comma(count) << " ops)\n";
 }
 
-// -- Multi-threaded stress test: concurrent reads while writing --
+// -- Random get benchmark (point lookups, mix of found/not-found) --
 
-void multithread_test(benchmark_config          cfg,
-                      std::shared_ptr<database>& db,
-                      write_session&             ses,
-                      uint32_t                   num_threads,
-                      auto                       make_key)
+void get_rand_test(benchmark_config   cfg,
+                   write_session&     ses,
+                   const std::string& name,
+                   auto               make_key)
 {
-   std::cout << "---------------------  multithread insert+read  "
-                "--------------------------------------------------\n";
+   print_header(name, cfg);
+
+   std::vector<char> key;
+   std::string       buf;
+   auto              root = ses.get_root(0);
+   cursor            cur(root);
+
+   auto     start = std::chrono::steady_clock::now();
+   uint64_t count = 0;
+   uint64_t found = 0;
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   {
+      make_key(i, key);
+      auto result = cur.get(key_view(key.data(), key.size()), &buf);
+      if (result >= 0)
+         ++found;
+      ++count;
+   }
+   auto   end  = std::chrono::steady_clock::now();
+   double secs = std::chrono::duration<double>(end - start).count();
+   auto   gps  = uint64_t(count / secs);
+   std::cout << format_comma(gps) << " gets/sec  (" << format_comma(found) << " found / "
+             << format_comma(count) << " ops)\n";
+}
+
+// -- Multi-threaded stress test: concurrent reads while writing --
+// read_op: "lower_bound" or "get"
+// key_mode: "rand" (random keys, may not exist) or "known" (keys guaranteed to exist)
+
+void multithread_rw_test(benchmark_config            cfg,
+                         std::shared_ptr<database>&   db,
+                         write_session&               ses,
+                         uint32_t                     num_threads,
+                         auto                         make_key,
+                         const std::string&           read_op,
+                         const std::string&           key_mode)
+{
+   std::string label = "multithread " + read_op + " (" + key_mode + " keys)";
+   std::cout << "---------------------  " << label << "  "
+             << std::string(std::max(0, int(52 - label.size())), '-') << "\n";
    std::cout << "write rounds: " << cfg.rounds << "  items: " << format_comma(cfg.items)
              << "  read threads: " << num_threads << "\n";
    std::cout << "-----------------------------------------------------------------------\n";
+
+   bool use_get   = (read_op == "get");
+   bool use_known = (key_mode == "known");
 
    // Seed the tree so readers start with data
    {
@@ -337,14 +377,15 @@ void multithread_test(benchmark_config          cfg,
    std::cout << "seeded " << format_comma(cfg.items) << " keys\n";
    print_stats(ses);
 
-   // Per-thread read counter padded to 128 bytes to avoid false sharing on Apple M-series
-   struct alignas(128) padded_counter
+   struct alignas(128) padded_counters
    {
-      std::atomic<int64_t> count{0};
+      std::atomic<int64_t> ops{0};
+      std::atomic<int64_t> found{0};
    };
 
-   std::atomic<bool>                  done{false};
-   std::vector<padded_counter>        read_counters(num_threads);
+   std::atomic<uint64_t>           committed_seq{cfg.items};
+   std::atomic<bool>               done{false};
+   std::vector<padded_counters>    counters(num_threads);
 
    // Launch reader threads
    std::vector<std::thread> readers;
@@ -352,40 +393,64 @@ void multithread_test(benchmark_config          cfg,
    for (uint32_t t = 0; t < num_threads; ++t)
    {
       readers.emplace_back(
-          [&db, &done, &read_counters, t, &make_key, &cfg]()
+          [&db, &done, &counters, &committed_seq, t, &make_key, use_get, use_known]()
           {
              sal::set_current_thread_name("read_thread");
              auto              rs  = db->start_read_session();
              auto              cur = rs->create_cursor(0);
              std::vector<char> key;
-             int64_t           local_reads     = 0;
+             std::string       buf;
+             int64_t           local_ops   = 0;
+             int64_t           local_found = 0;
              uint32_t          refresh_counter = 0;
+             // Per-thread salt so threads probe different keys
+             const uint64_t    salt = rand_from_seq(t * 999983ULL + 1);
 
              while (!done.load(std::memory_order_relaxed))
              {
-                // Recreate cursor every 10K reads to pick up latest commits
                 if (++refresh_counter >= 10)
                 {
                    cur = rs->create_cursor(0);
                    refresh_counter = 0;
                 }
+                uint64_t max_seq = committed_seq.load(std::memory_order_relaxed);
                 for (uint32_t i = 0; i < 1000; ++i)
                 {
-                   uint64_t seq = rand_from_seq(local_reads + i);
+                   uint64_t seq = rand_from_seq(local_ops + salt);
+                   if (use_known)
+                      seq = seq % max_seq;
                    make_key(seq, key);
-                   cur.lower_bound(key_view(key.data(), key.size()));
-                   ++local_reads;
+
+                   if (use_get)
+                   {
+                      if (cur.get(key_view(key.data(), key.size()), &buf) >= 0)
+                         ++local_found;
+                   }
+                   else
+                   {
+                      if (cur.lower_bound(key_view(key.data(), key.size())))
+                         ++local_found;
+                   }
+                   ++local_ops;
                 }
-                read_counters[t].count.store(local_reads, std::memory_order_relaxed);
+                counters[t].ops.store(local_ops, std::memory_order_relaxed);
+                counters[t].found.store(local_found, std::memory_order_relaxed);
              }
           });
    }
 
-   auto sum_reads = [&]()
+   auto sum_ops = [&]()
    {
       int64_t total = 0;
       for (uint32_t i = 0; i < num_threads; ++i)
-         total += read_counters[i].count.load(std::memory_order_relaxed);
+         total += counters[i].ops.load(std::memory_order_relaxed);
+      return total;
+   };
+   auto sum_found = [&]()
+   {
+      int64_t total = 0;
+      for (uint32_t i = 0; i < num_threads; ++i)
+         total += counters[i].found.load(std::memory_order_relaxed);
       return total;
    };
 
@@ -395,12 +460,12 @@ void multithread_test(benchmark_config          cfg,
    std::vector<char> key;
    std::vector<char> value(cfg.value_size, 'v');
    value_view        vv(value.data(), value.size());
-   uint64_t          seq = cfg.items;  // start after seeded keys
+   uint64_t          seq = cfg.items;
 
-   int64_t prev_reads = 0;
+   int64_t prev_ops = 0;
    for (uint32_t r = 0; r < cfg.rounds; ++r)
    {
-      auto tx = ses.start_transaction(0);
+      auto     tx       = ses.start_transaction(0);
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
       while (inserted < cfg.items)
@@ -414,32 +479,36 @@ void multithread_test(benchmark_config          cfg,
          }
       }
       tx.commit();
-      auto   end         = std::chrono::steady_clock::now();
-      double secs        = std::chrono::duration<double>(end - start).count();
-      auto   ips         = uint64_t(inserted / secs);
-      auto   cur_reads   = sum_reads();
-      auto   round_reads = cur_reads - prev_reads;
-      auto   rps         = uint64_t(round_reads / secs);
-      prev_reads         = cur_reads;
+      committed_seq.store(seq, std::memory_order_relaxed);
+
+      auto   end       = std::chrono::steady_clock::now();
+      double secs      = std::chrono::duration<double>(end - start).count();
+      auto   ips       = uint64_t(inserted / secs);
+      auto   cur_ops   = sum_ops();
+      auto   round_ops = cur_ops - prev_ops;
+      auto   rps       = uint64_t(round_ops / secs);
+      prev_ops         = cur_ops;
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  inserts/sec  " << std::setw(12) << std::right << format_comma(rps)
-                << "  reads/sec\n";
+                << "  " << read_op << "s/sec\n";
    }
 
-   // Stop readers
    done.store(true, std::memory_order_relaxed);
    for (auto& t : readers)
       t.join();
 
    auto   overall_end  = std::chrono::steady_clock::now();
    double overall_secs = std::chrono::duration<double>(overall_end - overall_start).count();
-   auto   final_reads  = sum_reads();
-   auto   written      = seq - cfg.items;  // exclude seeded keys
-   std::cout << "total: " << format_comma(written) << " inserts, " << format_comma(final_reads)
-             << " lower_bounds in " << std::fixed << std::setprecision(3) << overall_secs << " sec\n";
+   auto   final_ops    = sum_ops();
+   auto   final_found  = sum_found();
+   auto   written      = seq - cfg.items;
+   std::cout << "total: " << format_comma(written) << " inserts, " << format_comma(final_ops)
+             << " " << read_op << "s (" << format_comma(final_found) << " found) in "
+             << std::fixed << std::setprecision(3) << overall_secs << " sec\n";
    std::cout << "  write: " << format_comma(uint64_t(written / overall_secs))
-             << "/sec  read: " << format_comma(uint64_t(final_reads / overall_secs)) << "/sec\n";
+             << "/sec  " << read_op << ": "
+             << format_comma(uint64_t(final_ops / overall_secs)) << "/sec\n";
 }
 
 int main(int argc, char** argv)
@@ -465,7 +534,9 @@ int main(int argc, char** argv)
    opt("threads,t", po::value<uint32_t>(&threads)->default_value(4), "number of read threads for multithread test");
    opt("db-dir,d", po::value<std::string>(&db_dir)->default_value("./psitridb"), "database dir");
    opt("bench", po::value<std::string>(&bench)->default_value("all"),
-       "benchmark: all, insert, upsert, get, iterate, remove, lower-bound, multithread");
+       "benchmark: all, insert, upsert, get, iterate, remove, lower-bound, get-rand, "
+       "multithread-lowerbound-rand, multithread-lowerbound-known, "
+       "multithread-get-rand, multithread-get-known");
    opt("reset", po::bool_switch(&reset), "reset database before running");
    opt("stat", po::bool_switch(&stat)->default_value(false), "print database stats and exit");
 
@@ -552,6 +623,12 @@ int main(int argc, char** argv)
       lower_bound_test(cfg, *ses, "random lower_bound", rand_key);
    }
 
+   // -- Random get (point lookups, mix of found/not-found) --
+   if (run_all || bench == "get-rand")
+   {
+      get_rand_test(cfg, *ses, "random get", rand_key);
+   }
+
    // -- Remove --
    if (run_all || bench == "remove")
    {
@@ -559,10 +636,25 @@ int main(int argc, char** argv)
       print_stats(*ses);
    }
 
-   // -- Multithread --
-   if (run_all || bench == "multithread")
+   // -- Multithread variants --
+   if (run_all || bench == "multithread-lowerbound-rand")
    {
-      multithread_test(cfg, db, *ses, threads, rand_key);
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "rand");
+      print_stats(*ses);
+   }
+   if (run_all || bench == "multithread-lowerbound-known")
+   {
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "known");
+      print_stats(*ses);
+   }
+   if (run_all || bench == "multithread-get-rand")
+   {
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "rand");
+      print_stats(*ses);
+   }
+   if (run_all || bench == "multithread-get-known")
+   {
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "known");
       print_stats(*ses);
    }
 
