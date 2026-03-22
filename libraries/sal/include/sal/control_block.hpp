@@ -170,17 +170,7 @@ namespace sal
          }
          return prior;
       };
-      /**
-       * Only releases if not the last reference, otherwise does nothing because being
-       * the last to release may trigger more work. 
-       */
-      bool fast_release() noexcept
-      {
-         auto prior       = load(std::memory_order_relaxed);
-         bool is_not_last = prior.ref > 1;
-         _data.fetch_sub(is_not_last, std::memory_order_relaxed);
-         return is_not_last;
-      }
+
       void clear_pending_cache() noexcept
       {
          uint64_t           expected = _data.load(std::memory_order_relaxed);

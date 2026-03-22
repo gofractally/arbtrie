@@ -72,6 +72,12 @@ if(ENABLE_DEEP_INVARIANTS)
     add_compile_definitions(PSITRI_DEEP_INVARIANTS=1)
 endif()
 
+option(ENABLE_DEBUG_CURSOR "Enable temporary cursor debug instrumentation" OFF)
+if(ENABLE_DEBUG_CURSOR)
+    message(STATUS "Cursor debug instrumentation ENABLED")
+    add_compile_definitions(PSITRI_DEBUG_CURSOR=1)
+endif()
+
 if(DISABLE_NEON)
     message(STATUS "NEON SIMD optimizations DISABLED")
     # Force-include a header that undefs __ARM_NEON before any source code runs

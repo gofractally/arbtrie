@@ -126,7 +126,7 @@ namespace sal
          assert(ro < _root_objects->size() && "invalid root object number");
          std::shared_lock<std::shared_mutex> lock(_root_object_mutex[*ro]);
          auto adr = _root_objects->at(*ro).load(std::memory_order_acquire);
-         SAL_WARN("get root object: {} adr: {}", ro, adr);
+         SAL_TRACE("get root object: {} adr: {}", ro, adr);
          if (adr != null_ptr_address)
             retain(adr);
          return adr;

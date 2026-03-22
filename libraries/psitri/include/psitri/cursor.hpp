@@ -120,7 +120,7 @@ namespace psitri
        * @tparam Buffer Type that supports resize() and data() for contiguous memory access
        * @param key The key to get the value for
        * @param buffer Pointer to the buffer to read the value into
-       * @return 
+       * @return
        *   >= 0: Number of bytes read into buffer on success
        *   iterator::value_nothing: Value not found
        *   iterator::value_subtree: Found subtree value (use subtree() or subtree_cursor() instead)
@@ -176,6 +176,7 @@ namespace psitri
       void push(ptr_address adr) noexcept;
       void push_end(ptr_address adr) noexcept;
       void next_branch(key_view key) noexcept;
+
    };
    inline auto cursor::visit(ptr_address adr, auto&& lambda)
    {
@@ -234,7 +235,7 @@ namespace psitri
                if (branch == l->num_branches())
                {
                   //   SAL_INFO("{} leaf branch == num_branches", _path_back->adr);
-                  return pop(), next_impl();
+                  return pop() and next_impl();
                }
                //   SAL_INFO("{}  l->get_key({}): {} = {}", _path_back->adr, branch, l->get_key(branch),
                //           l->get_value(branch));
@@ -274,8 +275,7 @@ namespace psitri
                   return next_impl();
                }
                // SAL_INFO("{} prefix{} < key{}", _path_back->adr, ip->prefix(), key);
-               pop();
-               return next_impl();
+               return pop() and next_impl();
             }
             [[unlikely]] case node_type::value:
                [[fallthrough]];

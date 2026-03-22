@@ -28,7 +28,7 @@ namespace psitri
       tree_context(sal::smart_ptr<alloc_header> root)
           : _root(std::move(root)), _session(*(root.session()))
       {
-         SAL_WARN("tree_context constructor: {} {}", &_root, _root.address());
+         SAL_TRACE("tree_context constructor: {} {}", &_root, _root.address());
       }
       /**
        * Given a value type, if it is too large for inline converts it to a value_node,
@@ -158,6 +158,7 @@ namespace psitri
             _root.give(result.get_first_branch());
          else
             _root.give(make_inner(result));
+
          return _old_value_size;
       }
 
@@ -579,6 +580,7 @@ namespace psitri
       {
          validate_subtree(r, depth);
       }
+
       template <any_inner_node_type NodeType>
       void calc_stats(stats& s, smart_ref<NodeType> r, int depth = 0)
       {

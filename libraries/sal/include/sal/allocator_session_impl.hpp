@@ -255,13 +255,9 @@ namespace sal
    inline void allocator_session::release(ptr_address adr) noexcept
    {
       auto& cb = get(adr);
-      //    SAL_WARN("release: {} pre ref: {}", adr, cb.ref());
-      if (cb.fast_release()) [[likely]]
-         return;
 
-      //      SAL_WARN(" queue release: {} pre ref: {}", adr, cb.ref());
-      if (_release_queue.try_push(adr)) [[likely]]
-         return;
+      if( cb.ref() == 1 and _release_queue.try_push(adr)) 
+           return;
 
       //     SAL_ERROR(" try push failed, final_release: {}", adr);
       final_release(adr);
@@ -271,6 +267,8 @@ namespace sal
       //  SAL_ERROR("final_release: {} ", adr);
       auto& cb   = get(adr);
       auto  prev = cb.release();
+      if( prev.ref > 1 ) 
+         return;
 
       location loc = prev.loc();
       if (loc != location::null()) [[likely]]
