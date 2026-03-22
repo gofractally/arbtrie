@@ -5,6 +5,7 @@
 #include <sal/allocator.hpp>
 #include <sal/config.hpp>
 #include <sal/mapping.hpp>
+#include <sal/seg_alloc_dump.hpp>
 
 namespace psitri
 {
@@ -29,6 +30,9 @@ namespace psitri
 
       void sync();
       void set_runtime_config(const runtime_config& cfg);
+
+      sal::seg_alloc_dump dump() const { return _allocator.dump(); }
+      void print_stats(std::ostream& os = std::cout) const { dump().print(os); }
 
       std::shared_ptr<write_session> start_write_session();
       std::shared_ptr<read_session>  start_read_session();
