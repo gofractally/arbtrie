@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
+#include <psitri/tree_ops.hpp>
 #include <psitri/write_session_impl.hpp>
 #include <psitri/read_session_impl.hpp>
 #include <psitri/value_type.hpp>
@@ -25,6 +26,17 @@ namespace
       }
 
       ~test_db() { std::filesystem::remove_all(dir); }
+
+      /// Validate that every node reachable from root has refcount == 1.
+      /// Only valid when no concurrent readers or snapshots exist.
+      void validate_unique_refs(uint32_t root_index = 0)
+      {
+         auto root = ses->get_root(root_index);
+         if (!root) return;
+         tree_context ctx(root);
+         auto ref = root.session()->get_ref(root.address());
+         ctx.validate_unique_refs(ref);
+      }
    };
 }  // namespace
 
@@ -450,6 +462,7 @@ TEST_CASE("bulk insert then remove all", "[public-api][bulk]")
       }
       tx.commit();
    }
+   t.validate_unique_refs();
 
    // Remove all
    {
@@ -470,4 +483,443 @@ TEST_CASE("bulk insert then remove all", "[public-api][bulk]")
       c.seek_begin();
       REQUIRE(c.is_end());
    }
+}
+
+// ============================================================
+// Remove reference count tests
+// ============================================================
+
+TEST_CASE("remove does not leak references - repeated insert/remove cycles", "[public-api][remove][refcount]")
+{
+   test_db t;
+
+   const int N = 500;  // keys per cycle
+   const int CYCLES = 50;
+
+   for (int cycle = 0; cycle < CYCLES; ++cycle)
+   {
+      // Insert N keys
+      {
+         auto tx = t.ses->start_transaction(0);
+         for (int i = 0; i < N; ++i)
+         {
+            char key[32];
+            snprintf(key, sizeof(key), "key%06d", i);
+            std::string val(100, 'A' + (cycle % 26));
+            tx.upsert(to_key_view(std::string(key)), to_value_view(val));
+         }
+         tx.commit();
+      }
+      t.validate_unique_refs();
+
+      // Remove all N keys
+      {
+         auto tx = t.ses->start_transaction(0);
+         for (int i = 0; i < N; ++i)
+         {
+            char key[32];
+            snprintf(key, sizeof(key), "key%06d", i);
+            tx.remove(to_key_view(std::string(key)));
+         }
+         tx.commit();
+      }
+   }
+   // If we get here without "reference count exceeded limits", references are clean
+}
+
+TEST_CASE("remove nonexistent keys does not leak references", "[public-api][remove][refcount]")
+{
+   test_db t;
+
+   const int N = 100;
+
+   // Insert some keys
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char key[32];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value("value"));
+      }
+      tx.commit();
+   }
+
+   // Repeatedly remove nonexistent keys (should be no-ops)
+   for (int cycle = 0; cycle < 100; ++cycle)
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char key[32];
+         snprintf(key, sizeof(key), "missing%06d_%03d", i, cycle);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      tx.commit();
+   }
+
+   // Verify original keys still present and refs are clean
+   t.validate_unique_refs();
+   {
+      cursor c(t.ses->get_root(0));
+      c.seek_begin();
+      int count = 0;
+      if (!c.is_end())
+      {
+         do { ++count; } while (c.next());
+      }
+      REQUIRE(count == N);
+   }
+}
+
+TEST_CASE("batched remove across multiple transactions", "[public-api][remove][refcount]")
+{
+   test_db t;
+
+   const int N = 5000;
+   const int BATCH = 100;
+
+   // Insert all keys in one transaction
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char key[32];
+         snprintf(key, sizeof(key), "k%08d", i);
+         std::string val(50, 'x');
+         tx.upsert(to_key_view(std::string(key)), to_value_view(val));
+      }
+      tx.commit();
+   }
+   t.validate_unique_refs();
+
+   // Remove in batches (simulates benchmark pattern)
+   for (int i = 0; i < N; i += BATCH)
+   {
+      auto tx  = t.ses->start_transaction(0);
+      int  end = std::min(i + BATCH, N);
+      for (int j = i; j < end; ++j)
+      {
+         char key[32];
+         snprintf(key, sizeof(key), "k%08d", j);
+         REQUIRE(tx.remove(to_key_view(std::string(key))) >= 0);
+      }
+      tx.commit();
+   }
+
+   // Verify empty
+   auto root = t.ses->get_root(0);
+   if (root)
+   {
+      cursor c(root);
+      c.seek_begin();
+      REQUIRE(c.is_end());
+   }
+}
+
+TEST_CASE("remove same key repeatedly does not leak references", "[public-api][remove][refcount]")
+{
+   test_db t;
+
+   // Insert one key
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key_view("thekey"), to_value("thevalue"));
+      tx.commit();
+   }
+
+   // Remove the same key many times across many transactions
+   // (simulates zipfian pattern where same key is deleted repeatedly)
+   for (int i = 0; i < 1000; ++i)
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove(to_key_view("thekey"));
+      tx.commit();
+   }
+
+   // Insert it back and verify it works
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key_view("thekey"), to_value("restored"));
+      tx.commit();
+   }
+
+   cursor c(t.ses->get_root(0));
+   auto val = c.get<std::string>(to_key_view("thekey"));
+   REQUIRE(val.has_value());
+   REQUIRE(*val == "restored");
+}
+
+TEST_CASE("high-frequency insert/remove on overlapping keys", "[public-api][remove][refcount]")
+{
+   test_db t;
+
+   // Simulate zipfian-like access: small key space, many operations
+   const int KEY_SPACE = 50;
+   const int OPS = 10000;
+
+   for (int op = 0; op < OPS; ++op)
+   {
+      auto tx = t.ses->start_transaction(0);
+      int  k  = op % KEY_SPACE;
+      char key[32];
+      snprintf(key, sizeof(key), "zk%04d", k);
+
+      if (op % 3 == 0)
+      {
+         // Remove
+         tx.remove(to_key_view(std::string(key)));
+      }
+      else
+      {
+         // Upsert
+         char val[32];
+         snprintf(val, sizeof(val), "v%d", op);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(std::string(val)));
+      }
+      tx.commit();
+   }
+
+   // Verify tree is consistent: can iterate without crash
+   cursor c(t.ses->get_root(0));
+   c.seek_begin();
+   int count = 0;
+   if (!c.is_end())
+   {
+      do { ++count; } while (c.next());
+   }
+   // Some keys should remain (2/3 of ops are upserts, 1/3 removes)
+   REQUIRE(count > 0);
+   REQUIRE(count <= KEY_SPACE);
+}
+
+// Helper: insert N keys in one transaction
+static void insert_keys(test_db& t, int N, const char* prefix = "key", const char* vprefix = "val")
+{
+   auto tx = t.ses->start_transaction(0);
+   for (int i = 0; i < N; ++i)
+   {
+      char key[64], val[64];
+      snprintf(key, sizeof(key), "%s%06d", prefix, i);
+      snprintf(val, sizeof(val), "%s%06d", vprefix, i);
+      tx.upsert(to_key_view(std::string(key)), to_value_view(std::string(val)));
+   }
+   tx.commit();
+}
+
+// Helper: remove N keys in one transaction
+static void remove_keys(test_db& t, int N, const char* prefix = "key")
+{
+   auto tx = t.ses->start_transaction(0);
+   for (int i = 0; i < N; ++i)
+   {
+      char key[64];
+      snprintf(key, sizeof(key), "%s%06d", prefix, i);
+      tx.remove(to_key_view(std::string(key)));
+   }
+   tx.commit();
+}
+
+// Helper: count keys via iteration
+static int count_keys(test_db& t)
+{
+   auto root = t.ses->get_root(0);
+   if (!root) return 0;
+   cursor c(root);
+   c.seek_begin();
+   int count = 0;
+   if (!c.is_end())
+      do { ++count; } while (c.next());
+   return count;
+}
+
+TEST_CASE("insert-removeall-reinsert 3 keys", "[public-api][remove][refcount]")
+{
+   test_db t;
+   insert_keys(t, 3);
+   t.validate_unique_refs();
+   remove_keys(t, 3);
+   REQUIRE(count_keys(t) == 0);
+   insert_keys(t, 3, "key", "new");
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 3);
+}
+
+TEST_CASE("insert-removeall-reinsert 50 keys", "[public-api][remove][refcount]")
+{
+   test_db t;
+   insert_keys(t, 50);
+   t.validate_unique_refs();
+   remove_keys(t, 50);
+   REQUIRE(count_keys(t) == 0);
+   insert_keys(t, 50, "key", "new");
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 50);
+}
+
+TEST_CASE("insert-removeall-reinsert 500 keys", "[public-api][remove][refcount]")
+{
+   test_db t;
+   insert_keys(t, 500);
+   t.validate_unique_refs();
+   remove_keys(t, 500);
+   REQUIRE(count_keys(t) == 0);
+   insert_keys(t, 500, "key", "new");
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 500);
+}
+
+TEST_CASE("insert-removeall-reinsert 5000 keys", "[public-api][remove][refcount]")
+{
+   test_db t;
+   insert_keys(t, 5000);
+   t.validate_unique_refs();
+   remove_keys(t, 5000);
+   REQUIRE(count_keys(t) == 0);
+   insert_keys(t, 5000, "key", "new");
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 5000);
+}
+
+TEST_CASE("50 cycles of insert-removeall 500 keys", "[public-api][remove][refcount]")
+{
+   test_db t;
+   for (int cycle = 0; cycle < 50; ++cycle)
+   {
+      INFO("cycle " << cycle);
+      insert_keys(t, 500);
+      t.validate_unique_refs();
+      remove_keys(t, 500);
+   }
+}
+
+TEST_CASE("batched remove 100 at a time from 5000", "[public-api][remove][refcount]")
+{
+   test_db t;
+   insert_keys(t, 5000);
+   t.validate_unique_refs();
+   for (int i = 0; i < 5000; i += 100)
+   {
+      auto tx  = t.ses->start_transaction(0);
+      for (int j = i; j < i + 100; ++j)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", j);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      tx.commit();
+   }
+   REQUIRE(count_keys(t) == 0);
+}
+
+TEST_CASE("remove half then reinsert", "[public-api][remove][refcount]")
+{
+   test_db t;
+   insert_keys(t, 1000);
+   t.validate_unique_refs();
+   // Remove even keys
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 1000; i += 2)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      tx.commit();
+   }
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 500);
+   // Reinsert even keys
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 1000; i += 2)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value("reinserted"));
+      }
+      tx.commit();
+   }
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 1000);
+}
+
+TEST_CASE("insert-removeall-reinsert 500 keys with large values", "[public-api][remove][refcount]")
+{
+   test_db t;
+   std::string big_val(200, 'X');  // large enough to force value_node storage
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(big_val));
+      }
+      tx.commit();
+   }
+   t.validate_unique_refs();
+   remove_keys(t, 500);
+   REQUIRE(count_keys(t) == 0);
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(big_val));
+      }
+      tx.commit();
+   }
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 500);
+}
+
+TEST_CASE("5 cycles insert-removeall 500 keys with large values", "[public-api][remove][refcount]")
+{
+   test_db t;
+   std::string big_val(200, 'X');
+   for (int cycle = 0; cycle < 5; ++cycle)
+   {
+      INFO("cycle " << cycle);
+      {
+         auto tx = t.ses->start_transaction(0);
+         for (int i = 0; i < 500; ++i)
+         {
+            char key[64];
+            snprintf(key, sizeof(key), "key%06d", i);
+            tx.upsert(to_key_view(std::string(key)), to_value_view(big_val));
+         }
+         tx.commit();
+      }
+      t.validate_unique_refs();
+      remove_keys(t, 500);
+   }
+}
+
+TEST_CASE("interleaved insert and remove in same transaction", "[public-api][remove][refcount]")
+{
+   test_db t;
+   insert_keys(t, 100);
+   // In one tx: remove some, insert others
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 50; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.remove(to_key_view(std::string(key)));
+      }
+      for (int i = 100; i < 150; ++i)
+      {
+         char key[64], val[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         snprintf(val, sizeof(val), "val%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(std::string(val)));
+      }
+      tx.commit();
+   }
+   t.validate_unique_refs();
+   REQUIRE(count_keys(t) == 100);  // removed 50, added 50
 }

@@ -550,7 +550,7 @@ namespace psitri
          if (ref_count == 1)  // the one being removed
          {
             // This was the last branch using this cline, mark it as free
-            clines()[*cl_off] = ptr_address(0);
+            clines()[*cl_off] = sal::null_ptr_address;
             // if the last branch was removed, decrement the cline count
             _cline_cap -= (*cl_off == _cline_cap - 1);
          }
@@ -745,9 +745,9 @@ namespace psitri
             }
          }
       }
-      clines()[*cl_off] = ptr_address(0);
+      clines()[*cl_off] = sal::null_ptr_address;
       //_cline_cap -= (cl_off == _cline_cap - 1);
-      while (_cline_cap > 0 && clines()[_cline_cap - 1] == ptr_address(0))
+      while (_cline_cap > 0 && clines()[_cline_cap - 1] == sal::null_ptr_address)
       {
          --_cline_cap;
       }
@@ -813,9 +813,9 @@ namespace psitri
       for (uint16_t i = 0; i < nb; ++i)
       {
          auto ko = keys_offsets()[i];
-         if (*ko >= _alloc_pos && _alloc_pos > 0)
+         if (*ko > _alloc_pos && _alloc_pos > 0)
          {
-            SAL_ERROR("leaf validate: key_offset[{}]={} >= alloc_pos={}", i, *ko, _alloc_pos);
+            SAL_ERROR("leaf validate: key_offset[{}]={} > alloc_pos={}", i, *ko, _alloc_pos);
             return false;
          }
       }

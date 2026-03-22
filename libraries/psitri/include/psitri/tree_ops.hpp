@@ -248,7 +248,7 @@ namespace psitri
          return s;
       }
 
-     private:
+      // private:  // TODO: restore private after fixing friend access
       struct subtree_sizer
       {
          uint16_t count = 0;
@@ -579,6 +579,85 @@ namespace psitri
       void validate(smart_ref<alloc_header> r, int depth = 0)
       {
          validate_subtree(r, depth);
+      }
+
+      /// Validates that every non-root node in the tree has refcount == 1.
+      /// Only valid when there are no concurrent readers or snapshots.
+      /// The root node may have ref > 1 due to the root table + caller holding a ref.
+      void validate_unique_refs(smart_ref<alloc_header> r)
+      {
+         // Skip root ref check (root table + caller both hold refs)
+         // but validate all children have ref == 1
+         switch (node_type(r->type()))
+         {
+            case node_type::inner:
+               validate_unique_refs_inner(r.as<inner_node>());
+               break;
+            case node_type::inner_prefix:
+               validate_unique_refs_inner(r.as<inner_prefix_node>());
+               break;
+            case node_type::leaf:
+            {
+               auto leaf = r.as<leaf_node>();
+               for (int i = 0; i < leaf->num_branches(); ++i)
+               {
+                  if (leaf->get_value_type(branch_number(i)) == leaf_node::value_type_flag::value_node)
+                  {
+                     auto val_addr = leaf->get_value_address(branch_number(i));
+                     if (val_addr != sal::null_ptr_address)
+                     {
+                        auto val_ref = _session.get_ref(val_addr);
+                        assert(val_ref.ref() == 1 && "value node ref must be 1");
+                     }
+                  }
+               }
+               break;
+            }
+            default:
+               std::unreachable();
+         }
+      }
+      void validate_unique_refs_subtree(smart_ref<alloc_header> r)
+      {
+         switch (node_type(r->type()))
+         {
+            case node_type::inner:
+               validate_unique_refs_inner(r.as<inner_node>());
+               break;
+            case node_type::inner_prefix:
+               validate_unique_refs_inner(r.as<inner_prefix_node>());
+               break;
+            case node_type::leaf:
+            {
+               auto leaf = r.as<leaf_node>();
+               for (int i = 0; i < leaf->num_branches(); ++i)
+               {
+                  if (leaf->get_value_type(branch_number(i)) == leaf_node::value_type_flag::value_node)
+                  {
+                     auto val_addr = leaf->get_value_address(branch_number(i));
+                     if (val_addr != sal::null_ptr_address)
+                     {
+                        auto val_ref = _session.get_ref(val_addr);
+                        assert(val_ref.ref() == 1 && "value node ref must be 1");
+                     }
+                  }
+               }
+               break;
+            }
+            default:
+               std::unreachable();
+         }
+      }
+      template <any_inner_node_type NodeType>
+      void validate_unique_refs_inner(smart_ref<NodeType> r)
+      {
+         for (int i = 0; i < r->num_branches(); ++i)
+         {
+            auto br  = r->get_branch(branch_number(i));
+            auto ref = _session.get_ref(br);
+            assert(ref.ref() == 1 && "child node ref must be 1");
+            validate_unique_refs_subtree(ref);
+         }
       }
 
       template <any_inner_node_type NodeType>
