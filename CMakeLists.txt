@@ -359,6 +359,49 @@ set_target_properties(psitri-benchmark
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+# psitri benchmark in TidesDB-style format (same workload/output for direct comparison)
+# Configurable via BENCH_* cmake variables (same defaults as TidesDB bench)
+if(NOT DEFINED BENCH_NUM_OPERATIONS)
+    set(BENCH_NUM_OPERATIONS 100000000)
+endif()
+if(NOT DEFINED BENCH_NUM_SEEK_OPS)
+    set(BENCH_NUM_SEEK_OPS 1000)
+endif()
+if(NOT DEFINED BENCH_KEY_SIZE)
+    set(BENCH_KEY_SIZE 16)
+endif()
+if(NOT DEFINED BENCH_VALUE_SIZE)
+    set(BENCH_VALUE_SIZE 100)
+endif()
+if(NOT DEFINED BENCH_NUM_THREADS)
+    set(BENCH_NUM_THREADS 8)
+endif()
+if(NOT DEFINED BENCH_KEY_PATTERN)
+    set(BENCH_KEY_PATTERN "random")
+endif()
+if(NOT DEFINED BENCH_DB_PATH)
+    set(BENCH_DB_PATH "psitri_benchmark_db")
+endif()
+if(NOT DEFINED BENCH_BATCH_SIZE)
+    set(BENCH_BATCH_SIZE 1000)
+endif()
+
+add_executable(psitri-tidesdb-bench bench/psitri__bench.cpp)
+target_compile_definitions(psitri-tidesdb-bench PRIVATE
+    BENCH_NUM_OPERATIONS=${BENCH_NUM_OPERATIONS}
+    BENCH_NUM_SEEK_OPS=${BENCH_NUM_SEEK_OPS}
+    BENCH_KEY_SIZE=${BENCH_KEY_SIZE}
+    BENCH_VALUE_SIZE=${BENCH_VALUE_SIZE}
+    BENCH_NUM_THREADS=${BENCH_NUM_THREADS}
+    BENCH_KEY_PATTERN="${BENCH_KEY_PATTERN}"
+    BENCH_DB_PATH="${BENCH_DB_PATH}"
+    BENCH_BATCH_SIZE=${BENCH_BATCH_SIZE}
+)
+target_link_libraries(psitri-tidesdb-bench PRIVATE psitri Threads::Threads)
+set_target_properties(psitri-tidesdb-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 # TidesDB benchmark (optional — requires tidesdb installed or in external/)
 option(BUILD_TIDESDB_BENCH "Build the TidesDB comparison benchmark" OFF)
 if(BUILD_TIDESDB_BENCH)
