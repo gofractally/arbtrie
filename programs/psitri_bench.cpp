@@ -280,6 +280,59 @@ void remove_test(benchmark_config   cfg,
    tx.commit();
 }
 
+// -- Random remove of known keys --
+// Removes keys that were previously inserted with make_key(0..total_inserted-1)
+// in random order using a Fisher-Yates-like permutation via rand_from_seq
+
+void remove_rand_test(benchmark_config   cfg,
+                      write_session&     ses,
+                      const std::string& name,
+                      auto               make_key)
+{
+   print_header(name, cfg);
+
+   // Build a shuffled index of all inserted keys
+   uint64_t total = uint64_t(cfg.items) * cfg.rounds;
+   std::vector<uint64_t> indices(total);
+   for (uint64_t i = 0; i < total; ++i)
+      indices[i] = i;
+   // Fisher-Yates shuffle with deterministic RNG
+   for (uint64_t i = total - 1; i > 0; --i)
+   {
+      uint64_t j = rand_from_seq(i) % (i + 1);
+      std::swap(indices[i], indices[j]);
+   }
+
+   std::vector<char> key;
+   uint64_t          pos = 0;
+
+   auto tx = ses.start_transaction(0);
+
+   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   {
+      auto     start   = std::chrono::steady_clock::now();
+      uint32_t removed = 0;
+      while (removed < cfg.items)
+      {
+         uint32_t batch = std::min(cfg.batch_size, cfg.items - removed);
+         for (uint32_t i = 0; i < batch; ++i)
+         {
+            make_key(indices[pos++], key);
+            tx.remove(key_view(key.data(), key.size()));
+            ++removed;
+         }
+      }
+
+      auto   end  = std::chrono::steady_clock::now();
+      double secs = std::chrono::duration<double>(end - start).count();
+      auto   rps  = uint64_t(removed / secs);
+      std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
+                << format_comma(pos) << "  " << std::setw(12) << std::right << format_comma(rps)
+                << "  removes/sec\n";
+   }
+   tx.commit();
+}
+
 // -- Lower-bound benchmark --
 
 void lower_bound_test(benchmark_config   cfg,
@@ -337,6 +390,124 @@ void get_rand_test(benchmark_config   cfg,
    auto   gps  = uint64_t(count / secs);
    std::cout << format_comma(gps) << " gets/sec  (" << format_comma(found) << " found / "
              << format_comma(count) << " ops)\n";
+}
+
+// -- Multi-writer benchmark: N writers each on their own tree --
+
+void multiwriter_test(benchmark_config            cfg,
+                      std::shared_ptr<database>&   db,
+                      uint32_t                     num_writers,
+                      auto                         make_key,
+                      const std::string&           name)
+{
+   std::cout << "---------------------  " << name << "  "
+                << std::string(std::max(0, int(52 - int(name.size()))), '-') << "\n";
+   std::cout << "write rounds: " << cfg.rounds << "  items: " << format_comma(cfg.items)
+             << "  writers: " << num_writers << "\n";
+   std::cout << "-----------------------------------------------------------------------\n";
+
+   struct alignas(128) padded_counter
+   {
+      std::atomic<int64_t> count{0};
+   };
+
+   std::atomic<bool>           start_flag{false};
+   std::atomic<bool>           done{false};
+   std::vector<padded_counter> counters(num_writers);
+
+   std::vector<std::thread> writers;
+   writers.reserve(num_writers);
+   for (uint32_t t = 0; t < num_writers; ++t)
+   {
+      // Each writer uses root_index = t+1 (reserve 0 for other tests)
+      writers.emplace_back(
+          [&db, &start_flag, &done, &counters, &cfg, t, &make_key, num_writers]()
+          {
+             sal::set_current_thread_name("writer_thread");
+             auto              ws  = db->start_write_session();
+             std::vector<char> key;
+             std::vector<char> value(cfg.value_size, 'v');
+             value_view        vv(value.data(), value.size());
+             uint32_t          root_index = t + 1;  // each writer owns its own tree
+             int64_t           total_inserted = 0;
+
+             // Wait for all threads to be ready
+             while (!start_flag.load(std::memory_order_relaxed))
+                ;
+
+             for (uint32_t r = 0; r < cfg.rounds && !done.load(std::memory_order_relaxed); ++r)
+             {
+                auto     tx       = ws->start_transaction(root_index);
+                uint32_t inserted = 0;
+                while (inserted < cfg.items)
+                {
+                   uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
+                   for (uint32_t i = 0; i < batch; ++i)
+                   {
+                      // Salt keys by writer index so each tree has unique keys
+                      uint64_t seq = uint64_t(r) * cfg.items + inserted + i;
+                      seq = seq * num_writers + t;
+                      make_key(seq, key);
+                      tx.insert(key_view(key.data(), key.size()), vv);
+                      ++inserted;
+                   }
+                }
+                tx.commit();
+                total_inserted += inserted;
+                counters[t].count.store(total_inserted, std::memory_order_relaxed);
+             }
+          });
+   }
+
+   auto sum_inserts = [&]()
+   {
+      int64_t total = 0;
+      for (uint32_t i = 0; i < num_writers; ++i)
+         total += counters[i].count.load(std::memory_order_relaxed);
+      return total;
+   };
+
+   auto overall_start = std::chrono::steady_clock::now();
+   start_flag.store(true, std::memory_order_relaxed);
+
+   // Report progress while writers are running
+   int64_t prev_inserts = 0;
+   auto    prev_time    = overall_start;
+   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      auto    now     = std::chrono::steady_clock::now();
+      double  secs    = std::chrono::duration<double>(now - prev_time).count();
+      int64_t cur     = sum_inserts();
+      int64_t delta   = cur - prev_inserts;
+      prev_inserts    = cur;
+      prev_time       = now;
+      auto    ips     = uint64_t(delta / secs);
+      std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
+                << format_comma(cur) << "  " << std::setw(12) << std::right << format_comma(ips)
+                << "  inserts/sec (aggregate)\n";
+      // Check if all writers are done
+      bool all_done = true;
+      for (uint32_t i = 0; i < num_writers; ++i)
+         if (counters[i].count.load(std::memory_order_relaxed) < int64_t(cfg.items) * cfg.rounds)
+            all_done = false;
+      if (all_done)
+         break;
+   }
+
+   done.store(true, std::memory_order_relaxed);
+   for (auto& t : writers)
+      t.join();
+
+   auto   overall_end  = std::chrono::steady_clock::now();
+   double overall_secs = std::chrono::duration<double>(overall_end - overall_start).count();
+   auto   final_inserts = sum_inserts();
+   std::cout << "total: " << format_comma(final_inserts) << " inserts across " << num_writers
+             << " writers in " << std::fixed << std::setprecision(3) << overall_secs << " sec\n";
+   std::cout << "  aggregate: " << format_comma(uint64_t(final_inserts / overall_secs))
+             << " inserts/sec  per-writer: "
+             << format_comma(uint64_t(final_inserts / overall_secs / num_writers))
+             << " inserts/sec\n";
 }
 
 // -- Multi-threaded stress test: concurrent reads while writing --
@@ -534,7 +705,8 @@ int main(int argc, char** argv)
    opt("threads,t", po::value<uint32_t>(&threads)->default_value(4), "number of read threads for multithread test");
    opt("db-dir,d", po::value<std::string>(&db_dir)->default_value("./psitridb"), "database dir");
    opt("bench", po::value<std::string>(&bench)->default_value("all"),
-       "benchmark: all, insert, upsert, get, iterate, remove, lower-bound, get-rand, "
+       "benchmark: all, insert, upsert, get, iterate, remove, remove-rand, lower-bound, get-rand, "
+       "multiwriter-rand, multiwriter-seq, "
        "multithread-lowerbound-rand, multithread-lowerbound-known, "
        "multithread-get-rand, multithread-get-known");
    opt("reset", po::bool_switch(&reset), "reset database before running");
@@ -636,7 +808,24 @@ int main(int argc, char** argv)
       print_stats(*ses);
    }
 
-   // -- Multithread variants --
+   // -- Random remove of known keys (run after random insert) --
+   if (run_all || bench == "remove-rand")
+   {
+      remove_rand_test(cfg, *ses, "random remove (known keys)", rand_key);
+      print_stats(*ses);
+   }
+
+   // -- Multi-writer --
+   if (run_all || bench == "multiwriter-rand")
+   {
+      multiwriter_test(cfg, db, threads, rand_key, "multi-writer rand insert");
+   }
+   if (run_all || bench == "multiwriter-seq")
+   {
+      multiwriter_test(cfg, db, threads, be_seq_key, "multi-writer seq insert");
+   }
+
+   // -- Multithread read+write variants --
    if (run_all || bench == "multithread-lowerbound-rand")
    {
       multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "rand");
