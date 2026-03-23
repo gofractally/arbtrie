@@ -213,6 +213,19 @@ namespace psitri
       apply(rm);
    }
 
+   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove_range& rm)
+       : node(alloc_size, node_type::leaf, seq),
+         _alloc_pos(0),
+         _dead_space(0),
+         _cline_cap(0),
+         _optimal_layout(true)
+   {
+      // Clone the source then remove the range in-place.
+      // This is simple and correct; the compactor can optimize layout later.
+      clone_from(&rm.src);
+      remove_range(rm.lo, rm.hi);
+   }
+
    leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_prepend_prefix& pp)
        : node(alloc_size, node_type::leaf, seq),
          _alloc_pos(0),
@@ -578,6 +591,71 @@ namespace psitri
 
       // 5. Update Optimal Flag
       _optimal_layout = false;  // Removing always breaks optimal layout
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
+   }
+
+   void leaf_node::remove_range(branch_number lo, branch_number hi) noexcept
+   {
+      assert(*lo < *hi && *hi <= num_branches());
+      uint16_t count = *hi - *lo;
+
+      // 1. Free space accounting and cline cleanup for removed branches
+      for (uint16_t i = *lo; i < *hi; ++i)
+      {
+         key_offset   ko = keys_offsets()[i];
+         _dead_space += sizeof(key) + get_key_ptr(ko)->get().size();
+
+         value_branch vb = value_offsets()[i];
+         if (vb.is_inline())
+         {
+            value_offset vo = vb.offset();
+            _dead_space += sizeof(value_data) + get_value_ptr(vo)->get().size();
+         }
+         else if (vb.is_address())
+         {
+            cline_offset cl_off = vb.cline();
+            // Count references to this cline from branches NOT being removed
+            int ref_count = 0;
+            for (uint16_t j = 0; j < num_branches() && ref_count < 2; ++j)
+            {
+               if (j >= *lo && j < *hi)
+                  continue;  // skip branches being removed
+               value_branch other_vb = value_offsets()[j];
+               ref_count += other_vb.is_address() && other_vb.cline() == cl_off;
+            }
+            if (ref_count == 0)
+            {
+               clines()[*cl_off] = sal::null_ptr_address;
+               _cline_cap -= (*cl_off == _cline_cap - 1);
+            }
+         }
+      }
+
+      // 2. Shift metadata arrays to close the gap
+      //    Layout: khash[0..nb) | koff[0..nb) | voff[0..nb) | clines[0.._cline_cap)
+      //    Removing [lo, hi) shifts 3 sub-arrays by different amounts
+      auto     meta = get_meta_arrays();
+      uint16_t nb   = num_branches();
+
+      // Pointers for the range being removed
+      auto khash_hi  = meta.khash + *hi;
+      auto koff_lo   = meta.koffs + *lo * sizeof(key_offset);
+      auto koff_hi   = meta.koffs + *hi * sizeof(key_offset);
+      auto voff_lo   = meta.voffs + *lo * sizeof(value_branch);
+      auto voff_hi   = meta.voffs + *hi * sizeof(value_branch);
+      auto clines_end = meta.clines_end;
+
+      // khash: shift [hi..nb) back by count bytes
+      memmove(khash_hi - count, khash_hi, koff_lo - khash_hi);
+      // koff: shift [hi..nb) back by count*3 bytes (count in khash + count*sizeof(key_offset))
+      uint16_t shift2 = count + count * sizeof(key_offset);
+      memmove(koff_hi - shift2, koff_hi, voff_lo - koff_hi);
+      // voff+clines: shift [hi..end) back by count*(1+2+2) = count*5 bytes
+      uint16_t shift3 = count + count * sizeof(key_offset) + count * sizeof(value_branch);
+      memmove(voff_hi - shift3, voff_hi, clines_end - voff_hi);
+
+      set_num_branches(nb - count);
+      _optimal_layout = false;
       PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
 

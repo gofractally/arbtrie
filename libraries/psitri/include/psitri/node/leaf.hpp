@@ -31,6 +31,12 @@ namespace psitri
          const leaf_node& src;
          branch_number    bn;
       };
+      struct leaf_remove_range
+      {
+         const leaf_node& src;
+         branch_number    lo;  ///< first branch to remove (inclusive)
+         branch_number    hi;  ///< last branch to remove (exclusive)
+      };
       struct leaf_prepend_prefix
       {
          const leaf_node& src;
@@ -107,6 +113,10 @@ namespace psitri
          // no point in growing the node when we are removing a value
          return rm.src.size();
       }
+      inline static uint32_t alloc_size(const op::leaf_remove_range& rm)
+      {
+         return rm.src.size();
+      }
       inline static uint32_t alloc_size(const op::leaf_prepend_prefix&)
       {
          return max_leaf_size;
@@ -115,6 +125,7 @@ namespace psitri
 
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
+      leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove_range& rm);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_prepend_prefix& pp);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const struct op::leaf_from_visitor& vis);
 
@@ -258,6 +269,10 @@ namespace psitri
 
       /// @pre bn != num_branches()
       void remove(branch_number bn) noexcept;
+
+      /// Remove branches in range [lo, hi) in-place (unique mode).
+      /// @pre lo < hi && hi <= num_branches()
+      void remove_range(branch_number lo, branch_number hi) noexcept;
 
       uint8_t calc_key_hash(key_view key) const noexcept
       {

@@ -20,6 +20,12 @@ namespace psitri
          branch_number br;
          int64_t       delta_descendents;
       };
+      struct inner_remove_range
+      {
+         branch_number lo;                ///< first branch to remove (inclusive)
+         branch_number hi;                ///< last branch to remove (exclusive)
+         int64_t       delta_descendents;
+      };
    };  // namespace op
    class inner_node;
    class inner_prefix_node;
@@ -289,10 +295,64 @@ namespace psitri
          assert(d.validate_invariants());
       }
 
+      inline void init(const any_inner_node_type auto* clone,
+                        const op::inner_remove_range&   rm) noexcept
+      {
+         Derived&       d     = static_cast<Derived&>(*this);
+         uint16_t       count = *rm.hi - *rm.lo;
+         d._num_branches      = clone->_num_branches - count;
+         d._num_cline         = clone->_num_cline;  // keep same cline count
+         d._descendents       = clone->_descendents + rm.delta_descendents;
+
+         const branch*  c_branches = clone->const_branches();
+         const uint8_t* c_divs     = clone->divisions();
+         branch*        d_branches = d.branches();
+         uint8_t*       d_divs     = d.divisions();
+
+         // Copy clines from clone, then dec_ref for all removed branches
+         std::copy(clone->clines(), clone->clines() + clone->_num_cline, d.clines());
+         auto cl_head = reinterpret_cast<cline_data*>(d.clines());
+         for (uint16_t i = *rm.lo; i < *rm.hi; ++i)
+            cl_head[c_branches[i].line()].dec_ref();
+
+         // Copy divisions: skip dividers in [lo, hi) range
+         // Division at index i separates branch i from branch i+1.
+         // When removing branches [lo, hi):
+         //   - Keep divisions [0, lo) as-is (before the removed range)
+         //   - Skip divisions [lo, hi-1) — these are between removed branches
+         //   - Also skip the division that connected the removed range to the next branch:
+         //     if lo > 0, skip div[lo-1]; if lo == 0, skip div[hi-1]
+         //   - Keep divisions [hi, old_nd) as-is (after the removed range)
+         uint32_t old_nd = clone->num_branches() - 1;
+         if (*rm.lo == 0)
+         {
+            // Remove from start: skip first (hi-1) dividers, keep [hi-1, old_nd)
+            uint32_t remaining = old_nd - (*rm.hi - 1);
+            memcpy(d_divs, c_divs + *rm.hi - 1, remaining);
+         }
+         else
+         {
+            // Remove from middle/end: keep [0, lo-1), skip [lo-1, hi-1), keep [hi-1, old_nd)
+            uint32_t head = *rm.lo - 1;
+            memcpy(d_divs, c_divs, head);
+            uint32_t tail_start = *rm.hi - 1;
+            memcpy(d_divs + head, c_divs + tail_start, old_nd - tail_start);
+         }
+
+         // Copy branches: skip [lo, hi)
+         memcpy(d_branches, c_branches, *rm.lo);
+         memcpy(d_branches + *rm.lo, c_branches + *rm.hi,
+                clone->_num_branches - *rm.hi);
+
+         assert(std::is_sorted(d.divisions(), d.divisions() + d.num_divisions()));
+         assert(d.validate_invariants());
+      }
+
      public:
       [[nodiscard]] inline bool can_apply(const op::replace_branch& up) const noexcept;
       inline void               apply(const op::replace_branch& up) noexcept;
       inline void               remove_branch(branch_number bn) noexcept;
+      inline void               remove_range(branch_number lo, branch_number hi) noexcept;
       [[nodiscard]] inline bool validate_invariants() const noexcept;
 
       std::span<const ptr_address> get_branch_clines() const noexcept
@@ -527,6 +587,53 @@ namespace psitri
       memmove(new_branches + *bn, old_branches + *bn + 1, old_nb - *bn - 1);
 
       d->_num_branches = old_nb - 1;
+      PSITRI_ASSERT_INVARIANTS(d->validate_invariants());
+   }
+
+   template <typename Derived>
+   inline void inner_node_base<Derived>::remove_range(branch_number lo, branch_number hi) noexcept
+   {
+      Derived* d     = static_cast<Derived*>(this);
+      uint16_t count = *hi - *lo;
+      assert(count > 0);
+      assert(*hi <= d->_num_branches);
+      assert(d->_num_branches > count && "cannot remove all branches");
+
+      // 1. Dec cline refs for all removed branches
+      for (uint16_t i = *lo; i < *hi; ++i)
+         d->get_cline_data()[d->branches()[i].line()].dec_ref();
+
+      // 2. Compute old positions
+      uint8_t* old_divs     = d->divisions();
+      branch*  old_branches = d->branches();
+      uint32_t old_nb       = d->_num_branches;
+      uint32_t old_nd       = old_nb - 1;
+
+      // 3. Remove (count) divisions.
+      // When removing branches [lo, hi), we remove (count) dividers.
+      // If lo==0: remove dividers [0, count-1) i.e. first (count-1) divs + the one at hi-1
+      //           Actually we remove divs [0, hi-1), keep [hi-1, old_nd)
+      // If lo>0: remove divs [lo-1, hi-1), keep [0, lo-1) and [hi-1, old_nd)
+      if (*lo == 0)
+      {
+         uint32_t skip = *hi - 1;
+         memmove(old_divs, old_divs + skip, old_nd - skip);
+      }
+      else
+      {
+         uint32_t head = *lo - 1;
+         uint32_t tail_start = *hi - 1;
+         memmove(old_divs + head, old_divs + tail_start, old_nd - tail_start);
+      }
+
+      // 4. New branches start (count) bytes earlier (divisions shrank by count)
+      branch* new_branches = old_branches - count;
+      // Copy branches before lo to new position
+      memmove(new_branches, old_branches, *lo);
+      // Copy branches after hi to new position (skipping [lo, hi))
+      memmove(new_branches + *lo, old_branches + *hi, old_nb - *hi);
+
+      d->_num_branches = old_nb - count;
       PSITRI_ASSERT_INVARIANTS(d->validate_invariants());
    }
 

@@ -17,6 +17,20 @@ namespace psitri
    static constexpr uint8_t       insufficient_clines = 0xff;
    static constexpr branch_number branch_zero         = branch_number(0);
 
+   namespace detail
+   {
+      inline constexpr std::array<char, 256> max_key_data = []()
+      {
+         std::array<char, 256> arr{};
+         for (auto& c : arr)
+            c = '\xFF';
+         return arr;
+      }();
+   }  // namespace detail
+   /// Sentinel key that compares greater than any real key.
+   /// Use as upper bound in range operations to mean "unbounded".
+   static constexpr key_view max_key{detail::max_key_data.data(), detail::max_key_data.size()};
+
    struct subrange
    {
       branch_number begin;

@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/count_keys.hpp>
 #include <psitri/node/inner.hpp>
 #include <psitri/node/leaf.hpp>
 #include <psitri/node/node.hpp>
@@ -182,6 +183,25 @@ namespace psitri
             _root.give(make_inner(result));
          return _old_value_size;
       }
+
+      /// Remove all keys in range [lower, upper).
+      /// @return the number of keys removed.
+      uint64_t remove_range(key_view lower, key_view upper);
+
+      template <upsert_mode mode>
+      branch_set range_remove(const sal::alloc_hint&   parent_hint,
+                              smart_ref<alloc_header>& ref,
+                              key_range                range);
+
+      template <upsert_mode mode>
+      branch_set range_remove_leaf(const sal::alloc_hint& parent_hint,
+                                   smart_ref<leaf_node>&  leaf,
+                                   key_range              range);
+
+      template <upsert_mode mode, any_inner_node_type NodeT>
+      branch_set range_remove_inner(const sal::alloc_hint& parent_hint,
+                                    smart_ref<NodeT>&      node,
+                                    key_range              range);
 
       void print()
       {
@@ -1659,3 +1679,5 @@ namespace psitri
    }
 
 }  // namespace psitri
+
+#include <psitri/range_remove.hpp>

@@ -59,6 +59,12 @@ namespace psitri
       /// Remove key. Returns size of removed value, or -1 if not found.
       int remove(key_view key) { return _ctx.remove(key); }
 
+      /// Remove all keys in range [lower, upper). Returns number of keys removed.
+      uint64_t remove_range(key_view lower, key_view upper)
+      {
+         return _ctx.remove_range(lower, upper);
+      }
+
       // -- Read access --
 
       /// Get a read cursor for the current tree state
