@@ -453,3 +453,160 @@ TEST_CASE("InnerNodeUtilSmallNCopyBenchmarks", "[inner_node_util][benchmark][sma
    };
 #endif
 }
+
+// Helper to build a cline ptr_address from a base and ref count
+// Base must be 16-aligned (low 4 bits zero). ref_count >= 1.
+static sal::ptr_address make_cline(uint32_t base, uint32_t ref_count = 1)
+{
+   assert((base & 0x0f) == 0);
+   assert(ref_count >= 1 && ref_count <= 16);
+   return sal::ptr_address(base | (ref_count - 1));
+}
+
+TEST_CASE("find_clines", "[find_clines]")
+{
+   using namespace psitri;
+
+   SECTION("basic: new branches match existing clines")
+   {
+      // 2 existing clines with different bases
+      ptr_address current_clines[] = {make_cline(0x100, 1), make_cline(0x200, 1)};
+      // old branch is in cline 0
+      ptr_address old_branch(0x105);  // base=0x100, idx=5
+      // 2 new branches, both in existing clines
+      ptr_address new_branches[] = {ptr_address(0x103), ptr_address(0x207)};
+
+      std::array<uint8_t, 8> out{};
+      auto needed = find_clines<true>(
+          std::span<const ptr_address>(current_clines, 2), old_branch,
+          std::span<const ptr_address>(new_branches, 2), out);
+
+      // Both should find existing clines
+      REQUIRE(needed <= 16);
+      // new_branches[0] base=0x100 should match cline 0
+      // new_branches[1] base=0x200 should match cline 1
+      REQUIRE(out[0] == 0);
+      REQUIRE(out[1] == 1);
+   }
+
+   SECTION("new branch needs new cline slot")
+   {
+      // 1 existing cline
+      ptr_address current_clines[] = {make_cline(0x100, 1)};
+      ptr_address old_branch(0x103);
+      // 2 new branches: one matches, one needs new slot
+      ptr_address new_branches[] = {ptr_address(0x102), ptr_address(0x300)};
+
+      std::array<uint8_t, 8> out{};
+      auto needed = find_clines<true>(
+          std::span<const ptr_address>(current_clines, 1), old_branch,
+          std::span<const ptr_address>(new_branches, 2), out);
+
+      REQUIRE(needed <= 16);
+      REQUIRE(out[0] == 0);  // matches existing cline 0
+      REQUIRE(out[1] != 0);  // must get a different slot
+   }
+
+   SECTION("old branch cline freed when ref=1, new branch reuses slot")
+   {
+      // cline 0 has ref=1 (data & 0x0f == 0), cline 1 has ref=2
+      ptr_address current_clines[] = {make_cline(0x100, 1), make_cline(0x200, 2)};
+      ptr_address old_branch(0x103);  // in cline 0, ref=1 so it should be freed
+      // new branch with a completely different base
+      ptr_address new_branches[] = {ptr_address(0x500)};
+
+      std::array<uint8_t, 8> out{};
+      auto needed = find_clines<true>(
+          std::span<const ptr_address>(current_clines, 2), old_branch,
+          std::span<const ptr_address>(new_branches, 1), out);
+
+      REQUIRE(needed <= 16);
+      // cline 0 was freed (old branch had ref=1), so new branch should take slot 0
+      REQUIRE(out[0] == 0);
+   }
+
+   SECTION("BUG REGRESSION: old branch freed cline must not match different-base new branches")
+   {
+      // This reproduces the bug where the NEON vec[] registers were not reloaded
+      // after nullifying the old branch's cline, causing find_u32x16_neon to
+      // match the stale value and assign two different-base branches to the same slot.
+
+      // cline 0 = base 0x100 ref=1 (will be freed)
+      // cline 1 = base 0x200 ref=1
+      ptr_address current_clines[] = {make_cline(0x100, 1), make_cline(0x200, 1)};
+      ptr_address old_branch(0x103);  // in cline 0, ref=1
+
+      // 3 new sub-branches with 3 DIFFERENT bases:
+      // - sub[0] base=0x100 (same as old, should reuse freed slot 0)
+      // - sub[1] base=0x200 (matches cline 1)
+      // - sub[2] base=0x300 (new base, must NOT get slot 0 or 1)
+      ptr_address new_branches[] = {ptr_address(0x100), ptr_address(0x205), ptr_address(0x300)};
+
+      std::array<uint8_t, 8> out{};
+      auto needed = find_clines<true>(
+          std::span<const ptr_address>(current_clines, 2), old_branch,
+          std::span<const ptr_address>(new_branches, 3), out);
+
+      REQUIRE(needed <= 16);
+      // sub[0] base=0x100 should get a slot (slot 0 was freed but 0x100>>4 matches stale value)
+      // sub[1] base=0x200 should get slot 1
+      // sub[2] base=0x300 must get a DIFFERENT slot from sub[0] and sub[1]
+      REQUIRE(out[0] != out[2]);  // different bases MUST get different cline slots
+      REQUIRE(out[1] != out[2]);
+      REQUIRE(out[1] == 1);       // cline 1 still has base 0x200
+   }
+
+   SECTION("BUG REGRESSION: exact crash scenario - freed cline matches first sub-branch")
+   {
+      // Reproduce: old_branch in cline with ref=1, freed on removal.
+      // First new sub-branch has SAME base as old (finds the now-stale slot).
+      // Third new sub-branch has DIFFERENT base but NEON vec[] still has old value.
+      // Without the fix, sub[0] and sub[2] would both get assigned to the same slot.
+
+      // 3 existing clines
+      ptr_address current_clines[] = {
+          make_cline(0x2EF410, 1),  // cline 0: will be freed (old branch is here, ref=1)
+          make_cline(0x104640, 1),  // cline 1
+          make_cline(0x2C8C40, 1),  // cline 2 - note: different base from cline 0!
+      };
+      ptr_address old_branch(0x2EF413);  // in cline 0, base=0x2EF410
+
+      // 3 new sub-branches (from the actual crash dump):
+      ptr_address new_branches[] = {
+          ptr_address(0x2EF410),  // same base as freed cline 0
+          ptr_address(0x104643),  // matches cline 1
+          ptr_address(0x2C8C40),  // matches cline 2 — NOT cline 0!
+      };
+
+      std::array<uint8_t, 8> out{};
+      auto needed = find_clines<true>(
+          std::span<const ptr_address>(current_clines, 3), old_branch,
+          std::span<const ptr_address>(new_branches, 3), out);
+
+      REQUIRE(needed <= 16);
+      // Each sub-branch must get a UNIQUE cline slot since they have different bases
+      REQUIRE(out[0] != out[1]);
+      REQUIRE(out[0] != out[2]);
+      REQUIRE(out[1] != out[2]);
+      // Verify specific assignments: sub[1]→cline1, sub[2]→cline2
+      REQUIRE(out[1] == 1);
+      REQUIRE(out[2] == 2);
+   }
+
+   SECTION("no old branch removal")
+   {
+      ptr_address current_clines[] = {make_cline(0x100, 1), make_cline(0x200, 1)};
+      ptr_address new_branches[] = {ptr_address(0x103), ptr_address(0x207), ptr_address(0x400)};
+
+      std::array<uint8_t, 8> out{};
+      auto needed = find_clines(
+          std::span<const ptr_address>(current_clines, 2),
+          std::span<const ptr_address>(new_branches, 3), out);
+
+      REQUIRE(needed <= 16);
+      REQUIRE(out[0] == 0);   // base 0x100 → cline 0
+      REQUIRE(out[1] == 1);   // base 0x200 → cline 1
+      REQUIRE(out[2] != 0);   // base 0x400 → new slot
+      REQUIRE(out[2] != 1);
+   }
+}

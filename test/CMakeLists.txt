@@ -90,6 +90,16 @@ target_compile_definitions(psitri-tests PUBLIC XXH_INLINE_ALL)
 set_target_properties(psitri-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_test(NAME psitri-tests COMMAND psitri-tests)
 
+# init_replace_branch crash dump replay test
+add_executable(init-replace-branch-test init_replace_branch_test.cpp)
+target_link_libraries(init-replace-branch-test PRIVATE psitri)
+target_include_directories(init-replace-branch-test
+    PUBLIC
+        $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>
+)
+target_compile_definitions(init-replace-branch-test PUBLIC XXH_INLINE_ALL)
+set_target_properties(init-replace-branch-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # ============================================================
 # Sanitizer / coverage settings for active targets
 # ============================================================

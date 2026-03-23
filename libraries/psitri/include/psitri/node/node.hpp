@@ -297,9 +297,8 @@ namespace psitri
          temp[idx] |=
              ptr_address(-(idx < current_clines.size() and (*current_clines[idx] & 0x0f) == 0)) >>
              4;
-         //         SAL_ERROR(
-         //            "find_clines: replace br index find_u32x16_neon: idx:   {} cur_cline: {} temp[idx]={}",
-         //           idx, current_clines.size(), temp[idx]);
+         // Reload the NEON vector for the modified slot so subsequent searches see the update
+         vec[idx / 4] = vld1q_u32((uint32_t*)(temp + (idx & ~3)));
       }
       assert(current_clines.size() > 0);
       uint32_t    max_branch_index = 1 << (current_clines.size() - 1);

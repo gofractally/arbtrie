@@ -1,8 +1,11 @@
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <execinfo.h>
 #include <iomanip>
 #include <iostream>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include <boost/program_options/cmdline.hpp>
@@ -696,8 +699,25 @@ void multithread_rw_test(benchmark_config            cfg,
              << format_comma(uint64_t(final_ops / overall_secs)) << "/sec\n";
 }
 
+static void crash_handler(int sig, siginfo_t* info, void* /*ctx*/)
+{
+   const char* name = (sig == SIGBUS) ? "SIGBUS" : (sig == SIGSEGV) ? "SIGSEGV" : "SIGILL";
+   fprintf(stderr, "\n=== %s at addr %p ===\n", name, info->si_addr);
+   void* bt[64];
+   int n = backtrace(bt, 64);
+   backtrace_symbols_fd(bt, n, STDERR_FILENO);
+   _exit(128 + sig);
+}
+
 int main(int argc, char** argv)
 {
+   struct sigaction sa{};
+   sa.sa_sigaction = crash_handler;
+   sa.sa_flags = SA_SIGINFO;
+   sigaction(SIGBUS, &sa, nullptr);
+   sigaction(SIGSEGV, &sa, nullptr);
+   sigaction(SIGILL, &sa, nullptr);
+
    sal::set_current_thread_name("main");
    uint32_t    rounds;
    uint32_t    batch;
