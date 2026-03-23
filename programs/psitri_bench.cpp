@@ -13,6 +13,7 @@
 #include <hash/xxhash.h>
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
+#include <psitri/tree_ops.hpp>
 #include <psitri/write_session_impl.hpp>
 #include <psitri/read_session_impl.hpp>
 
@@ -26,6 +27,7 @@ struct benchmark_config
    uint32_t       batch_size = 512;
    uint32_t       value_size = 8;
    sal::sync_type sync       = sal::sync_type::none;
+   bool           validate   = false;
 };
 
 int64_t rand_from_seq(uint64_t seq)
@@ -108,6 +110,17 @@ void print_stats(write_session& ses, uint32_t root_index = 0)
    std::cout << "  stats took " << std::fixed << std::setprecision(3) << elapsed << " sec\n";
 }
 
+void validate_tree(write_session& ses, uint32_t root_index = 0)
+{
+   auto root = ses.get_root(root_index);
+   if (!root)
+      return;
+   tree_context ctx(root);
+   auto         s = ctx.get_stats();
+   std::cout << "  validate: " << format_comma(s.total_nodes()) << " nodes, "
+             << format_comma(s.total_keys) << " keys OK\n";
+}
+
 // -- Mutation benchmarks --
 
 void insert_test(benchmark_config cfg,
@@ -145,6 +158,8 @@ void insert_test(benchmark_config cfg,
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  inserts/sec\n";
+      if (cfg.validate)
+         validate_tree(ses);
    }
    tx.commit();
 }
@@ -694,6 +709,7 @@ int main(int argc, char** argv)
    uint32_t    threads;
    bool        reset    = false;
    bool        stat     = false;
+   bool        validate = false;
    std::string db_dir   = "./psitridb";
    std::string bench    = "all";
    std::string sync_str = "none";
@@ -716,6 +732,7 @@ int main(int argc, char** argv)
        "sync mode: none (no sync), safe (msync async), full (msync sync)");
    opt("reset", po::bool_switch(&reset), "reset database before running");
    opt("stat", po::bool_switch(&stat)->default_value(false), "print database stats and exit");
+   opt("validate", po::bool_switch(&validate)->default_value(false), "validate tree after each round");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -762,7 +779,7 @@ int main(int argc, char** argv)
 
    ses->set_sync(sync);
 
-   benchmark_config cfg = {rounds, items, batch, value_size, sync};
+   benchmark_config cfg = {rounds, items, batch, value_size, sync, validate};
 
    std::cout << "psitri-benchmark: db=" << db_dir << (created ? " (new)" : " (existing)") << "\n";
    std::cout << "rounds=" << rounds << " items=" << format_comma(items)

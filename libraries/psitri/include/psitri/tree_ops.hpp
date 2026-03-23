@@ -671,6 +671,13 @@ namespace psitri
             ++s.single_branch_inners;
          if (r->descendents() <= 24)
             ++s.sparse_subtree_inners;
+         if (!r->validate_invariants())
+         {
+            SAL_ERROR("calc_stats: inner node {} failed validate_invariants at depth {},"
+                      " branches={} clines={} size={}",
+                      r.address(), depth, r->num_branches(), r->num_clines(), r->size());
+            throw std::runtime_error("calc_stats: corrupted inner node");
+         }
          for (int i = 0; i < r->num_branches(); ++i)
          {
             auto br  = r->get_branch(branch_number(i));

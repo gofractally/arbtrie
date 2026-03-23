@@ -513,9 +513,9 @@ TEST_CASE("tree_context", "[tree_context]")
       uint32_t             batches_per_round = round_size / batch;
       uint64_t             key               = 0;
       std::array<char, 63> big_value;
+      sal::ptr_address     prev_root_addr    = sal::null_ptr_address;
       for (int r = 0; r < 30 / SCALE; ++r)
       {
-         //  SAL_WARN("round: {}", r);
          auto start = std::chrono::high_resolution_clock::now();
          for (uint32_t b = 0; b < batches_per_round; b++)
          {
@@ -526,18 +526,15 @@ TEST_CASE("tree_context", "[tree_context]")
                uint64_t   bigendian_key = __builtin_bswap64(key);
                key_view   kstr((char*)&bigendian_key, sizeof(bigendian_key));
                value_view vstr(big_value.data(), big_value.size());
-               //ctx.validate(last_version);
                ctx.insert(kstr, kstr);
-               //ctx.validate();
-               //ctx.validate(last_version);
             }
-            //  SAL_WARN("total nodes visited: {:L} total allocated: {:L}", ctx.get_stats().total_nodes(),
-            //           ses->get_total_allocated_objects());
+            auto cur_root_addr = ctx.get_root().address();
+            if (prev_root_addr != sal::null_ptr_address && cur_root_addr != prev_root_addr)
+            {
+               SAL_ERROR("ROOT ADDRESS CHANGED: {} -> {}", prev_root_addr, cur_root_addr);
+            }
+            prev_root_addr = cur_root_addr;
             ses->set_root(sal::root_object_number(0), ctx.get_root(), sal::sync_type::mprotect);
-            //   SAL_WARN("after set root total nodes visited: {:L} total allocated: {:L}",
-            //           ctx.get_stats().total_nodes(), ses->get_total_allocated_objects());
-            // ctx.print();
-            //last_version = ctx.get_root();
          }
          auto end = std::chrono::high_resolution_clock::now();
          auto duration_ms =
@@ -545,7 +542,6 @@ TEST_CASE("tree_context", "[tree_context]")
          auto inserts_per_sec = (batch * batches_per_round * 1000.) / duration_ms;
          SAL_ERROR("[{:L}] Dense Random {:L} inserts/sec batch size: {:L}", r,
                    uint64_t(inserts_per_sec), batch);
-         // last_version = ctx.get_root();
          SAL_WARN("total nodes visited: {:L} total allocated: {:L}", ctx.get_stats().total_nodes(),
                   ses->get_total_allocated_objects());
       }

@@ -546,29 +546,39 @@ namespace psitri
       if (!ok)
          return false;
 
+      // Verify branch line indices are in bounds
+      for (uint32_t branch_idx = 0; branch_idx < d._num_branches; ++branch_idx)
+      {
+         if (d.const_branches()[branch_idx].line() >= d._num_cline)
+         {
+            assert(false && "Branch line index out of bounds");
+            return false;
+         }
+      }
+
       // Verify that cline reference counts match actual branch usage
       for (uint32_t cline_idx = 0; cline_idx < d._num_cline; ++cline_idx)
       {
-         // Use const version of clines() or reinterpret_cast if necessary
          const cline_data* cline_ptr = reinterpret_cast<const cline_data*>(d.clines() + cline_idx);
          uint32_t          actual_refs = 0;
-         // Count branches referencing this cline
          for (uint32_t branch_idx = 0; branch_idx < d._num_branches; ++branch_idx)
          {
-            assert(d.const_branches()[branch_idx].line() < d._num_cline);
             if (d.const_branches()[branch_idx].line() == cline_idx)
                ++actual_refs;
          }
 
          if (cline_ptr->is_null())
-            assert(actual_refs == 0 && "Cline reference count mismatch");
+         {
+            assert(actual_refs == 0 && "Null cline has branch references");
+            if (actual_refs != 0)
+               return false;
+         }
          else
          {
             bool ref_count_matches = (cline_ptr->ref() == actual_refs);
-            // Assert in debug builds (standard assert does this automatically)
             assert(ref_count_matches && "Cline reference count mismatch");
             if (!ref_count_matches)
-               return false;  // Return false in all builds if check fails
+               return false;
          }
       }
       return true;
