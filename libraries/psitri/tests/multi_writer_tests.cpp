@@ -46,6 +46,28 @@ namespace
       return key_view(buf.data(), buf.size());
    }
 
+   /// Release all roots and verify no objects are leaked.
+   void require_no_leaks(multi_writer_db& t, uint32_t num_roots)
+   {
+      auto ses = t.db->start_write_session();
+      for (uint32_t i = 1; i <= num_roots; ++i)
+         ses->set_root(i, {});
+
+      // Cascaded destroy() calls generate new release queue entries,
+      // so we must loop until everything settles.
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+      while (std::chrono::steady_clock::now() < deadline)
+      {
+         t.db->wait_for_compactor();
+         if (ses->get_total_allocated_objects() == 0)
+            break;
+         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      uint64_t allocated = ses->get_total_allocated_objects();
+      INFO("allocated after releasing all roots: " << allocated << " (expected 0)");
+      REQUIRE(allocated == 0);
+   }
+
    /// Count keys in a tree by iterating a cursor
    uint64_t count_keys(std::shared_ptr<write_session>& ses, uint32_t root_index)
    {
@@ -119,6 +141,8 @@ TEST_CASE("multi-writer concurrent inserts", "[multi-writer][insert]")
    {
       REQUIRE(count_keys(ses, w + 1) == uint64_t(items_per_round) * num_rounds);
    }
+   ses.reset();
+   require_no_leaks(t, num_writers);
 }
 
 TEST_CASE("multi-writer concurrent insert and remove", "[multi-writer][remove]")
@@ -193,6 +217,8 @@ TEST_CASE("multi-writer concurrent insert and remove", "[multi-writer][remove]")
       uint64_t expected = items_per_round / 2 + items_per_round;
       REQUIRE(count_keys(ses, w + 1) == expected);
    }
+   ses.reset();
+   require_no_leaks(t, num_writers);
 }
 
 TEST_CASE("multi-writer shared tree inserts", "[multi-writer][shared-tree]")
@@ -240,6 +266,8 @@ TEST_CASE("multi-writer shared tree inserts", "[multi-writer][shared-tree]")
    auto     ses   = t.db->start_write_session();
    uint64_t count = count_keys(ses, root_index);
    REQUIRE(count >= items_per_writer);
+   ses.reset();
+   require_no_leaks(t, 1);
 }
 
 TEST_CASE("multi-writer with concurrent readers", "[multi-writer][reader]")
@@ -319,6 +347,7 @@ TEST_CASE("multi-writer with concurrent readers", "[multi-writer][reader]")
       threads[i].join();
 
    t.db->wait_for_compactor();
+   require_no_leaks(t, num_writers);
 }
 
 TEST_CASE("multi-writer stress insert", "[multi-writer][stress]")
@@ -372,6 +401,8 @@ TEST_CASE("multi-writer stress insert", "[multi-writer][stress]")
    {
       REQUIRE(count_keys(ses, w + 1) == uint64_t(items_per_round) * num_rounds);
    }
+   ses.reset();
+   require_no_leaks(t, num_writers);
 }
 
 TEST_CASE("multi-writer insert then remove all", "[multi-writer][remove-all]")
@@ -434,4 +465,6 @@ TEST_CASE("multi-writer insert then remove all", "[multi-writer][remove-all]")
    {
       REQUIRE(count_keys(ses, w + 1) == 0);
    }
+   ses.reset();
+   require_no_leaks(t, num_writers);
 }

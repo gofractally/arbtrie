@@ -256,7 +256,7 @@ namespace sal
    {
       auto& cb = get(adr);
 
-      if( cb.ref() == 1 and _release_queue.try_push(adr)) 
+      if( cb.ref() == 1 and _release_queue.try_push(adr))
            return;
 
       //     SAL_ERROR(" try push failed, final_release: {}", adr);
@@ -267,7 +267,7 @@ namespace sal
       //  SAL_ERROR("final_release: {} ", adr);
       auto& cb   = get(adr);
       auto  prev = cb.release();
-      if( prev.ref > 1 ) 
+      if( prev.ref > 1 )
          return;
 
       location loc = prev.loc();

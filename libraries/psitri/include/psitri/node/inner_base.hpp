@@ -95,6 +95,23 @@ namespace psitri
          } while (nb);
       }
 
+      void visit_children(const std::function<void(sal::ptr_address)>& visitor) const noexcept
+      {
+         const Derived& d   = static_cast<const Derived&>(*this);
+         const branch*  pos = d.const_branches();
+         auto           cd  = reinterpret_cast<const cline_data*>(d.clines());
+
+         uint32_t nb = d.num_branches();
+         assert(nb > 0 && "num branches should always be greater than 0");
+         do
+         {
+            --nb;
+            auto addr = ptr_address(*cd[pos->line()].base() + pos->index());
+            visitor(addr);
+            ++pos;
+         } while (nb);
+      }
+
       sal::alloc_hint hint() const noexcept { return sal::alloc_hint(clines(), num_clines()); }
 
      protected:
@@ -210,10 +227,14 @@ namespace psitri
             // SAL_INFO("{} new branch {} {}", sub_brs, i, sub_brs[i]);
             assert(d.get_branch(branch_number(i)) == sub_addr[i]);
          }
-         assert(d.validate_invariants());
+         if (!d.validate_invariants()) __builtin_trap();
       }
       inline void init(const Derived* clone, const op::replace_branch& update) noexcept
       {
+         if (!clone->validate_invariants()) {
+            SAL_ERROR("CLONE SOURCE CORRUPTED before init(replace_branch)");
+            __builtin_trap();
+         }
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = clone->_num_branches + update.sub_branches.count() - 1;
          d._num_cline    = update.needed_clines;
@@ -268,7 +289,29 @@ namespace psitri
             assert(sub_brs[i].line() < d._num_cline);
          }
          assert(std::is_sorted(d.divisions(), d.divisions() + d.num_divisions()));
-         assert(d.validate_invariants());
+         if (!d.validate_invariants()) {
+            SAL_ERROR("DEST CORRUPTED after init(replace_branch): clone_nb={} clone_ncl={} br={} sub_count={} needed_clines={} d_nb={} d_ncl={}",
+                      int(clone->_num_branches), int(clone->_num_cline), *update.br,
+                      update.sub_branches.count(), int(update.needed_clines),
+                      int(d._num_branches), int(d._num_cline));
+            auto c_cl = reinterpret_cast<const cline_data*>(c_clines_data);
+            for (int i = 0; i < clone->_num_branches; ++i) {
+               SAL_ERROR("  clone br[{}] line={} idx={} -> addr={}", i,
+                         int(c_branches[i].line()), int(c_branches[i].index()),
+                         sal::ptr_address(*c_cl[c_branches[i].line()].base() + c_branches[i].index()));
+            }
+            auto d_cl = reinterpret_cast<const cline_data*>(d_clines_data);
+            for (uint32_t i = 0; i < d._num_branches; ++i) {
+               SAL_ERROR("  dest  br[{}] line={} idx={} -> addr={}", i,
+                         int(d_branches[i].line()), int(d_branches[i].index()),
+                         sal::ptr_address(*d_cl[d_branches[i].line()].base() + d_branches[i].index()));
+            }
+            for (int i = 0; i < update.sub_branches.count(); ++i) {
+               SAL_ERROR("  sub[{}] addr={} cline_idx={}", i,
+                         update.sub_branches.addresses()[i], update.cline_indices[i]);
+            }
+            __builtin_trap();
+         }
       }
 
       inline void init(const any_inner_node_type auto* clone,
@@ -301,7 +344,7 @@ namespace psitri
                 clone->_num_branches - *rm.br - 1);
 
          assert(std::is_sorted(d.divisions(), d.divisions() + d.num_divisions()));
-         assert(d.validate_invariants());
+         if (!d.validate_invariants()) __builtin_trap();
       }
 
       inline void init(const any_inner_node_type auto* clone,
@@ -354,7 +397,7 @@ namespace psitri
                 clone->_num_branches - *rm.hi);
 
          assert(std::is_sorted(d.divisions(), d.divisions() + d.num_divisions()));
-         assert(d.validate_invariants());
+         if (!d.validate_invariants()) __builtin_trap();
       }
 
      public:
@@ -566,7 +609,7 @@ namespace psitri
       d->_num_cline = up.needed_clines;
       d->_descendents += up.delta_descendents;
       assert(std::is_sorted(d->divisions(), d->divisions() + d->num_divisions()));
-      PSITRI_ASSERT_INVARIANTS(d->validate_invariants());
+      if (!d->validate_invariants()) __builtin_trap();
    }
    template <typename Derived>
    inline void inner_node_base<Derived>::remove_branch(branch_number bn) noexcept
@@ -596,7 +639,7 @@ namespace psitri
       memmove(new_branches + *bn, old_branches + *bn + 1, old_nb - *bn - 1);
 
       d->_num_branches = old_nb - 1;
-      PSITRI_ASSERT_INVARIANTS(d->validate_invariants());
+      if (!d->validate_invariants()) __builtin_trap();
    }
 
    template <typename Derived>
@@ -643,7 +686,7 @@ namespace psitri
       memmove(new_branches + *lo, old_branches + *hi, old_nb - *hi);
 
       d->_num_branches = old_nb - count;
-      PSITRI_ASSERT_INVARIANTS(d->validate_invariants());
+      if (!d->validate_invariants()) __builtin_trap();
    }
 
    template <typename Derived>
@@ -697,6 +740,32 @@ namespace psitri
                return false;
          }
       }
+
+      // Verify no two branches resolve to the same address
+      {
+         auto cd = reinterpret_cast<const cline_data*>(d.clines());
+         for (uint32_t i = 0; i < d._num_branches; ++i)
+         {
+            auto ai = sal::ptr_address(
+                *cd[d.const_branches()[i].line()].base() + d.const_branches()[i].index());
+            for (uint32_t j = i + 1; j < d._num_branches; ++j)
+            {
+               auto aj = sal::ptr_address(
+                   *cd[d.const_branches()[j].line()].base() + d.const_branches()[j].index());
+               if (ai == aj)
+               {
+                  SAL_ERROR("DUP ADDR: br[{}] line={} idx={} base={} and br[{}] line={} idx={} base={} -> addr={} nb={} ncl={}",
+                            i, int(d.const_branches()[i].line()), int(d.const_branches()[i].index()),
+                            *cd[d.const_branches()[i].line()].base(),
+                            j, int(d.const_branches()[j].line()), int(d.const_branches()[j].index()),
+                            *cd[d.const_branches()[j].line()].base(),
+                            ai, d._num_branches, d._num_cline);
+                  return false;
+               }
+            }
+         }
+      }
+
       return true;
    }
 }  // namespace psitri

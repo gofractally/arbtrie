@@ -488,27 +488,24 @@ void multiwriter_test(benchmark_config            cfg,
    start_flag.store(true, std::memory_order_relaxed);
 
    // Report progress while writers are running
-   int64_t prev_inserts = 0;
-   auto    prev_time    = overall_start;
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   int64_t  prev_inserts   = 0;
+   auto     prev_time      = overall_start;
+   int64_t  target_inserts = int64_t(cfg.items) * cfg.rounds * num_writers;
+   uint32_t report_num     = 0;
+   while (true)
    {
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
-      auto    now     = std::chrono::steady_clock::now();
-      double  secs    = std::chrono::duration<double>(now - prev_time).count();
-      int64_t cur     = sum_inserts();
-      int64_t delta   = cur - prev_inserts;
-      prev_inserts    = cur;
-      prev_time       = now;
-      auto    ips     = uint64_t(delta / secs);
-      std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
+      auto    now   = std::chrono::steady_clock::now();
+      double  secs  = std::chrono::duration<double>(now - prev_time).count();
+      int64_t cur   = sum_inserts();
+      int64_t delta = cur - prev_inserts;
+      prev_inserts  = cur;
+      prev_time     = now;
+      auto ips      = uint64_t(delta / secs);
+      std::cout << std::setw(4) << std::left << report_num++ << " " << std::setw(12) << std::right
                 << format_comma(cur) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  inserts/sec (aggregate)\n";
-      // Check if all writers are done
-      bool all_done = true;
-      for (uint32_t i = 0; i < num_writers; ++i)
-         if (counters[i].count.load(std::memory_order_relaxed) < int64_t(cfg.items) * cfg.rounds)
-            all_done = false;
-      if (all_done)
+      if (cur >= target_inserts)
          break;
    }
 

@@ -42,7 +42,10 @@ namespace psitri
          throw std::runtime_error("Not a arbtrie file: " + (dir / "db").native());
 
       if (not _dbm->clean_shutdown)
-         SAL_WARN("database was not shutdown cleanly, memory may have leaked");
+      {
+         SAL_WARN("database was not shutdown cleanly, initiating recovery");
+         _allocator.recover();
+      }
       _dbm->clean_shutdown = false;
    }
 

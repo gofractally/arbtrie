@@ -59,6 +59,20 @@ namespace sal
       seg_alloc_dump dump() const;
 
       /**
+       * Full recovery: clear all control blocks, scan segments newest-to-oldest
+       * to rebuild object locations, walk roots to retain reachable objects,
+       * then free anything unreachable. Used after an unclean shutdown.
+       */
+      void recover();
+
+      /**
+       * Lightweight recovery: reset all ref counts > 1 to 1, walk roots to
+       * retain reachable objects, then free anything unreachable.
+       * Used to reclaim leaked memory without a full segment scan.
+       */
+      void reset_reference_counts();
+
+      /**
        * 
        * Forwards to the thread-local allocator_session::lock() method, it is faster
        * and more efficient to keep a cached copy of your thread's session than to
@@ -229,6 +243,7 @@ namespace sal
       inline bool config_update_checksum_on_modify() const;
 
       void mlock_pinned_segments();
+      void recursive_retain_all(ptr_address addr);
       bool compactor_release_objects(allocator_session& ses);
 
       /**

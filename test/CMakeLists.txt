@@ -74,6 +74,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/range_remove_tests.cpp
     ../libraries/psitri/tests/subtree_tests.cpp
     ../libraries/psitri/tests/multi_writer_tests.cpp
+    ../libraries/psitri/tests/recovery_tests.cpp
 )
 target_link_libraries(psitri-tests
     PRIVATE

@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstring>
 #include <filesystem>
+#include <sal/alloc_header.hpp>
 #include <sal/allocator.hpp>
 #include <sal/allocator_impl.hpp>
 #include <sal/debug.hpp>
@@ -162,6 +163,162 @@ namespace sal
    {
       stop_background_threads();
       free_allocator_index(_allocator_index);
+   }
+
+   void allocator::recursive_retain_all(ptr_address addr)
+   {
+      if (addr == null_ptr_address)
+         return;
+
+      auto* cb = _ptr_alloc.try_get(addr);
+      if (!cb || cb->ref() == 0)
+         return;
+
+      cb->retain();
+
+      auto  loc    = cb->loc();
+      auto  seg    = loc.segment();
+      auto* segptr = get_segment(seg);
+      auto* obj    = reinterpret_cast<const alloc_header*>(segptr->data + loc.segment_offset());
+
+      if (obj->address() != addr)
+         return;
+
+      auto& vtables  = get_type_vtables();
+      auto  type_idx = uint8_t(obj->type());
+      if (type_idx < vtables.size() && vtables[type_idx].visit_children)
+      {
+         vtables[type_idx].visit_children(
+             obj, [this](ptr_address child) { recursive_retain_all(child); });
+      }
+   }
+
+   void allocator::recover()
+   {
+      SAL_WARN("Recovering... rebuilding control blocks from segments!");
+
+      stop_background_threads();
+
+      // Phase 1: Clear all control blocks
+      _ptr_alloc.clear_all();
+
+      // Phase 2: Sort segments newest-to-oldest by _provider_sequence
+      auto                  num_segs = _block_alloc.num_blocks();
+      std::vector<uint32_t> age_index(num_segs);
+      for (uint32_t i = 0; i < num_segs; ++i)
+         age_index[i] = i;
+
+      std::sort(age_index.begin(), age_index.end(),
+                [this](uint32_t a, uint32_t b)
+                {
+                   return get_segment(segment_number(a))->_provider_sequence >
+                          get_segment(segment_number(b))->_provider_sequence;
+                });
+
+      // Reset segment provider state
+      _mapped_state->_segment_provider.free_segments.reset();
+      _mapped_state->_segment_provider.mlock_segments.reset();
+
+      for (uint32_t i = 0; i < num_segs; ++i)
+         _mapped_state->_segment_data.set_pinned(segment_number(i), false);
+
+      _mapped_state->_segment_provider.ready_pinned_segments.clear();
+      _mapped_state->_segment_provider.ready_unpinned_segments.clear();
+
+      // Phase 3: Scan each segment, rebuilding object ID -> location mapping
+      uint32_t max_provider_seq = 0;
+      for (auto seg_idx : age_index)
+      {
+         auto* seg = get_segment(segment_number(seg_idx));
+
+         if (seg->_provider_sequence == 0 && seg->get_alloc_pos() == 0)
+         {
+            _mapped_state->_segment_provider.free_segments.set(seg_idx);
+            continue;
+         }
+
+         if (seg->_provider_sequence > max_provider_seq)
+            max_provider_seq = seg->_provider_sequence;
+
+         auto* obj_ptr = reinterpret_cast<const alloc_header*>(seg->data);
+         auto* seg_end = reinterpret_cast<const alloc_header*>(
+             seg->data +
+             std::min<uint32_t>(segment_size - mapped_memory::segment_footer_size,
+                                seg->get_alloc_pos()));
+
+         while (obj_ptr < seg_end && obj_ptr->address() != null_ptr_address)
+         {
+            if (obj_ptr->size() == 0)
+               break;
+
+            if (obj_ptr->type() == header_type::sync_head)
+            {
+               obj_ptr = obj_ptr->next();
+               continue;
+            }
+
+            auto  addr = obj_ptr->address();
+            auto& cb   = _ptr_alloc.get_or_alloc(addr);
+            auto  cur_loc = cb.loc();
+
+            uint64_t abs_addr =
+                uint64_t(seg_idx) * segment_size +
+                (reinterpret_cast<const char*>(obj_ptr) - seg->data);
+            auto new_loc = location::from_absolute_address(abs_addr);
+
+            // Update if unseen, or if in the same segment (later offset = newer)
+            auto cur_seg = cur_loc.segment();
+            if (!cur_loc.cacheline() || *cur_seg == seg_idx)
+            {
+               cb.store(control_block_data().set_loc(new_loc).set_ref(1),
+                        std::memory_order_relaxed);
+            }
+
+            obj_ptr = obj_ptr->next();
+         }
+      }
+
+      // Phase 4: Walk all root objects, recursively retain reachable nodes
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+      {
+         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
+         if (addr != null_ptr_address)
+            recursive_retain_all(addr);
+      }
+
+      // Phase 5: Free leaked objects
+      _ptr_alloc.release_unreachable();
+
+      // Reset segment provider sequence counter
+      _mapped_state->_segment_provider._next_alloc_seq.store(max_provider_seq + 1,
+                                                              std::memory_order_relaxed);
+      _mapped_state->clean_exit_flag.store(false);
+
+      provider_populate_pinned_segments();
+      provider_populate_unpinned_segments();
+      start_background_threads();
+
+      SAL_WARN("Recovery complete.");
+   }
+
+   void allocator::reset_reference_counts()
+   {
+      SAL_WARN("Resetting reference counts...");
+
+      stop_background_threads();
+
+      _ptr_alloc.reset_all_refs();
+
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+      {
+         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
+         if (addr != null_ptr_address)
+            recursive_retain_all(addr);
+      }
+
+      _ptr_alloc.release_unreachable();
+
+      start_background_threads();
    }
 
    allocator_session_number allocator::alloc_session_num() noexcept

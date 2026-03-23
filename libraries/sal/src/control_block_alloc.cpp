@@ -72,4 +72,107 @@ namespace sal
       _header_ptr->min_alloc_zone.store(azone - 1, std::memory_order_relaxed);
    }
 
+   void control_block_alloc::clear_all()
+   {
+      auto num_zones = _header_ptr->allocated_zones.load(std::memory_order_relaxed);
+
+      for (uint32_t z = 0; z < num_zones; ++z)
+      {
+         char* zone_data = _zone_allocator->get(block_allocator::block_number(z));
+         char* free_data = _zone_free_list->get(block_allocator::block_number(z));
+         std::memset(zone_data, 0, _zone_allocator->block_size());
+         std::memset(free_data, 0xff, _zone_free_list->block_size());
+      }
+
+      for (uint32_t z = 0; z < num_zones; ++z)
+         _header_ptr->zone_alloc_count[z].store(0, std::memory_order_relaxed);
+      _header_ptr->total_allocations.store(0, std::memory_order_relaxed);
+      _header_ptr->min_alloc_zone.store(0, std::memory_order_relaxed);
+      _header_ptr->alloc_seq.store(0, std::memory_order_relaxed);
+   }
+
+   void control_block_alloc::release_unreachable()
+   {
+      auto     num_zones       = _header_ptr->allocated_zones.load(std::memory_order_relaxed);
+      uint64_t total_freed     = 0;
+      uint64_t total_surviving = 0;
+
+      for (uint32_t z = 0; z < num_zones; ++z)
+         _header_ptr->zone_alloc_count[z].store(0, std::memory_order_relaxed);
+      _header_ptr->total_allocations.store(0, std::memory_order_relaxed);
+
+      for (uint32_t z = 0; z < num_zones; ++z)
+      {
+         uint32_t zone_base = z * detail::ptrs_per_zone;
+
+         for (uint32_t i = 0; i < detail::ptrs_per_zone / 64; ++i)
+         {
+            auto&    flb       = _free_list_base[zone_base / 64 + i];
+            uint64_t free_bits = flb.load(std::memory_order_relaxed);
+            uint64_t new_free  = free_bits;
+            bool     changed   = false;
+
+            for (uint32_t bit = 0; bit < 64; ++bit)
+            {
+               if (free_bits & (1ULL << bit))
+                  continue;
+
+               ptr_address addr(zone_base + i * 64 + bit);
+               auto&       cb  = _ptr_base[*addr];
+               auto        ref = cb.ref();
+
+               if (ref <= 1)
+               {
+                  if (ref == 1)
+                     cb.release();
+                  cb.reset();
+                  new_free |= (1ULL << bit);
+                  changed = true;
+                  total_freed++;
+               }
+               else
+               {
+                  cb.release();
+                  _header_ptr->zone_alloc_count[z].fetch_add(1, std::memory_order_relaxed);
+                  _header_ptr->total_allocations.fetch_add(1, std::memory_order_relaxed);
+                  total_surviving++;
+               }
+            }
+            if (changed)
+               flb.store(new_free, std::memory_order_relaxed);
+         }
+      }
+
+      _header_ptr->update_min_zone();
+      SAL_WARN("release_unreachable: freed {} unreachable, {} surviving", total_freed,
+               total_surviving);
+   }
+
+   void control_block_alloc::reset_all_refs()
+   {
+      auto num_zones = _header_ptr->allocated_zones.load(std::memory_order_relaxed);
+
+      for (uint32_t z = 0; z < num_zones; ++z)
+      {
+         uint32_t zone_base = z * detail::ptrs_per_zone;
+         for (uint32_t i = 0; i < detail::ptrs_per_zone / 64; ++i)
+         {
+            uint64_t free_bits =
+                _free_list_base[zone_base / 64 + i].load(std::memory_order_relaxed);
+
+            for (uint32_t bit = 0; bit < 64; ++bit)
+            {
+               if (free_bits & (1ULL << bit))
+                  continue;
+
+               ptr_address addr(zone_base + i * 64 + bit);
+               auto&       cb = _ptr_base[*addr];
+
+               if (cb.ref() > 1)
+                  cb.set_ref(1, std::memory_order_relaxed);
+            }
+         }
+      }
+   }
+
 }  // namespace sal

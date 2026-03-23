@@ -168,8 +168,7 @@ namespace sal
                throw std::runtime_error("max of 64 sessions can be in use");
 
             session_num = std::countr_zero(fs_bits);
-            new_fs_bits = fs_bits & ~(1 << session_num);
-            fs_bits     = free_sessions.load(std::memory_order_relaxed);
+            new_fs_bits = fs_bits & ~(1ULL << session_num);
          } while (not free_sessions.compare_exchange_weak(fs_bits, new_fs_bits,
                                                           std::memory_order_relaxed));
          return allocator_session_number(session_num);
@@ -178,7 +177,7 @@ namespace sal
       inline void session_data::release_session_num(allocator_session_number num) noexcept
       {
          // bit should be 0 (in use) when we attempt to release it
-         assert(!(free_sessions.load(std::memory_order_relaxed) & (1 << *num)));
+         assert(!(free_sessions.load(std::memory_order_relaxed) & (1ULL << *num)));
 
          // Set the bit to 1 to mark it as free
          free_sessions.fetch_add(uint64_t(1) << *num, std::memory_order_relaxed);

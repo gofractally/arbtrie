@@ -55,6 +55,12 @@ namespace psitri
          return false;
       }
 
+      /// Full recovery: rebuild control blocks from segments and reclaim leaked memory
+      void recover() { _allocator.recover(); }
+
+      /// Lightweight recovery: reset reference counts and reclaim leaked memory
+      void reset_reference_counts() { _allocator.reset_reference_counts(); }
+
       std::shared_ptr<write_session> start_write_session();
       std::shared_ptr<read_session>  start_read_session();
 

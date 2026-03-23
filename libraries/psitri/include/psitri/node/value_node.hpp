@@ -50,6 +50,12 @@ namespace psitri
             lam(*(const ptr_address*)data);
       }
 
+      void visit_children(const std::function<void(sal::ptr_address)>& visitor) const noexcept
+      {
+         if (is_subtree)
+            visitor(*(const ptr_address*)data);
+      }
+
       value_view get_data() const { return value_view((const char*)data, data_size); }
 
       uint32_t data_size : 31;
