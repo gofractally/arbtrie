@@ -307,7 +307,9 @@ namespace sal
                                                    sync_type          st) noexcept
    {
       sync(st);
-      return smart_ptr<T>(allocator_session_ptr(this, true), _sega.set(ro, ptr.take(), st), false);
+      auto new_adr = ptr.take();
+      auto old_adr = _sega.set(ro, new_adr, st);
+      return smart_ptr<T>(allocator_session_ptr(this, true), old_adr, false);
    }
 
    template <typename T, typename U>

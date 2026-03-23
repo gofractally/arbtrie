@@ -25,6 +25,7 @@ namespace psitri
      public:
       void set_collapse_threshold(uint32_t t) { _collapse_threshold = t; }
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
+      sal::smart_ptr<alloc_header> take_root() { return std::move(_root); }
       tree_context(sal::smart_ptr<alloc_header> root)
           : _root(std::move(root)), _session(*(root.session()))
       {
@@ -149,9 +150,8 @@ namespace psitri
             _root = _session.smart_alloc<leaf_node>(key, make_value(_new_value, sal::alloc_hint()));
             return -1;
          }
-         auto rref = *_root;
-
-         _root.take();  // so it isn't released when it goes back...
+         auto rref     = *_root;
+         auto old_addr = _root.take();  // so it isn't released when it goes back...
 
          branch_set result = upsert<mode>({}, rref, key);
          if (result.count() == 1)
@@ -170,7 +170,7 @@ namespace psitri
          sal::read_lock lock = _session.lock();
          _delta_descendents  = 0;
          auto           rref = *_root;
-         _root.take();
+         auto       old_addr = _root.take();
          /// ironically, if we are in shared mode removing a key could force a split because the new
          /// branch address might not be sharable with the 16 existing clines.
          branch_set result = upsert<upsert_mode::unique_remove>({}, rref, key);
@@ -183,8 +183,16 @@ namespace psitri
          return _old_value_size;
       }
 
-      void print() { print(_session.get_ref(_root.address())); }
-      void validate() { validate(_session.get_ref(_root.address())); }
+      void print()
+      {
+         sal::read_lock lock = _session.lock();
+         print(_session.get_ref(_root.address()));
+      }
+      void validate()
+      {
+         sal::read_lock lock = _session.lock();
+         validate(_session.get_ref(_root.address()));
+      }
       void validate(const smart_ptr<alloc_header>& r)
       {
          if (r)
@@ -243,6 +251,7 @@ namespace psitri
       };
       stats get_stats()
       {
+         sal::read_lock lock = _session.lock();
          stats s;
          calc_stats(s, *_root);
          return s;

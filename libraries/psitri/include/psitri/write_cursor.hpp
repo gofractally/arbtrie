@@ -84,6 +84,9 @@ namespace psitri
       /// Get the current root (for saving or sharing)
       sal::smart_ptr<sal::alloc_header> root() const { return _ctx.get_root(); }
 
+      /// Move root out — caller takes ownership, cursor is left empty
+      sal::smart_ptr<sal::alloc_header> take_root() { return _ctx.take_root(); }
+
       /// Check if the tree is empty
       explicit operator bool() const { return static_cast<bool>(_ctx.get_root()); }
 

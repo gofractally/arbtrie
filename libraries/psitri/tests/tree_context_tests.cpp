@@ -513,7 +513,6 @@ TEST_CASE("tree_context", "[tree_context]")
       uint32_t             batches_per_round = round_size / batch;
       uint64_t             key               = 0;
       std::array<char, 63> big_value;
-      sal::ptr_address     prev_root_addr    = sal::null_ptr_address;
       for (int r = 0; r < 30 / SCALE; ++r)
       {
          auto start = std::chrono::high_resolution_clock::now();
@@ -528,12 +527,6 @@ TEST_CASE("tree_context", "[tree_context]")
                value_view vstr(big_value.data(), big_value.size());
                ctx.insert(kstr, kstr);
             }
-            auto cur_root_addr = ctx.get_root().address();
-            if (prev_root_addr != sal::null_ptr_address && cur_root_addr != prev_root_addr)
-            {
-               SAL_ERROR("ROOT ADDRESS CHANGED: {} -> {}", prev_root_addr, cur_root_addr);
-            }
-            prev_root_addr = cur_root_addr;
             ses->set_root(sal::root_object_number(0), ctx.get_root(), sal::sync_type::mprotect);
          }
          auto end = std::chrono::high_resolution_clock::now();
