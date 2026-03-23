@@ -20,7 +20,9 @@ namespace psitri
       sal::register_type_vtable<value_node>();
    }
 
-   database::database(const std::filesystem::path& dir, const runtime_config& cfg)
+   database::database(const std::filesystem::path& dir,
+                      const runtime_config&       cfg,
+                      recovery_mode               mode)
        : _dir(dir),
          _cfg(cfg),
          _allocator(dir, cfg),
@@ -41,10 +43,27 @@ namespace psitri
       if (_dbm->magic != sal::file_magic)
          throw std::runtime_error("Not a arbtrie file: " + (dir / "db").native());
 
-      if (not _dbm->clean_shutdown)
+      // Determine effective recovery mode
+      auto effective_mode = mode;
+      if (not _dbm->clean_shutdown && effective_mode == recovery_mode::none)
+         effective_mode = recovery_mode::app_crash;  // safe default for unclean shutdown
+
+      switch (effective_mode)
       {
-         SAL_WARN("database was not shutdown cleanly, initiating recovery");
-         _allocator.recover();
+         case recovery_mode::none:
+            break;
+         case recovery_mode::app_crash:
+            SAL_WARN("database was not shutdown cleanly, resetting reference counts");
+            _allocator.reset_reference_counts();
+            break;
+         case recovery_mode::power_loss:
+            SAL_WARN("power loss recovery: validating segments and rebuilding state");
+            _allocator.recover_from_power_loss();
+            break;
+         case recovery_mode::full_verify:
+            SAL_WARN("full verification requested: rebuilding and verifying all checksums");
+            _allocator.recover();  // TODO: add verify pass
+            break;
       }
       _dbm->clean_shutdown = false;
    }

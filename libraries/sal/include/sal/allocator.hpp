@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block_alloc.hpp>
 #include <sal/mapped_memory/allocator_state.hpp>
@@ -14,6 +16,26 @@ namespace sal
    class allocator_session;
    class allocator_session_ptr;
    class read_lock;
+
+   /**
+    * Indicates the nature of an unclean shutdown to guide recovery strategy.
+    */
+   enum class recovery_mode
+   {
+      none,         ///< clean shutdown, no recovery needed
+      app_crash,    ///< OS was fine, just fix ref counts — O(live objects)
+      power_loss,   ///< validate sync checksums, truncate torn tails, rebuild
+      full_verify   ///< deep per-object checksum verification (maintenance tool)
+   };
+
+   /**
+    * Exception thrown when a write is attempted on a corruption-halted database.
+    */
+   class corruption_error : public std::runtime_error
+   {
+     public:
+      using std::runtime_error::runtime_error;
+   };
 
    /**
     * A thread-safe smart allocator that manages objects derived from
@@ -58,6 +80,27 @@ namespace sal
 
       seg_alloc_dump dump() const;
 
+      /// Check if corruption has been detected (e.g. by compactor).
+      /// Writers should call this before starting transactions.
+      bool corruption_detected() const noexcept
+      {
+         return _corruption_detected.load(std::memory_order_relaxed);
+      }
+
+      /// Throws corruption_error if corruption has been detected.
+      /// Called at the start of write transactions.
+      void check_corruption() const
+      {
+         if (__builtin_expect(_corruption_detected.load(std::memory_order_relaxed), 0)) [[unlikely]]
+            throw corruption_error("database corruption detected, writes halted");
+      }
+
+      /// Signal that corruption has been detected (called by compactor).
+      void signal_corruption() noexcept
+      {
+         _corruption_detected.store(true, std::memory_order_relaxed);
+      }
+
       /**
        * Full recovery: clear all control blocks, scan segments newest-to-oldest
        * to rebuild object locations, walk roots to retain reachable objects,
@@ -71,6 +114,13 @@ namespace sal
        * Used to reclaim leaked memory without a full segment scan.
        */
       void reset_reference_counts();
+
+      /**
+       * Power-loss recovery: validate sync header chains in each segment,
+       * truncate torn tails, rebuild roots from sync_root_info embedded in
+       * sync headers, then rebuild control blocks and ref counts.
+       */
+      void recover_from_power_loss();
 
       /**
        * 
@@ -184,8 +234,9 @@ namespace sal
        * threads will be working on a update to this root object until this transaction
        * is committed or aborted. 
        */
-      [[nodiscard]] ptr_address start_transaction(root_object_number ro) noexcept
+      [[nodiscard]] ptr_address start_transaction(root_object_number ro)
       {
+         check_corruption();
          SAL_WARN("{}", _root_objects);
          SAL_WARN("start_transaction: {} size: {}", ro, _root_objects->size());
          assert(ro < _root_objects->size() && "invalid root object number");
@@ -237,6 +288,10 @@ namespace sal
       std::array<std::shared_mutex, 1024> _root_object_mutex;
       /// mutexes used by transactions to ensure that only one writer per root object
       std::array<std::mutex, 1024> _write_mutex;
+
+      /// Corruption flag — set by compactor on checksum failure, checked by writers.
+      /// Own cacheline to avoid false sharing (128 bytes for Apple M-series).
+      alignas(std::hardware_destructive_interference_size) std::atomic<bool> _corruption_detected{false};
 
       inline bool config_validate_checksum_on_compact() const;
       inline bool config_update_checksum_on_compact() const;

@@ -306,8 +306,9 @@ namespace sal
                                                    smart_ptr<T>       ptr,
                                                    sync_type          st) noexcept
    {
-      sync(st);
       auto new_adr = ptr.take();
+      sync_root_info root_info{*ro, *new_adr};
+      sync(st, _sega._mapped_state->_config, root_info);
       auto old_adr = _sega.set(ro, new_adr, st);
       return smart_ptr<T>(allocator_session_ptr(this, true), old_adr, false);
    }
@@ -318,7 +319,8 @@ namespace sal
                                                    smart_ptr<U>       desired,
                                                    sync_type          st) noexcept
    {
-      sync(st);
+      sync_root_info root_info{*ro, *desired.address()};
+      sync(st, _sega._mapped_state->_config, root_info);
       if (_sega.cas_root(ro, expect.address(), desired.address(), st))
       {
          desired.take();  // _sega took it, so don't release it
@@ -343,9 +345,11 @@ namespace sal
        smart_ptr<alloc_header> desired,
        sync_type               st) noexcept
    {
-      sync(st);
+      auto new_adr = desired.take();
+      sync_root_info root_info{*ro, *new_adr};
+      sync(st, _sega._mapped_state->_config, root_info);
       return smart_ptr<alloc_header>(get_session_ptr(),
-                                     _sega.transaction_commit(ro, desired.take(), st));
+                                     _sega.transaction_commit(ro, new_adr, st));
    }
    inline void allocator_session::transaction_abort(root_object_number ro) noexcept
    {

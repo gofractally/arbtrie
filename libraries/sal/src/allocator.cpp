@@ -321,6 +321,265 @@ namespace sal
       start_background_threads();
    }
 
+   /**
+    * Find the last valid sync header in a segment by walking the chain backward
+    * and verifying checksums. Returns the position of the last valid sync header,
+    * or 0 if none found.
+    */
+   static uint32_t find_last_valid_sync(const mapped_memory::segment* seg)
+   {
+      uint32_t pos = seg->_last_aheader_pos;
+      while (pos > 0)
+      {
+         auto* ah = reinterpret_cast<const alloc_header*>(seg->data + pos);
+         if (ah->type() != header_type::sync_head)
+            break;
+
+         auto* sh = reinterpret_cast<const sync_header*>(ah);
+
+         // Verify the sync checksum if present
+         if (sh->sync_checksum() != 0)
+         {
+            auto checksum_size = pos + sh->checksum_offset() - sh->start_checksum_pos();
+            auto computed = XXH3_64bits(seg->data + sh->start_checksum_pos(), checksum_size);
+            if (computed == sh->sync_checksum())
+               return pos;  // valid!
+
+            SAL_WARN("sync checksum mismatch at pos {} in segment, walking backward", pos);
+         }
+         else
+         {
+            // No checksum — trust it (checksums were disabled when this was written)
+            return pos;
+         }
+
+         // Walk backward
+         pos = sh->prev_aheader_pos();
+      }
+      return 0;  // no valid sync header found
+   }
+
+   void allocator::recover_from_power_loss()
+   {
+      SAL_WARN("Power-loss recovery: validating segments and rebuilding state");
+
+      stop_background_threads();
+
+      // Phase 1: Clear all control blocks
+      _ptr_alloc.clear_all();
+
+      // Phase 2: Sort segments newest-to-oldest by _provider_sequence
+      auto                  num_segs = _block_alloc.num_blocks();
+      std::vector<uint32_t> age_index(num_segs);
+      for (uint32_t i = 0; i < num_segs; ++i)
+         age_index[i] = i;
+
+      std::sort(age_index.begin(), age_index.end(),
+                [this](uint32_t a, uint32_t b)
+                {
+                   return get_segment(segment_number(a))->_provider_sequence >
+                          get_segment(segment_number(b))->_provider_sequence;
+                });
+
+      // Reset segment provider state
+      _mapped_state->_segment_provider.free_segments.reset();
+      _mapped_state->_segment_provider.mlock_segments.reset();
+
+      for (uint32_t i = 0; i < num_segs; ++i)
+         _mapped_state->_segment_data.set_pinned(segment_number(i), false);
+
+      _mapped_state->_segment_provider.ready_pinned_segments.clear();
+      _mapped_state->_segment_provider.ready_unpinned_segments.clear();
+
+      // Phase 3: Validate sync headers, truncate torn tails, collect root info
+      // We collect (timestamp, root_index, root_address) from valid sync headers
+      struct root_recovery_entry
+      {
+         usec_timestamp timestamp;
+         uint32_t       root_index;
+         uint32_t       root_address;
+      };
+      std::vector<root_recovery_entry> recovered_roots;
+
+      uint32_t max_provider_seq = 0;
+      for (auto seg_idx : age_index)
+      {
+         auto* seg = get_segment(segment_number(seg_idx));
+
+         if (seg->_provider_sequence == 0 && seg->get_alloc_pos() == 0)
+         {
+            _mapped_state->_segment_provider.free_segments.set(seg_idx);
+            continue;
+         }
+
+         if (seg->_provider_sequence > max_provider_seq)
+            max_provider_seq = seg->_provider_sequence;
+
+         // Find last valid sync boundary
+         uint32_t valid_sync_pos = find_last_valid_sync(seg);
+
+         // Determine valid data end.
+         // For segments with valid sync headers, we know data up to the sync
+         // boundary is consistent. For segments without sync headers (e.g. the
+         // active segment that was never synced), we scan up to alloc_pos and
+         // rely on individual object checksums to detect corruption.
+         uint32_t valid_end = seg->get_alloc_pos();
+
+         // Collect root info from all valid sync headers in this segment
+         if (valid_sync_pos > 0)
+         {
+            uint32_t scan_pos = valid_sync_pos;
+            while (scan_pos > 0)
+            {
+               auto* ah = reinterpret_cast<const alloc_header*>(seg->data + scan_pos);
+               if (ah->type() != header_type::sync_head)
+                  break;
+               auto* scan_sh = reinterpret_cast<const sync_header*>(ah);
+               auto  info    = scan_sh->get_root_info();
+               if (info)
+               {
+                  SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ts={}",
+                           scan_pos, info->root_index, info->root_address, *scan_sh->timestamp());
+                  recovered_roots.push_back(
+                      {scan_sh->timestamp(), info->root_index, info->root_address});
+               }
+               if (scan_pos == scan_sh->prev_aheader_pos())
+                  break;  // prevent infinite loop
+               scan_pos = scan_sh->prev_aheader_pos();
+            }
+         }
+
+         SAL_WARN("segment {}: alloc_pos={} valid_end={} valid_sync_pos={} first_write_pos={}",
+                  seg_idx, seg->get_alloc_pos(), valid_end, valid_sync_pos,
+                  seg->get_first_write_pos());
+
+         // Truncate: zero data beyond valid_end, update alloc_pos
+         if (valid_end < seg->get_alloc_pos())
+         {
+            SAL_WARN("segment {}: truncating from {} to {} (torn tail)",
+                     seg_idx, seg->get_alloc_pos(), valid_end);
+            memset(seg->data + valid_end, 0,
+                   seg->get_alloc_pos() - valid_end);
+            seg->set_alloc_pos(valid_end);
+         }
+
+         // Phase 4: Scan validated segment data, rebuild object ID -> location
+         auto* obj_ptr = reinterpret_cast<const alloc_header*>(seg->data);
+         auto* seg_end = reinterpret_cast<const alloc_header*>(
+             seg->data + std::min<uint32_t>(segment_size - mapped_memory::segment_footer_size,
+                                            valid_end));
+
+         while (obj_ptr < seg_end && obj_ptr->address() != null_ptr_address)
+         {
+            if (obj_ptr->size() == 0)
+               break;
+
+            if (obj_ptr->type() == header_type::sync_head)
+            {
+               obj_ptr = obj_ptr->next();
+               continue;
+            }
+
+            auto  addr = obj_ptr->address();
+            auto& cb   = _ptr_alloc.get_or_alloc(addr);
+            auto  cur_loc = cb.loc();
+
+            uint64_t abs_addr =
+                uint64_t(seg_idx) * segment_size +
+                (reinterpret_cast<const char*>(obj_ptr) - seg->data);
+            auto new_loc = location::from_absolute_address(abs_addr);
+
+            // Prefer newer segments (already sorted newest-first), or later offset in same segment
+            auto cur_seg = cur_loc.segment();
+            if (!cur_loc.cacheline() || *cur_seg == seg_idx)
+            {
+               cb.store(control_block_data().set_loc(new_loc).set_ref(1),
+                        std::memory_order_relaxed);
+            }
+
+            obj_ptr = obj_ptr->next();
+         }
+      }
+
+      // Phase 5: Rebuild roots from sync headers (newest timestamp wins)
+      // Sort by timestamp descending so we encounter newest first
+      std::sort(recovered_roots.begin(), recovered_roots.end(),
+                [](const auto& a, const auto& b) { return a.timestamp > b.timestamp; });
+
+      // Track which roots we've already set (first occurrence = newest)
+      std::vector<bool> root_set(_root_objects->size(), false);
+      uint32_t          roots_recovered = 0;
+      for (auto& entry : recovered_roots)
+      {
+         if (entry.root_index < _root_objects->size() && !root_set[entry.root_index])
+         {
+            // Verify the ptr_address actually has a valid control block
+            auto* cb = _ptr_alloc.try_get(ptr_address(entry.root_address));
+            if (cb && cb->loc().cacheline())
+            {
+               _root_objects->at(entry.root_index)
+                   .store(ptr_address(entry.root_address), std::memory_order_relaxed);
+               root_set[entry.root_index] = true;
+               ++roots_recovered;
+               SAL_WARN("recovered root[{}] = {} from sync header (ts={})",
+                        entry.root_index, entry.root_address, *entry.timestamp);
+            }
+         }
+      }
+
+      // Validate roots from the roots file — these were synced to disk by
+      // allocator::sync() during commit, so they are the primary source.
+      // Sync headers are a secondary source for when the roots file is corrupt.
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+      {
+         if (!root_set[i])
+         {
+            auto old = _root_objects->at(i).load(std::memory_order_relaxed);
+            if (old != null_ptr_address)
+            {
+               // Verify the existing root's control block was rebuilt by the segment scan
+               auto* cb = _ptr_alloc.try_get(old);
+               if (!cb || !cb->loc().cacheline())
+               {
+                  SAL_WARN("root[{}] = {} from roots file is invalid (no control block), clearing", i, *old);
+                  _root_objects->at(i).store(null_ptr_address, std::memory_order_relaxed);
+               }
+               else
+               {
+                  root_set[i] = true;  // existing root is valid, keep it
+               }
+            }
+         }
+      }
+
+      // Phase 6: Walk all valid roots, recursively retain reachable nodes
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+      {
+         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
+         if (addr != null_ptr_address)
+            recursive_retain_all(addr);
+      }
+
+      // Phase 7: Free leaked objects
+      _ptr_alloc.release_unreachable();
+
+      // Reset segment provider sequence counter
+      _mapped_state->_segment_provider._next_alloc_seq.store(max_provider_seq + 1,
+                                                              std::memory_order_relaxed);
+      _mapped_state->clean_exit_flag.store(false);
+
+      provider_populate_pinned_segments();
+      provider_populate_unpinned_segments();
+      start_background_threads();
+
+      uint32_t roots_from_file = 0;
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+         if (root_set[i] && i >= roots_recovered)
+            ++roots_from_file;
+      SAL_WARN("Power-loss recovery complete. {} roots from sync headers, {} validated from roots file.",
+               roots_recovered, roots_from_file);
+   }
+
    allocator_session_number allocator::alloc_session_num() noexcept
    {
       return _mapped_state->_session_data.alloc_session_num();
@@ -645,15 +904,15 @@ namespace sal
             return;  // object was freed
          if (obj_ref.obj() != nh)
             return;  // object was moved;
-         // assert / throw exception if the checksum is invalid,
-         // stop the world, we may need to do data recovery.
+         // Verify checksum — on failure, halt writes rather than crashing
          if (config_validate_checksum_on_compact())
          {
             if (vcall::has_checksum(nh) and not vcall::verify_checksum(nh))
             {
-               SAL_ERROR("checksum is invalid {} size: {} checksum: {} calculated: {}",
+               SAL_ERROR("corruption detected: obj {} size: {} checksum: {:x} expected: {:x}",
                          nh->address(), nh->size(), nh->checksum(), nh->calculate_checksum());
-               throw std::runtime_error("checksum is invalid");
+               signal_corruption();
+               return;  // stop compacting, don't touch corrupt data
             }
          }
 

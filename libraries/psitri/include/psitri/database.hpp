@@ -12,6 +12,7 @@
 namespace psitri
 {
    using runtime_config = sal::runtime_config;
+   using recovery_mode  = sal::recovery_mode;
    class write_session;
    class read_session;
 
@@ -24,7 +25,9 @@ namespace psitri
    class database : public std::enable_shared_from_this<database>
    {
      public:
-      database(const std::filesystem::path& dir, const runtime_config& cfg);
+      database(const std::filesystem::path& dir,
+               const runtime_config&       cfg,
+               recovery_mode               mode = recovery_mode::none);
       ~database();
 
       static std::shared_ptr<database> create(std::filesystem::path dir,

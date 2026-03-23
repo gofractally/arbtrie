@@ -88,31 +88,21 @@ namespace sal
 
    void allocator_session::sync(sync_type st, const runtime_config& cfg, std::span<char> user_data)
    {
-      //auto           st      = _sega._mapped_state->_config.sync_mode;
+      // Process finalized dirty segments
       segment_number seg_num = _alloc_seg_num;
       if (seg_num != segment_number(-1))
          seg_num = _dirty_segments.pop();
-      //ARBTRIE_WARN("sync: pop() => seg_num: ", seg_num);
       while (seg_num != segment_number(-1))
       {
          auto seg = _sega.get_segment(seg_num);
-         //        ARBTRIE_WARN("sync: seg_num: ", seg_num, " is_finalized: ", seg->is_finalized());
 
-         // sync() will write an allocation_header, and this header is space that
-         // can be reclaimed if compacted, so we need to record it in the meta data
-         // for easy access by the compactor
          _sega.record_session_write(_session_num, seg->sync(st, cfg, user_data));
          auto ahead = seg->get_last_aheader();
-         //   ARBTRIE_INFO("sync: segment: ", seg_num, " free_space: ", seg->free_space(),
-         //                " ahead: ", ahead->_nsize);
 
          _sega.record_freed_space(_session_num, ahead);
 
-         /// if the segment is entirely read only (because sync() just moved _last_writable_pos
-         /// to the end of the segment) then we can set the segment meta data to indicate that
-         /// the entire segment is read only
          assert(seg->is_finalized() ? seg->is_read_only() : true);
-         if (seg->is_read_only())  //or seg->is_finalized())
+         if (seg->is_read_only())
             _sega._mapped_state->_segment_data.prepare_for_compaction(
                 seg_num, seg->age_accumulator.average());
          seg_num = _dirty_segments.pop();

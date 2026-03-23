@@ -2,6 +2,7 @@
 #include <hash/xxhash.h>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <sal/allocator_session.hpp>
 #include <sal/time.hpp>
 #include <ucc/fast_memcpy.hpp>
@@ -252,6 +253,19 @@ namespace sal
    }  // namespace vcall
 
    /**
+    * Stored in sync_header::user_data to record which root was updated
+    * at each commit boundary. Enables root reconstruction from segments
+    * during power-loss recovery.
+    */
+   struct sync_root_info
+   {
+      uint32_t root_index;    ///< which root was updated
+      uint32_t root_address;  ///< the ptr_address it was set to
+   };
+   static_assert(sizeof(sync_root_info) == 8);
+   static_assert(sizeof(sync_root_info) <= 27, "must fit in sync_header user_data");
+
+   /**
     * sync_header this is written every time the
     * segment is synced and documents the empty space
     * at the end of the current page along with other
@@ -306,6 +320,20 @@ namespace sal
        */
       const char* user_data() const noexcept { return _user_data; }
       char*       user_data() noexcept { return _user_data; }
+
+      /**
+       * Returns the root info if user_data contains a sync_root_info, nullopt otherwise.
+       */
+      std::optional<sync_root_info> get_root_info() const noexcept
+      {
+         if (_user_data_size == sizeof(sync_root_info))
+         {
+            sync_root_info info;
+            memcpy(&info, _user_data, sizeof(info));
+            return info;
+         }
+         return std::nullopt;
+      }
 
       uint32_t checksum_offset() const noexcept { return sizeof(*this) - sizeof(_sync_checksum); }
 

@@ -224,7 +224,7 @@ namespace sal
        * This is more expensive, but it will detect corruption
        * of data at rest. This is about a 10% performance hit.
        */
-      bool checksum_commits = false;
+      bool checksum_commits = true;
 
       /**
        * Calculating the checksum is expensive and mostly
