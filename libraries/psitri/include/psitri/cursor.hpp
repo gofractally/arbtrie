@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/count_keys.hpp>
 #include <psitri/node/inner.hpp>
 #include <psitri/node/leaf.hpp>
 #include <psitri/node/node.hpp>
@@ -126,6 +127,9 @@ namespace psitri
        *   iterator::value_subtree: Found subtree value (use subtree() or subtree_cursor() instead)
        */
       int32_t get(key_view key, Buffer auto* buffer);
+
+      /// Count keys in range [lower, upper). Empty bounds mean unbounded.
+      uint64_t count_keys(key_view lower = {}, key_view upper = {}) const noexcept;
 
       bool is_subtree() const noexcept;
 
@@ -423,6 +427,13 @@ namespace psitri
    {
       seek_end();
       return prev();
+   }
+   inline uint64_t cursor::count_keys(key_view lower, key_view upper) const noexcept
+   {
+      if (_node.address() == sal::null_ptr_address)
+         return 0;
+      auto read_lock = _node.session()->lock();
+      return psitri::count_keys(*_node.session(), _node.address(), {lower, upper});
    }
    inline void cursor::push(ptr_address adr) noexcept
    {

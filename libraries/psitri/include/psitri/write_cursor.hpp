@@ -64,6 +64,12 @@ namespace psitri
       /// Get a read cursor for the current tree state
       cursor read_cursor() const { return cursor(_ctx.get_root()); }
 
+      /// Count keys in range [lower, upper). Empty bounds mean unbounded.
+      uint64_t count_keys(key_view lower = {}, key_view upper = {}) const
+      {
+         return cursor(_ctx.get_root()).count_keys(lower, upper);
+      }
+
       /// Point lookup. Returns nullopt if key not found.
       template <ConstructibleBuffer T>
       std::optional<T> get(key_view key) const

@@ -300,7 +300,7 @@ namespace psitri
             reamining -= idx;
          } while (true);
       }
-      /// uses binary search to find key
+      /// uses binary search to find first key >= search key
       branch_number lower_bound(key_view key) const noexcept
       {
          int                  pos[2];
@@ -313,6 +313,22 @@ namespace psitri
             int  middle = (pos[left_pos] + pos[right_pos]) >> 1;
             bool geq    = get_key(branch_number(middle)) >= key;
             pos[geq]    = middle;
+         }
+         return branch_number(pos[right_pos]);
+      }
+      /// uses binary search to find first key > search key
+      branch_number upper_bound(key_view key) const noexcept
+      {
+         int                  pos[2];
+         static constexpr int left_pos  = 0;
+         static constexpr int right_pos = 1;
+         pos[left_pos]                  = -1;
+         pos[right_pos]                 = num_branches();
+         while (pos[right_pos] - pos[left_pos] > 1)
+         {
+            int  middle = (pos[left_pos] + pos[right_pos]) >> 1;
+            bool gt     = get_key(branch_number(middle)) > key;
+            pos[gt]     = middle;
          }
          return branch_number(pos[right_pos]);
       }

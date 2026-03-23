@@ -70,6 +70,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/trie_tests.cpp
     ../libraries/psitri/tests/tree_context_tests.cpp
     ../libraries/psitri/tests/public_api_tests.cpp
+    ../libraries/psitri/tests/count_keys_tests.cpp
 )
 target_link_libraries(psitri-tests
     PRIVATE
