@@ -1385,9 +1385,9 @@ namespace psitri
 
       if constexpr (mode.is_unique())
       {
-         // Release old external value
+         // Release old external value (value_node or subtree)
          if (leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node)
-            _session.release(leaf->get_value_address(br));
+            _session.release(leaf->get_value(br).address());
 
          leaf.modify()->update_value(br, new_val);
          return leaf.address();
@@ -1398,7 +1398,7 @@ namespace psitri
 
          // Release old external value (retained above, so release brings it back to original)
          if (leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node)
-            _session.release(leaf->get_value_address(br));
+            _session.release(leaf->get_value(br).address());
 
          op::leaf_update update_op{.src = *leaf.obj(), .lb = br, .key = key, .value = new_val};
          return _session.alloc<leaf_node>(parent_hint, update_op);
@@ -1445,8 +1445,7 @@ namespace psitri
 
          if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
          {
-            auto addr = leaf->get_value_address(lb);
-            _session.release(addr);
+            _session.release(leaf->get_value(lb).address());
          }
 
          leaf.modify()->remove(lb);
@@ -1464,11 +1463,10 @@ namespace psitri
          op::leaf_remove remove_op{.src = *leaf.obj(), .bn = lb};
          auto            new_leaf = _session.alloc<leaf_node>(parent_hint, remove_op);
 
-         // if bn is an address, we need to release the address and (maybe) cline
+         // if bn is an address, we need to release the address (value_node or subtree)
          if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
          {
-            auto addr = leaf->get_value_address(lb);
-            _session.release(addr);
+            _session.release(leaf->get_value(lb).address());
          }
 
          // if bn is the last branch, return null

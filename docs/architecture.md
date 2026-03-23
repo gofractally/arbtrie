@@ -103,10 +103,13 @@ libraries/
     include/sal/              # allocator.hpp, smart_ptr.hpp, control_block.hpp, ...
     src/                      # allocator.cpp, block_allocator.cpp, ...
   psitri/
-    include/psitri/           # database.hpp, tree_ops.hpp, cursor.hpp, ...
-    include/psitri/node/      # leaf.hpp, inner.hpp, value_node.hpp
+    include/psitri/           # database.hpp, tree_ops.hpp, cursor.hpp,
+                              # count_keys.hpp, range_remove.hpp,
+                              # write_cursor.hpp, transaction.hpp, ...
+    include/psitri/node/      # leaf.hpp, inner.hpp, value_node.hpp, node.hpp
     src/                      # database.cpp, node/leaf.cpp
-    tests/                    # tree_context_tests.cpp, trie_tests.cpp, ...
+    tests/                    # tree_context_tests.cpp, range_remove_tests.cpp,
+                              # public_api_tests.cpp, count_keys_tests.cpp, ...
 ```
 
 ---
@@ -250,6 +253,8 @@ database
                                      │        ├── insert(key, value)
                                      │        ├── upsert(key, value)
                                      │        ├── remove(key)
+                                     │        ├── remove_range(lower, upper)
+                                     │        ├── count_keys(lower, upper)
                                      │        ├── commit()
                                      │        └── ~transaction() ──> auto-abort
                                      │
@@ -515,31 +520,82 @@ for each new branch address:
         └── all 16 clines full ──> SPLIT INNER NODE
 ```
 
-### Remove Algorithm (Partially Implemented)
+### Remove Algorithm
 
-**Completed (leaf level):**
+Single-key removal follows the same recursive descent as upsert, using `upsert<mode::unique_remove>`:
+
 ```
 remove(key)
   │
   ▼
-find key in leaf via lower_bound + exact match
+descend to leaf via inner/inner_prefix routing
   │
   ▼
-unique mode:
-  release value (if value_node/subtree)
-  compact leaf metadata arrays
-  update dead_space tracking
-
-shared mode:
-  clone leaf excluding removed key
-  release old leaf
+leaf_node:
+  lower_bound + exact match
+  unique: release value (if value_node), compact metadata arrays
+  shared: clone leaf excluding removed key
+  │
+  ▼
+return empty branch_set if leaf now empty
+  │
+  ▼
+inner_node (post-recursion):
+  child empty? → remove_branch(), update _descendents
+  child survived? → update _descendents
+  inner has 1 branch left? → collapse:
+    - Leaf child: realloc inner → leaf (prepend prefix if inner_prefix)
+    - Inner child: realloc inner → copy child (merge prefixes if inner_prefix)
+    - Value child: return single branch to parent
 ```
 
-**Incomplete (inner node level):**
-- `inner_node::remove_branch()` -- currently a stub
-- Cascading removal when child leaf empties
-- Node collapse: when inner goes from 2 branches to 1, merge up
-- Prefix node handling during removal
+### Range Remove Algorithm
+
+`remove_range(lower, upper)` efficiently removes all keys in `[lower, upper)` in O(log n) time by leveraging the `_descendents` invariant and deferred cascading release. The algorithm mirrors the `count_keys` routing logic but mutates the tree. Implementation is in `range_remove.hpp`, included at the bottom of `tree_ops.hpp`.
+
+```
+remove_range(lower, upper)
+  │
+  ▼
+prefix narrowing (inner_prefix_node):
+  same logic as count_keys — strip prefix from bounds
+  fully contained? → return {} (remove entire subtree, O(1))
+  fully disjoint?  → return node (nothing to remove)
+  │
+  ▼
+branch routing (inner_node):
+  start    = lower_bound(lower)
+  boundary = lower_bound(upper)
+  middle   = branches in (start, boundary)  ← fully contained
+  │
+  ├── middle branches: release directly (O(1) each via deferred cascade)
+  ├── start branch:    recurse with range (partial removal)
+  └── boundary branch: recurse with range (partial removal)
+  │
+  ▼
+rebuild node from survivors, update _descendents
+```
+
+**Key constants:**
+- `max_key`: 256-byte all-`0xFF` sentinel, compares greater than any real key. `remove_range("", max_key)` removes everything.
+- Bounds: `[lower, upper)` exclusive upper bound, consistent with `count_keys`
+
+### Count Keys Algorithm
+
+`count_keys(lower, upper)` returns the number of keys in `[lower, upper)` in O(log n) time by leveraging the `_descendents` field on inner nodes. Fully-contained subtrees return their descendents count directly without traversal. Implementation is in `count_keys.hpp`.
+
+```
+count_keys(lower, upper)
+  │
+  ▼
+prefix narrowing → same as range_remove
+  │
+  ▼
+branch routing:
+  middle branches: sum _descendents (O(1) per branch)
+  start branch:    recurse, subtract keys below lower
+  boundary branch: recurse, subtract keys above upper
+```
 
 ---
 
@@ -594,6 +650,7 @@ auto tx = session->start_transaction(root_index);
 tx.insert("key1", "value1");
 tx.upsert("key2", "value2");
 tx.remove("key3");
+tx.remove_range("key_a", "key_z");  // remove all keys in [key_a, key_z)
 
 tx.commit();   // atomically update root
 // or: tx is destroyed -> auto-abort
@@ -658,16 +715,15 @@ Throughput degrades logarithmically as tree depth increases -- no cliff edges fr
 - Full SAL allocator library with COW, compaction, MVCC
 - Psitri insert/upsert (unique and shared modes)
 - Cursor with lower_bound, next/prev, seek
-- Leaf-level remove (unique and shared modes)
+- Full remove (unique and shared modes, leaf through inner, with node collapse)
+- O(log n) `count_keys(lower, upper)` leveraging `_descendents` invariant
+- O(log n) `remove_range(lower, upper)` with deferred cascading release
 - Prefix compression and node splitting
 - 30M key insert test passing
+- Leak/orphan detection tests for insert, remove, and range_remove
 
-**In Progress (remove implementation ~60%):**
-- `inner_node::remove_branch()` -- currently a stub
-- Cascading removal through inner nodes (aborts when child empties)
-- Node collapse/merge when inner node goes from 2 branches to 1
-- Expose remove() on transaction/write_session public API
-- Edge case tests: mixed insert/remove, multi-level cascading, prefix nodes
+**In Progress:**
+- Multi-writer concurrency (concurrent insert/remove across threads)
 
 **Future:**
 - Currency simulator (item #3 in TODO)

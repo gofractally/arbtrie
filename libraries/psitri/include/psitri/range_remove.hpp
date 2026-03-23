@@ -113,11 +113,11 @@ namespace psitri
 
       if constexpr (mode.is_unique())
       {
-         // Release value_nodes for branches being removed
+         // Release value_nodes/subtrees for branches being removed
          for (uint16_t i = *lo; i < *hi; ++i)
          {
             if (leaf->get_value_type(branch_number(i)) >= leaf_node::value_type_flag::value_node)
-               _session.release(leaf->get_value_address(branch_number(i)));
+               _session.release(leaf->get_value(branch_number(i)).address());
          }
          leaf.modify()->remove_range(lo, hi);
          return leaf.address();
@@ -126,11 +126,11 @@ namespace psitri
       {
          retain_children(leaf);
 
-         // Release value_nodes for branches being removed
+         // Release value_nodes/subtrees for branches being removed
          for (uint16_t i = *lo; i < *hi; ++i)
          {
             if (leaf->get_value_type(branch_number(i)) >= leaf_node::value_type_flag::value_node)
-               _session.release(leaf->get_value_address(branch_number(i)));
+               _session.release(leaf->get_value(branch_number(i)).address());
          }
 
          op::leaf_remove_range rm{.src = *leaf.obj(), .lo = lo, .hi = hi};

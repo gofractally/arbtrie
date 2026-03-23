@@ -56,6 +56,14 @@ namespace psitri
          _ctx.upsert<upsert_mode::unique_upsert>(key, value_type(value));
       }
 
+      /// Store a subtree as the value for a key.
+      /// Takes ownership of the smart_ptr's reference count (the smart_ptr is consumed).
+      void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
+      {
+         auto addr = subtree_root.take();  // extract address without releasing ref
+         _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(addr));
+      }
+
       /// Remove key. Returns size of removed value, or -1 if not found.
       int remove(key_view key) { return _ctx.remove(key); }
 
@@ -89,6 +97,35 @@ namespace psitri
       {
          cursor c(_ctx.get_root());
          return c.get(key, buffer);
+      }
+
+      /// Check if the value at key is a subtree
+      bool is_subtree(key_view key) const
+      {
+         cursor c(_ctx.get_root());
+         return c.seek(key) && c.is_subtree();
+      }
+
+      /// Get a subtree root as a smart_ptr.
+      /// Returns null smart_ptr if key not found or value is not a subtree.
+      sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const
+      {
+         cursor c(_ctx.get_root());
+         if (c.seek(key) && c.is_subtree())
+            return c.subtree();
+         return sal::smart_ptr<sal::alloc_header>(c.get_root().session(), sal::null_ptr_address);
+      }
+
+      /// Get a write_cursor rooted at the subtree stored at the given key.
+      /// The returned cursor operates on a COW copy — changes are not reflected
+      /// back to the parent tree until the caller stores the modified root.
+      /// Returns an empty write_cursor if key not found or value is not a subtree.
+      write_cursor get_subtree_cursor(key_view key) const
+      {
+         auto sub = get_subtree(key);
+         if (sub)
+            return write_cursor(std::move(sub));
+         return write_cursor(_ctx.get_root().session());
       }
 
       // -- Root access --

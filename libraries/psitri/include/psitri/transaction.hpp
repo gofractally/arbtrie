@@ -34,6 +34,10 @@ namespace psitri
       bool insert(key_view key, value_view value) { return _cursor->insert(key, value); }
       bool update(key_view key, value_view value) { return _cursor->update(key, value); }
       void upsert(key_view key, value_view value) { _cursor->upsert(key, value); }
+      void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
+      {
+         _cursor->upsert(key, std::move(subtree_root));
+      }
       int      remove(key_view key) { return _cursor->remove(key); }
       uint64_t remove_range(key_view lower, key_view upper)
       {
@@ -51,6 +55,18 @@ namespace psitri
       }
 
       int32_t get(key_view key, Buffer auto* buffer) const { return _cursor->get(key, buffer); }
+
+      bool is_subtree(key_view key) const { return _cursor->is_subtree(key); }
+
+      sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const
+      {
+         return _cursor->get_subtree(key);
+      }
+
+      write_cursor get_subtree_cursor(key_view key) const
+      {
+         return _cursor->get_subtree_cursor(key);
+      }
 
       // -- Transaction control --
 

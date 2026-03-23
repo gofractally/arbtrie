@@ -420,6 +420,8 @@ namespace psitri
    }
    inline bool cursor::seek_begin() noexcept
    {
+      if (_node.address() == sal::null_ptr_address) [[unlikely]]
+         return seek_end();
       seek_rend();
       return next();
    }
@@ -427,6 +429,12 @@ namespace psitri
    {
       seek_end();
       return prev();
+   }
+   inline bool cursor::seek(key_view key) noexcept
+   {
+      if (lower_bound(key))
+         return this->key() == key;
+      return false;
    }
    inline uint64_t cursor::count_keys(key_view lower, key_view upper) const noexcept
    {
@@ -558,6 +566,71 @@ namespace psitri
             return false;
       }  // while true
       std::unreachable();
+   }
+
+   inline int32_t cursor::value_size() const noexcept
+   {
+      if (is_end() || is_rend())
+         return value_not_found;
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return value_not_found;
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return value_not_found;
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+            return 0;
+         case leaf_node::value_type_flag::inline_data:
+            return l->get_value_view(_path_back->branch).size();
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref = _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            return ref->get_data().size();
+         }
+         case leaf_node::value_type_flag::subtree:
+            return value_subtree;
+         default:
+            std::unreachable();
+      }
+   }
+
+   inline bool cursor::is_subtree() const noexcept
+   {
+      if (is_end() || is_rend())
+         return false;
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return false;
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return false;
+      return l->get_value_type(_path_back->branch) == leaf_node::value_type_flag::subtree;
+   }
+
+   inline sal::smart_ptr<sal::alloc_header> cursor::subtree() const noexcept
+   {
+      if (is_end() || is_rend())
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches() ||
+          l->get_value_type(_path_back->branch) != leaf_node::value_type_flag::subtree)
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
+      auto val = l->get_value(_path_back->branch);
+      // Construct smart_ptr with inc_ref=true — the leaf owns one ref, caller gets another
+      return sal::smart_ptr<sal::alloc_header>(_node.session(), val.subtree_address(), true);
+   }
+
+   inline cursor cursor::subtree_cursor() const noexcept
+   {
+      return cursor(subtree());
    }
 
 }  // namespace psitri
