@@ -151,11 +151,13 @@ void benchmark_32(int num_iterations, int data_size, const ResultCallback& save_
    // Benchmark the global implementation
    benchmark_impl("global_32", find_approx_min_index_32);
 
+#ifdef __ARM_NEON
    // Benchmark v11a implementation
    benchmark_impl("neon_v11a_32", find_approx_min_index_neon_v11a_32);
 
    // Benchmark v13a implementation
    benchmark_impl("neon_v13a_32", find_approx_min_index_neon_v13a_32);
+#endif
 
    // Calculate speedups
    for (auto& result : results)

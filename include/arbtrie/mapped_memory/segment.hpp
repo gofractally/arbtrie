@@ -35,8 +35,13 @@ namespace arbtrie
 
          enum segment_flags : uint32_t
          {
-            read_only = 1 << 0,
-            pinned    = 1 << 1
+            read_only = 1 << 0,  // segment entirely read only (eligable for compaction)
+            pinned    = 1 << 1,  // segment pinned in RAM
+            active =
+                1 << 2,  // segment active and being used by a session (at least partially writable)
+            pending = 1 << 3,  // segment compacted, waiting on read lock release
+            free    = 1 << 4,  // segment free and ready for reuse
+            queued  = 1 << 5,  // segment in provider queue waiting for session to claim
          };
 
          /// tracks if the segment is read only, set by the session thread when the
@@ -45,10 +50,35 @@ namespace arbtrie
          std::atomic<uint32_t> flags;
 
         public:
-         void prepare_for_reuse()
+         void added_to_provider_queue()
          {
+            assert(not(flags.load(std::memory_order_relaxed) & read_only));
+            uint32_t new_flags = (flags.load(std::memory_order_relaxed) & pinned) | queued;
+            flags.store(new_flags, std::memory_order_relaxed);
+         }
+         void added_to_read_lock_queue()
+         {
+            assert(flags.load(std::memory_order_relaxed) & read_only);
+            // don't change pinned or read_only flags
+            uint32_t new_flags =
+                (flags.load(std::memory_order_relaxed) & pinned | read_only) | pending;
+            flags.store(new_flags, std::memory_order_relaxed);
+         }
+         void added_to_free_list()
+         {
+            assert(not(flags.load(std::memory_order_relaxed) & (active | queued)));
+            assert(flags.load(std::memory_order_relaxed) & read_only);
+            uint32_t new_flags = (flags.load(std::memory_order_relaxed) & pinned) | free;
+            flags.store(new_flags, std::memory_order_relaxed);
+         }
+         /// transition to active from queued
+         void allocated_by_session()
+         {
+            assert(not(flags.load(std::memory_order_relaxed) & read_only));
+            assert(flags.load(std::memory_order_relaxed) & queued);
+            uint32_t new_flags = (flags.load(std::memory_order_relaxed) & pinned) | active;
+            flags.store(new_flags, std::memory_order_relaxed);
             freed_space.store(0, std::memory_order_relaxed);
-            flags.fetch_and(~read_only, std::memory_order_relaxed);
          }
 
          void add_freed_space(uint32_t size)
@@ -57,10 +87,12 @@ namespace arbtrie
             freed_space.fetch_add(size, std::memory_order_relaxed);
          }
 
+         /// stores the age and marks it as ready only
          void prepare_for_compaction(uint64_t vage_value)
          {
             vage.store(vage_value, std::memory_order_relaxed);
-            flags.fetch_or(read_only, std::memory_order_relaxed);
+            flags.store((flags.load(std::memory_order_relaxed) & pinned) | read_only,
+                        std::memory_order_relaxed);
          }
          void set_pinned(bool is_pinned)
          {
@@ -68,6 +100,11 @@ namespace arbtrie
                flags.fetch_or(pinned, std::memory_order_relaxed);
             else
                flags.fetch_and(~pinned, std::memory_order_relaxed);
+         }
+         // compactor may only consider segments that are read only and not in one of the other states
+         bool may_compact() const
+         {
+            return (flags.load(std::memory_order_relaxed) & ~pinned) == read_only;
          }
          bool     is_read_only() const { return flags.load(std::memory_order_relaxed) & read_only; }
          bool     is_pinned() const { return flags.load(std::memory_order_relaxed) & pinned; }
@@ -80,6 +117,17 @@ namespace arbtrie
        */
       struct segment_data
       {
+         bool may_compact(segment_number segment) const { return meta[segment].may_compact(); }
+         void added_to_free_segments(segment_number segment)
+         {
+            //            ARBTRIE_INFO("free: ", segment);
+            meta[segment].added_to_free_list();
+         }
+         void added_to_provider_queue(segment_number segment)
+         {
+            //           ARBTRIE_INFO("provider q: ", segment);
+            meta[segment].added_to_provider_queue();
+         }
          template <typename T>
          void add_freed_space(segment_number segment, const T* obj)
          {
@@ -87,10 +135,21 @@ namespace arbtrie
          }
 
          // initial condition of a new segment, given a starting age
-         void prepare_for_reuse(segment_number segment) { meta[segment].prepare_for_reuse(); }
+         void added_to_read_lock_queue(segment_number segment)
+         {
+            //          ARBTRIE_INFO("read lock q: ", segment);
+            meta[segment].added_to_read_lock_queue();
+         }
          void prepare_for_compaction(segment_number segment, uint64_t vage)
          {
+            //         ARBTRIE_INFO("may compact: ", segment);
             meta[segment].prepare_for_compaction(vage);
+            assert(meta[segment].may_compact());
+         }
+         void allocated_by_session(segment_number segment)
+         {
+            //        ARBTRIE_INFO("allocated: ", segment);
+            meta[segment].allocated_by_session();
          }
          uint32_t get_freed_space(segment_number segment) const
          {
@@ -123,6 +182,18 @@ namespace arbtrie
        * each object is aligned on cpu cache line boundaries. Each object_header contains a
        * type and _nsize field which allows us to navigate the objects in order through the
        * segment. 
+       * 
+       * # Life Cycle
+       * 
+       * ```mermaid
+       * graph LR
+       *   A[new/free_list] --> B[provider_queues]
+       *   B --> C[session_alloc]
+       *   C --> D[read_only]
+       *   D --> E[compacting]
+       *   E --> F[pending_recycle]
+       *   F --> A
+       * ```
        */
       struct segment
       {

@@ -378,7 +378,7 @@ namespace arbtrie
       const auto& seg_data             = _mapped_state->_segment_data;
       for (int i = 0; i < total_segs; ++i)
       {
-         if (not seg_data.is_read_only(i) or not seg_data.is_pinned(i))
+         if (not seg_data.may_compact(i) or not seg_data.is_pinned(i))
             continue;
          const auto freed_space = seg_data.get_freed_space(i);
          if (freed_space < _mapped_state->_config.compact_pinned_unused_threshold_mb * 1024 * 1024)
@@ -421,7 +421,7 @@ namespace arbtrie
       for (int i = 0; i < total_segs; ++i)
       {
          const auto freed_space = seg_data.get_freed_space(i);
-         if (not seg_data.is_read_only(i))
+         if (not seg_data.may_compact(i))
          {
             not_read_only++;
             continue;
@@ -551,7 +551,7 @@ namespace arbtrie
 
       // ensures that the segment will not get selected for compaction again until
       // after it is reused by the provider thread.
-      _mapped_state->_segment_data.prepare_for_reuse(seg_num);
+      _mapped_state->_segment_data.added_to_read_lock_queue(seg_num);
 
       // only one thread can move the end_ptr or this will break
       // std::cerr<<"done freeing end_ptr: " << _mapped_state->end_ptr.load() <<" <== " << seg_num <<"\n";
@@ -834,7 +834,10 @@ namespace arbtrie
          int popped = _mapped_state->_read_lock_queue.pop_recycled_segments(segs, available);
          // Set the recycled segment in the free_segments bitset
          for (int i = 0; i < popped; ++i)
+         {
             provider_state.free_segments.set(segs[i]);
+            _mapped_state->_segment_data.added_to_free_segments(segs[i]);
+         }
 
          ARBTRIE_DEBUG("segment_provider: Recycled segments: ", popped,
                        " added to free_segments, count: ", provider_state.free_segments.count());
@@ -911,6 +914,7 @@ namespace arbtrie
 
       provider_prepare_segment(seg_num, true /* pin it*/);
       provider_state.ready_pinned_segments.push(seg_num);
+      _mapped_state->_segment_data.added_to_provider_queue(seg_num);
    }
    void seg_allocator::provider_populate_unpinned_segments()
    {
@@ -922,6 +926,7 @@ namespace arbtrie
       if (seg_num == provider_state.free_segments.invalid_index)
          seg_num = provider_allocate_new_segment();
       provider_prepare_segment(seg_num, false /* don't pin it*/);
+      _mapped_state->_segment_data.added_to_provider_queue(seg_num);
       provider_state.ready_unpinned_segments.push(seg_num);
    }
 
@@ -941,7 +946,6 @@ namespace arbtrie
       uint64_t now_ms = arbtrie::get_current_time_ms();
 
       // Update the virtual age in segment metadata to match the segment header's initial value
-      _mapped_state->_segment_data.prepare_for_reuse(seg_num);
       disable_segment_write_protection(seg_num);
 
       auto sp = _block_alloc.get<mapped_memory::segment>(block_number(seg_num));
@@ -975,8 +979,6 @@ namespace arbtrie
          }
       }
       auto shp = new (sp) mapped_memory::segment();
-      shp->_provider_sequence =
-          _mapped_state->_segment_provider._next_alloc_seq.fetch_add(1, std::memory_order_relaxed);
       shp->set_alloc_pos(0);
       shp->_first_writable_page = 0;
       shp->_session_id          = -1;

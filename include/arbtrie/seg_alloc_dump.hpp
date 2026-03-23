@@ -1,10 +1,5 @@
 #pragma once
-#include <algorithm>           // Add include for std::sort
-#include <arbtrie/config.hpp>  // Include for segment_size constant
-#include <arbtrie/util.hpp>
-#include <cassert>  // Add include for assert
-#include <chrono>   // Add include for std::chrono
-#include <cstdint>
+#include <algorithm>  // Add include for std::sort
 #include <iomanip>
 #include <iostream>
 #include <limits>   // Add include for std::numeric_limits
@@ -12,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace arbtrie
+namespace sal
 {
 
    struct seg_alloc_dump
@@ -925,4 +920,4 @@ namespace arbtrie
       }
    };
 
-}  // namespace arbtrie
+}  // namespace sal

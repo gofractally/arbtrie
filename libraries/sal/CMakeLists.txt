@@ -14,10 +14,13 @@ option(SAL_DEBUG "Enable debug logging" OFF)
 # Create the library target
 add_library(sal
     src/block_allocator.cpp
+    src/allocator.cpp
     src/mapping.cpp
-    src/hiint.cpp
-    src/shared_ptr_alloc.cpp
+    src/control_block_alloc.cpp
+    src/allocator_session.cpp
+    src/segment_thread.cpp
 )
+target_compile_definitions(sal PUBLIC XXH_INLINE_ALL)
 
 # Set include directories
 target_include_directories(sal
@@ -33,6 +36,7 @@ target_compile_options(sal
         -Wall 
         -Wextra
         -Werror
+        -Wno-vla-cxx-extension
 )
 
 # Debug definitions
@@ -56,7 +60,7 @@ if(SAL_BUILD_TESTS)
     add_executable(sal-tests
         test/block_allocator_tests.cpp
         test/mapping_tests.cpp
-        test/shared_ptr_alloc_tests.cpp
+        test/control_block_alloc_tests.cpp
         test/min_index_tests.cpp
     )
     
@@ -127,6 +131,9 @@ if(ENABLE_COVERAGE)
         target_link_options(reserve-limit-test PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
     endif()
 endif()
+
+# Link dependencies (hash and ucc)
+target_link_libraries(sal PUBLIC hash ucc)
 
 # Installation
 include(GNUInstallDirs)

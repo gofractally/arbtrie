@@ -1,16 +1,14 @@
+#include <fcntl.h>
 #include <sal/debug.hpp>
 #include <sal/mapping.hpp>
 
 #include <cassert>
 #include <system_error>
 
-#include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-#include <iostream>
 
 namespace sal
 {
@@ -83,7 +81,7 @@ namespace sal
       if (_size == 0)
       {
          _data = nullptr;
-         sal_debug("Opened empty file: {}", file.native());
+         SAL_WARN("Opened empty file: {}", file.native());
       }
       else
       {
@@ -92,8 +90,8 @@ namespace sal
          {
             _data = addr;
             try_pin(&_pinned, addr, _size);
-            sal_debug("Mapped file: {}, size={}, addr={:#x}", file.native(), _size,
-                      reinterpret_cast<uintptr_t>(addr));
+            SAL_WARN("Mapped file: {}, size={}, addr={:#x}", file.native(), _size,
+                     reinterpret_cast<uintptr_t>(addr));
          }
          else
          {
@@ -111,8 +109,8 @@ namespace sal
       {
          if (debug_memory)
          {
-            sal_debug("Unmapping memory: addr={:#x}, size={}", reinterpret_cast<uintptr_t>(p),
-                      _size);
+            SAL_WARN("Unmapping memory: addr={:#x}, size={}", reinterpret_cast<uintptr_t>(p),
+                     _size);
          }
          ::munmap(p, _size);
       }
@@ -131,7 +129,7 @@ namespace sal
          return nullptr;
       }
 
-      sal_debug("Resizing mapping: current={}, new={}", _size, new_size);
+      SAL_WARN("Resizing mapping: current={}, new={}", _size, new_size);
 
       struct munmapper
       {
@@ -164,8 +162,8 @@ namespace sal
          {
             try_pin(&_pinned, end, new_size - _size);
             _size = new_size;
-            sal_debug("Extended existing mapping: addr={:#x}, new_size={}",
-                      reinterpret_cast<uintptr_t>(_data.load()), _size);
+            SAL_WARN("Extended existing mapping: addr={:#x}, new_size={}",
+                     reinterpret_cast<uintptr_t>(_data.load()), _size);
             return nullptr;
          }
          else
@@ -186,9 +184,9 @@ namespace sal
          _data        = addr;
          _size        = new_size;
          try_pin(&_pinned, addr, _size);
-         sal_debug("Remapped to new location: old_addr={:#x}, new_addr={:#x}, size={}",
-                   reinterpret_cast<uintptr_t>(result->addr), reinterpret_cast<uintptr_t>(addr),
-                   _size);
+         SAL_WARN("Remapped to new location: old_addr={:#x}, new_addr={:#x}, size={}",
+                  reinterpret_cast<uintptr_t>(result->addr), reinterpret_cast<uintptr_t>(addr),
+                  _size);
          return std::shared_ptr<void>(std::move(result), result->addr);
       }
       else
@@ -198,4 +196,38 @@ namespace sal
       }
    }
 
+   void mapping::sync(sync_type st) noexcept
+   {
+      if (st <= sync_type::mprotect)
+         return;
+      if (st == sync_type::msync_async)
+      {
+         if (::msync(data(), size(), MS_ASYNC) != 0)
+            SAL_ERROR("Failed to msync: error={}", strerror(errno));
+      }
+      else if (st == sync_type::msync_sync)
+      {
+         if (::msync(data(), size(), MS_SYNC) != 0)
+            SAL_ERROR("Failed to msync: error={}", strerror(errno));
+      }
+      else if (st == sync_type::fsync)
+      {
+         if (::msync(data(), size(), MS_SYNC) != 0)
+            SAL_ERROR("Failed to msync: error={}", strerror(errno));
+         if (::fsync(_fd) != 0)
+            SAL_ERROR("Failed to fsync: error={}", strerror(errno));
+      }
+      else if (st == sync_type::full)
+      {
+         if (::msync(data(), size(), MS_SYNC) != 0)
+            SAL_ERROR("Failed to msync: error={}", strerror(errno));
+#ifdef __APPLE__
+         if (-1 == ::fcntl(_fd, F_FULLFSYNC))
+            SAL_ERROR("Failed to fcntl: error={}", strerror(errno));
+#else
+         if (::fsync(_fd) != 0)
+            SAL_ERROR("Failed to fsync: error={}", strerror(errno));
+#endif
+      }
+   }
 }  // namespace sal

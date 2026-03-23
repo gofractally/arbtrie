@@ -20,6 +20,9 @@ set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
 # Print build type for debugging
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
+# Common compiler flags
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension -fdiagnostics-color=always")
+
 # Set debug flags explicitly - must be before project()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -UNDEBUG -fno-omit-frame-pointer" CACHE STRING "Flags used by the compiler in Debug builds" FORCE)
@@ -41,18 +44,45 @@ if(CMAKE_EXPORT_COMPILE_COMMANDS)
         ${CMAKE_SOURCE_DIR}/compile_commands.json)
 endif()
 
-project(arbtrie VERSION 0.1.0 LANGUAGES CXX)
+project(arbtrie VERSION 0.1.0 LANGUAGES CXX C)
 
 # Set global properties
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Enable Link-Time Optimization (LTO) for release builds
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel|RelWithDebInfo)$")
+  message(STATUS "Enabling Link-Time Optimization (LTO)")
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
+endif()
+
 # Define build options
 option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_VISUALIZER "Build segment visualizer" )
+option(DISABLE_NEON "Disable all ARM NEON SIMD optimizations (for debugging)" OFF)
+option(ENABLE_DEEP_INVARIANTS "Enable expensive invariant checks in debug builds" OFF)
+
+if(ENABLE_DEEP_INVARIANTS)
+    message(STATUS "Deep invariant checks ENABLED")
+    add_compile_definitions(PSITRI_DEEP_INVARIANTS=1)
+endif()
+
+option(ENABLE_DEBUG_CURSOR "Enable temporary cursor debug instrumentation" OFF)
+if(ENABLE_DEBUG_CURSOR)
+    message(STATUS "Cursor debug instrumentation ENABLED")
+    add_compile_definitions(PSITRI_DEBUG_CURSOR=1)
+endif()
+
+if(DISABLE_NEON)
+    message(STATUS "NEON SIMD optimizations DISABLED")
+    # Force-include a header that undefs __ARM_NEON before any source code runs
+    add_compile_options(-include ${CMAKE_SOURCE_DIR}/libraries/ucc/include/ucc/disable_neon.hpp)
+endif()
 
 # Find required packages
 find_package(Threads REQUIRED)
@@ -77,42 +107,41 @@ endif()
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
 option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
 
-# Add the SAL library
 add_subdirectory(libraries/sal)
-message(STATUS "SAL library added to build")
+add_subdirectory(libraries/psitri)
+add_subdirectory(libraries/hash)
+add_subdirectory(libraries/ucc)
 
 # Main library
-add_library(arbtrie
-    src/node_handle.cpp
-    src/database.cpp
-    src/mapping.cpp
-    src/seg_allocator.cpp
-    src/seg_allocator_session.cpp
-    src/recover.cpp
-    src/iterator_count_keys.cpp
-    src/segment_thread.cpp
-    src/mapped_memory/session_data.cpp
-)
+#add_library(arbtrie
+#    src/node_handle.cpp
+#    src/database.cpp
+##    src/mapping.cpp
+#    src/seg_allocator.cpp
+#    src/seg_allocator_session.cpp
+#    src/recover.cpp
+#    src/iterator_count_keys.cpp
+#    src/segment_thread.cpp
+#    src/mapped_memory/session_data.cpp
+#)
 
 # Library configuration
-target_include_directories(arbtrie 
-    PUBLIC 
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${Boost_INCLUDE_DIRS}
-)
+#target_include_directories(arbtrie 
+#    PUBLIC 
+#        ${CMAKE_CURRENT_SOURCE_DIR}/include
+#        ${Boost_INCLUDE_DIRS}
+#)
 
-target_link_libraries(arbtrie 
-    PUBLIC 
-        Threads::Threads
-        sal
-)
-target_compile_features(arbtrie PUBLIC cxx_std_23)
+#target_link_libraries(arbtrie 
+#    PUBLIC 
+#        Threads::Threads
+#        sal
+#)
+#target_compile_features(arbtrie PUBLIC cxx_std_23)
 
 # Set up explicit compile definitions
-add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
+#add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
 
-# Common compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension -fdiagnostics-color=always")
 
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -122,19 +151,20 @@ endif()
 # Sanitizer configuration
 if(ENABLE_SANITIZER)
     message(STATUS "Enabling Thread Sanitizer")
-    target_compile_options(arbtrie PUBLIC -fsanitize=thread -g)
-    target_link_options(arbtrie PUBLIC -fsanitize=thread -g)
+    # arbtrie target commented out — re-enable for psitri
+    # target_compile_options(arbtrie PUBLIC -fsanitize=thread -g)
+    # target_link_options(arbtrie PUBLIC -fsanitize=thread -g)
 endif()
 
 # Coverage configuration
 if(ENABLE_COVERAGE)
     message(STATUS "Enabling coverage reporting")
-    
-    # Add coverage flags - using more specific flags
-    target_compile_options(arbtrie PUBLIC 
-        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
-    target_link_options(arbtrie PUBLIC 
-        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+
+    # arbtrie target commented out — re-enable for psitri
+    # target_compile_options(arbtrie PUBLIC
+    #     $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
+    # target_link_options(arbtrie PUBLIC
+    #     $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
     
     # Find required tools
     find_program(LCOV lcov REQUIRED)
@@ -244,18 +274,16 @@ if(ENABLE_COVERAGE)
 endif()
 
 # Platform-specific optimizations
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(X86_64)|(amd64)|(AMD64)")
-    if(NOT APPLE)
-        target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
-        target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
-    else()
-        target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
-        target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
-    endif()
-endif()
+# if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(X86_64)|(amd64)|(AMD64)")
+#     if(NOT APPLE)
+#         target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
+#         target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
+#     else()
+#         target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
+#         target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
+#     endif()
+# endif()
 
-# Add subdirectories
-add_subdirectory(programs)
 
 # MDBX benchmark test (optional)
 option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
@@ -264,16 +292,18 @@ if(BUILD_MDBX_TEST)
     # Look for header directly in external/libmdbx
     find_path(MDBX_INCLUDE_DIR mdbx.h PATHS external/libmdbx HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_CACHE)
     
-    # Look for library directly in external/libmdbx, prefer static
-    find_library(MDBX_LIBRARY NAMES libmdbx-static.a libmdbx.a mdbx 
-                 PATHS external/libmdbx 
-                 HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_DEFAULT_PATH NO_CACHE)
+    # Look for library directly in external/libmdbx or its build dir, prefer static
+    find_library(MDBX_LIBRARY NAMES libmdbx-static.a libmdbx.a mdbx
+                 PATHS external/libmdbx external/libmdbx/build
+                 HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" "${CMAKE_SOURCE_DIR}/external/libmdbx/build"
+                 NO_DEFAULT_PATH NO_CACHE)
 
     # If static wasn't found, maybe dynamic exists (less preferred but okay for testing)
     if(NOT MDBX_LIBRARY)
-         find_library(MDBX_LIBRARY NAMES mdbx 
-                      PATHS external/libmdbx 
-                      HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_DEFAULT_PATH NO_CACHE)
+         find_library(MDBX_LIBRARY NAMES mdbx
+                      PATHS external/libmdbx external/libmdbx/build
+                      HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" "${CMAKE_SOURCE_DIR}/external/libmdbx/build"
+                      NO_DEFAULT_PATH NO_CACHE)
     endif()
 
 
@@ -295,6 +325,20 @@ if(BUILD_MDBX_TEST)
          # Install the test executable if needed
          install(TARGETS lmdbx_arb_test RUNTIME DESTINATION bin)
 
+        # New standardized benchmark (mirrors psitri-benchmark)
+        add_executable(mdbx-benchmark programs/mdbx_bench.cpp)
+        target_compile_definitions(mdbx-benchmark PRIVATE XXH_INLINE_ALL)
+        target_include_directories(mdbx-benchmark PRIVATE ${MDBX_INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
+        target_link_libraries(mdbx-benchmark PRIVATE
+            ${MDBX_LIBRARY} Boost::program_options hash Threads::Threads)
+        set_target_properties(mdbx-benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+        if(ENABLE_SANITIZER)
+            target_compile_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
+            target_link_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
+        endif()
+
     else()
         message(WARNING "MDBX library or includes not found. Skipping lmdbx_arb_test build. Looked in external/libmdbx")
         if(NOT MDBX_INCLUDE_DIR)
@@ -306,20 +350,131 @@ if(BUILD_MDBX_TEST)
     endif()
 endif()
 
+# Psitri benchmark
+add_executable(psitri-benchmark programs/psitri_bench.cpp)
+target_link_libraries(psitri-benchmark PUBLIC Boost::program_options psitri)
+target_include_directories(psitri-benchmark PUBLIC ${Boost_INCLUDE_DIRS})
+set_target_properties(psitri-benchmark
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# psitri benchmark in TidesDB-style format (same workload/output for direct comparison)
+# Configurable via BENCH_* cmake variables (same defaults as TidesDB bench)
+if(NOT DEFINED BENCH_NUM_OPERATIONS)
+    set(BENCH_NUM_OPERATIONS 100000000)
+endif()
+if(NOT DEFINED BENCH_NUM_SEEK_OPS)
+    set(BENCH_NUM_SEEK_OPS 1000)
+endif()
+if(NOT DEFINED BENCH_KEY_SIZE)
+    set(BENCH_KEY_SIZE 16)
+endif()
+if(NOT DEFINED BENCH_VALUE_SIZE)
+    set(BENCH_VALUE_SIZE 100)
+endif()
+if(NOT DEFINED BENCH_NUM_THREADS)
+    set(BENCH_NUM_THREADS 8)
+endif()
+if(NOT DEFINED BENCH_KEY_PATTERN)
+    set(BENCH_KEY_PATTERN "random")
+endif()
+if(NOT DEFINED BENCH_DB_PATH)
+    set(BENCH_DB_PATH "psitri_benchmark_db")
+endif()
+if(NOT DEFINED BENCH_BATCH_SIZE)
+    set(BENCH_BATCH_SIZE 1000)
+endif()
+
+add_executable(psitri-tidesdb-bench bench/psitri__bench.cpp)
+target_compile_definitions(psitri-tidesdb-bench PRIVATE
+    BENCH_NUM_OPERATIONS=${BENCH_NUM_OPERATIONS}
+    BENCH_NUM_SEEK_OPS=${BENCH_NUM_SEEK_OPS}
+    BENCH_KEY_SIZE=${BENCH_KEY_SIZE}
+    BENCH_VALUE_SIZE=${BENCH_VALUE_SIZE}
+    BENCH_NUM_THREADS=${BENCH_NUM_THREADS}
+    BENCH_KEY_PATTERN="${BENCH_KEY_PATTERN}"
+    BENCH_DB_PATH="${BENCH_DB_PATH}"
+    BENCH_BATCH_SIZE=${BENCH_BATCH_SIZE}
+)
+target_link_libraries(psitri-tidesdb-bench PRIVATE psitri Threads::Threads)
+set_target_properties(psitri-tidesdb-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# TidesDB benchmark (optional — requires tidesdb installed or in external/)
+option(BUILD_TIDESDB_BENCH "Build the TidesDB comparison benchmark" OFF)
+if(BUILD_TIDESDB_BENCH)
+    message(STATUS "Building TidesDB benchmark")
+
+    # Look for tidesdb header — prefer the build/include/tidesdb/ directory
+    # which has all headers (including ini.h, uthash.h, etc.)
+    find_path(TIDESDB_INCLUDE_DIR tidesdb.h
+        PATHS
+            "${CMAKE_SOURCE_DIR}/external/tidesdb/build/include/tidesdb"
+            "${CMAKE_SOURCE_DIR}/external/tidesdb/src"
+        PATH_SUFFIXES include/tidesdb src
+        NO_CACHE)
+
+    # Look for tidesdb library (shared or static)
+    find_library(TIDESDB_LIBRARY NAMES tidesdb libtidesdb
+        PATHS "${CMAKE_SOURCE_DIR}/external/tidesdb/build"
+        NO_CACHE)
+
+    # Also try system paths if external/ didn't work
+    if(NOT TIDESDB_INCLUDE_DIR)
+        find_path(TIDESDB_INCLUDE_DIR tidesdb.h PATH_SUFFIXES include/tidesdb include src NO_CACHE)
+    endif()
+    if(NOT TIDESDB_LIBRARY)
+        find_library(TIDESDB_LIBRARY NAMES tidesdb libtidesdb NO_CACHE)
+    endif()
+
+    if(TIDESDB_INCLUDE_DIR AND TIDESDB_LIBRARY)
+        message(STATUS "Found TidesDB include: ${TIDESDB_INCLUDE_DIR}")
+        message(STATUS "Found TidesDB library: ${TIDESDB_LIBRARY}")
+
+        # The C wrapper is compiled as C to avoid C++ type-checking issues
+        # with TidesDB's headers (implicit void* casts).
+        add_executable(tidesdb-benchmark
+            programs/tidesdb_bench.cpp
+            programs/tidesdb_c_wrapper.c)
+        target_compile_definitions(tidesdb-benchmark PRIVATE XXH_INLINE_ALL)
+        target_include_directories(tidesdb-benchmark PRIVATE
+            ${TIDESDB_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/programs ${Boost_INCLUDE_DIRS})
+        target_link_libraries(tidesdb-benchmark PRIVATE
+            ${TIDESDB_LIBRARY} Boost::program_options hash Threads::Threads)
+        set_target_properties(tidesdb-benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+        if(ENABLE_SANITIZER)
+            target_compile_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
+            target_link_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
+        endif()
+    else()
+        message(WARNING "TidesDB not found. Skipping tidesdb-benchmark build.")
+        if(NOT TIDESDB_INCLUDE_DIR)
+            message(WARNING "  tidesdb.h not found — try: git clone https://github.com/tidesdb/tidesdb external/tidesdb && cd external/tidesdb && cmake -B build && cmake --build build")
+        endif()
+        if(NOT TIDESDB_LIBRARY)
+            message(WARNING "  tidesdb library not found.")
+        endif()
+    endif()
+endif()
+
 # Only add test directory if testing is enabled
 if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
 # Installation rules (optional)
-install(TARGETS arbtrie
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin
-)
+# install(TARGETS arbtrie
+#     LIBRARY DESTINATION lib
+#     ARCHIVE DESTINATION lib
+#     RUNTIME DESTINATION bin
+# )
 
-install(DIRECTORY include/
-    DESTINATION include
-)
+# install(DIRECTORY include/
+#     DESTINATION include
+# )
 
 # End of file - removing duplicate SAL options and includes
