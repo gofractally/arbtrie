@@ -63,7 +63,6 @@ endif()
 option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
-option(BUILD_VISUALIZER "Build segment visualizer" )
 option(DISABLE_NEON "Disable all ARM NEON SIMD optimizations (for debugging)" OFF)
 option(ENABLE_DEEP_INVARIANTS "Enable expensive invariant checks in debug builds" OFF)
 
@@ -98,12 +97,7 @@ if(BUILD_TESTS)
     enable_testing()
 endif()
 
-# Only find Qt if building visualizer
-if(BUILD_VISUALIZER)
-    add_subdirectory(visualizer)
-endif()
-
-# SAL library setup - required by arbtrie
+# SAL library setup
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
 option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
 
@@ -111,37 +105,6 @@ add_subdirectory(libraries/sal)
 add_subdirectory(libraries/psitri)
 add_subdirectory(libraries/hash)
 add_subdirectory(libraries/ucc)
-
-# Main library
-#add_library(arbtrie
-#    src/node_handle.cpp
-#    src/database.cpp
-##    src/mapping.cpp
-#    src/seg_allocator.cpp
-#    src/seg_allocator_session.cpp
-#    src/recover.cpp
-#    src/iterator_count_keys.cpp
-#    src/segment_thread.cpp
-#    src/mapped_memory/session_data.cpp
-#)
-
-# Library configuration
-#target_include_directories(arbtrie 
-#    PUBLIC 
-#        ${CMAKE_CURRENT_SOURCE_DIR}/include
-#        ${Boost_INCLUDE_DIRS}
-#)
-
-#target_link_libraries(arbtrie 
-#    PUBLIC 
-#        Threads::Threads
-#        sal
-#)
-#target_compile_features(arbtrie PUBLIC cxx_std_23)
-
-# Set up explicit compile definitions
-#add_compile_definitions($<$<CONFIG:Debug>:_DEBUG>)
-
 
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -151,21 +114,19 @@ endif()
 # Sanitizer configuration
 if(ENABLE_SANITIZER)
     message(STATUS "Enabling Thread Sanitizer")
-    # arbtrie target commented out — re-enable for psitri
-    # target_compile_options(arbtrie PUBLIC -fsanitize=thread -g)
-    # target_link_options(arbtrie PUBLIC -fsanitize=thread -g)
+    target_compile_options(psitri PUBLIC -fsanitize=thread -g)
+    target_link_options(psitri PUBLIC -fsanitize=thread -g)
 endif()
 
 # Coverage configuration
 if(ENABLE_COVERAGE)
     message(STATUS "Enabling coverage reporting")
 
-    # arbtrie target commented out — re-enable for psitri
-    # target_compile_options(arbtrie PUBLIC
-    #     $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
-    # target_link_options(arbtrie PUBLIC
-    #     $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
-    
+    target_compile_options(psitri PUBLIC
+        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
+    target_link_options(psitri PUBLIC
+        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+
     # Find required tools
     find_program(LCOV lcov REQUIRED)
     find_program(GENHTML genhtml REQUIRED)
@@ -203,9 +164,7 @@ if(ENABLE_COVERAGE)
         COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters
         
         # Run tests (continue even if they fail)
-        COMMAND ${CMAKE_BINARY_DIR}/bin/arbtrie-tests || true
-        COMMAND ${CMAKE_BINARY_DIR}/bin/arbt || true
-        COMMAND ${CMAKE_BINARY_DIR}/bin/arbtrie-benchmark || true
+        COMMAND ${CMAKE_BINARY_DIR}/bin/psitri-tests || true
         
         # Capture coverage data
         COMMAND ${LCOV} 
@@ -273,18 +232,6 @@ if(ENABLE_COVERAGE)
     )
 endif()
 
-# Platform-specific optimizations
-# if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(X86_64)|(amd64)|(AMD64)")
-#     if(NOT APPLE)
-#         target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
-#         target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-march=haswell -flto>)
-#     else()
-#         target_compile_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
-#         target_link_options(arbtrie PUBLIC $<$<CONFIG:Release>:-flto>)
-#     endif()
-# endif()
-
-
 # MDBX benchmark test (optional)
 option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
 if(BUILD_MDBX_TEST)
@@ -310,22 +257,8 @@ if(BUILD_MDBX_TEST)
     if(MDBX_INCLUDE_DIR AND MDBX_LIBRARY)
         message(STATUS "Found MDBX include: ${MDBX_INCLUDE_DIR}")
         message(STATUS "Found MDBX library: ${MDBX_LIBRARY}")
-        add_executable(lmdbx_arb_test test/lmdbx_arb_test.cpp)
-        target_include_directories(lmdbx_arb_test PUBLIC ${MDBX_INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
-        target_link_libraries(lmdbx_arb_test PRIVATE ${MDBX_LIBRARY} ${Boost_LIBRARIES} Threads::Threads)
-        if(WIN32)
-            # Add necessary libraries for Windows if mdbx requires them
-        elseif(APPLE)
-            # Add necessary libraries for macOS if mdbx requires them
-        else()
-            # Add necessary libraries for Linux (like pthread, rt if needed)
-             target_link_libraries(lmdbx_arb_test PRIVATE rt) # For clock_gettime if needed by boost/chrono?
-        endif()
 
-         # Install the test executable if needed
-         install(TARGETS lmdbx_arb_test RUNTIME DESTINATION bin)
-
-        # New standardized benchmark (mirrors psitri-benchmark)
+        # Standardized benchmark (mirrors psitri-benchmark)
         add_executable(mdbx-benchmark programs/mdbx_bench.cpp)
         target_compile_definitions(mdbx-benchmark PRIVATE XXH_INLINE_ALL)
         target_include_directories(mdbx-benchmark PRIVATE ${MDBX_INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
@@ -466,15 +399,3 @@ if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
-# Installation rules (optional)
-# install(TARGETS arbtrie
-#     LIBRARY DESTINATION lib
-#     ARCHIVE DESTINATION lib
-#     RUNTIME DESTINATION bin
-# )
-
-# install(DIRECTORY include/
-#     DESTINATION include
-# )
-
-# End of file - removing duplicate SAL options and includes

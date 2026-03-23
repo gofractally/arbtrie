@@ -1,56 +1,4 @@
-# ============================================================
-# Legacy arbtrie tests (disabled — arbtrie library target removed)
-# Kept as reference; re-enable when psitri replaces arbtrie.
-# ============================================================
-# add_executable(arbtrie-tests
-#     arbtrie-tests.cpp
-#     hierarchical_bitmap_tests.cpp
-#     padded_atomic_tests.cpp
-#     segment_meta_tests.cpp
-#     interprocess_mutex_tests.cpp
-#     seg_alloc_dump_tests.cpp
-#     cache_difficulty_state_tests.cpp
-#     mapped_memory_tests.cpp
-#     poly_buffer_test.cpp
-#     find_byte_tests.cpp
-# )
-# target_link_libraries(arbtrie-tests PUBLIC arbtrie Catch2::Catch2WithMain)
-# target_include_directories(arbtrie-tests PUBLIC
-#     ${Boost_INCLUDE_DIRS}
-#     $<TARGET_PROPERTY:Catch2::Catch2WithMain,INTERFACE_INCLUDE_DIRECTORIES>
-# )
-# set_target_properties(arbtrie-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-# add_test(NAME arbtrie-tests COMMAND arbtrie-tests)
-
-# add_executable(arbtrie-fuzz-tester arbtrie_fuzz_tester.cpp)
-# target_link_libraries(arbtrie-fuzz-tester PRIVATE arbtrie Catch2::Catch2WithMain)
-# target_include_directories(arbtrie-fuzz-tester PUBLIC
-#     ${Boost_INCLUDE_DIRS}
-#     $<TARGET_PROPERTY:Catch2::Catch2WithMain,INTERFACE_INCLUDE_DIRECTORIES>
-# )
-# target_compile_options(arbtrie-fuzz-tester PRIVATE $<$<CONFIG:Debug>:-O0 -g -UNDEBUG -fno-omit-frame-pointer>)
-# set_target_properties(arbtrie-fuzz-tester PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-# add_test(NAME arbtrie-fuzz-tester COMMAND arbtrie-fuzz-tester)
-
-# add_executable(arbtrie-last-test arbtrie_last_test.cpp)
-# target_link_libraries(arbtrie-last-test PRIVATE arbtrie Catch2::Catch2WithMain)
-
-# add_executable(arbtrie-last-debug arbtrie_last_debug.cpp)
-# target_link_libraries(arbtrie-last-debug PRIVATE arbtrie Catch2::Catch2WithMain)
-
-# add_executable(min_index_test min_index_test.cpp)
-# target_link_libraries(min_index_test PUBLIC arbtrie Catch2::Catch2WithMain)
-# set_target_properties(min_index_test PROPERTIES
-#     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-#     OUTPUT_NAME "min_index_test"
-# )
-# add_test(NAME min_index_test COMMAND min_index_test)
-
-# ============================================================
-# Active tests
-# ============================================================
-
-# sim_db test (no arbtrie dependency)
+# sim_db test
 add_executable(sim-db-test sim_db_test.cpp)
 target_link_libraries(sim-db-test PRIVATE Catch2::Catch2WithMain)
 target_include_directories(sim-db-test
@@ -100,9 +48,7 @@ target_include_directories(init-replace-branch-test
 target_compile_definitions(init-replace-branch-test PUBLIC XXH_INLINE_ALL)
 set_target_properties(init-replace-branch-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# ============================================================
-# Sanitizer / coverage settings for active targets
-# ============================================================
+# Sanitizer / coverage settings
 if(ENABLE_SANITIZER)
     target_compile_options(psitri-tests PUBLIC -fsanitize=thread -g)
     target_link_options(psitri-tests PUBLIC -fsanitize=thread -g)
@@ -119,9 +65,7 @@ if(ENABLE_COVERAGE)
     target_link_options(sim-db-test PUBLIC --coverage)
 endif()
 
-# ============================================================
-# Benchmarks (no arbtrie dependency)
-# ============================================================
+# Benchmarks
 add_executable(min_index_benchmark min_index_benchmark.cpp)
 add_executable(min_index_32_benchmark min_index_32_benchmark.cpp)
 add_executable(min_index_combined_benchmark min_index_combined_benchmark.cpp)
@@ -148,7 +92,7 @@ target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
 
 add_subdirectory(min_index)
 
-# SQLite benchmark test (no arbtrie dependency)
+# SQLite benchmark test
 add_executable(sqlite-arb-test sqlite_arb_test.cpp)
 target_link_libraries(sqlite-arb-test
     PRIVATE
