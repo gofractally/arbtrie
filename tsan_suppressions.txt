@@ -1,13 +1,28 @@
-# ThreadSanitizer Suppressions for arbtrie
+# ThreadSanitizer Suppressions for arbtrie/psitri
 #
+# Usage: TSAN_OPTIONS="suppressions=tsan_suppressions.txt" ./bin/psitri-tests
+#
+# Each suppression must have a clear justification. Suppressions are reviewed
+# periodically — if the underlying code changes, re-evaluate.
 
 
-# Suppress known benign data races on std::cerr
+# ── Logging races (libc++ iostream internals) ─────────────────────────────
+#
+# SAL_WARN/SAL_INFO macros write to std::cerr from multiple threads without
+# synchronization. The C++ standard (§30.4.1) explicitly states that
+# concurrent access to a stream object may result in a data race — these
+# are races *inside libc++* formatting state (ios_base::width, fill, etc.),
+# not in our code. The observable effect is garbled log output, never
+# program state corruption. Adding a mutex around every log call would
+# defeat the purpose of low-overhead diagnostic logging.
+#
+# Alternative: replace SAL_WARN with a thread-safe logger (e.g., one that
+# formats into a thread-local buffer and writes atomically). Until then,
+# these suppressions are necessary for clean TSAN runs.
+#
+race:std::__1::ios_base
+race:std::__1::basic_ios
+race:std::__1::ostream
+race:std::__1::basic_ostream
 race:std::__1::cerr
 race:*libc++.1.dylib*
-race:std::__1::basic_ostream<char, std::__1::char_traits<char> >
-race:std::__1::ostream
-race:std::__1::ios_base
-race:std::__1::basic_ios<char, std::__1::char_traits<char> > 
-
-

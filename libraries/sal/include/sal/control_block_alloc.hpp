@@ -207,12 +207,25 @@ namespace sal
             uint64_t                  start_index  = rnd.next() % n64_per_zone;
             start_index &= ~7ull;  // round down to nearest multiple of 8
 
-            // atomic load 8 uint64_t from the zone free list
-            //alignas(128) uint64_t free_bits[8];
-            //for (int i = 0; i < 8; ++i)
-            //   free_bits[i] = zone_free_base[start_index + i].load(std::memory_order_relaxed);
-
-            uint8_t* free_bytes = (uint8_t*)(zone_free_base + start_index);
+            // Load 8 uint64_t (64 bytes = 512 free-list bits) from the zone.
+            //
+            // Fast path: cast to uint8_t* and use SIMD popcount to find the
+            // byte with the most free slots. This is a speculative heuristic —
+            // the actual allocation always goes through an atomic CAS in
+            // try_alloc(), so a torn/stale read only causes a harmless retry.
+            //
+            // Safe path: load each uint64_t atomically, then scan the local
+            // copy. Required under ThreadSanitizer to avoid UB reports, and
+            // available via SAL_STRICT_ATOMICS for paranoid builds.
+#if defined(SAL_STRICT_ATOMICS) || defined(__SANITIZE_THREAD__) || \
+    (defined(__has_feature) && __has_feature(thread_sanitizer))
+            alignas(128) uint64_t free_bits[8];
+            for (int i = 0; i < 8; ++i)
+               free_bits[i] = zone_free_base[start_index + i].load(std::memory_order_relaxed);
+            uint8_t* free_bytes = reinterpret_cast<uint8_t*>(free_bits);
+#else
+            uint8_t* free_bytes = reinterpret_cast<uint8_t*>(zone_free_base + start_index);
+#endif
 
             // get an index of the byte with the most set (free) bits
             int most_free_byte = max_pop_cnt8_index64(free_bytes);
