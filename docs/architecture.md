@@ -1,6 +1,6 @@
-# Arbtrie Architecture & Design
+# PsiTrie Architecture & Design
 
-This document provides a comprehensive technical reference for the arbtrie project: a persistent, transactional key-value store built on an adaptive radix trie. It is intended to bring developers (human or AI) up to speed quickly and guide future development.
+This document provides a comprehensive technical reference for the psitrie project: a persistent, transactional key-value store built on an adaptive radix trie. It is intended to bring developers (human or AI) up to speed quickly and guide future development.
 
 ## Table of Contents
 
@@ -19,7 +19,7 @@ This document provides a comprehensive technical reference for the arbtrie proje
 
 ## Project Overview
 
-Arbtrie is a persistent, ACID-compliant key-value store that uses an adaptive radix trie as its core data structure. It is designed for:
+PsiTrie is a persistent, ACID-compliant key-value store that uses an adaptive radix trie as its core data structure. It is designed for:
 
 - **High write throughput**: 1-3.7M inserts/sec (persistent, single-threaded)
 - **Low read latency**: O(key_length) lookups with max depth ~5 for 30M keys

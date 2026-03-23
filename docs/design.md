@@ -1,6 +1,6 @@
-# Arbtrie: A New Design Point in Database Engineering
+# PsiTrie: A New Design Point in Database Engineering
 
-Arbtrie is a persistent, transactional key-value store that combines ideas from radix tries, B-trees, garbage collectors, and proof-of-work mining into a system that is fundamentally different from existing databases. This document explains what makes it unique and why those differences matter.
+PsiTrie is a persistent, transactional key-value store that combines ideas from radix tries, B-trees, garbage collectors, and proof-of-work mining into a system that is fundamentally different from existing databases. This document explains what makes it unique and why those differences matter.
 
 ## The Problem with Existing Approaches
 
@@ -10,7 +10,7 @@ Every persistent key-value store makes the same set of tradeoffs:
 - **LSM trees** (RocksDB, LevelDB, Cassandra) batch writes for throughput but pay for it with read amplification, compaction stalls, and space amplification from tombstones.
 - **Adaptive radix tries** (ART) achieve optimal depth and cache-line efficiency, but only in memory. No persistent ART implementation exists that matches B-tree durability.
 
-Arbtrie eliminates these tradeoffs by combining three novel subsystems:
+PsiTrie eliminates these tradeoffs by combining three novel subsystems:
 
 1. **A persistent radix trie with batched leaves and 67-byte copy-on-write**
 2. **A relocatable object allocator with lock-free O(1) compaction moves**
@@ -24,28 +24,28 @@ Arbtrie eliminates these tradeoffs by combining three novel subsystems:
 
 Copy-on-write (COW) is the foundation of MVCC, snapshot isolation, and crash safety. But in every existing COW database, the unit of copying is a **page** — 4KB to 16KB of data. When you change one key, you copy 4KB at every level of the tree. For a 4-level B-tree, that's 16KB of writes for a single byte change.
 
-Arbtrie's inner nodes average **67 bytes**. Copy-on-write copies 67 bytes per level, not 4KB. For a 5-level trie, a single mutation writes ~335 bytes total — roughly **60x less** than a page-level COW B-tree.
+PsiTrie's inner nodes average **67 bytes**. Copy-on-write copies 67 bytes per level, not 4KB. For a 5-level trie, a single mutation writes ~335 bytes total — roughly **60x less** than a page-level COW B-tree.
 
 This is made possible by a novel encoding:
 
 ### Cacheline-Shared Branch Encoding
 
-In a traditional tree, each child pointer is an 8-byte address. An inner node with 16 children costs 128 bytes in pointers alone. Arbtrie observes that sibling nodes are typically allocated near each other — within the same 64-byte cacheline. So instead of storing 16 separate 8-byte addresses, it stores up to 16 **cacheline base addresses** (8 bytes each) and encodes each branch as a **1-byte index** (4 bits for which cacheline, 4 bits for which slot within that cacheline).
+In a traditional tree, each child pointer is an 8-byte address. An inner node with 16 children costs 128 bytes in pointers alone. PsiTrie observes that sibling nodes are typically allocated near each other — within the same 64-byte cacheline. So instead of storing 16 separate 8-byte addresses, it stores up to 16 **cacheline base addresses** (8 bytes each) and encodes each branch as a **1-byte index** (4 bits for which cacheline, 4 bits for which slot within that cacheline).
 
 ```
 Traditional:  16 branches × 8 bytes = 128 bytes of pointers
-Arbtrie:      4 cachelines × 8 bytes + 16 branches × 1 byte = 48 bytes
+PsiTrie:      4 cachelines × 8 bytes + 16 branches × 1 byte = 48 bytes
 ```
 
 This encoding supports up to 256 branches (16 cachelines × 16 slots) in a node that fits in 1-2 cache lines. The result: inner nodes averaging 67 bytes with 8-9 branches each, achieving B-tree-class fan-out in trie-class space.
 
 ### Batched Leaves: Trie Routing, B-tree Density
 
-Pure radix tries store one key per leaf. This creates millions of leaf nodes for millions of keys, each with per-node overhead. Arbtrie's leaf nodes pack up to **512 keys** using sorted binary search with hash-accelerated filtering. In practice, leaves hold ~58 keys each.
+Pure radix tries store one key per leaf. This creates millions of leaf nodes for millions of keys, each with per-node overhead. PsiTrie's leaf nodes pack up to **512 keys** using sorted binary search with hash-accelerated filtering. In practice, leaves hold ~58 keys each.
 
 The trie provides O(key_length) routing to the correct leaf. The leaf provides B-tree-class data density. You get the depth advantages of a trie (5 levels for 30M keys) with the storage efficiency of a B-tree.
 
-| Metric | B-tree (LMDB) | Pure ART | Arbtrie |
+| Metric | B-tree (LMDB) | Pure ART | PsiTrie |
 |--------|--------------|----------|---------|
 | COW unit | 4KB page | N/A (in-memory) | 67 bytes |
 | Leaf keys | 50-200 per page | 1 | ~58 per node |
@@ -118,7 +118,7 @@ Most databases delegate caching to the OS page cache (via mmap) or manage a fixe
 - **OS page cache**: Uses LRU (recency), not frequency. A full table scan evicts your entire hot working set. Operates at 4KB page granularity — one hot object pins an entire page of cold neighbors.
 - **Buffer pools**: Fixed size, page granularity, require manual tuning. PostgreSQL's `shared_buffers`, MySQL's `innodb_buffer_pool_size` — get the number wrong and performance degrades.
 
-Arbtrie does something different: it **physically relocates individual objects** between RAM-guaranteed (mlocked) segments and pageable segments based on observed access frequency. Over time, the physical layout of the database file converges to match the actual workload.
+PsiTrie does something different: it **physically relocates individual objects** between RAM-guaranteed (mlocked) segments and pageable segments based on observed access frequency. Over time, the physical layout of the database file converges to match the actual workload.
 
 ### Object-Granularity MFU Tracking in 2 Bits
 
@@ -201,7 +201,7 @@ Most databases must scan every key in the range to count them. A `SELECT COUNT(*
 
 Deleting 900,000 out of 1,000,000 keys visits only O(log n) nodes along the two boundary paths. The interior of the range is never touched.
 
-| Operation | B-tree | LSM-tree | Arbtrie |
+| Operation | B-tree | LSM-tree | PsiTrie |
 |-----------|--------|----------|---------|
 | Count keys in range | O(k) scan | O(k) scan + tombstones | **O(log n)** |
 | Delete range | O(k) deletes | O(k) tombstones | **O(log n)** |
@@ -252,7 +252,7 @@ What if a tree node could store another tree as its value?
 
 ### Subtrees as Values
 
-Arbtrie allows any key's value to be **a pointer to another tree root**. A leaf node entry can hold either inline data (up to 64 bytes), a reference to a value_node (larger data), or a **subtree reference** — a pointer to an independent trie that is a fully functional tree in its own right.
+PsiTrie allows any key's value to be **a pointer to another tree root**. A leaf node entry can hold either inline data (up to 64 bytes), a reference to a value_node (larger data), or a **subtree reference** — a pointer to an independent trie that is a fully functional tree in its own right.
 
 This creates composable, hierarchical data structures:
 
@@ -283,7 +283,7 @@ Because subtree roots participate in the same reference-counting and `visit_bran
 
 ### Why This Matters
 
-| Capability | RDBMS | Document DB | KV Store | Arbtrie |
+| Capability | RDBMS | Document DB | KV Store | PsiTrie |
 |-----------|-------|-------------|----------|---------|
 | Hierarchical data | Flattened + joins | Embedded blobs | Key-prefix encoding | Native subtrees |
 | Atomic subtree operations | Requires transactions | Replace entire document | Not possible | O(1) root pointer swap |
@@ -300,9 +300,9 @@ Subtrees enable patterns that are impossible or prohibitively expensive in other
 
 ## Summary: A New Design Point
 
-Arbtrie occupies a region of the design space that was previously empty:
+PsiTrie occupies a region of the design space that was previously empty:
 
-| Capability | B-tree | LSM-tree | In-memory ART | Arbtrie |
+| Capability | B-tree | LSM-tree | In-memory ART | PsiTrie |
 |-----------|--------|----------|---------------|---------|
 | Persistent + crash-safe | Yes | Yes | No | Yes |
 | COW granularity | 4KB page | N/A | N/A | 67 bytes |
