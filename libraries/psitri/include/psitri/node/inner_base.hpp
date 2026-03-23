@@ -110,6 +110,13 @@ namespace psitri
          d._num_cline    = ftab.compressed_clines();
 
          auto nth_set_bit_table = create_nth_set_bit_table(ftab.freq_table);
+         // The NEON SIMD write can trash up to 15 bytes before branches(), which
+         // for inner_prefix_node includes _prefix_cap. Save it so we can restore
+         // it after — divisions() depends on _prefix_cap for its pointer math.
+         [[maybe_unused]] uint16_t saved_prefix_cap = 0;
+         if constexpr (is_inner_prefix_node<Derived>)
+            saved_prefix_cap = d._prefix_cap;
+
          // note that this method is allowed to write to data up to 15 bytes before branches() as part of
          // the branchless SIMD implementation that processes 16 bytes at a time. This is fine, we just have to reset the
          // header information that may have been overwritten.
@@ -121,6 +128,8 @@ namespace psitri
          d._num_branches = *range.end - *range.begin;
          d._num_cline    = ftab.compressed_clines();
          d._descendents  = descendents;
+         if constexpr (is_inner_prefix_node<Derived>)
+            d._prefix_cap = saved_prefix_cap;
 
          copy_masked_cline_data(ftab.clines_referenced, clone->clines(), d.clines());
 

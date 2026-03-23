@@ -1037,6 +1037,20 @@ namespace psitri
       if constexpr (mode.is_shared())
          retain_children(in);  // all children have been copied to new node, retain them
 
+      // In unique_remove, if this is the last branch, pre-retain it so
+      // the dispatcher's release (if child becomes empty) decrements from
+      // 2→1 instead of 1→0.  Without this, final_release can free the
+      // control block before we get a chance to retain it, corrupting memory.
+      bool pre_retained_last_branch = false;
+      if constexpr (mode.is_unique() && mode.is_remove())
+      {
+         if (in->num_branches() == 1)
+         {
+            _session.retain(badr);
+            pre_retained_last_branch = true;
+         }
+      }
+
       // recursive upsert, give it this nodes clines as the parent hint
       branch_set sub_branches = upsert<mode>(in->get_branch_clines(), bref, key);
       //SAL_INFO("in after updating branch '{}' address {} ptr: {}", br, badr, in.obj());
@@ -1047,9 +1061,8 @@ namespace psitri
          {
             if (in->num_branches() == 1)
             {
-               if constexpr (mode.is_unique())
-                  _session.retain(badr);  // child already released by dispatch; retain so
-                                          // parent's destroy() release balances correctly
+               // badr was pre-retained above; in's destructor will release it,
+               // balancing the dispatcher's release.
                return {};  // cascade empty to parent — dispatch releases this node
             }
 
@@ -1321,6 +1334,11 @@ namespace psitri
             std::unreachable();
          }
       }
+
+      // Undo pre-retain: child didn't become empty, so the dispatcher
+      // didn't release badr; drop the extra reference we added.
+      if (pre_retained_last_branch)
+         _session.release(badr);
 
       // the happy path where there is nothing to do.
       if constexpr (mode.is_unique() or mode.is_remove())
