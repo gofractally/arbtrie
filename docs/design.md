@@ -30,14 +30,20 @@ This is made possible by a novel encoding:
 
 ### Cacheline-Shared Branch Encoding
 
-In a traditional tree, each child pointer is an 8-byte address. An inner node with 16 children costs 128 bytes in pointers alone. PsiTrie observes that sibling nodes are typically allocated near each other — within the same 64-byte cacheline. So instead of storing 16 separate 8-byte addresses, it stores up to 16 **cacheline base addresses** (8 bytes each) and encodes each branch as a **1-byte index** (4 bits for which cacheline, 4 bits for which slot within that cacheline).
+Every persistent data structure that uses indirection (control blocks, page tables, object headers) pays for it in **cache line loads**. When a tree node has 64 children, dereferencing their control blocks touches 64 separate cache lines — each requiring a separate memory fetch. On modern hardware, each cache line load transfers 64-128 bytes from DRAM. For a single inner node traversal, that's 4-16 KB of memory bandwidth consumed just to read reference counts and locations, most of which is wasted padding around the 8 bytes you actually need.
+
+PsiTrie solves this by **engineering the allocator to co-locate sibling nodes within shared cache lines**. This is not an observation about natural locality — it is a deliberate allocation strategy. When a node splits or children are allocated, the allocator receives **hints** (the parent's existing cacheline addresses) and preferentially places new objects adjacent to their siblings in the control block array. The result: siblings that share control block cache lines.
+
+The inner node encoding exploits this guarantee. Instead of storing N separate 8-byte addresses, it stores up to 16 **cacheline base addresses** (8 bytes each) and encodes each branch as a **1-byte index** (4 bits selecting which cacheline, 4 bits selecting which slot within that cacheline):
 
 ```
-Traditional:  16 branches × 8 bytes = 128 bytes of pointers
-PsiTrie:      4 cachelines × 8 bytes + 16 branches × 1 byte = 48 bytes
+Traditional:  16 branches × 8 bytes = 128 bytes of pointers, 16 cache line loads
+PsiTrie:      4 cachelines × 8 bytes + 16 branches × 1 byte = 48 bytes, 4 cache line loads
 ```
 
-This encoding supports up to 256 branches (16 cachelines × 16 slots) in a node that fits in 1-2 cache lines. The result: inner nodes averaging 67 bytes with 8-9 branches each, achieving B-tree-class fan-out in trie-class space.
+The space savings (48 bytes vs 128 bytes) enables compact inner nodes, but the real win is in **memory bandwidth**: dereferencing 16 children now loads 4 cache lines instead of 16. For nodes with 64-256 children, the reduction is even more dramatic — touching 4-16 cache lines instead of 64-256. Every retain, release, and location lookup on those children benefits from the cache lines already being hot.
+
+This encoding supports up to 256 branches (16 cachelines × 16 slots) in a node that fits in 1-2 cache lines. The result: inner nodes averaging 67 bytes with 8-9 branches each, achieving B-tree-class fan-out in trie-class space with minimal cache pressure.
 
 ### Batched Leaves: Trie Routing, B-tree Density
 
@@ -316,7 +322,7 @@ PsiTrie occupies a region of the design space that was previously empty:
 
 The key innovations that make this possible:
 
-1. **Cacheline-shared branch encoding** compresses 8-byte pointers into 1-byte references, enabling 67-byte inner nodes with B-tree-class fan-out
+1. **Engineered sibling co-location with cacheline-shared branch encoding** — the allocator deliberately places sibling control blocks in shared cache lines, reducing memory bandwidth by 4-16x per inner node traversal while compressing 8-byte pointers into 1-byte references
 2. **Control block indirection** makes every object relocatable via a single atomic CAS, enabling continuous online compaction without pointer updates or GC pauses
 3. **Bitcoin-inspired difficulty adjustment** self-tunes cache promotion rates to available RAM and workload, with 2-bit per-object tracking at zero space overhead
 4. **Subtree descendant tracking** enables O(log n) range counting and O(log n) range deletion with O(1) deferred subtree release
