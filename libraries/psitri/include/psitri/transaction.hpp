@@ -34,7 +34,11 @@ namespace psitri
       bool insert(key_view key, value_view value) { return _cursor->insert(key, value); }
       bool update(key_view key, value_view value) { return _cursor->update(key, value); }
       void upsert(key_view key, value_view value) { _cursor->upsert(key, value); }
-      int  remove(key_view key) { return _cursor->remove(key); }
+      int      remove(key_view key) { return _cursor->remove(key); }
+      uint64_t remove_range(key_view lower, key_view upper)
+      {
+         return _cursor->remove_range(lower, upper);
+      }
 
       // -- Read access --
 

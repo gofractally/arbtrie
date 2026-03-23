@@ -385,18 +385,13 @@ namespace psitri
 
       if (survivors == 0)
       {
-         // Release middle branches in unique mode
-         if constexpr (mode.is_unique())
-         {
-            for (uint16_t i = *start + 1; i < *end; ++i)
-               _session.release(node->get_branch(branch_number(i)));
-            if (!start_empty && start_addr != sal::null_ptr_address)
-               ;  // already released by recursive call
-            if (start_empty && !range.lower_bound.empty())
-               ;  // released by recursive call
-            else if (start_empty && range.lower_bound.empty())
-               _session.release(start_addr);
-         }
+         // Release middle branches (balance retain in shared mode, release ownership in unique mode)
+         for (uint16_t i = *start + 1; i < *end; ++i)
+            _session.release(node->get_branch(branch_number(i)));
+         // Release start only if NOT recursed into (unbounded lower = fully contained)
+         // If recursed into, the dispatch already released it.
+         if (start_empty && range.lower_bound.empty())
+            _session.release(start_addr);
          return {};
       }
 
@@ -493,23 +488,18 @@ namespace psitri
       }
       else  // shared mode
       {
-         // In shared mode, retain_children was already called.
-         // Release middle branches (balancing the retain)
+         // In shared mode, retain_children was already called (+1 to all children).
+         // Release middle branches (not recursed into — balance the retain)
          for (uint16_t i = *start + 1; i < *end; ++i)
             _session.release(node->get_branch(branch_number(i)));
 
-         // Release start branch if fully removed (balancing retain)
-         if (start_empty)
+         // Release start only if NOT recursed into (unbounded lower = fully contained).
+         // If recursed into, the dispatch in range_remove() already released the old
+         // ref (via ref.release()), which balances the retain.
+         if (start_empty && range.lower_bound.empty())
             _session.release(start_addr);
-         // Release boundary branch if fully removed (balancing retain)
-         if (boundary_empty && has_boundary)
-            _session.release(boundary_addr);
-
-         // Release old start/boundary addrs if they changed (balance retain)
-         if (!start_empty && start_changed)
-            _session.release(start_addr);
-         if (!boundary_empty && has_boundary && boundary_changed)
-            _session.release(boundary_addr);
+         // Note: boundary is always recursed into when has_boundary, so dispatch handles it.
+         // Do NOT explicitly release start/boundary that were recursed into — that would double-release.
 
          // Determine contiguous remove range
          uint16_t remove_lo = start_empty ? *start : *start + 1;
@@ -565,13 +555,31 @@ namespace psitri
                return node.address();
             }
 
-            // Build replacement: use merge_branches for the changed branches
+            // Build replacement: use merge_branches for the changed branches.
+            // When both start and boundary changed, we need two sequential merges.
+            if (start_changed && boundary_changed)
+            {
+               // First merge: replace start branch
+               branch_set ssub(new_start_addr);
+               _delta_descendents = 0;  // merge_branches uses _delta_descendents
+               auto after_start = merge_branches<mode.make_shared_or_unique_only()>(
+                   parent_hint, node, start, ssub);
+               // after_start is a new node. Replace boundary in it.
+               // merge_branches in shared mode allocates a new node, so we get a smart_ref to it.
+               if (after_start.count() == 1)
+               {
+                  auto after_ref = _session.template get_ref<NodeT>(after_start.get_first_branch());
+                  branch_set bsub(new_boundary_addr);
+                  _delta_descendents = total_delta;  // apply the full delta on the second merge
+                  return merge_branches<upsert_mode::unique>(parent_hint, after_ref, boundary, bsub);
+               }
+               // If split occurred (unlikely for a replacement), just return what we have
+               return after_start;
+            }
             if (start_changed)
             {
                branch_set ssub(new_start_addr);
-               auto result = merge_branches<mode.make_shared_or_unique_only()>(parent_hint, node, start, ssub);
-               // If boundary also changed, we'd need another merge, but for now handle the simple case
-               return result;
+               return merge_branches<mode.make_shared_or_unique_only()>(parent_hint, node, start, ssub);
             }
             if (boundary_changed)
             {

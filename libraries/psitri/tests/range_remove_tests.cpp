@@ -440,3 +440,167 @@ TEST_CASE("range_remove brute-force validation", "[range_remove]")
       }
    }
 }
+
+TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
+{
+   test_db t;
+   auto    cur = t.ses->create_write_cursor();
+
+   // Load a large dataset — synthetic dictionary-like words
+   const int                N = 10000 / SCALE;
+   std::vector<std::string> keys;
+   keys.reserve(N);
+   std::mt19937 rng(77777);
+
+   // Generate realistic variable-length keys with shared prefixes
+   const char* prefixes[] = {"account_", "balance_", "config_", "data_",  "event_",
+                             "file_",    "group_",   "hash_",   "index_", "job_",
+                             "key_",     "log_",     "meta_",   "node_",  "order_",
+                             "payment_", "query_",   "record_", "state_", "token_",
+                             "user_",    "value_",   "work_",   "xact_",  "zone_"};
+   constexpr int num_prefixes = sizeof(prefixes) / sizeof(prefixes[0]);
+
+   for (int i = 0; i < N; ++i)
+   {
+      std::string key = prefixes[rng() % num_prefixes];
+      int         suffix_len = 4 + (rng() % 12);
+      for (int j = 0; j < suffix_len; ++j)
+         key.push_back('a' + (rng() % 26));
+      keys.push_back(key);
+   }
+
+   // Deduplicate and sort
+   std::sort(keys.begin(), keys.end());
+   keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+   int total = keys.size();
+
+   // Shuffle for insertion to get varied tree structure
+   auto shuffled = keys;
+   std::shuffle(shuffled.begin(), shuffled.end(), rng);
+   for (auto& k : shuffled)
+      cur->insert(to_key_view(k), to_value("v"));
+
+   REQUIRE(cur->count_keys() == total);
+
+   SECTION("remove large contiguous range from middle")
+   {
+      // Remove ~50% of keys from the middle
+      int lo_idx = total / 4;
+      int hi_idx = 3 * total / 4;
+
+      auto     lo       = keys[lo_idx];
+      auto     hi       = keys[hi_idx];
+      uint64_t expected = cur->count_keys(lo, hi);
+      REQUIRE(expected > 500 / SCALE);  // sanity: should be a big range
+
+      uint64_t removed = cur->remove_range(lo, hi);
+      REQUIRE(removed == expected);
+      REQUIRE(cur->count_keys() == total - expected);
+
+      // Validate remaining keys
+      auto                    rc     = cur->read_cursor();
+      auto                    actual = collect_keys(rc);
+      std::vector<std::string> expected_remaining;
+      for (auto& k : keys)
+         if (k < lo || k >= hi)
+            expected_remaining.push_back(k);
+
+      REQUIRE(actual.size() == expected_remaining.size());
+      for (size_t i = 0; i < actual.size(); ++i)
+      {
+         INFO("i=" << i);
+         REQUIRE(actual[i] == expected_remaining[i]);
+      }
+      cur->validate();
+   }
+
+   SECTION("multiple large range removes")
+   {
+      std::vector<std::string> remaining = keys;
+      const int                num_removes = 5;
+
+      for (int trial = 0; trial < num_removes && remaining.size() > 100; ++trial)
+      {
+         // Pick a random range spanning ~20% of remaining keys
+         int range_size = remaining.size() / 5;
+         int lo_idx     = rng() % (remaining.size() - range_size);
+         int hi_idx     = lo_idx + range_size;
+
+         std::string lo = remaining[lo_idx];
+         std::string hi = remaining[hi_idx];
+
+         uint64_t counted = cur->count_keys(lo, hi);
+         uint64_t removed = cur->remove_range(lo, hi);
+         INFO("trial=" << trial << " lo=" << lo << " hi=" << hi);
+         REQUIRE(removed == counted);
+
+         // Update expected remaining
+         remaining.erase(
+             std::remove_if(remaining.begin(), remaining.end(),
+                            [&](const std::string& k) { return k >= lo && k < hi; }),
+             remaining.end());
+
+         REQUIRE(cur->count_keys() == remaining.size());
+         cur->validate();
+      }
+
+      // Final full validation
+      auto rc     = cur->read_cursor();
+      auto actual = collect_keys(rc);
+      REQUIRE(actual.size() == remaining.size());
+      for (size_t i = 0; i < actual.size(); ++i)
+      {
+         INFO("i=" << i);
+         REQUIRE(actual[i] == remaining[i]);
+      }
+   }
+
+   SECTION("remove entire prefix group")
+   {
+      // Remove all keys starting with "user_"
+      uint64_t counted = cur->count_keys("user_", "user_~");
+      uint64_t removed = cur->remove_range("user_", "user_~");
+      REQUIRE(removed == counted);
+      REQUIRE(removed > 0);
+
+      // Verify no "user_" keys remain
+      auto rc     = cur->read_cursor();
+      auto actual = collect_keys(rc);
+      for (auto& k : actual)
+      {
+         INFO("key=" << k);
+         REQUIRE(k.substr(0, 5) != "user_");
+      }
+      REQUIRE(cur->count_keys() == total - removed);
+      cur->validate();
+   }
+
+   SECTION("remove everything")
+   {
+      uint64_t removed = cur->remove_range("", max_key);
+      REQUIRE(removed == total);
+      REQUIRE(cur->count_keys() == 0);
+   }
+
+   SECTION("remove from beginning")
+   {
+      // Remove first ~30% of keys
+      int      hi_idx  = total * 3 / 10;
+      auto     hi      = keys[hi_idx];
+      uint64_t removed = cur->remove_range("", hi);
+      REQUIRE(removed == (uint64_t)hi_idx);
+      REQUIRE(cur->count_keys() == total - hi_idx);
+      cur->validate();
+   }
+
+   SECTION("remove from end")
+   {
+      // Remove last ~30% of keys
+      int      lo_idx  = total * 7 / 10;
+      auto     lo      = keys[lo_idx];
+      uint64_t removed = cur->remove_range(lo, max_key);
+      REQUIRE(removed == (uint64_t)(total - lo_idx));
+      REQUIRE(cur->count_keys() == lo_idx);
+      cur->validate();
+   }
+}

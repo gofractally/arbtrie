@@ -1408,3 +1408,196 @@ TEST_CASE("leak: interleaved insert/remove in same tx - no orphans",
    }
    require_empty_no_leaks(t, "after final remove-all");
 }
+
+// ============================================================
+// Range-remove leak detection tests
+// ============================================================
+
+TEST_CASE("leak: range_remove all keys leaves zero allocated",
+          "[public-api][range_remove][leak]")
+{
+   test_db t;
+   const int N = 2000 / SCALE;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after insert");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("", max_key);
+      REQUIRE(removed == N);
+      tx.commit();
+   }
+   require_empty_no_leaks(t, "after range_remove all");
+}
+
+TEST_CASE("leak: range_remove subset leaves no orphans",
+          "[public-api][range_remove][leak]")
+{
+   test_db t;
+   const int N = 2000 / SCALE;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after insert");
+
+   // Remove middle third
+   char lo_buf[64], hi_buf[64];
+   snprintf(lo_buf, sizeof(lo_buf), "key%06d", N / 3);
+   snprintf(hi_buf, sizeof(hi_buf), "key%06d", 2 * N / 3);
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range(lo_buf, hi_buf);
+      REQUIRE(removed > 0);
+      tx.commit();
+   }
+   require_no_orphans(t, "after range_remove middle third");
+
+   // Remove the rest
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("", max_key);
+      tx.commit();
+   }
+   require_empty_no_leaks(t, "after range_remove everything remaining");
+}
+
+TEST_CASE("leak: range_remove subset scaling diagnosis",
+          "[public-api][range_remove][leak][diag_rr]")
+{
+   for (int N : {10, 50, 100, 200, 300, 400, 500, 1000 / SCALE})
+   {
+      test_db t("diag_rr_testdb");
+      insert_keys(t, N);
+      wait_for_compactor(t);
+
+      uint64_t reachable_before = reachable_nodes(t);
+      uint64_t allocated_before = t.ses->get_total_allocated_objects();
+      WARN("N=" << N << " before: reachable=" << reachable_before
+                << " allocated=" << allocated_before);
+
+      // Remove middle third via transaction (forces shared mode)
+      char lo_buf[64], hi_buf[64];
+      snprintf(lo_buf, sizeof(lo_buf), "key%06d", N / 3);
+      snprintf(hi_buf, sizeof(hi_buf), "key%06d", 2 * N / 3);
+
+      {
+         auto tx = t.ses->start_transaction(0);
+         uint64_t removed = tx.remove_range(lo_buf, hi_buf);
+         WARN("N=" << N << " removed=" << removed);
+         tx.commit();
+      }
+      wait_for_compactor(t);
+
+      uint64_t reachable_after = reachable_nodes(t);
+      uint64_t allocated_after = t.ses->get_total_allocated_objects();
+      WARN("N=" << N << " after: reachable=" << reachable_after
+                << " allocated=" << allocated_after
+                << " diff=" << (int64_t)(reachable_after - allocated_after));
+
+      CHECK(reachable_after == allocated_after);
+   }
+}
+
+TEST_CASE("leak: range_remove with large values leaves no orphans",
+          "[public-api][range_remove][leak]")
+{
+   test_db t;
+   const int N = 500 / SCALE;
+   std::string big_val(300, 'X');  // forces value_node allocation
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char key[64];
+         snprintf(key, sizeof(key), "key%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(big_val));
+      }
+      tx.commit();
+   }
+   require_no_orphans(t, "after insert large values");
+
+   // Range-remove half
+   char hi_buf[64];
+   snprintf(hi_buf, sizeof(hi_buf), "key%06d", N / 2);
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("", hi_buf);
+      tx.commit();
+   }
+   require_no_orphans(t, "after range_remove half with large values");
+
+   // Remove the rest
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("", max_key);
+      tx.commit();
+   }
+   require_empty_no_leaks(t, "after range_remove all with large values");
+}
+
+TEST_CASE("leak: repeated range_remove cycles leave zero allocated",
+          "[public-api][range_remove][leak]")
+{
+   test_db t;
+   const int N = 1000 / SCALE;
+
+   for (int cycle = 0; cycle < 3; ++cycle)
+   {
+      INFO("cycle " << cycle);
+      insert_keys(t, N);
+      require_no_orphans(t, "after insert");
+
+      // Remove everything via range
+      {
+         auto tx = t.ses->start_transaction(0);
+         tx.remove_range("", max_key);
+         tx.commit();
+      }
+      require_empty_no_leaks(t, "after range_remove all");
+   }
+}
+
+TEST_CASE("leak: interleaved insert and range_remove - no orphans",
+          "[public-api][range_remove][leak]")
+{
+   test_db t;
+   const int N = 1000 / SCALE;
+
+   insert_keys(t, N);
+   require_no_orphans(t, "after initial insert");
+
+   // Range-remove first half
+   char mid_buf[64];
+   snprintf(mid_buf, sizeof(mid_buf), "key%06d", N / 2);
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("", mid_buf);
+      tx.commit();
+   }
+   require_no_orphans(t, "after range_remove first half");
+
+   // Insert new keys in the removed range
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N / 2; ++i)
+      {
+         char key[64], val[64];
+         snprintf(key, sizeof(key), "new_%06d", i);
+         snprintf(val, sizeof(val), "val_%06d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value_view(std::string(val)));
+      }
+      tx.commit();
+   }
+   require_no_orphans(t, "after re-insert into removed range");
+
+   // Remove everything
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("", max_key);
+      tx.commit();
+   }
+   require_empty_no_leaks(t, "after final range_remove all");
+}
