@@ -58,6 +58,15 @@ namespace psitri
          return false;
       }
 
+      /// True if ref counts are stale from a deferred_cleanup recovery.
+      /// Leaked memory is not reclaimed until reclaim_leaked_memory() is called.
+      bool ref_counts_stale() const;
+
+      /// Reclaim leaked memory from a prior deferred_cleanup recovery.
+      /// This is the expensive O(live objects) walk that deferred_cleanup skips.
+      /// No-op if ref counts are not stale.
+      void reclaim_leaked_memory();
+
       /// Full recovery: rebuild control blocks from segments and reclaim leaked memory
       void recover() { _allocator.recover(); }
 

@@ -22,10 +22,11 @@ namespace sal
     */
    enum class recovery_mode
    {
-      none,         ///< clean shutdown, no recovery needed
-      app_crash,    ///< OS was fine, just fix ref counts — O(live objects)
-      power_loss,   ///< validate sync checksums, truncate torn tails, rebuild
-      full_verify   ///< deep per-object checksum verification (maintenance tool)
+      none,              ///< clean shutdown, no recovery needed
+      deferred_cleanup,  ///< mark ref counts stale, defer leak reclamation — O(1)
+      app_crash,         ///< OS was fine, just fix ref counts — O(live objects)
+      power_loss,        ///< validate sync checksums, truncate torn tails, rebuild
+      full_verify        ///< deep per-object checksum verification (maintenance tool)
    };
 
    /**

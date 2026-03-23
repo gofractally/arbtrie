@@ -347,20 +347,45 @@ Control blocks track two things: where each object lives (location) and how many
 
 **Control blocks are pinned to RAM to avoid SSD wear.** Control blocks change on every retain, release, and relocation — far too frequently to flush to disk. They are mlocked in RAM and intentionally excluded from normal sync operations. This eliminates SSD write amplification from ref count churn, but it means control block state is **volatile by design**. On clean shutdown, a `clean_shutdown` flag is set — this tells the next open that the control blocks in RAM are consistent and can be reloaded as-is without regeneration. On crash, the flag remains unset and the control blocks must be rebuilt from segments.
 
+### Recovery Modes
+
+Recovery is not one-size-fits-all. The caller tells the database what kind of failure occurred via `recovery_mode`, because the database cannot distinguish an app crash from a power loss by inspecting its own files:
+
+| Mode              | When to use              | What it does                                        |
+|-------------------|--------------------------|-----------------------------------------------------|
+| `none`            | Clean shutdown detected  | No recovery needed                                  |
+| `deferred_cleanup`| App crash, fast restart  | Mark ref counts stale, defer leak reclamation       |
+| `app_crash`       | App crash, full cleanup  | Reset ref counts, reclaim leaked memory             |
+| `power_loss`      | OS or hardware crash     | Validate segments, rebuild control blocks and roots |
+| `full_verify`     | Suspected corruption     | Deep checksum verification of all objects           |
+
+If no mode is specified and the `clean_shutdown` flag is unset, the database defaults to `deferred_cleanup` — the tree is consistent (mprotect guarantees this), so the only cost of deferral is leaked objects occupying space until the user explicitly runs `app_crash` recovery. This keeps startup instant regardless of database size.
+
 ### How Recovery Works
 
-The segments — append-only, ordered by allocation sequence — are the durable source of truth. Recovery rebuilds the control blocks from segments in three phases:
+The segments — append-only, ordered by allocation sequence — are the durable source of truth. Two data sources provide root pointers:
 
-**Phase 1: Rebuild locations.** Clear all control block metadata. Sort segments newest-to-oldest by `_provider_sequence`. Scan each segment's objects sequentially. For each object ID encountered:
+1. **The roots file** — a memory-mapped file synced to disk by `allocator::sync()` at each commit. This is the primary source of root pointers after recovery.
+2. **Sync headers** — 64-byte records written at segment sync boundaries, containing a backward chain, timestamp, XXH3 checksum, and optionally a `sync_root_info{root_index, root_address}` that records which root was updated. These serve as a secondary/fallback source when the roots file is corrupt.
+
+**App-crash recovery** (the common case) needs only three phases:
+
+**Phase 1: Rebuild locations.** Clear all control block metadata. Sort segments newest-to-oldest by `_provider_sequence`. Scan each segment's objects sequentially up to `alloc_pos`. For each object ID encountered:
 - If unseen → record its location, set ref count to 1
 - If already mapped from a newer segment → skip (newer copy wins)
 - If in the same segment → update (within a segment, later offset = newer)
 
 This exploits the append-only invariant: segments never modify existing data, so scanning order determines which copy is authoritative.
 
-**Phase 2: Retain reachable nodes.** Starting from all top roots, recursively traverse the reachable tree using `visit_branches()`. Each reachable node gets `retain()`, bumping its ref count to 2+. Unreachable nodes (leaked by the crash) remain at 1.
+**Phase 2: Retain reachable nodes.** The roots file provides root pointers (validated against the rebuilt control blocks). Starting from all valid roots, recursively traverse the reachable tree using `visit_branches()`. Each reachable node gets `retain()`, bumping its ref count to 2+. Unreachable nodes (leaked by the crash) remain at 1. If a root from the roots file has no valid control block, sync headers provide a fallback — the newest sync header per root index with a valid control block wins.
 
 **Phase 3: Release unreachable.** Decrement every ref count by 1. Objects that drop to 0 are freed — their segment space becomes reclaimable. Reachable objects settle to their correct ref counts.
+
+**Power-loss recovery** adds segment validation before the three phases above: validate sync header checksums to identify the last trustworthy sync boundary in each segment. Data beyond the last valid sync header may be torn (partially written); data before it is guaranteed consistent by the XXH3 checksum chain.
+
+### Passive Corruption Detection
+
+The compactor, which runs continuously in the background relocating objects, validates per-object checksums (16-bit XXH3 in `alloc_header::_checksum`) as it copies. If a checksum mismatch is detected, the compactor sets an atomic `_corruption_detected` flag (aligned to `std::hardware_destructive_interference_size` to avoid false sharing) and halts. Every subsequent `start_transaction()` checks this flag with `[[unlikely]]` + `__builtin_expect` and throws `corruption_error` — reads continue working, but all writes are halted until the database is reopened with an appropriate recovery mode. This passive detection costs nothing during normal operation (the compactor was going to read the data anyway) and catches corruption that might otherwise go unnoticed until a user query hits the damaged object.
 
 ### Hardware-Enforced Corruption Prevention
 
@@ -389,7 +414,7 @@ This is a multi-layer defense:
 | Session         | `can_modify()` ownership check  | Only the allocating session can write           |
 | Object          | `smart_ptr::modify()` COW       | Read-only objects copied to writable segments  |
 
-This protection is enabled by default (`write_protect_on_commit = true`) even when disk sync is disabled, and is configurable across five sync levels from mprotect-only (no disk I/O) through full fsync.
+This protection is enabled by default (`write_protect_on_commit = true`) even when disk sync is disabled, and is configurable across six sync levels from mprotect-only (no disk I/O) through full fsync.
 
 Read-only protection also benefits OS paging behavior. Read-only pages are never dirty, so the OS can evict them instantly under memory pressure — no write-back to disk required. Dirty (writable) pages must be flushed before their physical frames can be reused, causing I/O storms under pressure. Since the vast majority of a PsiTrie database is committed (read-only) data, the OS can efficiently page the cold portions in and out with zero write amplification, while the self-tuning cache (Section 3) keeps hot data pinned in RAM.
 
@@ -405,9 +430,38 @@ The segments themselves serve as the recovery log:
 
 For **app crashes** (process dies, OS stays up), recovery is only needed to **reclaim leaked memory** — not for correctness or data protection. The mprotect + root-swap protocol guarantees that committed data is never corrupt. The tree is always in a consistent state; the only consequence of skipping recovery is that unreachable objects (from in-flight transactions that never completed their root swap) occupy space until reclaimed.
 
-For **hardware failures or power loss**, the OS can no longer guarantee that mmap'd pages were flushed to disk. In this case, recovery must also rebuild object locations from segments, since control blocks and even recently written segment data may be partially flushed or torn. The configurable sync level (Section 7) determines how much data is at risk: `sync_type::none` relies entirely on the OS and may lose recent writes; `sync_type::full` (fsync/F_FULLFSYNC) guarantees durability to physical media at the cost of write latency. In either case, the append-only segment structure ensures that recovery converges to a consistent state — it may lose uncommitted work, but it will never produce a corrupt tree. The append-only design also means all writes are sequential within a segment — minimizing the number of dirty pages and enabling efficient SSD flush patterns, unlike B-tree page-level COW which scatters writes across the file.
+For **hardware failures or power loss**, the OS can no longer guarantee that mmap'd pages were flushed to disk. In this case, recovery must also rebuild object locations from segments, since control blocks and even recently written segment data may be partially flushed or torn. The configurable sync level determines how much data is at risk — see the durability hierarchy below.
+
+In either case, the append-only segment structure ensures that recovery converges to a consistent state — it may lose uncommitted work, but it will never produce a corrupt tree. The append-only design also means all writes are sequential within a segment — minimizing the number of dirty pages and enabling efficient SSD flush patterns, unlike B-tree page-level COW which scatters writes across the file.
 
 The tradeoff: recovery time is proportional to database size (must scan segments + walk reachable tree), not proportional to the amount of uncommitted work. For the expected use case — long-lived databases with infrequent crashes — this is favorable: zero overhead during normal operation in exchange for a slower recovery path that only runs after a crash.
+
+### Durability Hierarchy
+
+PsiTrie offers six sync levels, each adding a layer of durability at the cost of latency:
+
+| Level          | Mechanism                       | App crash | Power loss | Write latency |
+|----------------|---------------------------------|-----------|------------|---------------|
+| `none`         | OS writes when convenient       | Maybe     | No         | Zero          |
+| `mprotect`     | Hardware write-protect pages    | Yes       | No         | ~microseconds |
+| `msync_async`  | Hint to OS: flush soon          | Yes       | Probably   | ~microseconds |
+| `msync_sync`   | Block until OS buffers written  | Yes       | Mostly     | ~milliseconds |
+| `fsync`        | Flush OS buffers to drive       | Yes       | Yes*       | ~milliseconds |
+| `full`         | F_FULLFSYNC / flush drive cache | Yes       | Yes        | ~10s of ms    |
+
+\*`fsync` sends data to the drive, but the drive's write cache may not have committed it to media. Only `full` (F_FULLFSYNC on macOS) guarantees data reaches physical media.
+
+### Background Full Sync (Planned)
+
+The optimal durability strategy combines zero write latency with guaranteed durability via background batching:
+
+1. **Writers** commit with `mprotect` only — zero disk I/O, immediate return
+2. **A background thread** wakes every N seconds (configurable), fsyncs all finalized segments, and marks them `sync_confirmed`
+3. **The compactor** cannot recycle a segment until both the source AND its compacted destination are `sync_confirmed`
+
+Because segments are pinned in RAM (`mlock`), the OS does not lazily flush pages to disk. The on-disk state is entirely under our control: the last completed background fsync is the only valid snapshot. Everything between the last fsync and a crash is lost — but the configurable interval makes this an explicit tradeoff (1 second for financial data, 30 seconds for games).
+
+The no-recycle-until-confirmed rule means every committed root has a complete tree behind it on disk. Old segments persist until the new compacted copies are confirmed durable, giving automatic multi-version snapshots with zero write amplification: all writes are sequential appends to fresh segments, and the SSD never sees the same sector rewritten until the data is confirmed durable elsewhere.
 
 ---
 

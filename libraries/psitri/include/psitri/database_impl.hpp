@@ -5,6 +5,12 @@ namespace psitri
 {
    namespace detail
    {
+      /// Bit flags for database_state::flags
+      enum db_flags : uint32_t
+      {
+         flag_ref_counts_stale = 1u << 0,  ///< ref counts need cleanup (deferred_cleanup)
+      };
+
       struct database_state
       {
          database_state()
@@ -13,7 +19,7 @@ namespace psitri
                r.store(0, std::memory_order_relaxed);
          }
          uint32_t          magic          = sal::file_magic;
-         uint32_t          flags          = 0x77777777;
+         uint32_t          flags          = 0;
          std::atomic<bool> clean_shutdown = true;
          runtime_config    config;
          // top_root is protected by _root_change_mutex to prevent race conditions

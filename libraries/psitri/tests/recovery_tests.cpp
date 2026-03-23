@@ -379,3 +379,227 @@ TEST_CASE("corruption flag halts writes", "[recovery]")
 
    std::filesystem::remove_all(dir);
 }
+
+// ---- Deferred cleanup tests ----
+
+TEST_CASE("deferred_cleanup is default for unclean shutdown", "[recovery][deferred_cleanup]")
+{
+   const std::string dir = "recovery_testdb";
+   std::filesystem::remove_all(dir);
+   std::filesystem::create_directories(dir + "/data");
+
+   {
+      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto ses = db->start_write_session();
+      auto tx  = ses->start_transaction(0);
+      for (int i = 0; i < 100; ++i)
+         tx.upsert(to_key(i), to_value(i));
+      tx.commit();
+   }
+
+   corrupt_shutdown_flag(dir);
+
+   {
+      // Default mode (none) with unclean shutdown should use deferred_cleanup
+      auto db = std::make_shared<database>(dir, runtime_config());
+      REQUIRE(db->ref_counts_stale());
+
+      // Data should still be readable
+      auto ses = db->start_read_session();
+      auto root = ses->get_root(0);
+      REQUIRE(root);
+      cursor c(root);
+      for (int i = 0; i < 100; ++i)
+         REQUIRE(c.seek(to_key(i)));
+   }
+
+   std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("deferred_cleanup flag persists across reopens", "[recovery][deferred_cleanup]")
+{
+   const std::string dir = "recovery_testdb";
+   std::filesystem::remove_all(dir);
+   std::filesystem::create_directories(dir + "/data");
+
+   {
+      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto ses = db->start_write_session();
+      auto tx  = ses->start_transaction(0);
+      for (int i = 0; i < 50; ++i)
+         tx.upsert(to_key(i), to_value(i));
+      tx.commit();
+   }
+
+   corrupt_shutdown_flag(dir);
+
+   // First reopen: deferred_cleanup sets the stale flag
+   {
+      auto db = std::make_shared<database>(dir, runtime_config());
+      REQUIRE(db->ref_counts_stale());
+   }
+
+   // Second reopen (clean shutdown): flag should still be set
+   {
+      auto db = std::make_shared<database>(dir, runtime_config());
+      REQUIRE(db->ref_counts_stale());
+   }
+
+   std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("reclaim_leaked_memory clears stale flag", "[recovery][deferred_cleanup]")
+{
+   const std::string dir = "recovery_testdb";
+   std::filesystem::remove_all(dir);
+   std::filesystem::create_directories(dir + "/data");
+
+   {
+      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto ses = db->start_write_session();
+      auto tx  = ses->start_transaction(0);
+      for (int i = 0; i < 100; ++i)
+         tx.upsert(to_key(i), to_value(i));
+      tx.commit();
+   }
+
+   corrupt_shutdown_flag(dir);
+
+   {
+      auto db = std::make_shared<database>(dir, runtime_config());
+      REQUIRE(db->ref_counts_stale());
+
+      // Trigger deferred cleanup
+      db->reclaim_leaked_memory();
+      REQUIRE_FALSE(db->ref_counts_stale());
+
+      // Data should still be readable after cleanup
+      auto ses = db->start_read_session();
+      auto root = ses->get_root(0);
+      REQUIRE(root);
+      cursor c(root);
+      for (int i = 0; i < 100; ++i)
+         REQUIRE(c.seek(to_key(i)));
+   }
+
+   // Flag should be cleared on next reopen
+   {
+      auto db = std::make_shared<database>(dir, runtime_config());
+      REQUIRE_FALSE(db->ref_counts_stale());
+   }
+
+   std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("explicit deferred_cleanup mode", "[recovery][deferred_cleanup]")
+{
+   const std::string dir = "recovery_testdb";
+   std::filesystem::remove_all(dir);
+   std::filesystem::create_directories(dir + "/data");
+
+   {
+      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto ses = db->start_write_session();
+      auto tx  = ses->start_transaction(0);
+      for (int i = 0; i < 100; ++i)
+         tx.upsert(to_key(i), to_value(i));
+      tx.commit();
+   }
+
+   corrupt_shutdown_flag(dir);
+
+   {
+      auto db = std::make_shared<database>(dir, runtime_config(), recovery_mode::deferred_cleanup);
+      REQUIRE(db->ref_counts_stale());
+
+      auto ses = db->start_read_session();
+      auto root = ses->get_root(0);
+      REQUIRE(root);
+      cursor c(root);
+      for (int i = 0; i < 100; ++i)
+         REQUIRE(c.seek(to_key(i)));
+   }
+
+   std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("app_crash clears stale flag from prior deferred_cleanup", "[recovery][deferred_cleanup]")
+{
+   const std::string dir = "recovery_testdb";
+   std::filesystem::remove_all(dir);
+   std::filesystem::create_directories(dir + "/data");
+
+   {
+      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto ses = db->start_write_session();
+      auto tx  = ses->start_transaction(0);
+      for (int i = 0; i < 100; ++i)
+         tx.upsert(to_key(i), to_value(i));
+      tx.commit();
+   }
+
+   corrupt_shutdown_flag(dir);
+
+   // First: deferred_cleanup
+   {
+      auto db = std::make_shared<database>(dir, runtime_config());
+      REQUIRE(db->ref_counts_stale());
+   }
+
+   corrupt_shutdown_flag(dir);
+
+   // Second: explicit app_crash should clear the stale flag
+   {
+      auto db = std::make_shared<database>(dir, runtime_config(), recovery_mode::app_crash);
+      REQUIRE_FALSE(db->ref_counts_stale());
+
+      auto ses = db->start_read_session();
+      auto root = ses->get_root(0);
+      REQUIRE(root);
+      cursor c(root);
+      for (int i = 0; i < 100; ++i)
+         REQUIRE(c.seek(to_key(i)));
+   }
+
+   std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("writes work with stale ref counts", "[recovery][deferred_cleanup]")
+{
+   const std::string dir = "recovery_testdb";
+   std::filesystem::remove_all(dir);
+   std::filesystem::create_directories(dir + "/data");
+
+   {
+      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto ses = db->start_write_session();
+      auto tx  = ses->start_transaction(0);
+      for (int i = 0; i < 50; ++i)
+         tx.upsert(to_key(i), to_value(i));
+      tx.commit();
+   }
+
+   corrupt_shutdown_flag(dir);
+
+   {
+      auto db = std::make_shared<database>(dir, runtime_config());
+      REQUIRE(db->ref_counts_stale());
+
+      // Writes should still work even with stale ref counts
+      auto ses = db->start_write_session();
+      auto tx  = ses->start_transaction(0);
+      for (int i = 50; i < 100; ++i)
+         tx.upsert(to_key(i), to_value(i));
+      tx.commit();
+
+      // All data should be readable
+      auto rses = db->start_read_session();
+      auto root = rses->get_root(0);
+      REQUIRE(root);
+      cursor c(root);
+      for (int i = 0; i < 100; ++i)
+         REQUIRE(c.seek(to_key(i)));
+   }
+
+   std::filesystem::remove_all(dir);
+}

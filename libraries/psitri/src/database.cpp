@@ -46,23 +46,30 @@ namespace psitri
       // Determine effective recovery mode
       auto effective_mode = mode;
       if (not _dbm->clean_shutdown && effective_mode == recovery_mode::none)
-         effective_mode = recovery_mode::app_crash;  // safe default for unclean shutdown
+         effective_mode = recovery_mode::deferred_cleanup;  // fast default for unclean shutdown
 
       switch (effective_mode)
       {
          case recovery_mode::none:
             break;
+         case recovery_mode::deferred_cleanup:
+            SAL_WARN("database was not shutdown cleanly, deferring leak reclamation");
+            _dbm->flags |= detail::flag_ref_counts_stale;
+            break;
          case recovery_mode::app_crash:
             SAL_WARN("database was not shutdown cleanly, resetting reference counts");
             _allocator.reset_reference_counts();
+            _dbm->flags &= ~detail::flag_ref_counts_stale;
             break;
          case recovery_mode::power_loss:
             SAL_WARN("power loss recovery: validating segments and rebuilding state");
             _allocator.recover_from_power_loss();
+            _dbm->flags &= ~detail::flag_ref_counts_stale;
             break;
          case recovery_mode::full_verify:
             SAL_WARN("full verification requested: rebuilding and verifying all checksums");
             _allocator.recover();  // TODO: add verify pass
+            _dbm->flags &= ~detail::flag_ref_counts_stale;
             break;
       }
       _dbm->clean_shutdown = false;
@@ -83,6 +90,20 @@ namespace psitri
       std::filesystem::create_directories(dir / "data");
 
       return std::make_shared<database>(dir, cfg);
+   }
+
+   bool database::ref_counts_stale() const
+   {
+      return _dbm->flags & detail::flag_ref_counts_stale;
+   }
+
+   void database::reclaim_leaked_memory()
+   {
+      if (!(_dbm->flags & detail::flag_ref_counts_stale))
+         return;
+      SAL_WARN("reclaiming leaked memory (deferred cleanup)");
+      _allocator.reset_reference_counts();
+      _dbm->flags &= ~detail::flag_ref_counts_stale;
    }
 
    void database::set_runtime_config(const runtime_config& cfg)
