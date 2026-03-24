@@ -40,9 +40,8 @@ namespace
 // updating a small inline value to a >64-byte value (stored as value_node)
 // requires a new cline slot. Without the fix, add_address_ptr() asserts
 // free_space() >= 4 on the full leaf.
-// DISABLED: crashes via SIGABRT — add_address_ptr free_space assert on full leaf
 TEST_CASE("update_value: inline to value_node on full leaf triggers split",
-          "[update_value][split][.][crash]")
+          "[update_value][split]")
 {
    update_test_db t;
    auto           cur = t.ses->create_write_cursor();

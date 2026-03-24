@@ -256,7 +256,7 @@ namespace
 // Test cases
 // ════════════════════════════════════════════════════════════════
 
-TEST_CASE("zip: big-endian sequential keys", "[zip][.][crash]")
+TEST_CASE("zip: big-endian sequential keys", "[zip]")
 {
    zip_db t("zip_be_testdb");
    int    N = 300 / ZIP_SCALE;
@@ -269,7 +269,7 @@ TEST_CASE("zip: big-endian sequential keys", "[zip][.][crash]")
    run_zip(t, keys, N);
 }
 
-TEST_CASE("zip: little-endian sequential keys", "[zip][.][crash]")
+TEST_CASE("zip: little-endian sequential keys", "[zip]")
 {
    zip_db t("zip_le_testdb");
    int    N = 300 / ZIP_SCALE;
@@ -282,7 +282,7 @@ TEST_CASE("zip: little-endian sequential keys", "[zip][.][crash]")
    run_zip(t, keys, N);
 }
 
-TEST_CASE("zip: short 3-byte keys", "[zip][.][crash]")
+TEST_CASE("zip: short 3-byte keys", "[zip]")
 {
    zip_db t("zip_short_testdb");
    int    N = 300 / ZIP_SCALE;
@@ -295,7 +295,7 @@ TEST_CASE("zip: short 3-byte keys", "[zip][.][crash]")
    run_zip(t, keys, N);
 }
 
-TEST_CASE("zip: long common-prefix keys", "[zip][.][crash]")
+TEST_CASE("zip: long common-prefix keys", "[zip]")
 {
    zip_db t("zip_prefix_testdb");
    int    N = 300 / ZIP_SCALE;
@@ -308,7 +308,7 @@ TEST_CASE("zip: long common-prefix keys", "[zip][.][crash]")
    run_zip(t, keys, N);
 }
 
-TEST_CASE("zip: dictionary words", "[zip][.][crash]")
+TEST_CASE("zip: dictionary words", "[zip]")
 {
    auto words = load_dict_keys(2000);
    if (words.size() < 50)
@@ -324,7 +324,7 @@ TEST_CASE("zip: dictionary words", "[zip][.][crash]")
    run_zip(t, words, N);
 }
 
-TEST_CASE("zip: short 3-byte keys with large values only", "[zip][.][crash]")
+TEST_CASE("zip: short 3-byte keys with large values only", "[zip]")
 {
    // This specifically targets the bug: 3-byte keys + values crossing the
    // 64-byte value_node threshold, exercising update_value transitions
@@ -407,7 +407,7 @@ TEST_CASE("zip: short 3-byte keys with large values only", "[zip][.][crash]")
    REQUIRE(cur->count_keys() == 0);
 }
 
-TEST_CASE("zip: shuffled keys stress boundary ordering", "[zip][.][crash]")
+TEST_CASE("zip: shuffled keys stress boundary ordering", "[zip]")
 {
    // Same keys but in shuffled order — different insertion/removal patterns
    // hit different inner node split/merge paths
