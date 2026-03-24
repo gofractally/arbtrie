@@ -384,6 +384,9 @@ namespace sal
              _header_ptr->allocated_zones.load(std::memory_order_relaxed))
             return nullptr;
 
+         if (is_free(address))
+            return nullptr;
+
          auto& ptr = _ptr_base[*address];
          if (ptr.load(std::memory_order_relaxed).cacheline_offset ==
              control_block::max_cacheline_offset)

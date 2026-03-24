@@ -159,6 +159,8 @@ if(ENABLE_COVERAGE)
         '/Library/*'
         '*/catch2/*'
         '*/test/*'
+        '*/tests/*'
+        '*/debug.hpp'
     )
     
     # Add custom target for generating coverage report

@@ -40,7 +40,7 @@ lcov --directory . --capture --output-file coverage/coverage_raw.info \
 # Remove external/test files from report
 lcov --remove coverage/coverage_raw.info \
   '/opt/homebrew/*' '/usr/include/*' '/usr/local/*' '/Library/*' \
-  '*/catch2/*' '*/test/*' \
+  '*/catch2/*' '*/test/*' '*/tests/*' '*/debug.hpp' \
   --output-file coverage/coverage.info \
   --rc branch_coverage=1 --rc function_coverage=1 \
   --ignore-errors graph,empty,corrupt,inconsistent,category,deprecated,format,unused,range \
