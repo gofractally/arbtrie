@@ -135,12 +135,13 @@ if(ENABLE_COVERAGE)
     set(LCOV_ARGS
         --rc branch_coverage=1
         --rc function_coverage=1
-        --ignore-errors graph,empty,corrupt,inconsistent,category,deprecated,format,unused
+        --ignore-errors graph,empty,corrupt,inconsistent,category,deprecated,format,unused,range
+        --filter range
         --verbose
     )
-    
+
     set(GENHTML_ARGS
-        --ignore-errors corrupt,inconsistent,category
+        --ignore-errors corrupt,inconsistent,category,range
         --branch-coverage
         --function-coverage
         --verbose

@@ -90,7 +90,7 @@ namespace
 // with 82 entries and 6 cachelines. Assertion: validate_invariants() fails
 // in update_value (leaf.cpp:748). Triggered by mixed upsert/remove/range_remove
 // with 3-byte keys and variable-size values crossing value_node threshold.
-// DISABLED: crashes process via SIGABRT, preventing remaining tests from running.
+// DISABLED: crashes process via SIGABRT — update_value free_space bug not yet fully fixed
 TEST_CASE("integrity: random ops oracle comparison forcing structural changes", "[integrity][oracle][.][crash]")
 {
    integrity_db t;

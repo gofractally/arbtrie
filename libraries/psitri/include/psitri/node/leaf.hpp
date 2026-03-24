@@ -107,7 +107,7 @@ namespace psitri
       {
          return max_leaf_size;
       }
-      inline static uint32_t alloc_size(const op::leaf_update& upd) { return upd.src.size(); }
+      inline static uint32_t alloc_size(const op::leaf_update& upd) { return max_leaf_size; }
       inline static uint32_t alloc_size(const op::leaf_remove& rm)
       {
          // no point in growing the node when we are removing a value

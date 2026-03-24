@@ -1385,14 +1385,31 @@ namespace psitri
 
       if constexpr (mode.is_unique())
       {
-         // Release old external value (value_node or subtree)
-         if (leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node)
-            _session.release(leaf->get_value(br).address());
+         // When transitioning from inline/null to address type (value_node/subtree),
+         // update_value() calls add_address_ptr() which may need to grow _cline_cap
+         // by sizeof(ptr_address) bytes. If the leaf lacks free_space, the in-place
+         // update would corrupt the node. Fall through to allocate a new leaf instead.
+         bool new_needs_address =
+             new_val.is_value_node() || new_val.is_subtree();
+         bool old_has_address =
+             leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node;
 
-         leaf.modify()->update_value(br, new_val);
-         return leaf.address();
+         if (!new_needs_address || old_has_address ||
+             leaf->free_space() >= int(sizeof(sal::ptr_address)))
+         {
+            // Release old external value (value_node or subtree)
+            if (old_has_address)
+               _session.release(leaf->get_value(br).address());
+
+            leaf.modify()->update_value(br, new_val);
+            return leaf.address();
+         }
+         // else: not enough space for in-place cline growth, fall through
       }
-      else  // shared mode
+
+      // Shared mode, or unique-mode fallback when leaf lacks space for cline growth.
+      // Allocating a new max_leaf_size leaf with clone_from defragments dead space,
+      // guaranteeing enough room for the address transition.
       {
          retain_children(leaf);
 
