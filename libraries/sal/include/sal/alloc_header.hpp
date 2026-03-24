@@ -277,7 +277,14 @@ namespace sal
    class sync_header : public alloc_header
    {
      public:
-      sync_header(uint32_t asize) : alloc_header(asize, header_type::sync_head, {}) {}
+      sync_header(uint32_t asize) : alloc_header(asize, header_type::sync_head, {}),
+         _time_stamp_usec(usec_timestamp(0)),
+         _prev_aheader_pos(0),
+         _start_checksum_pos(0),
+         _user_data{},
+         _user_data_size(0),
+         _sync_checksum(0)
+      {}
 
       template <typename UserData>
       void set_user_data(UserData user_data)
