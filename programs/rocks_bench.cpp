@@ -682,6 +682,14 @@ int main(int argc, char** argv)
       results.push_back(r);
    }
 
+   // Print engine-specific stats before closing
+   if (db)
+   {
+      std::string stats;
+      if (db->GetProperty("psitri.stats", &stats))
+         printf("PsiTri stats: %s\n", stats.c_str());
+   }
+
    if (db)
       delete db;
 

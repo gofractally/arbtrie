@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <mutex>
+#include <sstream>
 
 namespace rocksdb
 {
@@ -154,9 +155,15 @@ namespace rocksdb
             s.ws = db_->start_write_session();
             s.ws->set_sync(sync_);
          }
-         if (!s.rs)
-            s.rs = db_->start_read_session();
          return s;
+      }
+
+      std::shared_ptr<psitri::read_session>& get_read_session()
+      {
+         auto& ts = get_thread_state();
+         if (!ts.rs)
+            ts.rs = db_->start_read_session();
+         return ts.rs;
       }
 
       // ── Write path ──
@@ -292,8 +299,7 @@ namespace rocksdb
 
       const Snapshot* GetSnapshot() override
       {
-         auto& ts = get_thread_state();
-         return new PsiTriSnapshot(ts.rs, 0);
+         return new PsiTriSnapshot(get_read_session(), 0);
       }
 
       void ReleaseSnapshot(const Snapshot* snap) override
@@ -325,8 +331,49 @@ namespace rocksdb
          return Status::OK();
       }
 
-      bool GetProperty(const Slice&, std::string* value) override
+      bool GetProperty(const Slice& property, std::string* value) override
       {
+         if (property == "psitri.stats")
+         {
+            if (value)
+            {
+               db_->wait_for_compactor();
+               std::ostringstream os;
+
+               // Tree-level stats: walk the actual live trie
+               {
+                  auto ws = db_->start_write_session();
+                  auto trx = ws->start_transaction(0);
+                  auto ts = trx.get_stats();
+                  uint64_t total_tree_bytes = ts.total_inner_node_size + ts.total_leaf_size + ts.total_value_size;
+               os << "tree: " << ts.total_keys << " keys  "
+                     << (total_tree_bytes / (1024.0 * 1024.0)) << " MB"
+                     << " (inner: " << (ts.total_inner_node_size / 1024.0) << " KB"
+                     << "  leaf: " << (ts.total_leaf_size / (1024.0 * 1024.0)) << " MB"
+                     << "  value: " << (ts.total_value_size / (1024.0 * 1024.0)) << " MB)"
+                     << "  depth: " << ts.max_depth;
+               }
+
+               // Segment-level stats
+               auto d = db_->dump();
+               uint64_t total_freed = 0;
+               uint64_t total_allocated = 0;
+               uint32_t free_segs = 0;
+               for (auto& seg : d.segments)
+               {
+                  total_freed += seg.freed_bytes;
+                  total_allocated += seg.alloc_pos > 0 ? seg.alloc_pos : 0;
+                  if (seg.is_free) ++free_segs;
+               }
+               os << "\nsegs: " << d.total_segments << " (" << free_segs << " free)"
+                  << "  allocated: " << (total_allocated / (1024.0 * 1024.0)) << " MB"
+                  << "  freed: " << (total_freed / (1024.0 * 1024.0)) << " MB"
+                  << "  retained: " << d.total_retained
+                  << "  sessions: " << d.sessions.size();
+               *value = os.str();
+            }
+            return true;
+         }
          if (value) *value = "";
          return false;
       }
@@ -350,8 +397,7 @@ namespace rocksdb
          }
          else
          {
-            auto& ts = get_thread_state();
-            root     = ts.rs->get_root(root_idx);
+            root = get_read_session()->get_root(root_idx);
          }
 
          if (!root)
@@ -374,15 +420,11 @@ namespace rocksdb
          }
          else
          {
-            auto& ts = get_thread_state();
-            root     = ts.rs->get_root(root_idx);
+            root = get_read_session()->get_root(root_idx);
          }
 
          if (!root)
-         {
-            auto& ts = get_thread_state();
-            root     = ts.rs->get_root(root_idx);
-         }
+            root = get_read_session()->get_root(root_idx);
 
          return new PsiTriIterator(std::move(root));
       }

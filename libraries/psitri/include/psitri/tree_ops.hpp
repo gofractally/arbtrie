@@ -264,6 +264,8 @@ namespace psitri
          uint64_t clines                = 0;
          uint64_t max_depth             = 1;
          uint64_t total_inner_node_size = 0;
+         uint64_t total_leaf_size       = 0;
+         uint64_t total_value_size      = 0;
          uint64_t total_keys            = 0;
          uint64_t single_branch_inners  = 0;
          uint64_t sparse_subtree_inners = 0;
@@ -748,11 +750,19 @@ namespace psitri
             {
                s.leaf_nodes++;
                auto leaf = r.as<leaf_node>();
+               s.total_leaf_size += leaf->size();
                s.total_keys += leaf->num_branches();
                for (uint32_t i = 0; i < leaf->num_branches(); ++i)
+               {
                   if (leaf->get_value_type(branch_number(i)) ==
                       leaf_node::value_type_flag::value_node)
+                  {
                      s.value_nodes++;
+                     auto vref = _session.get_ref<value_node>(
+                         leaf->get_value_address(branch_number(i)));
+                     s.total_value_size += vref->size();
+                  }
+               }
                break;
             }
             case node_type::value:
