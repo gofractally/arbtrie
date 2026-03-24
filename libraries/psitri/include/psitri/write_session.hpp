@@ -49,6 +49,13 @@ namespace psitri
       /// DEBUG: Dump all live objects with type and ref count
       void dump_live_objects() const;
 
+      /// Visit all live objects with a callback: (ptr_address, refcount, alloc_header*)
+      template <typename Visitor>
+      void for_each_live_object(Visitor&& visitor) const
+      {
+         _allocator_session->for_each_live_object(std::forward<Visitor>(visitor));
+      }
+
      private:
       friend class transaction;
       sal::sync_type _sync = sal::sync_type::none;

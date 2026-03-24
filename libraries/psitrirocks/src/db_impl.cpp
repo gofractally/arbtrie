@@ -370,6 +370,40 @@ namespace rocksdb
                   << "  freed: " << (total_freed / (1024.0 * 1024.0)) << " MB"
                   << "  retained: " << d.total_retained
                   << "  sessions: " << d.sessions.size();
+
+               // Walk all live objects via control block allocator
+               {
+                  auto ws = db_->start_write_session();
+                  uint64_t live_inner = 0, live_leaf = 0, live_value = 0, live_other = 0;
+                  uint64_t bytes_inner = 0, bytes_leaf = 0, bytes_value = 0, bytes_other = 0;
+                  uint64_t high_ref = 0;
+                  ws->for_each_live_object(
+                      [&](sal::ptr_address, uint32_t ref, const sal::alloc_header* obj)
+                      {
+                         uint64_t sz = obj->size();
+                         switch ((int)obj->type())
+                         {
+                            case (int)psitri::node_type::inner:
+                            case (int)psitri::node_type::inner_prefix:
+                               ++live_inner; bytes_inner += sz; break;
+                            case (int)psitri::node_type::leaf:
+                               ++live_leaf; bytes_leaf += sz; break;
+                            case (int)psitri::node_type::value:
+                               ++live_value; bytes_value += sz; break;
+                            default:
+                               ++live_other; bytes_other += sz; break;
+                         }
+                         if (ref > 1) ++high_ref;
+                      });
+                  uint64_t total_live = bytes_inner + bytes_leaf + bytes_value + bytes_other;
+                  os << "\nlive objects: "
+                     << (total_live / (1024.0 * 1024.0)) << " MB"
+                     << " (inner: " << live_inner << "/" << (bytes_inner / 1024.0) << " KB"
+                     << "  leaf: " << live_leaf << "/" << (bytes_leaf / (1024.0 * 1024.0)) << " MB"
+                     << "  value: " << live_value << "/" << (bytes_value / (1024.0 * 1024.0)) << " MB"
+                     << "  other: " << live_other << "/" << (bytes_other / (1024.0 * 1024.0)) << " MB)"
+                     << "  ref>1: " << high_ref;
+               }
                *value = os.str();
             }
             return true;

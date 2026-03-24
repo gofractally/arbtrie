@@ -39,18 +39,17 @@ namespace psitri
       sal::seg_alloc_dump dump() const { return _allocator.dump(); }
       void print_stats(std::ostream& os = std::cout) const { dump().print(os); }
 
-      /// Block until the compactor has drained all pending releases.
+      /// Block until the compactor has drained all pending releases across all sessions.
       /// Returns true if drained, false if timed out.
       bool wait_for_compactor(std::chrono::milliseconds timeout = std::chrono::milliseconds(10000))
       {
-         auto ses      = start_write_session();
          auto deadline = std::chrono::steady_clock::now() + timeout;
          while (std::chrono::steady_clock::now() < deadline)
          {
-            if (ses->get_pending_release_count() == 0)
+            if (_allocator.total_pending_releases() == 0)
             {
                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-               if (ses->get_pending_release_count() == 0)
+               if (_allocator.total_pending_releases() == 0)
                   return true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

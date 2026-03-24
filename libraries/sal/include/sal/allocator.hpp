@@ -81,6 +81,9 @@ namespace sal
 
       seg_alloc_dump dump() const;
 
+      /// Total pending releases across all session queues
+      inline uint64_t total_pending_releases() const;
+
       /// Check if corruption has been detected (e.g. by compactor).
       /// Writers should call this before starting transactions.
       bool corruption_detected() const noexcept
@@ -528,6 +531,14 @@ namespace sal
    inline bool allocator::config_update_checksum_on_modify() const
    {
       return _mapped_state->_config.update_checksum_on_modify;
+   }
+
+   inline uint64_t allocator::total_pending_releases() const
+   {
+      uint64_t total = 0;
+      for (uint32_t i = 0; i < max_session_count; ++i)
+         total += get_release_queue(allocator_session_number(i)).usage();
+      return total;
    }
 
 };  // namespace sal
