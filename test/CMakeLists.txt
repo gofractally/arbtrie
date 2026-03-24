@@ -30,6 +30,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/update_value_tests.cpp
     ../libraries/psitri/tests/zip_tests.cpp
     ../libraries/psitri/tests/deep_recovery_tests.cpp
+    ../libraries/psitri/tests/coverage_gap_tests.cpp
 )
 target_link_libraries(psitri-tests
     PRIVATE
