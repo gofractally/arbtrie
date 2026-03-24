@@ -355,7 +355,7 @@ namespace psitri
          const uint32_t      n   = num_branches();
          for (int i = 0; i < n; ++i)
          {
-            if (cvb[i].type() != value_type_flag::inline_data)
+            if (cvb[i].is_address())
                lam(get_address(cvb[i]));
          }
       }
@@ -470,7 +470,7 @@ namespace psitri
          }
          cline_offset cline() const noexcept
          {
-            assert(type() == value_type_flag::subtree or type() == value_type_flag::value_node);
+            assert(type() == value_type_flag::subtree || type() == value_type_flag::value_node);
             return cline_offset(_offset >> 4);  // Get upper 10 bits
          }
          void set_cline_and_idx(cline_offset    cl,

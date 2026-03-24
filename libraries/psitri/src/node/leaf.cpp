@@ -789,7 +789,6 @@ namespace psitri
          return value_branch(t, cline_offset(found_empty), cline_index(*addr & 0x0f));
       }
       assert(free_space() >= 4);
-      SAL_WARN("base_cline: {:x}  addr: {:x}  cls.size():{}", base_cline, addr, cls.size());
       ++_cline_cap;
       /// cls[] will assert in debug if we address beyond its old size
       cls.data()[cls.size()] = base_cline;
