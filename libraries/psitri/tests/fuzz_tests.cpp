@@ -430,18 +430,6 @@ namespace
       {
          INFO("op #" << _op_count << " type=" << op_name(op) << " oracle_size=" << _oracle.size());
 
-         // Periodic sync check to catch divergence early
-         if (_op_count > 0 && _op_count % 50 == 0)
-         {
-            uint64_t iter_count = count_by_iteration({}, {});
-            if (iter_count != _oracle.size())
-            {
-               INFO("DESYNC at op #" << _op_count << ": psitri_iter=" << iter_count
-                                     << " oracle=" << _oracle.size());
-               REQUIRE(iter_count == _oracle.size());
-            }
-         }
-
          switch (op)
          {
             case op_type::insert:
@@ -483,6 +471,37 @@ namespace
             default:
                break;
          }
+
+         // Verify all oracle keys are findable AFTER each op
+         for (auto& [k, v] : _oracle)
+         {
+            std::string buf;
+            int32_t     r = _cur->get(to_key_view(k), &buf);
+            if (r < 0)
+            {
+               std::cerr << "=== KEY LOST at op #" << _op_count << " type=" << op_name(op)
+                         << " oracle_size=" << _oracle.size() << " ===" << std::endl;
+               std::cerr << "  Lost key: " << hex_encode(k) << " (len=" << k.size() << ")" << std::endl;
+               std::cerr << "  All oracle keys:" << std::endl;
+               for (auto& [ok, ov] : _oracle)
+               {
+                  std::string buf2;
+                  int32_t     r2 = _cur->get(to_key_view(ok), &buf2);
+                  std::cerr << "    " << hex_encode(ok) << " get=" << r2 << std::endl;
+               }
+               std::cerr << "  Iterated keys:" << std::endl;
+               {
+                  auto rc2 = _cur->read_cursor();
+                  if (rc2.seek_begin())
+                  {
+                     do { std::cerr << "    " << hex_encode(rc2.key()) << std::endl; } while (rc2.next());
+                  }
+               }
+               INFO("KEY LOST: " << hex_encode(k) << " at op #" << _op_count);
+               REQUIRE(r >= 0);
+            }
+         }
+
       }
 
       void do_insert()
@@ -791,6 +810,38 @@ namespace
          // First verify iteration count agrees (more reliable than count_keys)
          uint64_t iter_count = count_by_iteration({}, {});
          INFO("iter_count=" << iter_count);
+         if (iter_count != _oracle.size())
+         {
+            // Dump all oracle keys
+            std::cerr << "=== ITERATION MISMATCH at op #" << _op_count
+                      << " oracle=" << _oracle.size() << " iter=" << iter_count << " ===" << std::endl;
+            std::cerr << "Oracle keys:" << std::endl;
+            for (auto& [k, v] : _oracle)
+               std::cerr << "  " << hex_encode(k) << " (len=" << k.size() << ")" << std::endl;
+            std::cerr << "Iterated keys:" << std::endl;
+            {
+               auto rc2 = _cur->read_cursor();
+               if (rc2.seek_begin())
+               {
+                  do
+                  {
+                     std::cerr << "  " << hex_encode(rc2.key()) << " (len=" << rc2.key().size() << ")"
+                               << std::endl;
+                  } while (rc2.next());
+               }
+            }
+            // Check each oracle key individually via get()
+            std::cerr << "Individual get() results:" << std::endl;
+            for (auto& [k, v] : _oracle)
+            {
+               std::string buf;
+               int32_t     r = _cur->get(to_key_view(k), &buf);
+               std::cerr << "  " << hex_encode(k) << " get=" << r
+                         << (r >= 0 ? " FOUND" : " NOT_FOUND") << std::endl;
+            }
+            // Validate tree structure
+            _cur->validate();
+         }
          REQUIRE(iter_count == _oracle.size());
 
          if (_oracle.empty())

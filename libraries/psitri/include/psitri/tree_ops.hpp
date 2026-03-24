@@ -143,6 +143,7 @@ namespace psitri
       template <upsert_mode mode = upsert_mode::unique_upsert>
       int upsert(key_view key, value_type value)
       {
+         _old_value_size    = -1;
          sal::read_lock lock = _session.lock();
          _delta_descendents  = 0;
          _new_value          = std::move(value);
@@ -154,7 +155,16 @@ namespace psitri
          auto rref     = *_root;
          auto old_addr = _root.take();  // so it isn't released when it goes back...
 
-         branch_set result = upsert<mode>({}, rref, key);
+         branch_set result;
+         try
+         {
+            result = upsert<mode>({}, rref, key);
+         }
+         catch (...)
+         {
+            _root.give(old_addr);  // restore root on exception (update/insert may throw)
+            throw;
+         }
          if (result.count() == 1)
             _root.give(result.get_first_branch());
          else
@@ -168,6 +178,7 @@ namespace psitri
       {
          if (not _root)
             return -1;
+         _old_value_size = -1;
          sal::read_lock lock = _session.lock();
          _delta_descendents  = 0;
          auto           rref = *_root;
