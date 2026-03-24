@@ -970,7 +970,11 @@ namespace psitri
             //                   key);
             assert(in->prefix().size() >= 1);  // or else it should have been an inner_node
             if constexpr (mode.must_update())
+            {
+               if constexpr (mode.is_shared())
+                  return in.address();
                throw std::runtime_error("update: key does not exist");
+            }
 
             _delta_descendents = 1;  // inserting a new key via prefix mismatch
 
@@ -1330,6 +1334,16 @@ namespace psitri
                         auto result = _session.alloc<leaf_node>(
                             parent_hint,
                             op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+
+                        // Release the remaining subtree nodes: retain_children(in) at
+                        // the top of this function gave +1 to all of in's children.
+                        // The collapsed leaf doesn't reference the subtree nodes
+                        // (only their leaf values, which were separately retained above).
+                        // Without this release, the subtree nodes end up with ref=1
+                        // and no parent after the old snapshot is freed.
+                        for (uint16_t i = 0; i < rb_count; ++i)
+                           _session.release(remaining[i]);
+
                         return result;
                      }
                   }
@@ -1353,24 +1367,20 @@ namespace psitri
       if (pre_retained_last_branch)
          _session.release(badr);
 
-      // the happy path where there is nothing to do.
-      if constexpr (mode.is_unique() or mode.is_remove())
+      // the happy path where there is nothing to do: the child returned itself
+      // unchanged (e.g. key not found during remove/update, or key already exists
+      // during insert).
+      if (sub_branches.count() == 1 && bref->address() == sub_branches.get_first_branch())
       {
-         // even in shared mode it is possible for remove to do nothing if key was not found
-         if (sub_branches.count() == 1) [[likely]]
+         // Undo retain_children: no new node was created, so the
+         // retained refs are unbalanced. Release them all.
+         if constexpr (mode.is_shared())
          {
-            if (bref->address() == sub_branches.get_first_branch())
-            {
-               if (_delta_descendents != 0)
-                  in.modify()->add_descendents(_delta_descendents);
-               return in.address();
-            }
+            in->visit_branches([this](ptr_address br) { _session.release(br); });
          }
-         // else fall through to merge branches.
-      }
-      else
-      {
-         assert(sub_branches.count() > 0);
+         if (_delta_descendents != 0)
+            in.modify()->add_descendents(_delta_descendents);
+         return in.address();
       }
       //      SAL_ERROR(" merge branches: {}", sub_branches);
       // integrate the sub_branches into the current node, and return the resulting branch set
@@ -1432,6 +1442,10 @@ namespace psitri
                // That mirrors what insert() does for new keys but avoids the extra copy.
                if (old_has_address)
                   _session.release(leaf->get_value(br).address());
+               // Release the value_node allocated by make_value above — insert()
+               // will allocate its own from _new_value.
+               if (new_val.is_value_node())
+                  _session.release(new_val.value_address());
                op::leaf_remove rm_op{.src = *leaf.obj(), .bn = br};
                auto removed = _session.realloc<leaf_node>(leaf, rm_op);
                // Now insert the key with the new value into the (possibly smaller) leaf.
@@ -1710,14 +1724,25 @@ namespace psitri
       {
          branch_number br = leaf->get(key);
          if (br == leaf->num_branches()) [[unlikely]]
+         {
+            // In shared mode, retain_children was called at each inner node
+            // level above us — throwing would leave those refs unbalanced.
+            // Return the unchanged leaf address as a no-op signal instead.
+            if constexpr (mode.is_shared())
+               return leaf.address();
             throw std::runtime_error("update: key does not exist");
+         }
          return update<mode>(parent_hint, leaf, key, br);
       }
       if constexpr (mode.must_remove())
       {
          branch_number br = leaf->get(key);
          if (br == leaf->num_branches()) [[unlikely]]
+         {
+            if constexpr (mode.is_shared())
+               return leaf.address();
             throw std::runtime_error("remove: key does not exist");
+         }
          return remove<mode>(parent_hint, leaf, key, br);
       }
       else
@@ -1733,7 +1758,11 @@ namespace psitri
          else if constexpr (mode.is_insert())
          {
             if (not(lb == leaf->num_branches() or leaf->get_key(lb) != key)) [[unlikely]]
+            {
+               if constexpr (mode.is_shared())
+                  return leaf.address();
                throw std::runtime_error("insert: key already exists");
+            }
             return insert<mode>(parent_hint, leaf, key, lb);
          }
          else if constexpr (mode.is_remove())

@@ -48,6 +48,10 @@ namespace sal
       uint64_t get_total_allocated_objects() const noexcept;
       uint64_t get_pending_release_count() const noexcept;
 
+      /// DEBUG: Call visitor(ptr_address, ref_count, alloc_header*) for each live object
+      template <typename Visitor>
+      void for_each_live_object(Visitor&& visitor) const noexcept;
+
       template <typename T>
       [[nodiscard]] ptr_address alloc(auto&&... args) noexcept
       {

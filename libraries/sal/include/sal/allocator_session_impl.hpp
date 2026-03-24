@@ -380,4 +380,17 @@ namespace sal
       return _release_queue.usage();
    }
 
+   template <typename Visitor>
+   void allocator_session::for_each_live_object(Visitor&& visitor) const noexcept
+   {
+      _ptr_alloc.for_each_allocated(
+          [&](ptr_address adr, uint32_t ref)
+          {
+             auto& cb   = const_cast<control_block_alloc&>(_ptr_alloc).get(adr);
+             auto  data = cb.load(std::memory_order_relaxed);
+             auto* obj  = reinterpret_cast<alloc_header*>(_block_base_ptr + *data.loc().offset());
+             visitor(adr, ref, obj);
+          });
+   }
+
 }  // namespace sal

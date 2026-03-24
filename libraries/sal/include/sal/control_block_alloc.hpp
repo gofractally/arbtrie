@@ -459,6 +459,31 @@ namespace sal
          return detail::ptrs_per_zone * num_allocated_zones();
       }
 
+      /// DEBUG: Call visitor(ptr_address, uint32_t ref) for each non-free slot
+      template <typename Visitor>
+      void for_each_allocated(Visitor&& visitor) const
+      {
+         auto nz = num_allocated_zones();
+         for (uint32_t z = 0; z < nz; ++z)
+         {
+            uint32_t zone_base = z * detail::ptrs_per_zone;
+            for (uint32_t i = 0; i < detail::ptrs_per_zone / 64; ++i)
+            {
+               uint64_t free_bits =
+                   _free_list_base[zone_base / 64 + i].load(std::memory_order_relaxed);
+               for (uint32_t bit = 0; bit < 64; ++bit)
+               {
+                  if (free_bits & (1ULL << bit))
+                     continue;
+                  ptr_address addr(zone_base + i * 64 + bit);
+                  auto&       cb  = _ptr_base[*addr];
+                  auto        ref = cb.ref();
+                  visitor(addr, ref);
+               }
+            }
+         }
+      }
+
      private:
       void        ensure_capacity(uint32_t req_zones);
       inline bool claim_address(ptr_address address)

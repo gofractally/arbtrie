@@ -41,8 +41,8 @@ namespace psitri
             return false;  // empty tree, nothing to update
          try
          {
-            _ctx.upsert<upsert_mode::unique_update>(key, value_type(value));
-            return true;
+            auto result = _ctx.upsert<upsert_mode::unique_update>(key, value_type(value));
+            return result >= 0;  // -1 means key not found (shared-mode no-op)
          }
          catch (const std::runtime_error&)
          {

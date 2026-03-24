@@ -65,4 +65,25 @@ namespace psitri
           [&lock]() { lock.unlock(); });
    }
 
+   inline void write_session::dump_live_objects() const
+   {
+      _allocator_session->for_each_live_object(
+          [](sal::ptr_address adr, uint32_t ref, const sal::alloc_header* obj)
+          {
+             const char* type_name = "unknown";
+             switch ((int)obj->type())
+             {
+                case (int)node_type::inner: type_name = "inner"; break;
+                case (int)node_type::inner_prefix: type_name = "inner_prefix"; break;
+                case (int)node_type::leaf: type_name = "leaf"; break;
+                case (int)node_type::value: type_name = "value_node"; break;
+             }
+             std::cerr << "  LIVE addr=" << *adr
+                       << " ref=" << ref
+                       << " type=" << type_name
+                       << " size=" << obj->size()
+                       << std::endl;
+          });
+   }
+
 }  // namespace psitri

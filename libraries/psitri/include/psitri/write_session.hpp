@@ -46,6 +46,9 @@ namespace psitri
       /// Start a transaction on the given top-level root index
       transaction start_transaction(uint32_t root_index);
 
+      /// DEBUG: Dump all live objects with type and ref count
+      void dump_live_objects() const;
+
      private:
       friend class transaction;
       sal::sync_type _sync = sal::sync_type::none;

@@ -56,8 +56,21 @@ namespace
 
       void assert_no_leaks()
       {
+         // Wait multiple times to rule out race conditions
          db->wait_for_compactor(std::chrono::milliseconds(5000));
+         auto pending = ses->get_pending_release_count();
+         if (pending > 0)
+         {
+            std::cerr << "Still pending: " << pending << ", waiting again..." << std::endl;
+            db->wait_for_compactor(std::chrono::milliseconds(5000));
+         }
          auto count = ses->get_total_allocated_objects();
+         if (count > 0)
+         {
+            std::cerr << "=== LEAKED " << count << " objects ===" << std::endl;
+            ses->dump_live_objects();
+            std::cerr << "=== END LEAKED ===" << std::endl;
+         }
          REQUIRE(count == 0);
       }
    };
@@ -119,9 +132,9 @@ namespace
       }
 
       // Generate a random value
-      std::string generate_value()
+      std::string generate_value(int max_len = 512)
       {
-         std::uniform_int_distribution<int> len_dist(0, 512);
+         std::uniform_int_distribution<int> len_dist(0, max_len);
          int                                len = len_dist(_rng);
          std::string                        val(len, '\0');
          for (auto& c : val)
@@ -346,12 +359,13 @@ namespace
    class fuzz_runner
    {
      public:
-      fuzz_runner(test_db& tdb, uint64_t seed, op_weights ow)
+      fuzz_runner(test_db& tdb, uint64_t seed, op_weights ow, int max_value_len = 512)
           : _tdb(tdb),
             _keygen(seed),
             _rng(seed + 7919),  // different seed than keygen
             _ow(ow),
-            _op_count(0)
+            _op_count(0),
+            _max_value_len(max_value_len)
       {
          _cur = _tdb.ses->create_write_cursor();
          _total_weight = 0;
@@ -359,13 +373,27 @@ namespace
             _total_weight += _ow.weights[i];
       }
 
-      void run(uint64_t num_ops)
+      void run(uint64_t num_ops, bool trace_allocs = false)
       {
+         uint64_t prev_alloc = 0;
          for (uint64_t i = 0; i < num_ops; ++i)
          {
             auto op = pick_op();
             execute(op);
             _op_count++;
+
+            if (trace_allocs)
+            {
+               auto alloc = _tdb.ses->get_total_allocated_objects();
+               if (op == op_type::commit_reopen || op == op_type::update ||
+                   op == op_type::upsert || op == op_type::insert || op == op_type::remove)
+               {
+                  std::cerr << "op#" << _op_count << " " << op_name(op)
+                            << " oracle=" << _oracle.size()
+                            << " alloc=" << alloc << std::endl;
+               }
+               prev_alloc = alloc;
+            }
 
             if (_op_count % (100 / std::max(1, SCALE)) == 0)
                spot_check();
@@ -379,7 +407,7 @@ namespace
          full_backward_check();
       }
 
-      void cleanup_and_leak_check()
+      uint64_t cleanup_and_count_leaks()
       {
          // Remove all remaining keys
          for (auto it = _oracle.begin(); it != _oracle.end();)
@@ -392,14 +420,37 @@ namespace
          // Verify tree is empty
          {
             auto rc = _cur->read_cursor();
-            REQUIRE_FALSE(rc.seek_begin());
+            CHECK_FALSE(rc.seek_begin());
          }
 
          // Set root to null to release all memory
          _tdb.ses->set_root(0, _cur->take_root());
 
-         // Now check for leaks
-         _tdb.assert_no_leaks();
+         _tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
+         auto pending = _tdb.ses->get_pending_release_count();
+         if (pending > 0)
+            _tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
+         return _tdb.ses->get_total_allocated_objects();
+      }
+
+      void print_tree()
+      {
+         if (_cur && *_cur)
+            _cur->print();
+         else
+            std::cerr << "(empty tree)" << std::endl;
+      }
+
+      void cleanup_and_leak_check()
+      {
+         auto count = cleanup_and_count_leaks();
+         if (count > 0)
+         {
+            std::cerr << "=== LEAKED " << count << " objects ===" << std::endl;
+            _tdb.ses->dump_live_objects();
+            std::cerr << "=== END LEAKED ===" << std::endl;
+         }
+         REQUIRE(count == 0);
       }
 
      private:
@@ -411,6 +462,7 @@ namespace
       int                                _total_weight;
       write_cursor_ptr                   _cur;
       std::map<std::string, std::string> _oracle;
+      int                                _max_value_len;
 
       op_type pick_op()
       {
@@ -507,7 +559,7 @@ namespace
       void do_insert()
       {
          auto key   = _keygen.generate();
-         auto value = _keygen.generate_value();
+         auto value = _keygen.generate_value(_max_value_len);
          INFO("insert key=" << hex_encode(key) << " len=" << key.size());
 
          bool psitri_result = _cur->insert(to_key_view(key), to_value_view(value));
@@ -523,7 +575,7 @@ namespace
       void do_update()
       {
          auto key   = _keygen.pick_or_generate();
-         auto value = _keygen.generate_value();
+         auto value = _keygen.generate_value(_max_value_len);
          INFO("update key=" << hex_encode(key));
 
          bool psitri_result = _cur->update(to_key_view(key), to_value_view(value));
@@ -537,7 +589,7 @@ namespace
       void do_upsert()
       {
          auto key   = _keygen.pick_or_generate();
-         auto value = _keygen.generate_value();
+         auto value = _keygen.generate_value(_max_value_len);
          INFO("upsert key=" << hex_encode(key) << " len=" << key.size());
 
          _cur->upsert(to_key_view(key), to_value_view(value));
@@ -1010,3 +1062,892 @@ TEST_CASE("fuzz edge cases", "[fuzz]")
    runner.run(2000 / SCALE);
    runner.cleanup_and_leak_check();
 }
+
+// Diagnostic tests removed — they were debugging aids for shared-mode ref leaks
+// that have been fixed (no-op detection + no-throw in shared mode).
+// To add new diagnostic tests, use the [fuzz][diag] tags.
+
+#if 0  // Diagnostic tests kept for reference but disabled
+TEST_CASE("fuzz value transition leak", "[fuzz][diag]")
+{
+   // Use the actual fuzz runner with only insert+upsert+remove (no update op),
+   // to isolate whether the leak is from `update` vs `upsert`
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_vt_leak");
+   // insert=30, update=0, upsert=30, remove=20, remove_range=0, get=10, rest=0
+   fuzz_runner runner(tdb, seed, op_weights{{30, 0, 30, 20, 0, 10, 5, 2, 2, 1, 0, 0}});
+   runner.run(2000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz update-only leak", "[fuzz][diag]")
+{
+   // Use the actual fuzz runner with insert+update+remove (no upsert)
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_uo_leak");
+   // insert=30, update=20, upsert=0, remove=20, remove_range=0, get=20, rest=0
+   fuzz_runner runner(tdb, seed, op_weights{{30, 20, 0, 20, 0, 20, 5, 2, 2, 1, 0, 0}});
+   runner.run(2000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz all-mutations leak", "[fuzz][diag]")
+{
+   // All three mutation types together — WITH commit_reopen
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_all_mut");
+   fuzz_runner runner(tdb, seed, op_weights{{25, 10, 20, 15, 0, 15, 5, 2, 2, 2, 2, 2}});
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz all-mut no-commit leak", "[fuzz][diag]")
+{
+   // Same weights but commit_reopen=0
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_nc");
+   fuzz_runner runner(tdb, seed, op_weights{{25, 10, 20, 15, 0, 15, 5, 2, 2, 2, 2, 0}});
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz commit+upsert minimal leak", "[fuzz][diag]")
+{
+   // Minimal: just upsert + commit_reopen, no update/insert/remove
+   test_db tdb("fuzz_cu_min");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 50;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   // Insert N keys with large values
+   for (int i = 0; i < N; ++i)
+   {
+      auto key = make_key(i);
+      std::string val(200, 'A' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Commit (share the tree)
+   tdb.ses->set_root(0, cur->root());
+   auto new_root = tdb.ses->get_root(0);
+   cur = tdb.ses->create_write_cursor(std::move(new_root));
+
+   // Upsert same keys with different values (triggers shared-mode COW)
+   for (int i = 0; i < N; ++i)
+   {
+      auto key = make_key(i);
+      std::string val(200, 'B' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Remove all
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   // Release everything
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz multi-commit leak", "[fuzz][diag]")
+{
+   // Multiple commit_reopen cycles with mixed update/upsert
+   test_db tdb("fuzz_mc_leak");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 20;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   auto do_commit = [&]()
+   {
+      tdb.ses->set_root(0, cur->root());
+      auto nr = tdb.ses->get_root(0);
+      cur     = tdb.ses->create_write_cursor(std::move(nr));
+   };
+
+   // Insert N keys
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'A' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Cycle 1: commit + update
+   do_commit();
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'X');
+      cur->update(to_key_view(key), to_value_view(val));
+   }
+
+   // Cycle 2: commit + upsert
+   do_commit();
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'Y');
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Cycle 3: commit + update again
+   do_commit();
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'Z');
+      cur->update(to_key_view(key), to_value_view(val));
+   }
+
+   // Remove all
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz insert-after-commit leak", "[fuzz][diag]")
+{
+   // Insert new keys AND update/upsert existing keys after commit_reopen
+   test_db tdb("fuzz_iac_leak");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 20;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   auto do_commit = [&]()
+   {
+      tdb.ses->set_root(0, cur->root());
+      auto nr = tdb.ses->get_root(0);
+      cur     = tdb.ses->create_write_cursor(std::move(nr));
+   };
+
+   // Insert N keys
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'A' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Commit, then insert NEW keys + update existing
+   do_commit();
+   for (int i = N; i < N * 2; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'B' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'X');
+      cur->update(to_key_view(key), to_value_view(val));
+   }
+
+   // Commit again, then more inserts + updates
+   do_commit();
+   for (int i = N * 2; i < N * 3; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'C' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+   for (int i = 0; i < N * 2; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'Z');
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Remove all
+   for (int i = 0; i < N * 3; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz interleaved-ops+commit leak", "[fuzz][diag]")
+{
+   // Interleave different operation types within a single commit cycle
+   test_db tdb("fuzz_io_leak");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 30;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   auto do_commit = [&]()
+   {
+      tdb.ses->set_root(0, cur->root());
+      auto nr = tdb.ses->get_root(0);
+      cur     = tdb.ses->create_write_cursor(std::move(nr));
+   };
+
+   // Insert keys
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'A' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   do_commit();
+
+   // Interleaved: update k0, insert k30, upsert k1, insert k31, update k2, ...
+   for (int i = 0; i < N / 2; ++i)
+   {
+      // update existing
+      cur->update(to_key_view(make_key(i)), to_value_view(std::string(200, 'X')));
+      // insert new
+      cur->upsert(to_key_view(make_key(N + i)), to_value_view(std::string(200, 'Y')));
+      // upsert existing
+      cur->upsert(to_key_view(make_key(N / 2 + i)), to_value_view(std::string(200, 'Z')));
+   }
+
+   do_commit();
+
+   // More interleaved ops + removes
+   for (int i = 0; i < N / 4; ++i)
+   {
+      cur->remove(to_key_view(make_key(i)));
+      cur->upsert(to_key_view(make_key(N + N / 2 + i)), to_value_view(std::string(200, 'W')));
+      if (i < N / 2)
+         cur->update(to_key_view(make_key(N / 2 + i)), to_value_view(std::string(200, 'V')));
+   }
+
+   // Remove all remaining
+   std::set<int> removed;
+   for (int i = 0; i < N / 4; ++i)
+      removed.insert(i);
+   for (int i = 0; i < N + N / 2 + N / 4; ++i)
+   {
+      if (removed.count(i) == 0)
+         cur->remove(to_key_view(make_key(i)));
+   }
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz update+upsert+commit minimal", "[fuzz][diag]")
+{
+   // Test: explicit update + upsert + commit_reopen
+   test_db tdb("fuzz_uuc_min");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 20;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   // Phase 1: Insert N keys with large values (>64 bytes → value_nodes)
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'A' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Phase 2: Commit (share the tree, ref=2)
+   tdb.ses->set_root(0, cur->root());
+   auto new_root = tdb.ses->get_root(0);
+   cur           = tdb.ses->create_write_cursor(std::move(new_root));
+
+   // Phase 3: Explicit update() on some keys (uses unique_update → shared_update)
+   for (int i = 0; i < N / 2; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'X' + (i % 3));
+      cur->update(to_key_view(key), to_value_view(val));
+   }
+
+   // Phase 4: upsert() on remaining keys (uses unique_upsert → maybe shared_upsert)
+   for (int i = N / 2; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'Y' + (i % 3));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   // Phase 5: Remove all
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   // Phase 6: Release everything and check
+   auto leaked_before_release = tdb.ses->get_total_allocated_objects();
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+
+   tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
+   auto leaked = tdb.ses->get_total_allocated_objects();
+   WARN("leaked_before_release=" << leaked_before_release << " leaked_after=" << leaked);
+   REQUIRE(leaked == 0);
+}
+
+TEST_CASE("fuzz update-only+commit minimal", "[fuzz][diag]")
+{
+   // Same but ONLY update, no upsert after commit
+   test_db tdb("fuzz_uc_min");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 20;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'A' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   tdb.ses->set_root(0, cur->root());
+   auto new_root = tdb.ses->get_root(0);
+   cur           = tdb.ses->create_write_cursor(std::move(new_root));
+
+   // ONLY update, no upsert
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'X' + (i % 3));
+      cur->update(to_key_view(key), to_value_view(val));
+   }
+
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz upsert-only+commit minimal", "[fuzz][diag]")
+{
+   // Same but ONLY upsert, no explicit update after commit
+   test_db tdb("fuzz_usc_min");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 20;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'A' + (i % 26));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   tdb.ses->set_root(0, cur->root());
+   auto new_root = tdb.ses->get_root(0);
+   cur           = tdb.ses->create_write_cursor(std::move(new_root));
+
+   // ONLY upsert on existing keys
+   for (int i = 0; i < N; ++i)
+   {
+      auto        key = make_key(i);
+      std::string val(200, 'Y' + (i % 3));
+      cur->upsert(to_key_view(key), to_value_view(val));
+   }
+
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz leak bisect", "[fuzz][diag]")
+{
+   // Run all-mut no-insert pattern and log mutations to find which op causes leak
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+
+   // Instead of using fuzz_runner, replicate the logic with logging
+   test_db tdb("fuzz_bisect");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   key_generator keygen(seed);
+   std::mt19937_64 rng(seed + 7919);
+   std::map<std::string, std::string> oracle;
+
+   // Operation weights from no-insert test: {0, 10, 45, 15, 0, 15, 5, 2, 2, 2, 2, 2}
+   // insert=0, update=10, upsert=45, remove=15, rr=0, get=15, ...commit_reopen=2
+   // Total mutations we care about: update, upsert, remove, commit_reopen
+
+   auto pick_op = [&]() -> int
+   {
+      // Simplified: 10=update, 45=upsert, 15=remove, 2=commit_reopen, 28=get/read (skip)
+      std::uniform_int_distribution<int> dist(0, 99);
+      int r = dist(rng);
+      if (r < 10) return 0;       // update
+      if (r < 55) return 1;       // upsert
+      if (r < 70) return 2;       // remove
+      if (r < 72) return 3;       // commit_reopen
+      return 4;                    // read-only (skip)
+   };
+
+   auto do_commit_reopen = [&]()
+   {
+      tdb.ses->set_root(0, cur->root());
+      auto nr = tdb.ses->get_root(0);
+      cur = tdb.ses->create_write_cursor(std::move(nr));
+   };
+
+   int op_count = 0;
+   for (int i = 0; i < 200; ++i)  // 200 ops (1000/SCALE=5)
+   {
+      int op = pick_op();
+      if (op == 4) { ++op_count; continue; }  // skip reads
+
+      std::string key;
+      std::string val;
+
+      switch (op)
+      {
+         case 0:  // update
+         {
+            if (oracle.empty()) break;
+            auto it = oracle.begin();
+            std::uniform_int_distribution<int> skip(0, oracle.size() - 1);
+            std::advance(it, skip(rng));
+            key = it->first;
+            val = std::string(100 + (rng() % 200), 'U');
+            cur->update(to_key_view(key), to_value_view(val));
+            oracle[key] = val;
+            break;
+         }
+         case 1:  // upsert
+         {
+            key = keygen.pick_or_generate();
+            val = std::string(100 + (rng() % 200), 'S');
+            cur->upsert(to_key_view(key), to_value_view(val));
+            oracle[key] = val;
+            break;
+         }
+         case 2:  // remove
+         {
+            if (oracle.empty()) break;
+            auto it = oracle.begin();
+            std::uniform_int_distribution<int> skip(0, oracle.size() - 1);
+            std::advance(it, skip(rng));
+            key = it->first;
+            cur->remove(to_key_view(key));
+            oracle.erase(it);
+            break;
+         }
+         case 3:  // commit_reopen
+         {
+            do_commit_reopen();
+            break;
+         }
+      }
+      ++op_count;
+   }
+
+   WARN("After " << op_count << " ops, oracle has " << oracle.size() << " keys");
+
+   // Remove all
+   for (auto it = oracle.begin(); it != oracle.end(); it = oracle.erase(it))
+      cur->remove(to_key_view(it->first));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
+   auto leaked = tdb.ses->get_total_allocated_objects();
+   WARN("leaked=" << leaked);
+   REQUIRE(leaked == 0);
+}
+
+TEST_CASE("fuzz insert+update leak", "[fuzz][diag]")
+{
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+   test_db     tdb("fuzz_iu_leak");
+   // insert=30, update=30, upsert=0, remove=20, rr=0, get=10, rest=0
+   fuzz_runner runner(tdb, seed, op_weights{{30, 30, 0, 20, 0, 10, 5, 2, 2, 1, 0, 0}});
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz insert+upsert leak", "[fuzz][diag]")
+{
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+   test_db     tdb("fuzz_ius_leak");
+   // insert=30, update=0, upsert=30, remove=20, rr=0, get=10, rest=0
+   fuzz_runner runner(tdb, seed, op_weights{{30, 0, 30, 20, 0, 10, 5, 2, 2, 1, 0, 0}});
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz all-mut no-update leak", "[fuzz][diag]")
+{
+   // Same total weights as all-mutations but update=0
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+   test_db     tdb("fuzz_no_upd");
+   fuzz_runner runner(tdb, seed, op_weights{{25, 0, 30, 15, 0, 15, 5, 2, 2, 2, 2, 2}});
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz all-mut no-upsert leak", "[fuzz][diag]")
+{
+   // Same total weights as all-mutations but upsert=0
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+   test_db     tdb("fuzz_no_ups");
+   fuzz_runner runner(tdb, seed, op_weights{{25, 10, 0, 15, 0, 15, 5, 2, 2, 2, 2, 2}});
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz all-mut no-insert leak", "[fuzz][diag]")
+{
+   // Same total weights but insert=0 (relies on upsert to add keys)
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+   test_db     tdb("fuzz_no_ins");
+   fuzz_runner runner(tdb, seed, op_weights{{0, 10, 45, 15, 0, 15, 5, 2, 2, 2, 2, 2}});
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz no-insert small-values", "[fuzz][diag]")
+{
+   // Same as no-insert but with values <= 60 bytes (no value_nodes)
+   // Leaks 4 objects = tree nodes only (vs 43 with value_nodes)
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+   test_db     tdb("fuzz_ni_small");
+   fuzz_runner runner(tdb, seed, op_weights{{0, 10, 45, 15, 0, 15, 5, 2, 2, 2, 2, 2}}, 60);
+   runner.run(680 / SCALE, true);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz op128 leak", "[fuzz][diag]")
+{
+   // Op #128 (a remove after two commit_reopens) introduces 4 leaked leaf nodes
+   // First run 127 ops (no leak), then run 1 more op with diagnostics
+   test_db     tdb("fuzz_op128");
+   fuzz_runner runner(tdb, 42, op_weights{{0, 10, 45, 15, 0, 15, 5, 2, 2, 2, 2, 2}}, 60);
+   runner.run(127);  // 127 ops → no leak
+
+   // Print tree structure before op 128
+   std::cerr << "=== TREE BEFORE op 128 ===" << std::endl;
+   runner.print_tree();
+   std::cerr << "=== OBJECTS BEFORE op 128 ===" << std::endl;
+   tdb.ses->dump_live_objects();
+
+   runner.run(1, true);  // op #128
+
+   std::cerr << "=== TREE AFTER op 128 ===" << std::endl;
+   runner.print_tree();
+   std::cerr << "=== OBJECTS AFTER op 128 ===" << std::endl;
+   tdb.ses->dump_live_objects();
+
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz bisect random heavy", "[fuzz][diag]")
+{
+   op_weights ow{{25, 10, 20, 15, 0, 15, 5, 2, 2, 2, 2, 2}};
+   uint64_t seed = 12345;
+   int max_ops = 1000;  // 5000/SCALE=5
+
+   int lo = 1, hi = max_ops;
+   while (lo < hi)
+   {
+      int mid = (lo + hi) / 2;
+      test_db tdb("fuzz_brh_" + std::to_string(mid));
+      fuzz_runner runner(tdb, seed, ow);
+      runner.run(mid);
+      auto leaks = runner.cleanup_and_count_leaks();
+      std::cerr << "Bisect: " << mid << " ops → " << leaks << " leaks" << std::endl;
+      if (leaks > 0)
+         hi = mid;
+      else
+         lo = mid + 1;
+   }
+   std::cerr << "=== FIRST LEAKING OP: " << lo << " ===" << std::endl;
+
+   // Replay with diagnostics
+   {
+      test_db tdb("fuzz_brh_final");
+      fuzz_runner runner(tdb, seed, ow);
+      runner.run(lo - 1);
+      std::cerr << "=== TREE BEFORE ===" << std::endl;
+      runner.print_tree();
+      runner.run(1, true);
+      std::cerr << "=== TREE AFTER ===" << std::endl;
+      runner.print_tree();
+      runner.cleanup_and_leak_check();
+   }
+}
+
+TEST_CASE("fuzz bisect leak", "[fuzz][diag]")
+{
+   // Binary search for the first operation that introduces a leak.
+   // For each candidate N, we create a fresh DB, replay N ops, cleanup, check leaks.
+   op_weights ow{{0, 10, 45, 15, 0, 15, 5, 2, 2, 2, 2, 2}};
+   int max_ops = 680 / SCALE;
+
+   // First verify max_ops leaks
+   {
+      test_db tdb("fuzz_bisect_verify");
+      fuzz_runner runner(tdb, 42, ow, 60);
+      runner.run(max_ops);
+      auto leaks = runner.cleanup_and_count_leaks();
+      std::cerr << "Verify: " << max_ops << " ops → " << leaks << " leaks" << std::endl;
+      REQUIRE(leaks > 0);
+   }
+
+   int lo = 1, hi = max_ops;
+   while (lo < hi)
+   {
+      int mid = (lo + hi) / 2;
+      test_db tdb("fuzz_bisect_" + std::to_string(mid));
+      fuzz_runner runner(tdb, 42, ow, 60);
+      runner.run(mid);
+      auto leaks = runner.cleanup_and_count_leaks();
+      std::cerr << "Bisect: " << mid << " ops → " << leaks << " leaks" << std::endl;
+      if (leaks > 0)
+         hi = mid;
+      else
+         lo = mid + 1;
+   }
+   std::cerr << "=== FIRST LEAKING OP: " << lo << " ===" << std::endl;
+
+   // Now replay with tracing to see exactly what that op is
+   {
+      test_db tdb("fuzz_bisect_final");
+      fuzz_runner runner(tdb, 42, ow, 60);
+      runner.run(lo, true);
+      auto leaks = runner.cleanup_and_count_leaks();
+      std::cerr << "Final: " << lo << " ops → " << leaks << " leaks" << std::endl;
+      REQUIRE(leaks == 0);  // will fail, showing us the op
+   }
+}
+
+TEST_CASE("fuzz double-commit+update leak", "[fuzz][diag]")
+{
+   // Test: double commit_reopen then update in shared mode
+   test_db tdb("fuzz_dcu_leak");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 40;  // enough to have inner nodes
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   auto do_commit = [&]()
+   {
+      tdb.ses->set_root(0, cur->root());
+      auto nr = tdb.ses->get_root(0);
+      cur     = tdb.ses->create_write_cursor(std::move(nr));
+   };
+
+   // Insert N keys with small values
+   for (int i = 0; i < N; ++i)
+      cur->upsert(to_key_view(make_key(i)), to_value_view(std::string(30, 'A' + (i % 26))));
+
+   // Double commit_reopen (as seen in the trace)
+   do_commit();
+   do_commit();
+
+   // Update one key in shared mode
+   cur->update(to_key_view(make_key(0)), to_value_view(std::string(30, 'X')));
+
+   // Remove all
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz single-commit+update leak", "[fuzz][diag]")
+{
+   // Same but with single commit (should pass)
+   test_db tdb("fuzz_scu_leak");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 40;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   auto do_commit = [&]()
+   {
+      tdb.ses->set_root(0, cur->root());
+      auto nr = tdb.ses->get_root(0);
+      cur     = tdb.ses->create_write_cursor(std::move(nr));
+   };
+
+   for (int i = 0; i < N; ++i)
+      cur->upsert(to_key_view(make_key(i)), to_value_view(std::string(30, 'A' + (i % 26))));
+
+   // Single commit
+   do_commit();
+
+   // Update one key
+   cur->update(to_key_view(make_key(0)), to_value_view(std::string(30, 'X')));
+
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz commit+many-updates leak", "[fuzz][diag]")
+{
+   // Commit then update ALL keys
+   test_db tdb("fuzz_cmu_leak");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   constexpr int N = 40;
+
+   auto make_key = [](int i) -> std::string
+   {
+      std::string key(4, '\0');
+      key[0] = (i >> 24) & 0xff;
+      key[1] = (i >> 16) & 0xff;
+      key[2] = (i >> 8) & 0xff;
+      key[3] = i & 0xff;
+      return key;
+   };
+
+   auto do_commit = [&]()
+   {
+      tdb.ses->set_root(0, cur->root());
+      auto nr = tdb.ses->get_root(0);
+      cur     = tdb.ses->create_write_cursor(std::move(nr));
+   };
+
+   for (int i = 0; i < N; ++i)
+      cur->upsert(to_key_view(make_key(i)), to_value_view(std::string(30, 'A' + (i % 26))));
+
+   do_commit();
+
+   // Update ALL keys
+   for (int i = 0; i < N; ++i)
+      cur->update(to_key_view(make_key(i)), to_value_view(std::string(30, 'X')));
+
+   // Commit again then update more
+   do_commit();
+   for (int i = 0; i < N; ++i)
+      cur->update(to_key_view(make_key(i)), to_value_view(std::string(30, 'Y')));
+
+   for (int i = 0; i < N; ++i)
+      cur->remove(to_key_view(make_key(i)));
+
+   cur->take_root();
+   tdb.ses->set_root(0, {}, sal::sync_type::none);
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz no-insert big-values-only", "[fuzz][diag]")
+{
+   // Same as no-insert but values always > 64 bytes (always value_nodes)
+   uint64_t seed = 42;
+   INFO("seed=" << seed);
+   test_db     tdb("fuzz_ni_big");
+   fuzz_runner runner(tdb, seed, op_weights{{0, 10, 45, 15, 0, 15, 5, 2, 2, 2, 2, 2}}, 512);
+   runner.run(1000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+#endif  // Diagnostic tests
