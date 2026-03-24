@@ -427,6 +427,8 @@ namespace psitri
    }
    inline bool cursor::seek_last() noexcept
    {
+      if (_node.address() == sal::null_ptr_address) [[unlikely]]
+         return seek_end();
       seek_end();
       return prev();
    }
@@ -547,7 +549,10 @@ namespace psitri
             [[unlikely]] case node_type::inner_prefix:
             {
                auto* ip = static_cast<const inner_prefix_node*>(n);
-               if (branch_number(-2) == _path_back->branch) [[unlikely]]
+               // branch==-2: arrived via push_end (non-root first visit)
+               // branch==num_branches(): arrived via seek_end (root-level first visit)
+               if (_path_back->branch == branch_number(-2) ||
+                   _path_back->branch == branch_number(ip->num_branches())) [[unlikely]]
                {
                   _path_back->branch = branch_number(ip->num_branches());
                   append_key(ip->prefix());

@@ -23,6 +23,10 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/subtree_tests.cpp
     ../libraries/psitri/tests/multi_writer_tests.cpp
     ../libraries/psitri/tests/recovery_tests.cpp
+    ../libraries/psitri/tests/fuzz_tests.cpp
+    ../libraries/psitri/tests/cursor_tests.cpp
+    ../libraries/psitri/tests/integrity_tests.cpp
+    ../libraries/psitri/tests/edge_case_tests.cpp
 )
 target_link_libraries(psitri-tests
     PRIVATE
