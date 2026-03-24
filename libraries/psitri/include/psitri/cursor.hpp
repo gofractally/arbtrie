@@ -602,6 +602,123 @@ namespace psitri
       }
    }
 
+   inline value_view cursor::value(sal::read_lock& rl) const noexcept
+   {
+      if (is_end() || is_rend())
+         return value_view();
+      const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return value_view();
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return value_view();
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+            return value_view();
+         case leaf_node::value_type_flag::inline_data:
+            return l->get_value_view(_path_back->branch);
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref = _node.session()->get_ref<value_node>(
+                l->get_value_address(_path_back->branch));
+            return ref->get_data();
+         }
+         case leaf_node::value_type_flag::subtree:
+            return value_view();
+         default:
+            std::unreachable();
+      }
+   }
+
+   inline void cursor::get_value(std::invocable<value_view> auto&& lambda) const noexcept
+   {
+      if (is_end() || is_rend())
+      {
+         lambda(value_view());
+         return;
+      }
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+      {
+         lambda(value_view());
+         return;
+      }
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+      {
+         lambda(value_view());
+         return;
+      }
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+            lambda(value_view());
+            return;
+         case leaf_node::value_type_flag::inline_data:
+            lambda(l->get_value_view(_path_back->branch));
+            return;
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref = _node.session()->get_ref<value_node>(
+                l->get_value_address(_path_back->branch));
+            lambda(ref->get_data());
+            return;
+         }
+         case leaf_node::value_type_flag::subtree:
+            lambda(value_view());
+            return;
+         default:
+            std::unreachable();
+      }
+   }
+
+   template <ConstructibleBuffer ConstructibleBufferType>
+   std::optional<ConstructibleBufferType> cursor::value() const noexcept
+   {
+      if (is_end() || is_rend())
+         return std::nullopt;
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return std::nullopt;
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return std::nullopt;
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+         {
+            ConstructibleBufferType buf;
+            buf.resize(0);
+            return buf;
+         }
+         case leaf_node::value_type_flag::inline_data:
+         {
+            auto                    vv = l->get_value_view(_path_back->branch);
+            ConstructibleBufferType buf;
+            buf.resize(vv.size());
+            std::memcpy(buf.data(), vv.data(), vv.size());
+            return buf;
+         }
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref = _node.session()->get_ref<value_node>(
+                l->get_value_address(_path_back->branch));
+            auto                    vv = ref->get_data();
+            ConstructibleBufferType buf;
+            buf.resize(vv.size());
+            std::memcpy(buf.data(), vv.data(), vv.size());
+            return buf;
+         }
+         case leaf_node::value_type_flag::subtree:
+            return std::nullopt;
+         default:
+            std::unreachable();
+      }
+   }
+
    inline bool cursor::is_subtree() const noexcept
    {
       if (is_end() || is_rend())

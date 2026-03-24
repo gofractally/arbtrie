@@ -106,6 +106,9 @@ add_subdirectory(libraries/psitri)
 add_subdirectory(libraries/hash)
 add_subdirectory(libraries/ucc)
 
+# PsiTriRocks: RocksDB-compatible wrapper around psitri
+add_subdirectory(libraries/psitrirocks)
+
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-O0 -g -fno-omit-frame-pointer)
@@ -335,6 +338,77 @@ target_link_libraries(psitri-tidesdb-bench PRIVATE psitri Threads::Threads)
 set_target_properties(psitri-tidesdb-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+# PsiTriRocks benchmark (uses rocksdb::DB API backed by psitri)
+add_executable(psitrirocks-bench programs/rocks_bench.cpp)
+target_link_libraries(psitrirocks-bench PRIVATE psitrirocks)
+target_compile_definitions(psitrirocks-bench PRIVATE PSITRIROCKS_BACKEND=1)
+set_target_properties(psitrirocks-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# Real RocksDB benchmark (optional — fetches RocksDB for comparison)
+option(BUILD_ROCKSDB_BENCH "Build RocksDB comparison benchmark (fetches RocksDB)" OFF)
+if(BUILD_ROCKSDB_BENCH)
+    message(STATUS "Fetching RocksDB for comparison benchmark")
+    include(FetchContent)
+
+    # Minimal RocksDB build — disable tests, tools, benchmarks, Java
+    set(WITH_TESTS OFF CACHE BOOL "" FORCE)
+    set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "" FORCE)
+    set(WITH_TOOLS OFF CACHE BOOL "" FORCE)
+    set(WITH_ALL_TESTS OFF CACHE BOOL "" FORCE)
+    set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)
+    set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(FAIL_ON_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(WITH_JNI OFF CACHE BOOL "" FORCE)
+    set(WITH_SNAPPY OFF CACHE BOOL "" FORCE)
+    set(WITH_LZ4 OFF CACHE BOOL "" FORCE)
+    set(WITH_ZLIB OFF CACHE BOOL "" FORCE)
+    set(WITH_ZSTD OFF CACHE BOOL "" FORCE)
+    set(WITH_BZ2 OFF CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        rocksdb
+        GIT_REPOSITORY https://github.com/facebook/rocksdb.git
+        GIT_TAG        v9.9.3
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(rocksdb)
+
+    # Same benchmark code, linked against real RocksDB
+    add_executable(rocksdb-bench programs/rocks_bench.cpp)
+    target_link_libraries(rocksdb-bench PRIVATE rocksdb)
+    target_include_directories(rocksdb-bench PRIVATE ${rocksdb_SOURCE_DIR}/include)
+    set_target_properties(rocksdb-bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # Convenience target: build both and run them side by side
+    set(BENCH_NUM "1000000" CACHE STRING "Number of keys for bench-compare")
+    set(BENCH_BATCH "1" CACHE STRING "Batch size for bench-compare")
+    set(BENCH_WORKLOADS "fillseq,fillrandom,overwrite,readrandom,readseq,readreverse,seekrandom,deleteseq,deleterandom,fillrandom,readwhilewriting"
+        CACHE STRING "Comma-separated benchmark workloads for bench-compare")
+
+    add_custom_target(bench-compare
+        COMMAND ${CMAKE_COMMAND} -E echo "======================================================"
+        COMMAND ${CMAKE_COMMAND} -E echo "  PsiTriRocks (psitri backend) — ${BENCH_NUM} keys"
+        COMMAND ${CMAKE_COMMAND} -E echo "======================================================"
+        COMMAND ${CMAKE_BINARY_DIR}/bin/psitrirocks-bench
+            --num=${BENCH_NUM} --batch_size=${BENCH_BATCH}
+            --benchmarks=${BENCH_WORKLOADS}
+            --db=${CMAKE_BINARY_DIR}/bench_psitri
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "======================================================"
+        COMMAND ${CMAKE_COMMAND} -E echo "  RocksDB (native) — ${BENCH_NUM} keys"
+        COMMAND ${CMAKE_COMMAND} -E echo "======================================================"
+        COMMAND ${CMAKE_BINARY_DIR}/bin/rocksdb-bench
+            --num=${BENCH_NUM} --batch_size=${BENCH_BATCH}
+            --benchmarks=${BENCH_WORKLOADS}
+            --db=${CMAKE_BINARY_DIR}/bench_rocksdb
+        DEPENDS psitrirocks-bench rocksdb-bench
+        COMMENT "Running PsiTriRocks vs RocksDB comparison benchmark"
+        VERBATIM
+    )
+endif()
 
 # TidesDB benchmark (optional — requires tidesdb installed or in external/)
 option(BUILD_TIDESDB_BENCH "Build the TidesDB comparison benchmark" OFF)
