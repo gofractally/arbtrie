@@ -384,7 +384,31 @@ if(BUILD_ROCKSDB_BENCH)
     set_target_properties(rocksdb-bench PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-    # Convenience target: build both and run them side by side
+    # ── libmdbx for MDBX comparison benchmark ──
+    message(STATUS "Fetching libmdbx for comparison benchmark")
+
+    set(MDBX_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(MDBX_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(MDBX_BUILD_CXX OFF CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        libmdbx
+        GIT_REPOSITORY https://github.com/erthink/libmdbx.git
+        GIT_TAG        v0.13.11
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(libmdbx)
+
+    add_subdirectory(libraries/mdbxrocks)
+
+    # MDBX benchmark — same bench code, linked against mdbxrocks
+    add_executable(mdbx-bench programs/rocks_bench.cpp)
+    target_link_libraries(mdbx-bench PRIVATE mdbxrocks)
+    target_compile_definitions(mdbx-bench PRIVATE MDBX_BACKEND=1)
+    set_target_properties(mdbx-bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # Convenience target: build all three and run them side by side
     set(BENCH_NUM "1000000" CACHE STRING "Number of keys for bench-compare")
     set(BENCH_BATCH "1" CACHE STRING "Batch size for bench-compare")
     set(BENCH_WORKLOADS "fillseq,fillrandom,overwrite,readrandom,readseq,readreverse,seekrandom,deleteseq,deleterandom,fillrandom,readwhilewriting"
@@ -406,8 +430,16 @@ if(BUILD_ROCKSDB_BENCH)
             --num=${BENCH_NUM} --batch_size=${BENCH_BATCH}
             --benchmarks=${BENCH_WORKLOADS}
             --db=${CMAKE_BINARY_DIR}/bench_rocksdb
-        DEPENDS psitrirocks-bench rocksdb-bench
-        COMMENT "Running PsiTriRocks vs RocksDB comparison benchmark"
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "======================================================"
+        COMMAND ${CMAKE_COMMAND} -E echo "  MDBX (libmdbx backend) — ${BENCH_NUM} keys"
+        COMMAND ${CMAKE_COMMAND} -E echo "======================================================"
+        COMMAND ${CMAKE_BINARY_DIR}/bin/mdbx-bench
+            --num=${BENCH_NUM} --batch_size=${BENCH_BATCH}
+            --benchmarks=${BENCH_WORKLOADS}
+            --db=${CMAKE_BINARY_DIR}/bench_mdbx
+        DEPENDS psitrirocks-bench rocksdb-bench mdbx-bench
+        COMMENT "Running PsiTriRocks vs RocksDB vs MDBX comparison benchmark"
         VERBATIM
     )
 endif()

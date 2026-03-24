@@ -591,6 +591,8 @@ int main(int argc, char** argv)
 
 #ifdef PSITRIROCKS_BACKEND
    printf("Backend: PsiTriRocks (psitri)\n");
+#elif defined(MDBX_BACKEND)
+   printf("Backend: MDBX (libmdbx)\n");
 #else
    printf("Backend: RocksDB\n");
 #endif
@@ -682,6 +684,28 @@ int main(int argc, char** argv)
 
    if (db)
       delete db;
+
+   // Report database size on disk
+   {
+      uint64_t total_bytes = 0;
+      try
+      {
+         for (auto& entry : std::filesystem::recursive_directory_iterator(cfg.db_path))
+         {
+            if (entry.is_regular_file())
+               total_bytes += entry.file_size();
+         }
+      }
+      catch (...) {}
+
+      if (total_bytes > 0)
+      {
+         double mb = total_bytes / (1024.0 * 1024.0);
+         uint64_t data_bytes = (uint64_t)cfg.num * (cfg.key_size + cfg.value_size);
+         double ratio = data_bytes > 0 ? (double)total_bytes / data_bytes : 0;
+         printf("DB size:     %.1f MB (%.1fx raw data)\n", mb, ratio);
+      }
+   }
 
    printf("-------------------------------------------------------\n");
    printf("Done.\n");
