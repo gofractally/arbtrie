@@ -87,7 +87,10 @@ namespace psitri
       //    SAL_ERROR("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
       PSITRI_ASSERT_INVARIANTS(clone->validate_invariants());
       set_num_branches(clone->num_branches());
-      if (clone->dead_space())
+      // Rebuild from scratch when there is dead space to reclaim, or when the
+      // cline table is full — rebuilding compacts clines by only keeping those
+      // actually referenced, which frees slots for subsequent update_value().
+      if (clone->dead_space() || clone->_cline_cap >= 16)
       {
          // let the compactor do this work, it has a major slowdown of updates/inserts when
          // put in the critical path.
@@ -195,8 +198,45 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
-      clone_from(&upd.src);
-      update_value(upd.lb, upd.value);
+      // Rebuild from scratch, substituting the new value at upd.lb during the copy.
+      // This avoids clone_from + update_value which would carry the old value as dead
+      // space — causing overflow when the leaf is already near capacity.
+      const leaf_node* clone = &upd.src;
+      PSITRI_ASSERT_INVARIANTS(clone->validate_invariants());
+      const uint16_t nb = clone->num_branches();
+      set_num_branches(nb);
+
+      memcpy(_key_hashs, clone->_key_hashs, nb * sizeof(uint8_t));
+
+      const uint8_t* seq_table = search_seq_table.data() + ((nb - 1) * nb) / 2;
+      auto           kos       = keys_offsets();
+      for (uint16_t x = nb; x-- > 0;)
+      {
+         auto idx  = seq_table[x];
+         kos[idx]  = alloc_key(clone->get_key(branch_number(idx)));
+      }
+
+      auto vos       = value_offsets();
+      for (uint16_t x = 0; x < nb; ++x)
+      {
+         // Substitute the new value at the updated branch
+         value_type val = (x == *upd.lb) ? upd.value : clone->get_value(branch_number(x));
+         if (val.is_view())
+         {
+            if (val.view().empty())
+               vos[x] = value_branch();
+            else
+               vos[x] = alloc_value(val.view());
+         }
+         else if (val.is_subtree())
+            vos[x] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+         else if (val.is_value_node())
+            vos[x] = add_address_ptr(value_type_flag::value_node, val.value_address());
+         else
+            vos[x] = value_branch();
+      }
+      assert(is_optimal_layout());
+      PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
 
    leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm)
@@ -454,6 +494,45 @@ namespace psitri
       }
       return can_apply_mode::none;
    }
+   leaf_node::can_apply_mode leaf_node::can_apply(const op::leaf_update& upd) const noexcept
+   {
+      assert(upd.lb < num_branches());
+      assert(not upd.value.is_remove());
+
+      // Compute worst-case additional free_space consumed by update_value():
+      //  - inline alloc: if the new value is a larger inline, alloc_value() grows _alloc_pos
+      //  - cline growth: if the new value is address-typed and doesn't match an existing cline
+      int extra = 0;
+
+      value_branch old_vb   = value_offsets()[*upd.lb];
+      bool         old_inline = old_vb.is_inline();
+      size_t       old_size   = old_inline ? get_value_ptr(old_vb.offset())->get().size() : 0;
+
+      if (upd.value.is_view())
+      {
+         auto v = upd.value.view();
+         if (v.size() > 0 && !(old_inline && v.size() <= old_size))
+            extra += v.size() + sizeof(value_data);
+      }
+      else if (upd.value.is_address())
+      {
+         // Conservative: assume a new cline slot is needed. We cannot use
+         // can_insert_address() here because update_value() may remove the old
+         // address's cline entry before calling add_address_ptr() for the new one,
+         // invalidating any match can_insert_address() found in the pre-mutation state.
+         if (_cline_cap >= 16)
+            return can_apply_mode::defrag;
+         extra += sizeof(ptr_address);
+      }
+
+      int leftover = free_space() - extra;
+      if (leftover >= 0)
+         return can_apply_mode::modify;
+      if (leftover + int(dead_space()) + (int(leaf_node::cow_size()) - int(size())) >= 0)
+         return can_apply_mode::defrag;
+      return can_apply_mode::none;
+   }
+
    void leaf_node::apply(const op::leaf_remove& rm) noexcept
    {
       auto init_free_space = free_space();
@@ -752,16 +831,18 @@ namespace psitri
    bool leaf_node::can_insert_address(ptr_address addr) const noexcept
    {
       ptr_address base_cline(*addr & ~0x0f);
-      if (clines().size() < 15)
-         return true;
-      bool       found_existing = false;
-      const auto cls            = clines();
+      const auto  cls            = clines();
+      bool        found_existing = false;
       // TODO: there is a scalar algo that can do this 2x at a time
       // there is a neon algo that can do this 4x at a time
       // there is a AVX2 algo that can do this 8x at a time
       for (int i = 0; i < cls.size(); ++i)
-         found_existing |= cls[i] == base_cline;
-      return found_existing;
+         found_existing |= (cls[i] == base_cline) | (sal::null_ptr_address == cls[i]);
+      if (found_existing)
+         return true;
+      // No matching or empty slot — must grow _cline_cap.
+      // Enforce both the 16-cline capacity limit and available free_space.
+      return cls.size() < 16 && free_space() >= int(sizeof(ptr_address));
    }
 
    /**

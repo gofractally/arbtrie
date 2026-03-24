@@ -348,7 +348,7 @@ namespace psitri
          return branch_number(pos[right_pos]);
       }
 
-      /// visit all branches that are ptr_address
+      /// visit all branches that are ptr_address (value_node or subtree)
       void visit_branches(std::invocable<ptr_address> auto&& lam) const noexcept
       {
          const value_branch* cvb = value_offsets();

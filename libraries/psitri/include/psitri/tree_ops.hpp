@@ -221,6 +221,8 @@ namespace psitri
       }
       void validate()
       {
+         if (not _root)
+            return;  // empty tree is valid
          sal::read_lock lock = _session.lock();
          validate(_session.get_ref(_root.address()));
       }
@@ -1391,36 +1393,60 @@ namespace psitri
       else
          _old_value_size = old_value.size();
 
-      // Convert large values to value_nodes
-      auto new_val = make_value(_new_value, parent_hint);
+      // Convert large values to value_nodes, using the leaf's clines as the
+      // allocation hint so the value_node lands on an existing cline when possible.
+      auto new_val = make_value(_new_value, leaf->clines());
+
+      // Check if the leaf has enough space for the in-place update.
+      // update_value() may allocate inline data (growing _alloc_pos) and/or
+      // grow the cline table (growing _cline_cap). These modifications happen
+      // non-atomically — if space runs out mid-update, the leaf is left corrupt.
+      // can_apply() conservatively checks all space requirements up front.
+      op::leaf_update update_op{.src = *leaf.obj(), .lb = br, .key = key, .value = new_val};
 
       if constexpr (mode.is_unique())
       {
-         // When transitioning from inline/null to address type (value_node/subtree),
-         // update_value() calls add_address_ptr() which may need to grow _cline_cap
-         // by sizeof(ptr_address) bytes. If the leaf lacks free_space, the in-place
-         // update would corrupt the node. Fall through to allocate a new leaf instead.
-         bool new_needs_address =
-             new_val.is_value_node() || new_val.is_subtree();
          bool old_has_address =
              leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node;
 
-         if (!new_needs_address || old_has_address ||
-             leaf->free_space() >= int(sizeof(sal::ptr_address)))
+         switch (leaf->can_apply(update_op))
          {
-            // Release old external value (value_node or subtree)
-            if (old_has_address)
-               _session.release(leaf->get_value(br).address());
-
-            leaf.modify()->update_value(br, new_val);
-            return leaf.address();
+            case leaf_node::can_apply_mode::modify:
+               if (old_has_address)
+                  _session.release(leaf->get_value(br).address());
+               leaf.modify()->update_value(br, new_val);
+               return leaf.address();
+            case leaf_node::can_apply_mode::defrag:
+               if (old_has_address)
+                  _session.release(leaf->get_value(br).address());
+               return _session.realloc<leaf_node>(leaf, update_op).address();
+            case leaf_node::can_apply_mode::none:
+            {
+               // The leaf is at max capacity with no dead space and the new value
+               // is larger than the old — it genuinely cannot fit. Treat as a
+               // remove + insert which may split the leaf.
+               //
+               // TODO: This does two allocations (realloc to remove, then insert which
+               // may split). A single-allocation approach would split the leaf around
+               // the updated key, placing the updated entry in whichever half has room.
+               // That mirrors what insert() does for new keys but avoids the extra copy.
+               if (old_has_address)
+                  _session.release(leaf->get_value(br).address());
+               op::leaf_remove rm_op{.src = *leaf.obj(), .bn = br};
+               auto removed = _session.realloc<leaf_node>(leaf, rm_op);
+               // Now insert the key with the new value into the (possibly smaller) leaf.
+               // insert() sets _delta_descendents=1, but this is an update (net 0),
+               // so we reset it after insert to avoid corrupting ancestor descendent counts.
+               branch_number lb = removed->lower_bound(key);
+               auto result = insert<mode>(parent_hint, removed, key, lb);
+               _delta_descendents = 0;
+               return result;
+            }
          }
-         // else: not enough space for in-place cline growth, fall through
+         std::unreachable();
       }
 
-      // Shared mode, or unique-mode fallback when leaf lacks space for cline growth.
-      // Allocating a new max_leaf_size leaf with clone_from defragments dead space,
-      // guaranteeing enough room for the address transition.
+      // Shared mode: clone into a new max_leaf_size leaf (defragments dead space).
       {
          retain_children(leaf);
 
@@ -1428,7 +1454,6 @@ namespace psitri
          if (leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node)
             _session.release(leaf->get_value(br).address());
 
-         op::leaf_update update_op{.src = *leaf.obj(), .lb = br, .key = key, .value = new_val};
          return _session.alloc<leaf_node>(parent_hint, update_op);
       }
    }
