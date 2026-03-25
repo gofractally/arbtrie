@@ -138,16 +138,20 @@ static void print_phase(const char* name, double secs, uint64_t ops = 0, const c
 
 struct SizeReport
 {
-   uint64_t file_size = 0;  // raw on-disk footprint
-   uint64_t live_size = 0;  // actual data in use
-   uint64_t free_size = 0;  // reclaimable space
+   uint64_t file_size      = 0;  // raw on-disk footprint
+   uint64_t live_size      = 0;  // actual data in use
+   uint64_t free_size      = 0;  // reclaimable space
+   uint64_t reachable_size = 0;  // bytes occupied by reachable objects (0 = not available)
 
    void print() const
    {
-      printf("  Size: file=%.1f MB  live=%.1f MB  free=%.1f MB\n",
+      printf("  Size: file=%.1f MB  live=%.1f MB  free=%.1f MB",
              file_size / (1024.0 * 1024.0),
              live_size / (1024.0 * 1024.0),
              free_size / (1024.0 * 1024.0));
+      if (reachable_size > 0)
+         printf("  reachable=%.1f MB", reachable_size / (1024.0 * 1024.0));
+      printf("\n");
    }
 };
 
@@ -426,6 +430,8 @@ class PsiTriEngine : public BankEngine
             live += seg.alloc_pos - seg.freed_bytes;
       r.live_size = live;
       r.free_size = r.file_size - live;
+      // Walk reachable objects from roots to get true data footprint
+      r.reachable_size = _db->reachable_size();
       return r;
    }
 
@@ -573,6 +579,9 @@ class RocksDbEngine : public BankEngine
       else
          r.live_size = r.file_size;
       r.free_size = r.file_size > r.live_size ? r.file_size - r.live_size : 0;
+      // PsiTriRocks exposes reachable object size
+      if (_db->GetProperty("psitri.reachable-size", &val))
+         r.reachable_size = std::stoull(val);
       return r;
    }
 

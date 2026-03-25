@@ -188,47 +188,82 @@ On-disk footprint after completing all 10M transfers with ~6.9M transaction log
 entries. Storage efficiency reflects each engine's data structure overhead,
 compression strategy, and garbage collection behavior.
 
+#### Reachable Data Size
+
+The most meaningful storage comparison: bytes occupied by live, reachable objects.
+PsiTri now reports this by walking the trie from its roots and summing the size
+of every reachable node. This eliminates dead COW copies and allocator free space
+from the measurement.
+
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
 xychart-beta
-    title "On-Disk Size After Benchmark (MB)"
+    title "Reachable Data Size (MB)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
-    y-axis "Megabytes" 0 --> 5600
-    bar [5376, 5490, 263, 320, 640]
+    y-axis "Megabytes" 0 --> 600
+    bar [509, 509, 263, 320, 366]
 ```
 
-| Engine | File Size | Reported Live | Free/Reclaimable | Notes |
-|--------|-----------|--------------|------------------|-------|
-| **PsiTri** | 5,376 MB | 4,423 MB | 953 MB | See note below |
-| **PsiTriRocks** | 5,490 MB | 4,481 MB | 1,010 MB | See note below |
-| **TidesDB** | 263 MB | 263 MB | 0 MB | No detailed stats exposed |
-| **RocksDB** | 320 MB | 314 MB | 6 MB | LSM compaction + compression |
-| **MDBX** | 640 MB | 366 MB | 274 MB | COW pages accumulate between syncs |
+| Engine | Reachable Data | File Size | Overhead Ratio | Notes |
+|--------|---------------|-----------|----------------|-------|
+| **TidesDB** | 263 MB | 263 MB | 1.0x | No detailed stats exposed |
+| **RocksDB** | 314 MB | 320 MB | 1.0x | LSM compaction + compression |
+| **MDBX** | 366 MB | 640 MB | 1.7x | COW pages between syncs |
+| **PsiTri** | 509 MB | 5,344 MB | 10.5x | Dead COW copies dominate file |
+| **PsiTriRocks** | 509 MB | 5,344 MB | 10.5x | Same engine, same footprint |
 
-RocksDB achieves the most compact footprint (320 MB) thanks to LSM compaction
-and block compression. The transaction log entries (sequential keys with ~30-byte
-values) compress well under RocksDB's block-based scheme.
+PsiTri's reachable data (509 MB) is comparable to the other engines — only 1.6x
+larger than RocksDB's compressed 314 MB, and 1.4x larger than MDBX's 366 MB live
+pages. The trie structure stores keys implicitly in the tree path rather than
+repeating them in leaf nodes, but each node carries allocation headers and
+pointer metadata that add per-node overhead.
+
+#### File Size
+
+The raw on-disk file size tells a different story — PsiTri's file is 10x larger
+than its reachable data. This is a consequence of copy-on-write without immediate
+compaction: every modified node creates a new copy, and the old version remains
+in the segment file until the background compactor reclaims it. During a sustained
+write workload with 6.9M transactions, dead COW copies accumulate faster than
+compaction can reclaim them.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#DC2626'}}}}%%
+xychart-beta
+    title "On-Disk File Size (MB)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Megabytes" 0 --> 5600
+    bar [5344, 5344, 263, 320, 640]
+```
+
+| Engine | File Size | Reachable | Dead/Free Space | Notes |
+|--------|-----------|-----------|-----------------|-------|
+| **PsiTri** | 5,344 MB | 509 MB | 4,835 MB (91%) | COW copies + allocator free space |
+| **PsiTriRocks** | 5,344 MB | 509 MB | 4,835 MB (91%) | Same engine via RocksDB API shim |
+| **MDBX** | 640 MB | 366 MB | 274 MB (43%) | COW pages accumulate between syncs |
+| **RocksDB** | 320 MB | 314 MB | 6 MB (2%) | LSM compaction + block compression |
+| **TidesDB** | 263 MB | 263 MB | 0 MB | No detailed stats exposed |
+
+RocksDB achieves the most compact footprint thanks to LSM compaction and block
+compression. The transaction log entries (sequential keys with ~30-byte values)
+compress well under RocksDB's block-based scheme.
 
 MDBX's 640 MB file is 43% free space — dead COW pages that the GC cannot reclaim
 without an fsync. The transaction log inserts grow the B+tree significantly because
 each new sequential key requires page allocation under COW.
 
-TidesDB at 263 MB is the most compact, though without detailed stats it's unclear
-how much is reclaimable.
-
-> **Note on PsiTri/PsiTriRocks size reporting:** The "reported live" figure represents
-> allocated segment space minus freed regions, but it **includes substantial internal
-> free space** within the allocator (fragmentation from node splits, freed slots within
-> active segments, etc.). This space is available to the allocator for future writes
-> without growing the file. The actual data footprint is significantly smaller than
-> the reported live size. The trie structure trades space for speed: the allocator
-> maintains a pool of reusable slots that enables the high write throughput shown above.
+PsiTri's file size is the primary area for improvement. The 91% dead space
+represents an opportunity to tune the compactor's aggressiveness during sustained
+write workloads, or to implement segment-level truncation after the benchmark
+completes. The reachable data measurement confirms the trie structure itself is
+space-competitive — the issue is garbage collection throughput, not data structure
+overhead.
 
 ### Summary
 
 | Engine | Architecture | Strength | Weakness |
 |--------|-------------|----------|----------|
-| **PsiTri** | Adaptive radix trie, mmap COW | Fastest transactions (372K/s) | Largest file footprint |
+| **PsiTri** | Adaptive radix trie, mmap COW | Fastest transactions (372K/s) | Large file footprint (compaction lag) |
 | **PsiTriRocks** | PsiTri via RocksDB API shim | Drop-in RocksDB replacement | Slight shim overhead |
 | **TidesDB** | Skip-list + SSTables | Good tx speed (214K/s), compact | Slow scan, 100K txn op limit |
 | **RocksDB** | LSM-tree | Compact storage (320 MB) | 2.8x slower than PsiTri |

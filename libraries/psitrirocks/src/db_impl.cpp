@@ -454,6 +454,12 @@ namespace rocksdb
             }
             return true;
          }
+         if (property == "psitri.reachable-size")
+         {
+            if (value)
+               *value = std::to_string(db_->reachable_size());
+            return true;
+         }
          if (value) *value = "";
          return false;
       }

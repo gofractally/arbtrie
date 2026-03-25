@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstring>
 #include <filesystem>
+#include <unordered_set>
 #include <sal/alloc_header.hpp>
 #include <sal/allocator.hpp>
 #include <sal/allocator_impl.hpp>
@@ -247,6 +248,55 @@ namespace sal
          vtables[type_idx].visit_children(
              obj, [this](ptr_address child) { recursive_retain_all(child); });
       }
+   }
+
+   void allocator::recursive_sum_size(ptr_address addr, uint64_t& total, void* visited_ptr)
+   {
+      if (addr == null_ptr_address)
+         return;
+
+      auto& visited = *static_cast<std::unordered_set<uint64_t>*>(visited_ptr);
+      if (!visited.insert(*addr).second)
+         return;  // already counted
+
+      auto* cb = _ptr_alloc.try_get(addr);
+      if (!cb || cb->ref() == 0)
+         return;
+
+      auto  loc    = cb->loc();
+      auto  seg    = loc.segment();
+      auto* segptr = get_segment(seg);
+      auto* obj    = reinterpret_cast<const alloc_header*>(segptr->data + loc.segment_offset());
+
+      if (obj->address() != addr)
+         return;
+
+      total += obj->size();
+
+      auto& vtables  = get_type_vtables();
+      auto  type_idx = uint8_t(obj->type());
+      if (type_idx < vtables.size() && vtables[type_idx].visit_children)
+      {
+         vtables[type_idx].visit_children(
+             obj, [this, &total, visited_ptr](ptr_address child) {
+                recursive_sum_size(child, total, visited_ptr);
+             });
+      }
+   }
+
+   uint64_t allocator::reachable_size()
+   {
+      uint64_t                      total = 0;
+      std::unordered_set<uint64_t>  visited;
+      visited.reserve(1 << 20);  // pre-allocate for ~1M objects
+
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+      {
+         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
+         if (addr != null_ptr_address)
+            recursive_sum_size(addr, total, &visited);
+      }
+      return total;
    }
 
    void allocator::recover()

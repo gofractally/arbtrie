@@ -81,6 +81,10 @@ namespace sal
 
       seg_alloc_dump dump() const;
 
+      /// Walk all objects reachable from root objects and sum their allocated sizes.
+      /// Returns total bytes occupied by live, reachable objects.
+      uint64_t reachable_size();
+
       /// Total pending releases across all session queues
       inline uint64_t total_pending_releases() const;
 
@@ -311,6 +315,8 @@ namespace sal
 
       void mlock_pinned_segments();
       void recursive_retain_all(ptr_address addr);
+      // Implementation helper for reachable_size(); defined in allocator.cpp
+      void recursive_sum_size(ptr_address addr, uint64_t& total, void* visited);
       bool compactor_release_objects(allocator_session& ses);
 
       /**
