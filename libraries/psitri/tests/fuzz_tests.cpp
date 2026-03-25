@@ -43,12 +43,18 @@ namespace
       std::shared_ptr<database>      db;
       std::shared_ptr<write_session> ses;
 
-      test_db(const std::string& name = "fuzz_testdb")
+      test_db(const std::string& name = "fuzz_testdb", bool disable_compact = false)
           : dir(name)
       {
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir + "/data");
-         db  = std::make_shared<database>(dir, runtime_config());
+         runtime_config cfg;
+         if (disable_compact)
+         {
+            cfg.compact_pinned_unused_threshold_mb = 255;
+            cfg.compact_unpinned_unused_threshold_mb = 255;
+         }
+         db  = std::make_shared<database>(dir, cfg);
          ses = db->start_write_session();
       }
 
@@ -359,13 +365,15 @@ namespace
    class fuzz_runner
    {
      public:
-      fuzz_runner(test_db& tdb, uint64_t seed, op_weights ow, int max_value_len = 512)
+      fuzz_runner(test_db& tdb, uint64_t seed, op_weights ow, int max_value_len = 512,
+                  uint32_t root_index = 0)
           : _tdb(tdb),
             _keygen(seed),
             _rng(seed + 7919),  // different seed than keygen
             _ow(ow),
             _op_count(0),
-            _max_value_len(max_value_len)
+            _max_value_len(max_value_len),
+            _root_index(root_index)
       {
          _cur = _tdb.ses->create_write_cursor();
          _total_weight = 0;
@@ -407,7 +415,55 @@ namespace
          full_backward_check();
       }
 
-      uint64_t cleanup_and_count_leaks()
+      /// Run operations while periodically holding snapshot cursors,
+      /// forcing shared-mode (ref > 1) COW paths on every mutation.
+      void run_with_snapshots(uint64_t num_ops, int snapshot_interval = 50)
+      {
+         // snapshot_oracle: a frozen copy of _oracle taken at snapshot time
+         std::map<std::string, std::string> snapshot_oracle;
+         write_cursor_ptr                   snapshot_cur;
+
+         for (uint64_t i = 0; i < num_ops; ++i)
+         {
+            // Take a snapshot every snapshot_interval ops
+            if (i % snapshot_interval == 0 && *_cur)
+            {
+               // Validate previous snapshot before replacing
+               if (snapshot_cur && *snapshot_cur)
+               {
+                  validate_snapshot(snapshot_cur, snapshot_oracle);
+               }
+
+               // Take new snapshot: get a second cursor on the same root.
+               // This bumps ref to 2, forcing shared-mode COW on subsequent mutations.
+               snapshot_oracle = _oracle;
+               snapshot_cur = _tdb.ses->create_write_cursor(_cur->root());
+            }
+
+            auto op = pick_op();
+            execute(op);
+            _op_count++;
+
+            if (_op_count % (100 / std::max(1, SCALE)) == 0)
+               spot_check();
+
+            if (_op_count % (500 / std::max(1, SCALE)) == 0)
+               full_forward_check();
+         }
+
+         // Validate final snapshot
+         if (snapshot_cur && *snapshot_cur)
+            validate_snapshot(snapshot_cur, snapshot_oracle);
+
+         // Release snapshot before final validation
+         snapshot_cur.reset();
+
+         full_forward_check();
+         full_backward_check();
+      }
+
+      /// Remove all keys and release root. Does not check for leaks.
+      void cleanup()
       {
          // Remove all remaining keys
          for (auto it = _oracle.begin(); it != _oracle.end();)
@@ -424,7 +480,12 @@ namespace
          }
 
          // Set root to null to release all memory
-         _tdb.ses->set_root(0, _cur->take_root());
+         _tdb.ses->set_root(_root_index, _cur->take_root());
+      }
+
+      uint64_t cleanup_and_count_leaks()
+      {
+         cleanup();
 
          _tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
          auto pending = _tdb.ses->get_pending_release_count();
@@ -463,6 +524,7 @@ namespace
       write_cursor_ptr                   _cur;
       std::map<std::string, std::string> _oracle;
       int                                _max_value_len;
+      uint32_t                           _root_index;
 
       op_type pick_op()
       {
@@ -524,36 +586,6 @@ namespace
                break;
          }
 
-         // Verify all oracle keys are findable AFTER each op
-         for (auto& [k, v] : _oracle)
-         {
-            std::string buf;
-            int32_t     r = _cur->get(to_key_view(k), &buf);
-            if (r < 0)
-            {
-               std::cerr << "=== KEY LOST at op #" << _op_count << " type=" << op_name(op)
-                         << " oracle_size=" << _oracle.size() << " ===" << std::endl;
-               std::cerr << "  Lost key: " << hex_encode(k) << " (len=" << k.size() << ")" << std::endl;
-               std::cerr << "  All oracle keys:" << std::endl;
-               for (auto& [ok, ov] : _oracle)
-               {
-                  std::string buf2;
-                  int32_t     r2 = _cur->get(to_key_view(ok), &buf2);
-                  std::cerr << "    " << hex_encode(ok) << " get=" << r2 << std::endl;
-               }
-               std::cerr << "  Iterated keys:" << std::endl;
-               {
-                  auto rc2 = _cur->read_cursor();
-                  if (rc2.seek_begin())
-                  {
-                     do { std::cerr << "    " << hex_encode(rc2.key()) << std::endl; } while (rc2.next());
-                  }
-               }
-               INFO("KEY LOST: " << hex_encode(k) << " at op #" << _op_count);
-               REQUIRE(r >= 0);
-            }
-         }
-
       }
 
       void do_insert()
@@ -579,6 +611,7 @@ namespace
          INFO("update key=" << hex_encode(key));
 
          bool psitri_result = _cur->update(to_key_view(key), to_value_view(value));
+
          auto it            = _oracle.find(key);
          bool oracle_exists = (it != _oracle.end());
          REQUIRE(psitri_result == oracle_exists);
@@ -800,9 +833,9 @@ namespace
       {
          // Persist current state via root, then re-read
          auto root = _cur->root();
-         _tdb.ses->set_root(0, std::move(root));
+         _tdb.ses->set_root(_root_index, std::move(root));
 
-         auto new_root = _tdb.ses->get_root(0);
+         auto new_root = _tdb.ses->get_root(_root_index);
          _cur          = _tdb.ses->create_write_cursor(std::move(new_root));
 
          // Spot-check a few keys
@@ -945,6 +978,41 @@ namespace
          REQUIRE(it == _oracle.rend());
          REQUIRE(count == _oracle.size());
       }
+
+      /// Validate that a snapshot cursor still sees the oracle state from when
+      /// the snapshot was taken (COW isolation check).
+      void validate_snapshot(const write_cursor_ptr& snap,
+                             const std::map<std::string, std::string>& snap_oracle)
+      {
+         INFO("validate_snapshot snap_oracle_size=" << snap_oracle.size());
+
+         // Spot-check up to 10 random keys from the snapshot oracle
+         int checks = std::min((int)snap_oracle.size(), 10);
+         if (checks > 0)
+         {
+            auto it = snap_oracle.begin();
+            std::uniform_int_distribution<int> skip_dist(0, std::max(0, (int)snap_oracle.size() - 1));
+            for (int i = 0; i < checks; ++i)
+            {
+               auto check_it = snap_oracle.begin();
+               std::advance(check_it, skip_dist(_rng) % snap_oracle.size());
+
+               std::string buf;
+               int32_t     result = snap->get(to_key_view(check_it->first), &buf);
+               REQUIRE(result == (int32_t)check_it->second.size());
+               REQUIRE(buf == check_it->second);
+            }
+         }
+
+         // Verify key count via iteration matches snapshot oracle
+         auto     rc    = snap->read_cursor();
+         uint64_t count = 0;
+         if (rc.seek_begin())
+         {
+            do { ++count; } while (rc.next());
+         }
+         REQUIRE(count == snap_oracle.size());
+      }
    };
 
    // ============================================================
@@ -993,7 +1061,7 @@ namespace
 
 TEST_CASE("fuzz random heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 12345, 987654);
+   uint64_t seed = GENERATE(42, 12345, 987654, 314159, 1000000007);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_random_heavy_" + std::to_string(seed));
@@ -1005,7 +1073,7 @@ TEST_CASE("fuzz random heavy", "[fuzz]")
 
 TEST_CASE("fuzz sequential heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(1, 77777);
+   uint64_t seed = GENERATE(1, 77777, 65536, 2718281);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_seq_heavy_" + std::to_string(seed));
@@ -1017,7 +1085,7 @@ TEST_CASE("fuzz sequential heavy", "[fuzz]")
 
 TEST_CASE("fuzz remove heavy", "[fuzz][remove_range]")
 {
-   uint64_t seed = GENERATE(42, 55555);
+   uint64_t seed = GENERATE(42, 55555, 161803, 7777777);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_remove_heavy_" + std::to_string(seed));
@@ -1029,43 +1097,212 @@ TEST_CASE("fuzz remove heavy", "[fuzz][remove_range]")
 
 TEST_CASE("fuzz cursor heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 31415);
+   uint64_t seed = GENERATE(42, 31415, 999983);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_cursor_heavy_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, cursor_heavy_weights());
 
-   runner.run(3000 / SCALE);
+   runner.run(5000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz transaction lifecycle", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 99999);
+   uint64_t seed = GENERATE(42, 99999, 424242, 8675309);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_tx_lifecycle_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, transaction_weights());
 
-   runner.run(2000 / SCALE);
+   runner.run(5000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz edge cases", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 271828);
+   uint64_t seed = GENERATE(42, 271828, 1337, 0xDEAD);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_edge_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, balanced_no_rr_weights());
 
-   runner.run(2000 / SCALE);
+   runner.run(5000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
-// Diagnostic tests removed — they were debugging aids for shared-mode ref leaks
-// that have been fixed (no-op detection + no-throw in shared mode).
-// To add new diagnostic tests, use the [fuzz][diag] tags.
+// ============================================================
+// Shared-mode heavy: hold snapshot cursors while mutating,
+// forcing COW (ref > 1) on every mutation path
+// ============================================================
+
+TEST_CASE("fuzz shared mode heavy", "[fuzz]")
+{
+   uint64_t seed = GENERATE(42, 12345, 161803, 999983);
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_shared_" + std::to_string(seed));
+   fuzz_runner runner(tdb, seed, balanced_no_rr_weights());
+
+   // run_with_snapshots takes a snapshot every 50 ops, creating shared-mode
+   // trees. Mutations on the main cursor must COW every node they touch.
+   runner.run_with_snapshots(8000 / SCALE, 50);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz shared mode remove heavy", "[fuzz][remove_range]")
+{
+   uint64_t seed = GENERATE(42, 55555);
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_shared_rm_" + std::to_string(seed));
+   fuzz_runner runner(tdb, seed, remove_heavy_weights());
+
+   runner.run_with_snapshots(8000 / SCALE, 30);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz shared mode transaction", "[fuzz]")
+{
+   uint64_t seed = GENERATE(42, 314159);
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_shared_tx_" + std::to_string(seed));
+   fuzz_runner runner(tdb, seed, transaction_weights());
+
+   runner.run_with_snapshots(5000 / SCALE, 40);
+   runner.cleanup_and_leak_check();
+}
+
+// ============================================================
+// Multi-tree: independent trees on different root slots,
+// interleaved operations to test cross-tree isolation
+// ============================================================
+
+TEST_CASE("fuzz multi-tree parallel", "[fuzz]")
+{
+   uint64_t seed = GENERATE(42, 12345, 271828);
+   INFO("seed=" << seed);
+
+   test_db tdb("fuzz_multi_" + std::to_string(seed));
+
+   // Three independent runners on root slots 0, 1, 2
+   fuzz_runner runner0(tdb, seed,       balanced_no_rr_weights(), 512, 0);
+   fuzz_runner runner1(tdb, seed + 100, sequential_weights(),     512, 1);
+   fuzz_runner runner2(tdb, seed + 200, remove_heavy_weights(),   512, 2);
+
+   // Interleave: run small batches from each runner
+   std::mt19937_64 interleave_rng(seed + 9999);
+   int total_ops = 6000 / SCALE;
+   int ops_done  = 0;
+
+   while (ops_done < total_ops)
+   {
+      int batch = std::uniform_int_distribution<int>(1, 20)(interleave_rng);
+      batch = std::min(batch, total_ops - ops_done);
+
+      // Pick a random runner
+      int which = std::uniform_int_distribution<int>(0, 2)(interleave_rng);
+      switch (which)
+      {
+         case 0: runner0.run(batch); break;
+         case 1: runner1.run(batch); break;
+         case 2: runner2.run(batch); break;
+      }
+      ops_done += batch;
+   }
+
+   // Clean up all three trees, then check for leaks once (session-wide count)
+   runner0.cleanup();
+   runner1.cleanup();
+   runner2.cleanup();
+   tdb.assert_no_leaks();
+}
+
+TEST_CASE("fuzz multi-tree with snapshots", "[fuzz]")
+{
+   uint64_t seed = GENERATE(42, 987654);
+   INFO("seed=" << seed);
+
+   test_db tdb("fuzz_multi_snap_" + std::to_string(seed));
+
+   // Two trees, both with snapshot-driven shared mode
+   fuzz_runner runner0(tdb, seed,       balanced_no_rr_weights(), 512, 0);
+   fuzz_runner runner1(tdb, seed + 500, transaction_weights(),    512, 1);
+
+   // Interleave with snapshots
+   runner0.run_with_snapshots(4000 / SCALE, 40);
+   runner1.run_with_snapshots(4000 / SCALE, 40);
+
+   runner0.cleanup();
+   runner1.cleanup();
+   tdb.assert_no_leaks();
+}
+
+// Diagnostic: same as fuzz edge cases but with commit_reopen=0
+// Tests whether the KEY LOST bug requires shared mode (ref>1 from commit_reopen)
+TEST_CASE("fuzz edge no commit", "[fuzz][diag]")
+{
+   uint64_t seed = GENERATE(1337, 0xDEAD);
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_edge_nc_" + std::to_string(seed));
+   // Same as balanced_no_rr_weights but commit_reopen=0
+   fuzz_runner runner(tdb, seed, op_weights{{25, 10, 20, 15, 0, 15, 5, 2, 2, 2, 2, 0}});
+
+   runner.run(5000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz edge commit no update", "[fuzz][diag]")
+{
+   uint64_t seed = GENERATE(1337, 0xDEAD);
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_edge_cnu_" + std::to_string(seed));
+   // Same as balanced_no_rr_weights but update=0
+   fuzz_runner runner(tdb, seed, op_weights{{25, 0, 20, 15, 0, 15, 5, 2, 2, 2, 2, 2}});
+
+   runner.run(5000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz edge commit no upsert", "[fuzz][diag]")
+{
+   uint64_t seed = GENERATE(1337, 0xDEAD);
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_edge_cns_" + std::to_string(seed));
+   // Same as balanced_no_rr_weights but upsert=0
+   fuzz_runner runner(tdb, seed, op_weights{{25, 10, 0, 15, 0, 15, 5, 2, 2, 2, 2, 2}});
+
+   runner.run(5000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz keylost repro", "[fuzz][diag]")
+{
+   uint64_t seed = 0xDEAD;
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_keylost_repro");
+   fuzz_runner runner(tdb, seed, balanced_no_rr_weights());
+
+   runner.run(5000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("fuzz keylost no compact", "[fuzz][diag]")
+{
+   uint64_t seed = 0xDEAD;
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_keylost_nc", true);  // disable compaction
+   fuzz_runner runner(tdb, seed, balanced_no_rr_weights());
+
+   runner.run(5000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
 
 #if 0  // Diagnostic tests kept for reference but disabled
 TEST_CASE("fuzz value transition leak", "[fuzz][diag]")

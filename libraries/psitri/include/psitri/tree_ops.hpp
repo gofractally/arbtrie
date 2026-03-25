@@ -166,7 +166,10 @@ namespace psitri
             throw;
          }
          if (result.count() == 1)
-            _root.give(result.get_first_branch());
+         {
+            auto new_addr = result.get_first_branch();
+            _root.give(new_addr);
+         }
          else
             _root.give(make_inner(result));
 
@@ -1372,12 +1375,10 @@ namespace psitri
       // during insert).
       if (sub_branches.count() == 1 && bref->address() == sub_branches.get_first_branch())
       {
-         // Undo retain_children: no new node was created, so the
-         // retained refs are unbalanced. Release them all.
+         // Undo retains: no new node was created, so the retained refs
+         // are unbalanced — release all children to restore balance.
          if constexpr (mode.is_shared())
-         {
             in->visit_branches([this](ptr_address br) { _session.release(br); });
-         }
          if (_delta_descendents != 0)
             in.modify()->add_descendents(_delta_descendents);
          return in.address();
@@ -1451,8 +1452,10 @@ namespace psitri
                // Now insert the key with the new value into the (possibly smaller) leaf.
                // insert() sets _delta_descendents=1, but this is an update (net 0),
                // so we reset it after insert to avoid corrupting ancestor descendent counts.
+               // Must use unique_upsert (not mode=unique_update) because the key was
+               // removed — split_insert calls upsert<mode>() which must INSERT, not UPDATE.
                branch_number lb = removed->lower_bound(key);
-               auto result = insert<mode>(parent_hint, removed, key, lb);
+               auto result = insert<upsert_mode::unique_upsert>(parent_hint, removed, key, lb);
                _delta_descendents = 0;
                return result;
             }
@@ -1462,13 +1465,54 @@ namespace psitri
 
       // Shared mode: clone into a new max_leaf_size leaf (defragments dead space).
       {
-         retain_children(leaf);
+         bool old_has_address =
+             leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node;
 
-         // Release old external value (retained above, so release brings it back to original)
-         if (leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node)
+         // Check if the updated data fits in max_leaf_size. If the leaf is already
+         // near capacity and the new value is larger, we must split instead.
+         if (leaf->can_apply(update_op) != leaf_node::can_apply_mode::none) [[likely]]
+         {
+            retain_children(leaf);
+
+            // Release old external value (retained above, so release brings it back to original)
+            if (old_has_address)
+               _session.release(leaf->get_value(br).address());
+
+            return _session.alloc<leaf_node>(parent_hint, update_op);
+         }
+
+         // Overflow: the leaf is at max capacity and the new value is larger.
+         // Strategy: retain children selectively, create a removed leaf (unique,
+         // ref=1), then insert the key back with the new value using unique mode.
+         //
+         // Ref counting:
+         // - The original leaf (snapshot) holds c0..cN. Its destroy() releases them.
+         // - The result node(s) hold c0..cN minus old_value plus new_value.
+         //   Their destroy() releases them.
+         // - So the N-1 surviving children need +1 (shared between snapshot and result).
+         // - The old value at br does NOT need +1 (only snapshot holds it).
+         // - retain_children(leaf) retains ALL children including old value at br,
+         //   so we must un-retain the old value to keep it balanced.
+
+         retain_children(leaf);
+         // Un-retain the old value: it's only in the snapshot leaf, not the result.
+         if (old_has_address)
             _session.release(leaf->get_value(br).address());
 
-         return _session.alloc<leaf_node>(parent_hint, update_op);
+         // Release the value_node allocated by make_value — insert() will create its own.
+         if (new_val.is_value_node())
+            _session.release(new_val.value_address());
+
+         // Create a new leaf without the key at br (copies N-1 child refs from source).
+         // This leaf has ref=1, so we can operate on it in unique mode.
+         op::leaf_remove rm_op{.src = *leaf.obj(), .bn = br};
+         auto removed = _session.get_ref<leaf_node>(
+             _session.alloc<leaf_node>(parent_hint, rm_op));
+         branch_number new_lb = removed->lower_bound(key);
+         // Insert using unique mode since removed has ref=1.
+         auto result = insert<upsert_mode::unique_upsert>(parent_hint, removed, key, new_lb);
+         _delta_descendents = 0;  // update is net-zero, insert set it to +1
+         return result;
       }
    }
    template <upsert_mode mode>
