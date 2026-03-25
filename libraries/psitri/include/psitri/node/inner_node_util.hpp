@@ -3,6 +3,7 @@
 #include <arm_neon.h>
 #endif
 #include <psitri/node/node.hpp>
+#include <psitri/util.hpp>
 
 #include <array>
 #include <cstdint>
@@ -184,18 +185,37 @@ namespace psitri
     * @param lut The 16-byte lookup table.
     */
 #ifdef __ARM_NEON
+   PSITRI_NO_SANITIZE_ALIGNMENT
+#if PSITRI_PLATFORM_OPTIMIZATIONS
+   __attribute__((no_sanitize("pointer-overflow")))
+#endif
    inline void copy_branches_and_update_cline_index_neon(
        const uint8_t*                 input_data,
        uint8_t*                       output_data,
        size_t                         N,
        const std::array<uint8_t, 16>& lut) noexcept
    {
+#if !PSITRI_PLATFORM_OPTIMIZATIONS
+      // Standards-conforming scalar fallback for small N to avoid pointer wraparound UB
+      if (N < 16)
+      {
+         for (size_t i = 0; i < N; ++i)
+         {
+            uint8_t byte   = input_data[i];
+            output_data[i] = (lut[byte >> 4] << 4) | (byte & 0x0F);
+         }
+         return;
+      }
+#endif
+
       // --- Setup ---
       const uint8x16_t lut_vec         = vld1q_u8(lut.data());
       const uint8x16_t low_nibble_mask = vdupq_n_u8(0x0F);
 
       // --- 1. Final Unconditional Operation (Aligned to End) ---
       // Calculate offset, load, compute, store for the chunk ending at N-1.
+      // When N < 16, the subtraction wraps unsigned to produce a negative offset;
+      // this is intentional — the caller guarantees 16 bytes of padding before input/output.
       const size_t final_offset = N - 16;
       {
          uint8x16_t data_vec             = vld1q_u8(input_data + final_offset);

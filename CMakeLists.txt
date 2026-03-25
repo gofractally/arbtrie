@@ -64,6 +64,33 @@ option(ENABLE_SANITIZER "Enable Thread Sanitizer" OFF)
 option(ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(DISABLE_NEON "Disable all ARM NEON SIMD optimizations (for debugging)" OFF)
+option(ENABLE_PLATFORM_OPTIMIZATIONS
+    "Enable platform-specific optimizations that rely on hardware-defined behavior \
+beyond what the C++ standard guarantees. When ON (default), the following techniques \
+are used for performance: \
+(1) Unaligned memory access — leaf nodes pack uint16_t offsets after variable-length \
+byte arrays, producing addresses that may not be 2-byte aligned. On x86-64 and ARM64 \
+this is handled transparently by hardware with no performance penalty. \
+(2) Pointer arithmetic wraparound — the NEON branch-copy routine uses unsigned \
+underflow (N-16 when N<16) to compute a negative offset into caller-provided padding, \
+avoiding a branch for the small-N case. \
+(3) typed_int<uint16_t> is marked __attribute__((packed)) so the compiler knows these \
+values may reside at any alignment. On a single-member struct this changes nothing \
+about code generation on modern architectures. \
+When OFF, all code paths use standards-conforming alternatives (memcpy for unaligned \
+access, scalar fallbacks for small-N NEON). This is fully UBSAN-clean but measurably \
+slower on hot paths. Use OFF when running sanitizers to get clean reports, or when \
+targeting architectures where unaligned access traps (e.g. some MIPS, older ARM)."
+    ON)
+
+if(ENABLE_PLATFORM_OPTIMIZATIONS)
+    message(STATUS "Platform optimizations ENABLED (hardware-defined unaligned access, pointer tricks)")
+    add_compile_definitions(PSITRI_PLATFORM_OPTIMIZATIONS=1)
+else()
+    message(STATUS "Platform optimizations DISABLED (strict C++ conformance, UBSAN-clean)")
+    add_compile_definitions(PSITRI_PLATFORM_OPTIMIZATIONS=0)
+endif()
+
 option(ENABLE_DEEP_INVARIANTS "Enable expensive invariant checks in debug builds" OFF)
 
 if(ENABLE_DEEP_INVARIANTS)

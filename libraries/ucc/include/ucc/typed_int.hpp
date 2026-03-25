@@ -3,15 +3,29 @@
 #include <iostream>
 #include <limits>
 
+/// PSITRI_PLATFORM_OPTIMIZATIONS: when enabled, typed_int is packed (alignment 1)
+/// because these values are stored at arbitrary byte offsets in packed node layouts.
+/// On x86-64/ARM64, unaligned access to small types has zero cost.
+/// When disabled, typed_int keeps natural alignment for strict UBSAN conformance.
+#ifndef PSITRI_PLATFORM_OPTIMIZATIONS
+#define PSITRI_PLATFORM_OPTIMIZATIONS 1
+#endif
+
+#if PSITRI_PLATFORM_OPTIMIZATIONS
+#define UCC_TYPED_INT_PACKED __attribute__((packed))
+#else
+#define UCC_TYPED_INT_PACKED
+#endif
+
 namespace ucc
 {
    /**
     * A wrapper around a type that adds a tag to the type.
-    * This is useful for creating types that are not interchangeable with other types. 
+    * This is useful for creating types that are not interchangeable with other types.
     * it is easy to unwrap the type using *value to get the underlying type T
     */
    template <typename T, typename Tag>
-   class typed_int
+   class UCC_TYPED_INT_PACKED typed_int
    {
       T value;
 

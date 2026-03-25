@@ -4,6 +4,13 @@
 #include <psitri/node/leaf.hpp>
 #include "ucc/fast_memcpy.hpp"
 
+// All leaf_node methods work with intentionally unaligned packed data.
+// When PSITRI_PLATFORM_OPTIMIZATIONS is on, suppress alignment sanitizer for the entire file.
+#if PSITRI_PLATFORM_OPTIMIZATIONS && defined(__clang__)
+#pragma clang attribute push(__attribute__((no_sanitize("alignment"))), apply_to = function)
+#define PSITRI_LEAF_ALIGNMENT_PUSH 1
+#endif
+
 namespace psitri
 {
    /**
@@ -1114,3 +1121,8 @@ namespace psitri
    }
 
 }  // namespace psitri
+
+#ifdef PSITRI_LEAF_ALIGNMENT_PUSH
+#pragma clang attribute pop
+#undef PSITRI_LEAF_ALIGNMENT_PUSH
+#endif

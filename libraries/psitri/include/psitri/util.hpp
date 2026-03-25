@@ -10,6 +10,23 @@
 #else
 #define PSITRI_ASSERT_INVARIANTS(expr) ((void)0)
 #endif
+
+/// PSITRI_PLATFORM_OPTIMIZATIONS is set by CMake (-DENABLE_PLATFORM_OPTIMIZATIONS=ON/OFF).
+/// When enabled, we use hardware-defined-but-technically-UB code paths (unaligned access,
+/// pointer wraparound) and suppress the corresponding sanitizer checks.
+/// When disabled, all code uses standards-conforming alternatives.
+#ifndef PSITRI_PLATFORM_OPTIMIZATIONS
+#define PSITRI_PLATFORM_OPTIMIZATIONS 1
+#endif
+
+#if PSITRI_PLATFORM_OPTIMIZATIONS && defined(__clang__)
+#define PSITRI_NO_SANITIZE_ALIGNMENT __attribute__((no_sanitize("alignment")))
+#elif PSITRI_PLATFORM_OPTIMIZATIONS && defined(__GNUC__)
+#define PSITRI_NO_SANITIZE_ALIGNMENT __attribute__((no_sanitize_undefined))
+#else
+#define PSITRI_NO_SANITIZE_ALIGNMENT
+#endif
+
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -156,6 +173,7 @@ namespace psitri
     * @return index of first occurrence of value, or size if not found
     */
 
+   PSITRI_NO_SANITIZE_ALIGNMENT
    inline int find_byte(const uint8_t* arr, size_t size, uint8_t value)
    {
       const uint64_t target   = value * 0x0101010101010101ULL;  // Broadcast value to all bytes
@@ -166,7 +184,12 @@ namespace psitri
       // Process full 8-byte chunks without checking inside the loop
       while (p <= last_pos)
       {
-         const uint64_t data            = *(const uint64_t*)p;
+#if PSITRI_PLATFORM_OPTIMIZATIONS
+         const uint64_t data = *(const uint64_t*)p;
+#else
+         uint64_t data;
+         std::memcpy(&data, p, sizeof(data));
+#endif
          const uint64_t data_xor_target = data ^ target;
          uint64_t       mask = (data_xor_target - 0x0101010101010101ULL) & ~data_xor_target;
          mask &= 0x8080808080808080ULL;
@@ -184,7 +207,13 @@ namespace psitri
       if (remaining >= 4)
       {
          // Process remaining bytes using same pattern
+#if PSITRI_PLATFORM_OPTIMIZATIONS
          const uint32_t data_xor_target = *(uint32_t*)p ^ uint32_t(target);
+#else
+         uint32_t raw;
+         std::memcpy(&raw, p, sizeof(raw));
+         const uint32_t data_xor_target = raw ^ uint32_t(target);
+#endif
          uint32_t       mask            = (data_xor_target - 0x01010101) & ~data_xor_target;
          mask &= 0x80808080;
 

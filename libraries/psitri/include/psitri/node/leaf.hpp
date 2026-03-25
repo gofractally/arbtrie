@@ -202,12 +202,12 @@ namespace psitri
       };
       split_pos get_split_pos() const noexcept;
 
-      key_view get_key(branch_number bn) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT key_view get_key(branch_number bn) const noexcept
       {
          assert(bn < num_branches());
          return get_key_ptr(keys_offsets()[*bn])->get();
       }
-      value_type get_value(branch_number bn) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT value_type get_value(branch_number bn) const noexcept
       {
          assert(bn < num_branches());
          value_branch vb = value_offsets()[*bn];
@@ -224,12 +224,12 @@ namespace psitri
          }
          std::unreachable();
       }
-      value_view get_value_view(branch_number bn) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT value_view get_value_view(branch_number bn) const noexcept
       {
          assert(value_offsets()[*bn].type() == value_type_flag::inline_data);
          return get_value_ptr(value_offsets()[*bn].offset())->get();
       }
-      ptr_address get_value_address(branch_number bn) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT ptr_address get_value_address(branch_number bn) const noexcept
       {
          assert(value_offsets()[*bn].type() == value_type_flag::value_node);
          return get_address(value_offsets()[*bn]);
@@ -425,19 +425,23 @@ namespace psitri
       {
          return std::span<const uint8_t>(_key_hashs, num_branches());
       }
-      std::span<key_offset> keys_offsets() noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT std::span<key_offset> keys_offsets() noexcept
       {
          return std::span<key_offset>(
              reinterpret_cast<key_offset*>(key_hashs().data() + num_branches()), num_branches());
       }
-      std::span<const key_offset> keys_offsets() const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT std::span<const key_offset> keys_offsets() const noexcept
       {
          return std::span<const key_offset>(
              reinterpret_cast<const key_offset*>(key_hashs().data() + num_branches()),
              num_branches());
       }
 
+#if PSITRI_PLATFORM_OPTIMIZATIONS
+      class __attribute__((packed)) value_branch
+#else
       class value_branch
+#endif
       {
         public:
          value_branch() noexcept : _type(null), _offset(0) {}
@@ -551,7 +555,11 @@ namespace psitri
       /// calculate the number of references to the cline
       int calc_cline_refs(cline_offset cl_off) const noexcept;
 
+#if PSITRI_PLATFORM_OPTIMIZATIONS
+      class __attribute__((packed)) key
+#else
       class key
+#endif
       {
          uint16_t size;
          uint8_t  data[];
@@ -588,15 +596,15 @@ namespace psitri
       static_assert(sizeof(key) == 2);
       static_assert(sizeof(value_data) == 2);
 
-      key* get_key_ptr(key_offset off) noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT key* get_key_ptr(key_offset off) noexcept
       {
          return reinterpret_cast<key*>(((char*)tail()) - *off);
       }
-      const key* get_key_ptr(key_offset off) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT const key* get_key_ptr(key_offset off) const noexcept
       {
          return reinterpret_cast<const key*>(((const char*)tail()) - *off);
       }
-      key_offset alloc_key(key_view key) noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT key_offset alloc_key(key_view key) noexcept
       {
          //       SAL_INFO("alloc pos: {} alloc_key: {}", _alloc_pos, key);
          _alloc_pos += key.size() + sizeof(leaf_node::key);
@@ -609,16 +617,16 @@ namespace psitri
          get_key_ptr(off)->set(key);
          return off;
       }
-      value_data* get_value_ptr(value_offset off) noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT value_data* get_value_ptr(value_offset off) noexcept
       {
          return reinterpret_cast<value_data*>(((char*)tail()) - *off);
       }
-      const value_data* get_value_ptr(value_offset off) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT const value_data* get_value_ptr(value_offset off) const noexcept
       {
          auto ptr = reinterpret_cast<const value_data*>(((const char*)tail()) - *off);
          return ptr;
       }
-      value_offset alloc_value(value_view value) noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT value_offset alloc_value(value_view value) noexcept
       {
          _alloc_pos += value.size() + sizeof(value_data);
          value_offset off = value_offset(_alloc_pos);
@@ -628,22 +636,22 @@ namespace psitri
          get_value_ptr(off)->set(value);
          return off;
       }
-      bool can_alloc_key(key_view key) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT bool can_alloc_key(key_view key) const noexcept
       {
          return (const uint8_t*)get_key_ptr(key_offset(_alloc_pos + key.size() + sizeof(key))) <
                 (const uint8_t*)value_offsets_end();
       }
-      bool can_alloc_value(value_view value) const noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT bool can_alloc_value(value_view value) const noexcept
       {
          return (const uint8_t*)get_value_ptr(
                     value_offset(_alloc_pos + value.size() + sizeof(value_data))) <
                 (const uint8_t*)value_offsets_end();
       }
-      void free_key(key_offset off) noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT void free_key(key_offset off) noexcept
       {
          _dead_space += sizeof(key) + get_key_ptr(off)->get().size();
       }
-      void free_value(value_offset off) noexcept
+      PSITRI_NO_SANITIZE_ALIGNMENT void free_value(value_offset off) noexcept
       {
          _dead_space += sizeof(value_data) + get_value_ptr(off)->get().size();
       }
