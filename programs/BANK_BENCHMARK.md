@@ -56,6 +56,24 @@ xychart-beta
     bar [25.346, 25.986, 35.741, 65.486, 114.861]
 ```
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#16A34A'}}}}%%
+xychart-beta
+    title "Bulk Load — 1M Accounts (ops/sec)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Operations per second" 0 --> 3200000
+    bar [2992740, 1786308, 871341, 1928537, 3023581]
+```
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#9333EA'}}}}%%
+xychart-beta
+    title "Validation Scan — 1M Accounts (ops/sec)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Operations per second" 0 --> 90000000
+    bar [43726360, 40742325, 642880, 16190584, 83829323]
+```
+
 | Engine | Bulk Load | Transactions | Validation Scan | Total |
 |--------|-----------|-------------|-----------------|-------|
 | **PsiTri** | 0.33s (2.99M ops/s) | 25.35s | 0.023s (43.7M ops/s) | 33.70s |
