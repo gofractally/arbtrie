@@ -2,4 +2,6 @@
 
 4. move cache processing to its own thread with its own session so it doesn't mix with compactor's work
 
-3. build currency simulator
+3. ~~build currency simulator~~ (completed)
+
+5. Leaf nodes should start small and grow as needed instead of always allocating max_leaf_size (2048 bytes). Currently every leaf_node::alloc_size() returns max_leaf_size regardless of content. For sparse keys (e.g. a leaf with one 8-byte key + 8-byte value), this wastes ~2000 bytes per leaf. Implement a graduated allocation (e.g. 128 -> 256 -> 512 -> 1024 -> 2048) that sizes the initial allocation based on key+value size and grows on insert/update when needed. This would significantly reduce PsiTri's reachable data footprint (currently 509 MB vs ~275 MB theoretical minimum in the bank benchmark).

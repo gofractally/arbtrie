@@ -204,19 +204,28 @@ xychart-beta
     bar [509, 509, 263, 320, 366]
 ```
 
-| Engine | Reachable Data | File Size | Overhead Ratio | Notes |
-|--------|---------------|-----------|----------------|-------|
-| **TidesDB** | 263 MB | 263 MB | 1.0x | No detailed stats exposed |
-| **RocksDB** | 314 MB | 320 MB | 1.0x | LSM compaction + compression |
-| **MDBX** | 366 MB | 640 MB | 1.7x | COW pages between syncs |
-| **PsiTri** | 509 MB | 5,344 MB | 10.5x | Dead COW copies dominate file |
-| **PsiTriRocks** | 509 MB | 5,344 MB | 10.5x | Same engine, same footprint |
+The theoretical minimum raw data size is **275 MB** — the sum of all key bytes and
+value bytes with zero structural overhead. This baseline is identical for all engines:
+1M account keys (~8.4 MB) + 1M balances (8 MB) + 6.9M log keys (72 MB) +
+6.9M log values (~187 MB).
 
-PsiTri's reachable data (509 MB) is comparable to the other engines — only 1.6x
-larger than RocksDB's compressed 314 MB, and 1.4x larger than MDBX's 366 MB live
-pages. The trie structure stores keys implicitly in the tree path rather than
-repeating them in leaf nodes, but each node carries allocation headers and
-pointer metadata that add per-node overhead.
+| Engine | Reachable Data | vs. Theoretical (275 MB) | File Size | Notes |
+|--------|---------------|--------------------------|-----------|-------|
+| **TidesDB** | 263 MB | 0.96x | 263 MB | Likely compressed below raw size |
+| **RocksDB** | 314 MB | 1.14x | 320 MB | Block compression offsets index overhead |
+| **MDBX** | 366 MB | 1.33x | 640 MB | B+tree page overhead |
+| **PsiTri** | 509 MB | 1.85x | 5,344 MB | Fixed 2 KB leaf allocation (see below) |
+| **PsiTriRocks** | 509 MB | 1.85x | 5,344 MB | Same engine, same footprint |
+
+PsiTri's 1.85x overhead relative to the theoretical minimum is primarily due to
+fixed-size leaf node allocation: every leaf is allocated at 2,048 bytes regardless
+of content. A leaf holding a single 8-byte key + 8-byte value wastes ~2,000 bytes.
+Implementing graduated leaf sizing (e.g. 128 → 256 → 512 → 1024 → 2048) would
+bring PsiTri's reachable data much closer to the theoretical minimum.
+
+RocksDB and TidesDB achieve near-theoretical or below-theoretical sizes through
+block compression, which is particularly effective on the sequential log keys and
+small fixed-size values in this workload.
 
 #### File Size
 
