@@ -688,6 +688,10 @@ int main(int argc, char** argv)
       std::string stats;
       if (db->GetProperty("psitri.stats", &stats))
          printf("PsiTri stats: %s\n", stats.c_str());
+
+      // Compact and truncate to reclaim disk space before measuring DB size
+      if (db->GetProperty("psitri.compact_and_truncate", &stats))
+         printf("Truncate: %s\n", stats.c_str());
    }
 
    if (db)

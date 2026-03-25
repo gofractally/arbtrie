@@ -32,6 +32,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/deep_recovery_tests.cpp
     ../libraries/psitri/tests/coverage_gap_tests.cpp
     ../libraries/psitri/tests/tree_ops_tests.cpp
+    ../libraries/psitri/tests/truncate_tests.cpp
 )
 target_link_libraries(psitri-tests
     PRIVATE

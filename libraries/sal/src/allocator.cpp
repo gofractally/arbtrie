@@ -162,7 +162,63 @@ namespace sal
    allocator::~allocator()
    {
       stop_background_threads();
+      truncate_free_tail_stopped();
       free_allocator_index(_allocator_index);
+   }
+
+   void allocator::truncate_free_tail_stopped()
+   {
+      auto& provider_state = _mapped_state->_segment_provider;
+
+      // Drain the provider's ready queues back into free_segments bitmap.
+      // These segments were popped from free_segments (or freshly allocated)
+      // and prepared for reuse but never claimed by a session.
+      while (auto seg = provider_state.ready_pinned_segments.try_pop())
+         provider_state.free_segments.set(*(*seg));
+      while (auto seg = provider_state.ready_unpinned_segments.try_pop())
+         provider_state.free_segments.set(*(*seg));
+
+      uint32_t num_segs  = _block_alloc.num_blocks();
+      uint32_t new_count = num_segs;
+
+      // Scan from the end to find the highest non-free segment
+      while (new_count > 0 && provider_state.free_segments.test(new_count - 1))
+         --new_count;
+
+      if (new_count >= num_segs)
+         return;  // nothing to truncate
+
+      // munlock and clean up state for segments we're about to truncate
+      for (uint32_t i = new_count; i < num_segs; ++i)
+      {
+         if (provider_state.mlock_segments.test(i))
+         {
+            auto* seg_ptr = get_segment(segment_number(i));
+            ::munlock(seg_ptr, segment_size);
+            update_segment_pinned_state(segment_number(i), false);
+         }
+         provider_state.free_segments.reset(i);
+      }
+
+      SAL_INFO("truncate_free_tail: {} -> {} segments (freeing {} MB)",
+               num_segs, new_count,
+               (num_segs - new_count) * (segment_size / (1024 * 1024)));
+
+      _block_alloc.truncate(new_count);
+   }
+
+   void allocator::truncate_free_tail()
+   {
+      // Stop all background threads to get exclusive access to provider queues,
+      // free_segments bitmap, and mlock_segments bitmap.
+      stop_background_threads();
+
+      truncate_free_tail_stopped();
+
+      // Re-populate provider queues from remaining free segments and restart threads
+      provider_populate_pinned_segments();
+      provider_populate_unpinned_segments();
+      start_background_threads();
    }
 
    void allocator::recursive_retain_all(ptr_address addr)

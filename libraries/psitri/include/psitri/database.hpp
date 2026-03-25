@@ -57,6 +57,14 @@ namespace psitri
          return false;
       }
 
+      /// Wait for compaction to complete, then truncate trailing free segments
+      /// from the data file to reclaim disk space.
+      void compact_and_truncate()
+      {
+         wait_for_compactor();
+         _allocator.truncate_free_tail();
+      }
+
       /// True if ref counts are stale from a deferred_cleanup recovery.
       /// Leaked memory is not reclaimed until reclaim_leaked_memory() is called.
       bool ref_counts_stale() const;

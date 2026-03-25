@@ -84,6 +84,10 @@ namespace sal
       /// Total pending releases across all session queues
       inline uint64_t total_pending_releases() const;
 
+      /// Truncate trailing free segments from the segment file to reclaim disk space.
+      /// Must be called after background threads are stopped and compaction is complete.
+      void truncate_free_tail();
+
       /// Check if corruption has been detected (e.g. by compactor).
       /// Writers should call this before starting transactions.
       bool corruption_detected() const noexcept
@@ -164,6 +168,10 @@ namespace sal
       }
 
      private:
+      /// Core truncation logic — assumes background threads are already stopped.
+      /// Does not restart threads; caller is responsible for that.
+      void truncate_free_tail_stopped();
+
       friend class transaction;
       /**
        * @name Root Object Methods

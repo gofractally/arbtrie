@@ -444,63 +444,125 @@ if(BUILD_ROCKSDB_BENCH)
     )
 endif()
 
-# TidesDB benchmark (optional — requires tidesdb installed or in external/)
+# TidesDB benchmark (optional — fetched automatically like RocksDB/MDBX)
 option(BUILD_TIDESDB_BENCH "Build the TidesDB comparison benchmark" OFF)
 if(BUILD_TIDESDB_BENCH)
-    message(STATUS "Building TidesDB benchmark")
+    message(STATUS "Fetching TidesDB for comparison benchmark")
 
-    # Look for tidesdb header — prefer the build/include/tidesdb/ directory
-    # which has all headers (including ini.h, uthash.h, etc.)
-    find_path(TIDESDB_INCLUDE_DIR tidesdb.h
-        PATHS
-            "${CMAKE_SOURCE_DIR}/external/tidesdb/build/include/tidesdb"
-            "${CMAKE_SOURCE_DIR}/external/tidesdb/src"
-        PATH_SUFFIXES include/tidesdb src
-        NO_CACHE)
-
-    # Look for tidesdb library (shared or static)
-    find_library(TIDESDB_LIBRARY NAMES tidesdb libtidesdb
-        PATHS "${CMAKE_SOURCE_DIR}/external/tidesdb/build"
-        NO_CACHE)
-
-    # Also try system paths if external/ didn't work
-    if(NOT TIDESDB_INCLUDE_DIR)
-        find_path(TIDESDB_INCLUDE_DIR tidesdb.h PATH_SUFFIXES include/tidesdb include src NO_CACHE)
-    endif()
-    if(NOT TIDESDB_LIBRARY)
-        find_library(TIDESDB_LIBRARY NAMES tidesdb libtidesdb NO_CACHE)
+    # Fetch source only — we build it ourselves to avoid TidesDB's complex
+    # CMakeLists.txt pulling in platform-specific allocator detection etc.
+    FetchContent_Declare(
+        tidesdb
+        GIT_REPOSITORY https://github.com/tidesdb/tidesdb.git
+        GIT_TAG        v8.9.4
+        GIT_SHALLOW    TRUE
+    )
+    # Populate source only — we build TidesDB ourselves to avoid its complex
+    # CMakeLists.txt (platform-specific allocator detection, etc.)
+    FetchContent_GetProperties(tidesdb)
+    if(NOT tidesdb_POPULATED)
+        FetchContent_Populate(tidesdb)
     endif()
 
-    if(TIDESDB_INCLUDE_DIR AND TIDESDB_LIBRARY)
-        message(STATUS "Found TidesDB include: ${TIDESDB_INCLUDE_DIR}")
-        message(STATUS "Found TidesDB library: ${TIDESDB_LIBRARY}")
+    # Build TidesDB as a static C library from its source files
+    add_library(tidesdb_lib STATIC
+        ${tidesdb_SOURCE_DIR}/src/tidesdb.c
+        ${tidesdb_SOURCE_DIR}/src/block_manager.c
+        ${tidesdb_SOURCE_DIR}/src/skip_list.c
+        ${tidesdb_SOURCE_DIR}/src/compress.c
+        ${tidesdb_SOURCE_DIR}/src/bloom_filter.c
+        ${tidesdb_SOURCE_DIR}/src/manifest.c
+        ${tidesdb_SOURCE_DIR}/src/clock_cache.c
+        ${tidesdb_SOURCE_DIR}/src/queue.c
+        ${tidesdb_SOURCE_DIR}/src/buffer.c
+        ${tidesdb_SOURCE_DIR}/src/btree.c
+        ${tidesdb_SOURCE_DIR}/src/alloc.c
+        ${tidesdb_SOURCE_DIR}/external/xxhash.c
+        ${tidesdb_SOURCE_DIR}/external/ini.c)
+    # Generate tidesdb_version.h into the binary dir
+    configure_file(
+        "${tidesdb_SOURCE_DIR}/src/tidesdb_version.h.in"
+        "${tidesdb_BINARY_DIR}/tidesdb_version.h")
+    find_path(LZ4_INCLUDE_DIR lz4.h)
+    target_include_directories(tidesdb_lib PRIVATE
+        ${tidesdb_SOURCE_DIR}/src
+        ${tidesdb_SOURCE_DIR}/external
+        ${tidesdb_BINARY_DIR}
+        ${LZ4_INCLUDE_DIR})
+    # TidesDB needs lz4, zstd, snappy for compression
+    find_library(LZ4_LIBRARY lz4)
+    find_library(ZSTD_LIBRARY zstd)
+    find_library(SNAPPY_LIBRARY snappy)
+    target_link_libraries(tidesdb_lib PRIVATE
+        ${LZ4_LIBRARY} ${ZSTD_LIBRARY} ${SNAPPY_LIBRARY} Threads::Threads)
+    set_target_properties(tidesdb_lib PROPERTIES C_STANDARD 11)
 
-        # The C wrapper is compiled as C to avoid C++ type-checking issues
-        # with TidesDB's headers (implicit void* casts).
-        add_executable(tidesdb-benchmark
-            programs/tidesdb_bench.cpp
-            programs/tidesdb_c_wrapper.c)
-        target_compile_definitions(tidesdb-benchmark PRIVATE XXH_INLINE_ALL)
-        target_include_directories(tidesdb-benchmark PRIVATE
-            ${TIDESDB_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/programs ${Boost_INCLUDE_DIRS})
-        target_link_libraries(tidesdb-benchmark PRIVATE
-            ${TIDESDB_LIBRARY} Boost::program_options hash Threads::Threads)
-        set_target_properties(tidesdb-benchmark PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    set(TIDESDB_INCLUDE_DIR ${tidesdb_SOURCE_DIR}/src)
 
-        if(ENABLE_SANITIZER)
-            target_compile_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
-            target_link_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
-        endif()
-    else()
-        message(WARNING "TidesDB not found. Skipping tidesdb-benchmark build.")
-        if(NOT TIDESDB_INCLUDE_DIR)
-            message(WARNING "  tidesdb.h not found — try: git clone https://github.com/tidesdb/tidesdb external/tidesdb && cd external/tidesdb && cmake -B build && cmake --build build")
-        endif()
-        if(NOT TIDESDB_LIBRARY)
-            message(WARNING "  tidesdb library not found.")
-        endif()
+    # The C wrapper is compiled as C to avoid C++ type-checking issues
+    # with TidesDB's headers (implicit void* casts).
+    add_executable(tidesdb-benchmark
+        programs/tidesdb_bench.cpp
+        programs/tidesdb_c_wrapper.c)
+    target_compile_definitions(tidesdb-benchmark PRIVATE XXH_INLINE_ALL)
+    target_include_directories(tidesdb-benchmark PRIVATE
+        ${TIDESDB_INCLUDE_DIR} ${tidesdb_SOURCE_DIR}/external
+        ${tidesdb_BINARY_DIR} ${CMAKE_SOURCE_DIR}/programs ${Boost_INCLUDE_DIRS})
+    target_link_libraries(tidesdb-benchmark PRIVATE
+        tidesdb_lib Boost::program_options hash Threads::Threads)
+    set_target_properties(tidesdb-benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    if(ENABLE_SANITIZER)
+        target_compile_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
+        target_link_options(tidesdb-benchmark PRIVATE -fsanitize=thread -g)
     endif()
+endif()
+
+# ── Bank Transaction Benchmark ──
+# PsiTri bank bench (always available)
+add_executable(bank-bench-psitri programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-psitri PRIVATE BANK_ENGINE_PSITRI=1)
+target_link_libraries(bank-bench-psitri PRIVATE psitri Boost::program_options)
+set_target_properties(bank-bench-psitri PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+if(BUILD_ROCKSDB_BENCH)
+    # PsiTriRocks bank bench
+    add_executable(bank-bench-psitrirocks programs/bank_bench.cpp)
+    target_compile_definitions(bank-bench-psitrirocks PRIVATE BANK_ENGINE_ROCKSDB=1 PSITRIROCKS_BACKEND=1)
+    target_link_libraries(bank-bench-psitrirocks PRIVATE psitrirocks Boost::program_options)
+    set_target_properties(bank-bench-psitrirocks PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # Real RocksDB bank bench
+    add_executable(bank-bench-rocksdb programs/bank_bench.cpp)
+    target_compile_definitions(bank-bench-rocksdb PRIVATE BANK_ENGINE_ROCKSDB=1)
+    target_link_libraries(bank-bench-rocksdb PRIVATE rocksdb Boost::program_options)
+    target_include_directories(bank-bench-rocksdb PRIVATE ${rocksdb_SOURCE_DIR}/include)
+    set_target_properties(bank-bench-rocksdb PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # MDBX bank bench
+    add_executable(bank-bench-mdbx programs/bank_bench.cpp)
+    target_compile_definitions(bank-bench-mdbx PRIVATE BANK_ENGINE_MDBX=1)
+    target_link_libraries(bank-bench-mdbx PRIVATE mdbx-static Boost::program_options)
+    set_target_properties(bank-bench-mdbx PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+if(BUILD_TIDESDB_BENCH AND TARGET tidesdb_lib)
+    add_executable(bank-bench-tidesdb
+        programs/bank_bench.cpp
+        programs/tidesdb_c_wrapper.c)
+    target_compile_definitions(bank-bench-tidesdb PRIVATE BANK_ENGINE_TIDESDB=1)
+    target_include_directories(bank-bench-tidesdb PRIVATE
+        ${TIDESDB_INCLUDE_DIR} ${tidesdb_SOURCE_DIR}/external
+        ${tidesdb_BINARY_DIR} ${CMAKE_SOURCE_DIR}/programs ${Boost_INCLUDE_DIRS})
+    target_link_libraries(bank-bench-tidesdb PRIVATE
+        tidesdb_lib Boost::program_options Threads::Threads)
+    set_target_properties(bank-bench-tidesdb PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
 # Only add test directory if testing is enabled

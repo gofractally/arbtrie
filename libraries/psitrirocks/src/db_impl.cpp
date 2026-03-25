@@ -404,7 +404,53 @@ namespace rocksdb
                      << "  other: " << live_other << "/" << (bytes_other / (1024.0 * 1024.0)) << " MB)"
                      << "  ref>1: " << high_ref;
                }
+
+               // Pretty-printed segment dump
+               os << "\n";
+               d.print(os);
+
                *value = os.str();
+            }
+            return true;
+         }
+         if (property == "psitri.compact_and_truncate")
+         {
+            auto before = db_->dump().total_segments;
+            db_->compact_and_truncate();
+            auto after_dump = db_->dump();
+            if (value)
+            {
+               std::ostringstream os;
+               os << "truncated: " << before << " -> " << after_dump.total_segments << " segments";
+               *value = os.str();
+            }
+            return true;
+         }
+         // RocksDB-compatible size properties
+         if (property == "rocksdb.total-sst-files-size" ||
+             property == "rocksdb.live-sst-files-size" ||
+             property == "rocksdb.estimate-pending-compaction-bytes")
+         {
+            auto d = db_->dump();
+            if (value)
+            {
+               if (property == "rocksdb.total-sst-files-size")
+               {
+                  *value = std::to_string(d.total_segments * sal::segment_size);
+               }
+               else if (property == "rocksdb.live-sst-files-size")
+               {
+                  // Live = total allocated minus freed (internal fragmentation)
+                  uint64_t live = 0;
+                  for (auto& seg : d.segments)
+                     if (!seg.is_free && seg.alloc_pos > 0)
+                        live += seg.alloc_pos - seg.freed_bytes;
+                  *value = std::to_string(live);
+               }
+               else  // estimate-pending-compaction-bytes
+               {
+                  *value = std::to_string(d.total_free_space);
+               }
             }
             return true;
          }

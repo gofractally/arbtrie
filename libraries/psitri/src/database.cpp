@@ -97,6 +97,12 @@ namespace psitri
       return _dbm->flags & detail::flag_ref_counts_stale;
    }
 
+   void database::sync()
+   {
+      std::lock_guard lock(_sync_mutex);
+      _allocator.sync(_cfg.sync_mode);
+   }
+
    void database::reclaim_leaked_memory()
    {
       if (!(_dbm->flags & detail::flag_ref_counts_stale))
