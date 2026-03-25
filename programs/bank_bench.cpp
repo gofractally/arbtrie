@@ -172,10 +172,6 @@ static uint64_t decode_balance(const std::string& s)
    return decode_balance(s.data(), s.size());
 }
 
-// ============================================================
-// Account name generation
-// ============================================================
-
 static uint64_t to_big_endian(uint64_t v)
 {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -184,6 +180,46 @@ static uint64_t to_big_endian(uint64_t v)
    return v;
 #endif
 }
+
+// ============================================================
+// Transaction log key/value encoding
+// ============================================================
+
+// Log key: "\x00TX" prefix + 8-byte big-endian sequence number
+// The NUL byte prefix ensures no collision with dictionary words (all printable)
+// or binary account keys (which are 8 bytes, not 11).
+static const std::string LOG_PREFIX = std::string("\x00TX", 3);
+
+static std::string encode_log_key(uint64_t seq)
+{
+   std::string key;
+   key.reserve(11);
+   key.append(LOG_PREFIX);
+   uint64_t be = to_big_endian(seq);
+   key.append(reinterpret_cast<const char*>(&be), sizeof(be));
+   return key;
+}
+
+// Log value: src_len(2 bytes) + src + dst_len(2 bytes) + dst + amount(8 bytes)
+static std::string encode_log_value(const std::string& src,
+                                    const std::string& dst,
+                                    uint64_t           amount)
+{
+   std::string val;
+   val.reserve(2 + src.size() + 2 + dst.size() + 8);
+   uint16_t slen = (uint16_t)src.size();
+   uint16_t dlen = (uint16_t)dst.size();
+   val.append(reinterpret_cast<const char*>(&slen), 2);
+   val.append(src);
+   val.append(reinterpret_cast<const char*>(&dlen), 2);
+   val.append(dst);
+   val.append(reinterpret_cast<const char*>(&amount), 8);
+   return val;
+}
+
+// ============================================================
+// Account name generation
+// ============================================================
 
 static std::vector<std::string> generate_account_names(uint64_t num_accounts, uint64_t seed)
 {
@@ -269,7 +305,11 @@ class BankEngine
    /// Attempt a single transfer within the current batch. Returns true if the
    /// transfer succeeded (sufficient balance), false if skipped. Reads within
    /// the batch must see writes from prior transfers in the same batch.
-   virtual bool transfer(const std::string& src, const std::string& dst, uint64_t amount) = 0;
+   /// On success, also inserts a transaction log entry keyed by big-endian seq.
+   virtual bool transfer(const std::string& src,
+                         const std::string& dst,
+                         uint64_t           amount,
+                         uint64_t           seq) = 0;
 
    /// Commit the current batch transaction.
    virtual void commit_batch() = 0;
@@ -337,7 +377,10 @@ class PsiTriEngine : public BankEngine
       _tx.emplace(_ses->start_transaction(0));
    }
 
-   bool transfer(const std::string& src, const std::string& dst, uint64_t amount) override
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
    {
       auto src_val = _tx->get<std::string>(psitri::to_key_view(src));
       if (!src_val)
@@ -355,6 +398,11 @@ class PsiTriEngine : public BankEngine
       auto new_dst = encode_balance(dst_bal + amount);
       _tx->upsert(psitri::to_key_view(src), psitri::to_value_view(new_src));
       _tx->upsert(psitri::to_key_view(dst), psitri::to_value_view(new_dst));
+
+      // Transaction log entry
+      auto log_key = encode_log_key(seq);
+      auto log_val = encode_log_value(src, dst, amount);
+      _tx->upsert(psitri::to_key_view(log_key), psitri::to_value_view(log_val));
       return true;
    }
 
@@ -467,7 +515,10 @@ class RocksDbEngine : public BankEngine
       _pending.clear();
    }
 
-   bool transfer(const std::string& src, const std::string& dst, uint64_t amount) override
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
    {
       // Read source — check pending writes first, then DB
       std::string src_val;
@@ -497,6 +548,9 @@ class RocksDbEngine : public BankEngine
       _batch.Put(dst, new_dst);
       _pending[src] = std::move(new_src);
       _pending[dst] = std::move(new_dst);
+
+      // Transaction log entry
+      _batch.Put(encode_log_key(seq), encode_log_value(src, dst, amount));
       return true;
    }
 
@@ -621,7 +675,10 @@ class MdbxEngine : public BankEngine
       MDBX_CHECK(mdbx_txn_begin(_env, nullptr, (MDBX_txn_flags_t)0, &_txn));
    }
 
-   bool transfer(const std::string& src, const std::string& dst, uint64_t amount) override
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
    {
       MDBX_val sk{const_cast<char*>(src.data()), src.size()};
       MDBX_val sv;
@@ -646,6 +703,13 @@ class MdbxEngine : public BankEngine
       MDBX_val ndv{&new_dst, sizeof(new_dst)};
       MDBX_CHECK(mdbx_put(_txn, _dbi, &sk, &nsv, MDBX_UPSERT));
       MDBX_CHECK(mdbx_put(_txn, _dbi, &dk, &ndv, MDBX_UPSERT));
+
+      // Transaction log entry
+      auto     lk = encode_log_key(seq);
+      auto     lv = encode_log_value(src, dst, amount);
+      MDBX_val lkv{lk.data(), lk.size()};
+      MDBX_val lvv{lv.data(), lv.size()};
+      MDBX_CHECK(mdbx_put(_txn, _dbi, &lkv, &lvv, MDBX_UPSERT));
       return true;
    }
 
@@ -762,7 +826,10 @@ class TidesDbEngine : public BankEngine
       _txn = tdb_txn_begin(_db);
    }
 
-   bool transfer(const std::string& src, const std::string& dst, uint64_t amount) override
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
    {
       uint8_t* sv   = nullptr;
       size_t   slen = 0;
@@ -791,6 +858,12 @@ class TidesDbEngine : public BankEngine
               (const uint8_t*)&new_src, sizeof(new_src));
       tdb_put(_txn, CF, (const uint8_t*)dst.data(), dst.size(),
               (const uint8_t*)&new_dst, sizeof(new_dst));
+
+      // Transaction log entry
+      auto lk = encode_log_key(seq);
+      auto lv = encode_log_value(src, dst, amount);
+      tdb_put(_txn, CF, (const uint8_t*)lk.data(), lk.size(),
+              (const uint8_t*)lv.data(), lv.size());
       return true;
    }
 
@@ -835,6 +908,19 @@ class TidesDbEngine : public BankEngine
             visitor(acct, bal);
             ++count;
          }
+      }
+      // Also scan transaction log entries by probing sequential keys
+      for (uint64_t seq = 1; ; ++seq)
+      {
+         auto     lk  = encode_log_key(seq);
+         uint8_t* val = nullptr;
+         size_t   vlen = 0;
+         if (tdb_get(txn, CF, (const uint8_t*)lk.data(), lk.size(), &val, &vlen) !=
+             TDB_WRAP_SUCCESS)
+            break;
+         free(val);
+         visitor(lk, 0);  // balance field unused for log entries
+         ++count;
       }
       tdb_txn_free(txn);
       return count;
@@ -947,7 +1033,7 @@ int main(int argc, char** argv)
       if (dst_idx == src_idx)
          dst_idx = (src_idx + 1) % cfg.num_accounts;
 
-      if (engine->transfer(accounts[src_idx], accounts[dst_idx], amount))
+      if (engine->transfer(accounts[src_idx], accounts[dst_idx], amount, successful + 1))
          ++successful;
       else
          ++skipped;
@@ -991,19 +1077,29 @@ int main(int argc, char** argv)
    auto     p4_start      = Clock::now();
    uint64_t total_balance  = 0;
    uint64_t account_count  = 0;
-   engine->scan_all([&](const std::string&, uint64_t bal)
+   uint64_t log_count      = 0;
+   engine->scan_all([&](const std::string& key, uint64_t bal)
    {
-      total_balance += bal;
-      ++account_count;
+      // Log entries start with "\x00TX" prefix and are 11 bytes (3 + 8)
+      if (key.size() == 11 && key.substr(0, 3) == LOG_PREFIX)
+         ++log_count;
+      else
+      {
+         total_balance += bal;
+         ++account_count;
+      }
    });
    auto p4_secs = elapsed_sec(p4_start);
 
    uint64_t expected = cfg.initial_balance * cfg.num_accounts;
-   bool     pass     = (total_balance == expected && account_count == cfg.num_accounts);
+   bool     pass     = (total_balance == expected && account_count == cfg.num_accounts
+                        && log_count == successful);
 
-   print_phase("Validation scan", p4_secs, account_count);
+   print_phase("Validation scan", p4_secs, account_count + log_count);
    printf("  Accounts found: %s (expected %s)\n",
           format_comma(account_count).c_str(), format_comma(cfg.num_accounts).c_str());
+   printf("  Log entries:    %s (expected %s)\n",
+          format_comma(log_count).c_str(), format_comma(successful).c_str());
    printf("  Total balance:  %s (expected %s)  %s\n",
           format_comma(total_balance).c_str(), format_comma(expected).c_str(),
           pass ? "PASS" : "*** FAIL ***");

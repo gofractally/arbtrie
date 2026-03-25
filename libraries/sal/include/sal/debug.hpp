@@ -114,7 +114,7 @@ namespace sal
    /**
     * Enables debug logging for memory operations like mmap/mlock.
     */
-   static constexpr bool debug_memory = true;
+   static constexpr bool debug_memory = false;
 
    struct scope
    {
