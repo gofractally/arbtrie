@@ -747,6 +747,31 @@ namespace
          _keygen.remove_range_from_pool(lower, upper);
 
          REQUIRE(psitri_count == oracle_count);
+
+         // Verify iteration count matches oracle after remove_range
+         // (catches bugs where remove_range reports correct count but leaves keys)
+         uint64_t iter_count = count_by_iteration({}, {});
+         if (iter_count != _oracle.size())
+         {
+            // Find the extra keys in psitri that oracle doesn't have
+            auto rc = _cur->read_cursor();
+            WARN("--- All psitri keys after remove_range ---");
+            if (rc.seek_begin())
+            {
+               do
+               {
+                  std::string k(rc.key());
+                  bool in_oracle = _oracle.find(k) != _oracle.end();
+                  WARN("  psitri key: " << hex_encode(k) << (in_oracle ? "" : " ** GHOST **"));
+               } while (rc.next());
+            }
+            WARN("--- Oracle keys ---");
+            for (auto& [k, v] : _oracle)
+               WARN("  oracle key: " << hex_encode(k));
+            WARN("remove_range [" << hex_encode(lower) << ", " << hex_encode(upper) << ")"
+                  << " iter=" << iter_count << " oracle=" << _oracle.size());
+            REQUIRE(iter_count == _oracle.size());
+         }
       }
 
       void do_get()
@@ -1451,6 +1476,62 @@ TEST_CASE("fuzz shared mode remove heavy", "[fuzz][remove_range]")
 
    runner.run_with_snapshots(20000 / SCALE, 30);
    runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("shared mode remove_range ghost key repro", "[fuzz][remove_range][repro]")
+{
+   // Minimal reproduction: 6 keys, shared mode, remove_range leaves ghost keys
+   auto hex_decode = [](const char* hex) -> std::string {
+      std::string result;
+      for (size_t i = 0; hex[i] && hex[i+1]; i += 2) {
+         char byte = (char)((hex[i] >= 'a' ? hex[i]-'a'+10 : hex[i]-'0') * 16
+                          + (hex[i+1] >= 'a' ? hex[i+1]-'a'+10 : hex[i+1]-'0'));
+         result.push_back(byte);
+      }
+      return result;
+   };
+
+   std::string k1 = hex_decode("0000000000000031");
+   std::string k2 = hex_decode("2e00000000000000");
+   std::string k3 = hex_decode("30521e8fff7d5cb7936fdfcfadafc1cc0ddbd3465ac8e88a46604156aef4303e3ca9f2e2c51be46a8b69af005369a4130676805e0b5b4f3b0b34fc605486457be2b6fd134293ea4010bd449aeb2d33b77a09e0");
+   std::string k4 = hex_decode("ca028e05b1cfa449702ec95ddd5c8d217ee0");
+   std::string k5 = hex_decode("dd");
+   std::string k6 = hex_decode("fd");
+   std::string val = "testval";
+
+   test_db tdb("ghost_repro");
+   auto cur = tdb.ses->create_write_cursor();
+
+   // Insert all 6 keys
+   cur->upsert(to_key_view(k1), val);
+   cur->upsert(to_key_view(k2), val);
+   cur->upsert(to_key_view(k3), val);
+   cur->upsert(to_key_view(k4), val);
+   cur->upsert(to_key_view(k5), val);
+   cur->upsert(to_key_view(k6), val);
+
+   // Create shared mode by taking a snapshot
+   auto snapshot = tdb.ses->create_write_cursor(cur->root());
+
+   // Remove range [k3, k6) — should remove k3, k4, k5
+   uint64_t removed = cur->remove_range(to_key_view(k3), to_key_view(k6));
+   WARN("remove_range returned: " << removed);
+   REQUIRE(removed == 3);
+
+   // Verify by iteration
+   auto rc = cur->read_cursor();
+   int count = 0;
+   if (rc.seek_begin()) {
+      do {
+         std::string k(rc.key());
+         bool expected = (k == k1 || k == k2 || k == k6);
+         WARN("  key: " << hex_encode(k) << (expected ? "" : " ** GHOST **"));
+         ++count;
+      } while (rc.next());
+   }
+   REQUIRE(count == 3);
+
+   snapshot.reset();
 }
 
 TEST_CASE("fuzz shared mode transaction", "[fuzz]")

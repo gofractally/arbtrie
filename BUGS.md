@@ -15,11 +15,16 @@
 - **Likely cause**: Descendant count tracking (`_delta_descendents`) gets corrupted during some tree restructuring operation (split, merge, or update overflow).
 - **Workaround**: Fuzz tests use WARN instead of REQUIRE for count_keys checks.
 
-### 3. Subtree collapse test too small for debug builds
-- **Fixed in**: 9feae4c (N=60 instead of 60/OPS_SCALE)
-- **Was**: "tree_ops: subtree collapse with set_collapse_threshold" failed with `1 < 1` because N=12 never created a multi-level tree.
-
 ## Fixed (recent)
+
+### range_remove ghost keys when both start and boundary branches COW (this session)
+- **Repro**: `psitri-tests "fuzz shared mode remove heavy" -c "seed=11332302"`
+- **Symptom**: `remove_range` reported correct count but left 2 ghost keys in the tree. Iteration found keys that should have been removed.
+- **Root cause**: In `range_remove_inner` unique-mode general case, when both the start and boundary branches had shared children (ref > 1) causing COW, only the start branch's new address was written into the node. The boundary branch update was in a separate `if` block that was never reached because the start block returned early.
+- **Fix**: When both branches changed, apply `merge_branches` sequentially (start first, then boundary on the resulting node). Same fix applied in both the `remove_lo < remove_hi` and `remove_lo >= remove_hi` code paths.
+
+### Subtree collapse test too small for debug builds (9feae4c)
+- "tree_ops: subtree collapse with set_collapse_threshold" failed with `1 < 1` because N=12 never created a multi-level tree. Fixed: N=60.
 
 ### make_value assertion for value_node type (9feae4c)
 - `make_value()` didn't handle `value_node` type, asserting on re-entry after `insert()` converted a view to value_node.

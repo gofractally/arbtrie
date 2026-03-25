@@ -463,13 +463,27 @@ namespace psitri
                    n->add_descendents(total_delta);
                 });
 
-            // If boundary survived but address changed, we need to update it.
-            // After remove_range, the boundary's new position is remove_lo (if it survived)
+            // Handle changed addresses after the remove_range.
+            // add_descendents already applied total_delta, so merge_branches must use 0.
+            // After remove_range, boundary's position shifted to remove_lo.
+            if (!start_empty && start_changed && !boundary_empty && has_boundary && boundary_changed)
+            {
+               // Both changed — handle sequentially
+               _delta_descendents = 0;
+               branch_set ssub(new_start_addr);
+               auto result = merge_branches<upsert_mode::unique>(parent_hint, node, start, ssub);
+               if (result.count() == 1)
+               {
+                  auto result_ref = _session.template get_ref<NodeT>(result.get_first_branch());
+                  auto boundary_new_pos = branch_number(remove_lo);
+                  branch_set bsub(new_boundary_addr);
+                  result = merge_branches<upsert_mode::unique>(parent_hint, result_ref, boundary_new_pos, bsub);
+               }
+               _delta_descendents = total_delta;
+               return result;
+            }
             if (!boundary_empty && has_boundary && boundary_changed)
             {
-               // The boundary branch was at position *boundary, after removing [remove_lo, remove_hi),
-               // it's now at position remove_lo. But we need to update the branch pointer.
-               // add_descendents already applied total_delta, so merge_branches must use 0.
                auto boundary_new_pos = branch_number(remove_lo);
                _delta_descendents = 0;
                branch_set bsub(new_boundary_addr);
@@ -477,11 +491,8 @@ namespace psitri
                _delta_descendents = total_delta;
                return result;
             }
-
-            // If start survived but address changed
             if (!start_empty && start_changed)
             {
-               // add_descendents already applied total_delta, so merge_branches must use 0.
                _delta_descendents = 0;
                branch_set ssub(new_start_addr);
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, start, ssub);
@@ -504,6 +515,14 @@ namespace psitri
                _delta_descendents = 0;
                branch_set ssub(new_start_addr);
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, start, ssub);
+
+               // If boundary also changed, apply it to the result node
+               if (!boundary_empty && has_boundary && boundary_changed && result.count() == 1)
+               {
+                  auto result_ref = _session.template get_ref<NodeT>(result.get_first_branch());
+                  branch_set bsub(new_boundary_addr);
+                  result = merge_branches<upsert_mode::unique>(parent_hint, result_ref, boundary, bsub);
+               }
                _delta_descendents = total_delta;
                return result;
             }
