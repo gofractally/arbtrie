@@ -233,7 +233,9 @@ TEST_CASE("tree_ops: subtree collapse via low threshold", "[tree_ops][collapse]"
 TEST_CASE("tree_ops: subtree collapse with set_collapse_threshold", "[tree_ops][collapse]")
 {
    test_db env("tree_ops_threshold_db");
-   const int N = 60 / OPS_SCALE;
+   // N must be large enough to force a multi-level tree structure;
+   // a single leaf holds ~50-60 small entries, so don't scale this down.
+   const int N = 60;
 
    // Build tree with enough keys to create multi-level structure
    {

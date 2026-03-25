@@ -38,8 +38,8 @@ namespace psitri
        */
       value_type make_value(value_type value, sal::alloc_hint hint) noexcept
       {
-         if (value.is_subtree())
-            return value;
+         if (value.is_subtree() || value.is_value_node())
+            return value;  // already converted or is a subtree address
          if (value.is_view())
          {
             auto v = value.view();
@@ -47,7 +47,7 @@ namespace psitri
                return value_type::make_value_node(_session.alloc<value_node>(hint, v));
             return value;
          }
-         assert(!"only value_view or subtree values are supported");
+         assert(!"only value_view, value_node, or subtree values are supported");
          abort();
       }
       uint64_t count_child_keys(ptr_address addr) noexcept
@@ -1114,10 +1114,14 @@ namespace psitri
                         }
                         else if constexpr (is_inner_prefix_node<InnerNodeType>)
                         {
-                           // Skip collapse if prepending prefix would overflow leaf capacity
-                           auto     pfx   = in->prefix();
-                           uint16_t nb    = leaf_ref->num_branches();
-                           uint32_t avail = leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * nb;
+                           // Skip collapse if prepending prefix would overflow leaf capacity.
+                           // Account for per-branch overhead, cline slots for address-typed values,
+                           // and the extra prefix bytes prepended to each key.
+                           auto     pfx       = in->prefix();
+                           uint16_t nb        = leaf_ref->num_branches();
+                           uint32_t cline_space = leaf_ref->clines_capacity() * sizeof(ptr_address);
+                           uint32_t avail = leaf_node::max_leaf_size - sizeof(leaf_node)
+                                            - 5u * nb - cline_space;
                            if (leaf_ref->alloc_pos() + (uint32_t)pfx.size() * nb <= avail)
                            {
                               retain_children(leaf_ref);
@@ -1253,7 +1257,9 @@ namespace psitri
                            auto     leaf_ref = child_ref.template as<leaf_node>();
                            auto     pfx     = in->prefix();
                            uint16_t nb      = leaf_ref->num_branches();
-                           uint32_t avail   = leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * nb;
+                           uint32_t cline_space = leaf_ref->clines_capacity() * sizeof(ptr_address);
+                           uint32_t avail   = leaf_node::max_leaf_size - sizeof(leaf_node)
+                                              - 5u * nb - cline_space;
                            if (leaf_ref->alloc_pos() + (uint32_t)pfx.size() * nb <= avail)
                            {
                               retain_children(leaf_ref);
@@ -1687,7 +1693,66 @@ namespace psitri
                                          branch_number          lb)
    {
       //SAL_INFO("split_insert: leaf {} key: {}", leaf.address(), key);
-      branch_set           result;
+      branch_set result;
+
+      // Special case: leaf has only 1 entry and can't fit a second key.
+      // get_split_pos() requires nb > 1, so we manually build the split:
+      // create two single-entry leaves and an inner_prefix_node.
+      if (leaf->num_branches() == 1)
+      {
+         key_view existing_key = leaf->get_key(branch_zero);
+
+         // Find common prefix length
+         size_t cplen = 0;
+         size_t max_cp = std::min(existing_key.size(), key.size());
+         while (cplen < max_cp && existing_key[cplen] == key[cplen])
+            ++cplen;
+
+         key_view cprefix = existing_key.substr(0, cplen);
+
+         // Determine dividing byte and which key goes left vs right
+         // The key with the smaller byte at cplen goes left (divider = larger byte)
+         uint8_t existing_byte = (cplen < existing_key.size()) ? existing_key[cplen] : 0;
+         uint8_t new_byte      = (cplen < key.size()) ? key[cplen] : 0;
+
+         // Alloc both leaves (don't realloc leaf — we need it for remake_inner_prefix)
+         ptr_address existing_leaf =
+             _session.alloc<leaf_node>({}, leaf.obj(), cprefix, branch_zero, branch_number(1));
+
+         key_view    new_key_suffix = key.substr(cplen);
+         ptr_address new_leaf = _session.alloc<leaf_node>(
+             {&existing_leaf, 1}, new_key_suffix, make_value(_new_value, {&existing_leaf, 1}));
+
+         // Build inner_prefix_node: the divider is the larger of the two bytes
+         ptr_address left_addr, right_addr;
+         uint8_t divider;
+         if (existing_byte < new_byte)
+         {
+            left_addr  = existing_leaf;
+            right_addr = new_leaf;
+            divider    = new_byte;
+         }
+         else
+         {
+            left_addr  = new_leaf;
+            right_addr = existing_leaf;
+            divider    = existing_byte;
+         }
+
+         branch_set branches(divider, left_addr, right_addr);
+         if constexpr (mode.is_unique())
+         {
+            // realloc leaf into the inner_prefix_node so the address is preserved
+            return remake_inner_prefix(leaf, cprefix, branches).address();
+         }
+         else if constexpr (mode.is_shared())
+         {
+            retain_children(leaf);
+            return make_inner_prefix(parent_hint, cprefix, branches);
+         }
+         std::unreachable();
+      }
+
       leaf_node::split_pos spos      = leaf->get_split_pos();
       branch_number        left_size = branch_number(spos.less_than_count);
       branch_number        right_end = branch_number(leaf->num_branches());
