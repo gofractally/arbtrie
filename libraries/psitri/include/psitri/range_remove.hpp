@@ -385,13 +385,36 @@ namespace psitri
 
       if (survivors == 0)
       {
-         // Release middle branches (balance retain in shared mode, release ownership in unique mode)
-         for (uint16_t i = *start + 1; i < *end; ++i)
-            _session.release(node->get_branch(branch_number(i)));
-         // Release start only if NOT recursed into (unbounded lower = fully contained)
-         // If recursed into, the dispatch already released it.
-         if (start_empty && range.lower_bound.empty())
-            _session.release(start_addr);
+         if constexpr (mode.is_unique())
+         {
+            // The caller will release this node, and its destroy() cascade releases
+            // ALL children.  We must NOT double-release branches that the recursive
+            // range_remove already released.  Instead, retain those branches so the
+            // destroy cascade can properly release them (same pattern as the
+            // same-branch num_branches==1 case).
+            //
+            // Middle branches and fully-contained start were NOT recursed into,
+            // so they haven't been released — no action needed for them (the
+            // destroy cascade handles them).
+            //
+            // Branches that WERE recursed into and came back empty were already
+            // released by range_remove.  Retain them to counterbalance.
+            if (start_empty && !range.lower_bound.empty())
+               _session.retain(start_addr);
+            if (boundary_empty && has_boundary)
+               _session.retain(boundary_addr);
+         }
+         else
+         {
+            // In shared mode, retain_children was called (+1 to all children).
+            // Release branches that were NOT recursed into to balance the retain.
+            // Branches that were recursed into are balanced by ref.release() in
+            // the shared-mode range_remove dispatch.
+            for (uint16_t i = *start + 1; i < *end; ++i)
+               _session.release(node->get_branch(branch_number(i)));
+            if (start_empty && range.lower_bound.empty())
+               _session.release(start_addr);
+         }
          return {};
       }
 
