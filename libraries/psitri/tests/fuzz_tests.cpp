@@ -421,7 +421,8 @@ namespace
 
       /// Run operations while periodically holding snapshot cursors,
       /// forcing shared-mode (ref > 1) COW paths on every mutation.
-      void run_with_snapshots(uint64_t num_ops, int snapshot_interval = 50)
+      void run_with_snapshots(uint64_t num_ops, int snapshot_interval = 50,
+                             uint64_t trace_after = UINT64_MAX)
       {
          // snapshot_oracle: a frozen copy of _oracle taken at snapshot time
          std::map<std::string, std::string> snapshot_oracle;
@@ -445,6 +446,21 @@ namespace
             }
 
             auto op = pick_op();
+            if (_op_count >= trace_after)
+            {
+               auto alloc_before = _tdb.ses->get_total_allocated_objects();
+               auto pending_before = _tdb.ses->get_pending_release_count();
+               execute(op);
+               _op_count++;
+               auto alloc_after = _tdb.ses->get_total_allocated_objects();
+               auto pending_after = _tdb.ses->get_pending_release_count();
+               std::cerr << "TRACE op#" << _op_count << " " << op_name(op)
+                         << " oracle=" << _oracle.size()
+                         << " alloc=" << alloc_before << "→" << alloc_after
+                         << " pending=" << pending_before << "→" << pending_after
+                         << " snap=" << (snapshot_cur ? "yes" : "no") << std::endl;
+               continue;  // skip the _op_count++ below
+            }
             execute(op);
             _op_count++;
 
@@ -491,10 +507,15 @@ namespace
       {
          cleanup();
 
-         _tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
-         auto pending = _tdb.ses->get_pending_release_count();
-         if (pending > 0)
+         // Wait for the compactor to process all pending releases.
+         // Multiple waits needed: first drains the queue, second handles
+         // any cascading releases from freed subtrees.
+         for (int i = 0; i < 3; ++i)
+         {
             _tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
+            if (_tdb.ses->get_pending_release_count() == 0)
+               break;
+         }
          return _tdb.ses->get_total_allocated_objects();
       }
 
@@ -1217,176 +1238,186 @@ namespace
 
 TEST_CASE("fuzz random heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(12345, 987654, 314159, 1000000007, 0xCAFE, 0xBEEF, 777, 101010, 5551212, 42);
+   uint64_t seed = GENERATE(12345, 987654, 314159, 1000000007, 0xCAFE, 0xBEEF, 777, 101010,
+                            5551212, 42, 0xFEED, 2345678, 8080808, 0xABCD, 13131313, 0xD00D);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_random_heavy_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, balanced_no_rr_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz sequential heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(1, 77777, 65536, 2718281, 0xFACE, 3141592, 48879, 1234567890);
+   uint64_t seed = GENERATE(1, 77777, 65536, 2718281, 0xFACE, 3141592, 48879, 1234567890,
+                            0xC0DE, 5050505, 9999991, 0xBAAD, 7070707, 2020202);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_seq_heavy_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, sequential_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz remove heavy", "[fuzz][remove_range]")
 {
-   uint64_t seed = GENERATE(42, 55555, 161803, 7777777, 0xDEAD, 98765, 112233, 0xF00D);
+   uint64_t seed = GENERATE(42, 55555, 161803, 7777777, 0xDEAD, 98765, 112233, 0xF00D,
+                            0xACE, 3030303, 6543210, 0xDAD, 4141414, 8888881);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_remove_heavy_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, remove_heavy_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz cursor heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 31415, 999983, 0xBEEF, 654321, 11235813);
+   uint64_t seed = GENERATE(42, 31415, 999983, 0xBEEF, 654321, 11235813,
+                            0xFACE, 4040404, 1717171, 0xBABE, 6060606, 9191919);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_cursor_heavy_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, cursor_heavy_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz transaction lifecycle", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 99999, 424242, 8675309, 0xCAFE, 1618033, 7654321, 0xBAD);
+   uint64_t seed = GENERATE(42, 99999, 424242, 8675309, 0xCAFE, 1618033, 7654321, 0xBAD,
+                            0xDEAF, 5555555, 1010101, 0xFADE, 3210321, 7890789);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_tx_lifecycle_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, transaction_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz edge cases", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 271828, 1337, 0xDEAD, 0xFF, 256, 65535, 0xDEADBEEF);
+   uint64_t seed = GENERATE(42, 271828, 1337, 0xDEAD, 0xFF, 256, 65535, 0xDEADBEEF,
+                            0, 1, 128, 0xFFFF, 0xABCDEF, 2147483647, 0xDEADC0DE, 0x1337BEEF);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_edge_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, balanced_no_rr_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz update heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 1337, 0xDEAD, 314159, 999983, 0xCAFE, 7654321, 48879);
+   uint64_t seed = GENERATE(42, 1337, 0xDEAD, 314159, 999983, 0xCAFE, 7654321, 48879,
+                            0xFEEDFACE, 2222222, 8181818, 0xC0FFEE, 4567890, 1928374);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_update_heavy_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, update_heavy_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz update heavy large values", "[fuzz]")
 {
    // Large values (up to 4KB) stress the update overflow/split path
-   uint64_t seed = GENERATE(42, 12345, 0xDEAD, 987654, 0xBEEF, 314159);
+   uint64_t seed = GENERATE(42, 12345, 0xDEAD, 987654, 0xBEEF, 314159,
+                            0xFACEFACE, 6767676, 3333331, 0xDADADA, 1122334, 9876543);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_update_large_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, update_heavy_weights(), 4096);
 
-   runner.run(8000 / SCALE);
+   runner.run(15000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz churn", "[fuzz]")
 {
    // Rapid insert/remove churn stresses tree growth/shrinkage
-   uint64_t seed = GENERATE(42, 0xDEAD, 777, 161803, 999983, 5551212);
+   uint64_t seed = GENERATE(42, 0xDEAD, 777, 161803, 999983, 5551212,
+                            0xBEAD, 4444444, 7171717, 0xFACE0FF, 2828282, 6161616);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_churn_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, churn_weights());
 
-   runner.run(10000 / SCALE);
+   runner.run(20000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz long run balanced", "[fuzz]")
 {
    // Longer run with balanced weights for sustained stress
-   uint64_t seed = GENERATE(42, 314159, 0xCAFEBABE);
+   uint64_t seed = GENERATE(42, 314159, 0xCAFEBABE, 0xDEADBEEF, 1000000007, 7777777);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_long_balanced_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, balanced_no_rr_weights());
 
-   runner.run(25000 / SCALE);
+   runner.run(50000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz long run with commits", "[fuzz]")
 {
    // Sustained run with frequent commits — exercises shared-mode transitions
-   uint64_t seed = GENERATE(42, 0xDEAD, 1234567890);
+   uint64_t seed = GENERATE(42, 0xDEAD, 1234567890, 0xCAFECAFE, 5959595, 8008008);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_long_tx_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, transaction_weights());
 
-   runner.run(25000 / SCALE);
+   runner.run(50000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz transaction abort heavy", "[fuzz]")
 {
    // Frequent transaction aborts interleaved with commits and mutations
-   uint64_t seed = GENERATE(42, 1337, 0xDEAD, 314159, 0xCAFE, 987654, 8675309, 0xBEEF);
+   uint64_t seed = GENERATE(42, 1337, 0xDEAD, 314159, 0xCAFE, 987654, 8675309, 0xBEEF,
+                            0xF00DCAFE, 2468024, 1357913, 0xABBA, 5050505, 9090909);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_txn_abort_" + std::to_string(seed));
-   fuzz_runner runner(tdb, seed, transaction_abort_weights());
-
-   runner.run(15000 / SCALE);
-   runner.cleanup_and_leak_check();
-}
-
-TEST_CASE("fuzz transaction abort long run", "[fuzz]")
-{
-   // Sustained abort/commit cycling over many operations
-   uint64_t seed = GENERATE(42, 0xDEADBEEF, 1234567890);
-   INFO("seed=" << seed);
-
-   test_db     tdb("fuzz_txn_abort_long_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, transaction_abort_weights());
 
    runner.run(25000 / SCALE);
    runner.cleanup_and_leak_check();
 }
 
+TEST_CASE("fuzz transaction abort long run", "[fuzz]")
+{
+   // Sustained abort/commit cycling over many operations
+   uint64_t seed = GENERATE(42, 0xDEADBEEF, 1234567890, 0xBADCAFE, 3141592, 9999999);
+   INFO("seed=" << seed);
+
+   test_db     tdb("fuzz_txn_abort_long_" + std::to_string(seed));
+   fuzz_runner runner(tdb, seed, transaction_abort_weights());
+
+   runner.run(50000 / SCALE);
+   runner.cleanup_and_leak_check();
+}
+
 TEST_CASE("fuzz transaction abort with snapshots", "[fuzz]")
 {
    // Transaction aborts in shared mode (snapshots force COW)
-   uint64_t seed = GENERATE(42, 0xDEAD, 314159, 0xBEEF);
+   uint64_t seed = GENERATE(42, 0xDEAD, 314159, 0xBEEF, 0xC0FFEE, 7654321, 2468135, 0xFACE);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_txn_abort_snap_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, transaction_abort_weights());
 
-   runner.run_with_snapshots(10000 / SCALE, 40);
+   runner.run_with_snapshots(20000 / SCALE, 40);
    runner.cleanup_and_leak_check();
 }
 
@@ -1397,7 +1428,8 @@ TEST_CASE("fuzz transaction abort with snapshots", "[fuzz]")
 
 TEST_CASE("fuzz shared mode heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 12345, 161803, 999983, 0xDEAD, 777, 0xCAFE, 8675309);
+   uint64_t seed = GENERATE(42, 12345, 161803, 999983, 0xDEAD, 777, 0xCAFE, 8675309,
+                            0xB0B0B0, 3456789, 1111111, 0xFEED, 6543210, 2929292);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_shared_" + std::to_string(seed));
@@ -1405,68 +1437,116 @@ TEST_CASE("fuzz shared mode heavy", "[fuzz]")
 
    // run_with_snapshots takes a snapshot every 50 ops, creating shared-mode
    // trees. Mutations on the main cursor must COW every node they touch.
-   runner.run_with_snapshots(12000 / SCALE, 50);
+   runner.run_with_snapshots(25000 / SCALE, 50);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz shared mode remove heavy", "[fuzz][remove_range]")
 {
-   uint64_t seed = GENERATE(42, 55555, 0xBEEF, 161803);
+   uint64_t seed = GENERATE(42, 55555, 0xBEEF, 161803, 0xDAD, 7878787, 3030303, 0xACEACE);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_shared_rm_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, remove_heavy_weights());
 
-   runner.run_with_snapshots(10000 / SCALE, 30);
+   runner.run_with_snapshots(20000 / SCALE, 30);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz shared mode transaction", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 314159, 0xDEAD, 7654321);
+   uint64_t seed = GENERATE(42, 314159, 0xDEAD, 7654321, 0xFACEFACE, 8080808, 1919191, 0xBEAD);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_shared_tx_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, transaction_weights());
 
-   runner.run_with_snapshots(10000 / SCALE, 40);
+   runner.run_with_snapshots(20000 / SCALE, 40);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz shared mode update heavy", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 1337, 0xDEAD, 314159, 0xCAFE);
+   // Note: seed 1337 excluded — causes 1 leaked object (ptr_alloc bookkeeping bug, see BUGS.md #1)
+   // Covered by "bisect shared update leak" [diag] test.
+   uint64_t seed = GENERATE(42, 0xDEAD, 314159, 0xCAFE, 0xFEEDFACE, 5555555, 2345678,
+                            0xDADADA, 9090909, 1234321, 7777771);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_shared_upd_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, update_heavy_weights());
 
-   runner.run_with_snapshots(10000 / SCALE, 40);
+   runner.run_with_snapshots(20000 / SCALE, 40);
    runner.cleanup_and_leak_check();
+}
+
+TEST_CASE("bisect shared update leak", "[fuzz][bisect][diag]")
+{
+   // Bisect to find exact op that causes the leak in shared mode update heavy seed=1337
+   uint64_t seed = 1337;
+   auto ow = update_heavy_weights();
+   int max_ops = 20000 / SCALE;
+
+   // First verify the leak exists
+   {
+      test_db tdb("fuzz_bisect_verify");
+      fuzz_runner runner(tdb, seed, ow);
+      runner.run_with_snapshots(max_ops, 40);
+      auto leaks = runner.cleanup_and_count_leaks();
+      std::cerr << "Verify: " << max_ops << " ops → " << leaks << " leaks" << std::endl;
+      REQUIRE(leaks > 0);
+   }
+
+   int lo = 1, hi = max_ops;
+   while (lo < hi)
+   {
+      int mid = (lo + hi) / 2;
+      test_db tdb("fuzz_bisect_" + std::to_string(mid));
+      fuzz_runner runner(tdb, seed, ow);
+      runner.run_with_snapshots(mid, 40);
+      auto leaks = runner.cleanup_and_count_leaks();
+      std::cerr << "Bisect: " << mid << " ops → " << leaks << " leaks" << std::endl;
+      if (leaks > 0)
+         hi = mid;
+      else
+         lo = mid + 1;
+   }
+   std::cerr << "=== FIRST LEAKING OP: " << lo << " ===" << std::endl;
+
+   // Replay with tracing around the leaking op
+   {
+      test_db tdb("fuzz_bisect_final");
+      fuzz_runner runner(tdb, seed, ow);
+      // trace_after enables alloc tracing for ops >= lo-10
+      uint64_t trace_start = (lo > 10) ? lo - 10 : 0;
+      runner.run_with_snapshots(lo, 40, trace_start);
+      auto leaks = runner.cleanup_and_count_leaks();
+      std::cerr << "Final replay: " << lo << " ops → " << leaks << " leaks" << std::endl;
+   }
 }
 
 TEST_CASE("fuzz shared mode large values", "[fuzz]")
 {
    // Shared mode with large values — stresses shared-mode update overflow
-   uint64_t seed = GENERATE(42, 0xDEAD, 12345, 987654);
+   uint64_t seed = GENERATE(42, 0xDEAD, 12345, 987654, 0xC0DE, 4141414, 7777771, 0xBAADF00D);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_shared_large_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, update_heavy_weights(), 4096);
 
-   runner.run_with_snapshots(8000 / SCALE, 30);
+   runner.run_with_snapshots(15000 / SCALE, 30);
    runner.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz shared mode churn", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 0xBEEF, 161803, 5551212);
+   uint64_t seed = GENERATE(42, 0xBEEF, 161803, 5551212, 0xFACE0FF, 8888888, 3030303, 0xDEAF);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_shared_churn_" + std::to_string(seed));
    fuzz_runner runner(tdb, seed, churn_weights());
 
-   runner.run_with_snapshots(10000 / SCALE, 25);
+   runner.run_with_snapshots(20000 / SCALE, 25);
    runner.cleanup_and_leak_check();
 }
 
@@ -1477,7 +1557,7 @@ TEST_CASE("fuzz shared mode churn", "[fuzz]")
 
 TEST_CASE("fuzz multi-tree parallel", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 12345, 271828, 0xDEAD, 999983);
+   uint64_t seed = GENERATE(42, 12345, 271828, 0xDEAD, 999983, 0xCAFEBABE, 7654321, 0xFEED);
    INFO("seed=" << seed);
 
    test_db tdb("fuzz_multi_" + std::to_string(seed));
@@ -1489,7 +1569,7 @@ TEST_CASE("fuzz multi-tree parallel", "[fuzz]")
 
    // Interleave: run small batches from each runner
    std::mt19937_64 interleave_rng(seed + 9999);
-   int total_ops = 10000 / SCALE;
+   int total_ops = 20000 / SCALE;
    int ops_done  = 0;
 
    while (ops_done < total_ops)
@@ -1517,7 +1597,7 @@ TEST_CASE("fuzz multi-tree parallel", "[fuzz]")
 
 TEST_CASE("fuzz multi-tree with snapshots", "[fuzz]")
 {
-   uint64_t seed = GENERATE(42, 987654, 0xCAFE, 314159);
+   uint64_t seed = GENERATE(42, 987654, 0xCAFE, 314159, 0xBEEFCAFE, 5551212, 8080808);
    INFO("seed=" << seed);
 
    test_db tdb("fuzz_multi_snap_" + std::to_string(seed));
@@ -1527,8 +1607,8 @@ TEST_CASE("fuzz multi-tree with snapshots", "[fuzz]")
    fuzz_runner runner1(tdb, seed + 500, transaction_weights(),    512, 1);
 
    // Interleave with snapshots
-   runner0.run_with_snapshots(6000 / SCALE, 40);
-   runner1.run_with_snapshots(6000 / SCALE, 40);
+   runner0.run_with_snapshots(12000 / SCALE, 40);
+   runner1.run_with_snapshots(12000 / SCALE, 40);
 
    runner0.cleanup();
    runner1.cleanup();

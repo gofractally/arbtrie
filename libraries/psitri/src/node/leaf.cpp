@@ -521,7 +521,7 @@ namespace psitri
          // address's cline entry before calling add_address_ptr() for the new one,
          // invalidating any match can_insert_address() found in the pre-mutation state.
          if (_cline_cap >= 16)
-            return can_apply_mode::defrag;
+            return can_apply_mode::none;  // force split; defrag rebuild can still overflow
          extra += sizeof(ptr_address);
       }
 
