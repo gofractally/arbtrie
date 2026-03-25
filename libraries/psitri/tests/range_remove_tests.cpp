@@ -604,3 +604,389 @@ TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
       cur->validate();
    }
 }
+
+// ============================================================================
+// Coverage-focused tests: exercise uncovered code paths in range_remove.hpp
+// ============================================================================
+
+// Helper: insert keys with a given prefix into a write_cursor
+static void insert_prefix_group(write_cursor_ptr& cur,
+                                const std::string& prefix,
+                                int                count,
+                                const std::string& val_prefix = "v")
+{
+   for (int i = 0; i < count; ++i)
+   {
+      char key[128], val[128];
+      snprintf(key, sizeof(key), "%s%03d", prefix.c_str(), i);
+      snprintf(val, sizeof(val), "%s%03d", val_prefix.c_str(), i);
+      cur->upsert(to_key(key), to_value(val));
+   }
+}
+
+// Helper: insert keys with a given prefix into a transaction
+static void insert_prefix_group(psitri::transaction& tx,
+                                const std::string&   prefix,
+                                int                  count,
+                                const std::string&   val_prefix = "v")
+{
+   for (int i = 0; i < count; ++i)
+   {
+      char key[128], val[128];
+      snprintf(key, sizeof(key), "%s%03d", prefix.c_str(), i);
+      snprintf(val, sizeof(val), "%s%03d", val_prefix.c_str(), i);
+      tx.upsert(to_key(key), to_value(val));
+   }
+}
+
+TEST_CASE("coverage: prefix edge cases in range_remove", "[range_remove][coverage]")
+{
+   // Create 3 prefix groups to force inner_prefix_nodes.
+   // Keys: aaa_000..aaa_019, bbb_000..bbb_019, ccc_000..ccc_019
+   test_db t("cov_prefix_edge");
+   auto    cur = t.ses->create_write_cursor();
+   insert_prefix_group(cur, "aaa_", 20);
+   insert_prefix_group(cur, "bbb_", 20);
+   insert_prefix_group(cur, "ccc_", 20);
+   REQUIRE(cur->count_keys() == 60);
+   cur->validate();
+
+   SECTION("lower diverges after prefix — all keys < lower (line 167)")
+   {
+      // prefix="bbb_", lower="bbc" → common_prefix="bb", prefix[2]='b' < lower[2]='c'
+      // All "bbb_*" keys are < "bbc", so nothing in bbb group is removed by [bbc, z)
+      // But aaa and ccc groups: "ccc_*" > "bbc" and < "z" so ccc is removed
+      uint64_t removed = cur->remove_range("bbc", "z");
+      REQUIRE(removed == 20);  // only ccc group
+      REQUIRE(cur->count_keys() == 40);
+      cur->validate();
+   }
+
+   SECTION("lower is a prefix of node prefix (line 172)")
+   {
+      // prefix="bbb_", lower="bb" → lower is prefix of prefix → all keys > lower
+      // So bbb group is fully in range [bb, z)
+      uint64_t removed = cur->remove_range("bb", "z");
+      REQUIRE(removed == 40);  // bbb + ccc groups
+      REQUIRE(cur->count_keys() == 20);
+      cur->validate();
+   }
+
+   SECTION("upper equals prefix exactly — exclusive (line 183)")
+   {
+      // prefix="bbb_", upper="bbb_" → since upper is exclusive, no bbb keys qualify
+      uint64_t removed = cur->remove_range("a", "bbb_");
+      REQUIRE(removed == 20);  // only aaa group
+      REQUIRE(cur->count_keys() == 40);
+      cur->validate();
+   }
+
+   SECTION("upper is a prefix of node prefix (line 197)")
+   {
+      // prefix="bbb_", upper="bbb" → upper is prefix of prefix
+      // All bbb keys start with "bbb_..." >= "bbb", so none are < upper
+      uint64_t removed = cur->remove_range("a", "bbb");
+      REQUIRE(removed == 20);  // only aaa group
+      REQUIRE(cur->count_keys() == 40);
+      cur->validate();
+   }
+
+   SECTION("upper diverges before prefix — all keys >= upper (line 190)")
+   {
+      // prefix="bbb_", upper="bba" → common_prefix="bb", prefix[2]='b' >= upper[2]='a'
+      // All bbb keys >= "bba", so none are removed from bbb group
+      uint64_t removed = cur->remove_range("a", "bba");
+      REQUIRE(removed == 20);  // only aaa group
+      REQUIRE(cur->count_keys() == 40);
+      cur->validate();
+   }
+}
+
+TEST_CASE("coverage: single-key tree range_remove", "[range_remove][coverage]")
+{
+   test_db t("cov_single_key");
+   auto    cur = t.ses->create_write_cursor();
+   cur->insert(to_key("solo"), to_value("val"));
+   REQUIRE(cur->count_keys() == 1);
+
+   SECTION("remove all via unbounded range")
+   {
+      REQUIRE(cur->remove_range("", max_key) == 1);
+      REQUIRE(cur->count_keys() == 0);
+   }
+
+   SECTION("range before key — no removal")
+   {
+      REQUIRE(cur->remove_range("a", "b") == 0);
+      REQUIRE(cur->count_keys() == 1);
+   }
+
+   SECTION("range after key — no removal")
+   {
+      REQUIRE(cur->remove_range("t", "z") == 0);
+      REQUIRE(cur->count_keys() == 1);
+   }
+
+   SECTION("range includes key")
+   {
+      REQUIRE(cur->remove_range("s", "t") == 1);
+      REQUIRE(cur->count_keys() == 0);
+   }
+
+   SECTION("range lower equals key exactly")
+   {
+      REQUIRE(cur->remove_range("solo", "z") == 1);
+      REQUIRE(cur->count_keys() == 0);
+   }
+
+   SECTION("range upper equals key exactly — exclusive, no removal")
+   {
+      REQUIRE(cur->remove_range("a", "solo") == 0);
+      REQUIRE(cur->count_keys() == 1);
+   }
+}
+
+TEST_CASE("coverage: shared-mode survivors==1 collapse on inner_prefix_node",
+          "[range_remove][coverage][shared]")
+{
+   // Create keys all sharing a common prefix "data_" then diverging into 3 groups.
+   // This forces an inner_prefix_node with prefix "data_" and 3 branches (a, b, g).
+   test_db t("cov_shared_collapse");
+
+   // Phase 1: populate and commit
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "data_alpha_", 15);
+      insert_prefix_group(tx, "data_beta_", 15);
+      insert_prefix_group(tx, "data_gamma_", 15);
+      tx.commit();
+   }
+
+   // Phase 2: via transaction (shared mode), remove 2 of 3 groups → survivors==1
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("data_a", "data_g");
+      REQUIRE(removed == 30);  // alpha + beta
+      tx.commit();
+   }
+
+   // Verify remaining keys via a new transaction
+   {
+      auto     tx    = t.ses->start_transaction(0);
+      auto     rc    = tx.read_cursor();
+      uint64_t count = rc.count_keys();
+      REQUIRE(count == 15);
+      auto keys = collect_keys(rc);
+      REQUIRE(keys.front().substr(0, 11) == "data_gamma_");
+   }
+}
+
+TEST_CASE("coverage: shared-mode partial overlap across branch boundaries",
+          "[range_remove][coverage][shared]")
+{
+   // Create 4 prefix groups, commit, then remove a range spanning the middle.
+   test_db t("cov_shared_partial");
+   int     N = 30 / SCALE;
+
+   // Phase 1: populate (groups in lexicographic order: aa_, bb_, cc_, dd_)
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "aa_", N);
+      insert_prefix_group(tx, "bb_", N);
+      insert_prefix_group(tx, "cc_", N);
+      insert_prefix_group(tx, "dd_", N);
+      tx.commit();
+   }
+
+   SECTION("range spans full middle group")
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("bb_", "cc_");
+      REQUIRE(removed == N);
+      auto rc = tx.read_cursor();
+      REQUIRE(rc.count_keys() == 3 * N);
+      tx.commit();
+   }
+
+   SECTION("range partially overlaps start and boundary branches")
+   {
+      char lo[64], hi[64];
+      snprintf(lo, sizeof(lo), "bb_%03d", N / 2);
+      snprintf(hi, sizeof(hi), "cc_%03d", N / 2);
+
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range(lo, hi);
+      REQUIRE(removed > 0);
+      auto rc = tx.read_cursor();
+      REQUIRE(rc.count_keys() == 4 * N - removed);
+      tx.commit();
+   }
+
+   SECTION("range removes all but last group")
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("", "dd_");
+      REQUIRE(removed == 3 * N);
+      auto rc = tx.read_cursor();
+      REQUIRE(rc.count_keys() == N);
+      tx.commit();
+   }
+}
+
+TEST_CASE("coverage: shared-mode address changes with branch removal",
+          "[range_remove][coverage][shared]")
+{
+   // Force shared-mode recursion that changes child addresses while removing branches.
+   // Use many prefix groups so the inner node has many branches.
+   test_db t("cov_shared_addr_change");
+   int     N = 20 / SCALE;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      // Create 6 groups — letters a through f
+      for (char c = 'a'; c <= 'f'; ++c)
+      {
+         std::string prefix = std::string("grp_") + c + "_";
+         insert_prefix_group(tx, prefix, N);
+      }
+      tx.commit();
+   }
+
+   // Remove range that spans from middle of b to middle of e
+   // This exercises: start branch partial, middle branches full, boundary branch partial
+   {
+      char lo[64], hi[64];
+      snprintf(lo, sizeof(lo), "grp_b_%03d", N / 2);
+      snprintf(hi, sizeof(hi), "grp_e_%03d", N / 2);
+
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range(lo, hi);
+      REQUIRE(removed > 0);
+      tx.commit();
+   }
+
+   // Verify via transaction
+   {
+      auto tx   = t.ses->start_transaction(0);
+      auto rc   = tx.read_cursor();
+      auto keys = collect_keys(rc);
+      for (auto& k : keys)
+      {
+         // No keys from c or d groups should remain
+         REQUIRE(k.substr(0, 5) != "grp_c");
+         REQUIRE(k.substr(0, 5) != "grp_d");
+      }
+   }
+}
+
+TEST_CASE("coverage: value_node handling in range_remove", "[range_remove][coverage]")
+{
+   // Insert keys that are prefixes of each other to force value_node creation.
+   // "x" is a prefix of "xa", which creates a value_node for "x" at the branch point.
+   test_db t("cov_value_node");
+   auto    cur = t.ses->create_write_cursor();
+
+   cur->upsert(to_key("x"), to_value("val_x"));
+   cur->upsert(to_key("xa"), to_value("val_xa"));
+   cur->upsert(to_key("xab"), to_value("val_xab"));
+   cur->upsert(to_key("xb"), to_value("val_xb"));
+   REQUIRE(cur->count_keys() == 4);
+   cur->validate();
+
+   SECTION("range includes value_node key")
+   {
+      // "x" is stored as a value_node; range [x, xa) should remove just "x"
+      uint64_t removed = cur->remove_range("x", "xa");
+      REQUIRE(removed == 1);
+      REQUIRE(cur->count_keys() == 3);
+      cur->validate();
+   }
+
+   SECTION("range excludes value_node key")
+   {
+      // Range [xa, xz) should NOT remove "x" (value_node is at empty key after prefix)
+      uint64_t removed = cur->remove_range("xa", "xz");
+      REQUIRE(removed == 3);  // xa, xab, xb
+      REQUIRE(cur->count_keys() == 1);
+      // Remaining key should be "x"
+      auto rc = cur->read_cursor();
+      rc.seek_begin();
+      REQUIRE(!rc.is_end());
+      REQUIRE(std::string(rc.key()) == "x");
+      cur->validate();
+   }
+
+   SECTION("remove all including value_node")
+   {
+      uint64_t removed = cur->remove_range("", max_key);
+      REQUIRE(removed == 4);
+      REQUIRE(cur->count_keys() == 0);
+   }
+}
+
+TEST_CASE("coverage: shared-mode no-change path with retain undo",
+          "[range_remove][coverage][shared]")
+{
+   // Exercise the shared-mode path where recursion results in no actual change,
+   // requiring retain_children to be undone.
+   test_db t("cov_shared_nochange");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "key_", 50 / SCALE);
+      tx.commit();
+   }
+
+   // Remove a range that doesn't exist — no keys match
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("zzz_000", "zzz_999");
+      REQUIRE(removed == 0);
+      tx.commit();
+   }
+
+   // Remove a range where lower > upper (should be caught early)
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("z", "a");
+      REQUIRE(removed == 0);
+      tx.commit();
+   }
+
+   // Verify tree is intact via transaction
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto rc = tx.read_cursor();
+      REQUIRE(rc.count_keys() == 50 / SCALE);
+   }
+}
+
+TEST_CASE("coverage: shared-mode same-branch case empties single-branch node",
+          "[range_remove][coverage][shared]")
+{
+   // Force a same-branch recursion where the single branch becomes empty.
+   // Create keys that all share a long prefix so the tree has a deep
+   // inner_prefix_node chain, then remove all via a bounded range.
+   test_db t("cov_shared_same_branch");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      // All keys share "longprefix_" so deep inner_prefix_node chain
+      insert_prefix_group(tx, "longprefix_", 30 / SCALE);
+      tx.commit();
+   }
+
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("longprefix_", "longprefix`");
+      // "longprefix`" > "longprefix_" since '`' (0x60) > '_' (0x5F)
+      REQUIRE(removed == 30 / SCALE);
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto rc = tx.read_cursor();
+      REQUIRE(rc.count_keys() == 0);
+   }
+}

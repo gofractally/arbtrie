@@ -52,6 +52,19 @@ namespace
       }
       return count;
    }
+   // Helper: insert keys with a given prefix
+   void insert_prefix_group(write_cursor_ptr& cur,
+                            const std::string& prefix,
+                            int                count)
+   {
+      for (int i = 0; i < count; ++i)
+      {
+         char key[128], val[128];
+         snprintf(key, sizeof(key), "%s%03d", prefix.c_str(), i);
+         snprintf(val, sizeof(val), "v%03d", i);
+         cur->upsert(to_key(key), to_value(val));
+      }
+   }
 }  // namespace
 
 TEST_CASE("count_keys empty tree", "[count_keys]")
@@ -292,5 +305,136 @@ TEST_CASE("count_keys brute-force validation", "[count_keys]")
       INFO("lower=" << lower << " upper=" << (upper.empty() ? "(unbounded)" : upper)
                      << " trial=" << trial);
       REQUIRE(counted == iterated);
+   }
+}
+
+// ============================================================================
+// Coverage-focused tests: exercise uncovered code paths in count_keys.hpp
+// ============================================================================
+
+TEST_CASE("coverage: count_keys prefix narrowing edge cases", "[count_keys][coverage]")
+{
+   // Create 3 prefix groups to force inner_prefix_nodes with prefixes "aaa_", "bbb_", "ccc_"
+   test_db t("cov_ck_prefix");
+   auto    cur = t.ses->create_write_cursor();
+   insert_prefix_group(cur, "aaa_", 20);
+   insert_prefix_group(cur, "bbb_", 20);
+   insert_prefix_group(cur, "ccc_", 20);
+   REQUIRE(cur->count_keys() == 60);
+
+   auto rc = cur->read_cursor();
+
+   SECTION("lower diverges after prefix — all keys < lower (count_keys line 88)")
+   {
+      // prefix="bbb_", lower="bbc" → prefix[2]='b' < lower[2]='c' → count=0 for bbb group
+      uint64_t counted  = cur->count_keys("bbc", "z");
+      uint64_t iterated = count_by_iteration(rc, "bbc", "z");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 20);  // only ccc group
+   }
+
+   SECTION("lower is prefix of node prefix (count_keys line 93)")
+   {
+      // prefix="bbb_", lower="bb" → lower is prefix of prefix → all keys > lower
+      uint64_t counted  = cur->count_keys("bb", "z");
+      uint64_t iterated = count_by_iteration(rc, "bb", "z");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 40);  // bbb + ccc
+   }
+
+   SECTION("upper equals prefix exactly (count_keys line 104)")
+   {
+      // prefix="bbb_", upper="bbb_" → exclusive, 0 keys from bbb group
+      uint64_t counted  = cur->count_keys("a", "bbb_");
+      uint64_t iterated = count_by_iteration(rc, "a", "bbb_");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 20);  // only aaa group
+   }
+
+   SECTION("upper diverges before prefix — all keys >= upper (count_keys line 111)")
+   {
+      // prefix="bbb_", upper="bba" → prefix[2]='b' >= upper[2]='a' → count=0 for bbb
+      uint64_t counted  = cur->count_keys("a", "bba");
+      uint64_t iterated = count_by_iteration(rc, "a", "bba");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 20);  // only aaa group
+   }
+
+   SECTION("upper is prefix of node prefix (count_keys line 118)")
+   {
+      // prefix="bbb_", upper="bbb" → upper is prefix of prefix → 0 keys from bbb
+      uint64_t counted  = cur->count_keys("a", "bbb");
+      uint64_t iterated = count_by_iteration(rc, "a", "bbb");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 20);  // only aaa group
+   }
+
+   SECTION("empty range after prefix narrowing (count_keys line 129)")
+   {
+      // Both bounds narrow into the same prefix group but create inverted range
+      // lower="bbb_z" → narrows to "z", upper="bbb_a" → narrows to "a"
+      // Since "z" > "a", the range is empty
+      uint64_t counted  = cur->count_keys("bbb_z", "bbb_a");
+      uint64_t iterated = count_by_iteration(rc, "bbb_z", "bbb_a");
+      REQUIRE(counted == 0);
+      REQUIRE(iterated == 0);
+   }
+
+   SECTION("start >= num_branches after narrowing (count_keys line 136)")
+   {
+      // All keys in bbb group are "bbb_000"-"bbb_019".
+      // lower="bbb_z" → after prefix narrowing "z", lower_bound('z') >= num_branches
+      uint64_t counted  = cur->count_keys("bbb_z", "ccc_");
+      uint64_t iterated = count_by_iteration(rc, "bbb_z", "ccc_");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 0);
+   }
+}
+
+TEST_CASE("coverage: count_keys on value_node children", "[count_keys][coverage]")
+{
+   // Keys that are prefixes of each other create value_nodes at branch points.
+   test_db t("cov_ck_value_node");
+   auto    cur = t.ses->create_write_cursor();
+
+   cur->upsert(to_key("x"), to_value("val_x"));
+   cur->upsert(to_key("xa"), to_value("val_xa"));
+   cur->upsert(to_key("xab"), to_value("val_xab"));
+   cur->upsert(to_key("xb"), to_value("val_xb"));
+   REQUIRE(cur->count_keys() == 4);
+
+   auto rc = cur->read_cursor();
+
+   SECTION("range includes value_node key")
+   {
+      // "x" is at empty key after prefix "x" → value_node
+      // Range [x, xa) should count just "x"
+      uint64_t counted  = cur->count_keys("x", "xa");
+      uint64_t iterated = count_by_iteration(rc, "x", "xa");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 1);
+   }
+
+   SECTION("range excludes value_node key")
+   {
+      // Range [xa, xz) should count xa, xab, xb but NOT "x"
+      uint64_t counted  = cur->count_keys("xa", "xz");
+      uint64_t iterated = count_by_iteration(rc, "xa", "xz");
+      REQUIRE(counted == iterated);
+      REQUIRE(counted == 3);
+   }
+
+   SECTION("range before all keys")
+   {
+      uint64_t counted = cur->count_keys("a", "b");
+      REQUIRE(counted == 0);
+   }
+
+   SECTION("unbounded count")
+   {
+      uint64_t counted  = cur->count_keys();
+      uint64_t iterated = count_by_iteration(rc, {}, {});
+      REQUIRE(counted == 4);
+      REQUIRE(iterated == 4);
    }
 }
