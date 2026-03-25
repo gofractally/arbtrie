@@ -29,7 +29,7 @@ All engines use identical batching and sync parameters to ensure apples-to-apple
 The core metric — sustained transfers per second over 10M operations:
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#4A90D9'}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
 xychart-beta
     title "Transaction Throughput (transfers/sec)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
@@ -48,9 +48,9 @@ xychart-beta
 ### Phase Breakdown
 
 ```mermaid
-%%{init: {'theme': 'base'}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
 xychart-beta
-    title "Time by Phase (seconds, log scale)"
+    title "Transaction Time (seconds)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
     y-axis "Seconds" 0 --> 120
     bar [25.346, 25.986, 35.741, 65.486, 114.861]
@@ -67,7 +67,7 @@ xychart-beta
 ### Storage Efficiency
 
 ```mermaid
-%%{init: {'theme': 'base'}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
 xychart-beta
     title "On-Disk Size After Benchmark (MB)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
