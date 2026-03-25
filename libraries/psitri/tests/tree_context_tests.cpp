@@ -7,11 +7,7 @@
 #include "sal/numbers.hpp"
 using namespace psitri;
 
-#ifdef NDEBUG
 constexpr int SCALE = 1;
-#else
-constexpr int SCALE = 5;
-#endif
 
 int64_t rand64()
 {

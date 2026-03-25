@@ -13,12 +13,7 @@
 
 using namespace psitri;
 
-// Debug builds are ~10x slower; scale down iteration counts to keep tests fast
-#ifdef NDEBUG
 constexpr int SCALE = 1;
-#else
-constexpr int SCALE = 5;  // divide counts by this in debug
-#endif
 
 namespace
 {

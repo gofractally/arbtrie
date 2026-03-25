@@ -11,11 +11,7 @@
 
 using namespace psitri;
 
-#ifdef NDEBUG
 constexpr int CURSOR_SCALE = 1;
-#else
-constexpr int CURSOR_SCALE = 5;
-#endif
 
 namespace
 {

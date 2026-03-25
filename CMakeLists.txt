@@ -150,7 +150,7 @@ endif()
 
 # Coverage configuration
 if(ENABLE_COVERAGE)
-    message(STATUS "Enabling coverage reporting")
+    message(STATUS "Enabling coverage reporting (SCALE override: SCALE=1 for full coverage)")
 
     target_compile_options(psitri PUBLIC
         $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
@@ -196,8 +196,8 @@ if(ENABLE_COVERAGE)
         COMMAND ${CMAKE_COMMAND} -E make_directory coverage
         COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters
         
-        # Run tests (continue even if they fail)
-        COMMAND ${CMAKE_BINARY_DIR}/bin/psitri-tests || true
+        # Run tests — exclude crash/mayfail/benchmark tests (continue even if they fail)
+        COMMAND ${CMAKE_BINARY_DIR}/bin/psitri-tests "~[crash]" "~[!mayfail]" "~[benchmark]" || true
         
         # Capture coverage data
         COMMAND ${LCOV} 

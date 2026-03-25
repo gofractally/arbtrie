@@ -10,11 +10,7 @@
 
 using namespace psitri;
 
-#ifdef NDEBUG
 constexpr int GAP_SCALE = 1;
-#else
-constexpr int GAP_SCALE = 5;
-#endif
 
 namespace
 {

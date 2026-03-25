@@ -10,11 +10,7 @@
 
 using namespace psitri;
 
-#ifdef NDEBUG
 constexpr int OPS_SCALE = 1;
-#else
-constexpr int OPS_SCALE = 5;
-#endif
 
 namespace
 {

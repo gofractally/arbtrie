@@ -36,11 +36,7 @@
 
 using namespace psitri;
 
-#ifdef NDEBUG
 constexpr int ZIP_SCALE = 1;
-#else
-constexpr int ZIP_SCALE = 5;
-#endif
 
 namespace
 {
