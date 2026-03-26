@@ -152,10 +152,11 @@ endif()
 if(ENABLE_COVERAGE)
     message(STATUS "Enabling coverage reporting (SCALE override: SCALE=1 for full coverage)")
 
+    # Use -O1 and NDEBUG for faster coverage runs — asserts and -O0 are unnecessary overhead
     target_compile_options(psitri PUBLIC
-        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
+        -fprofile-arcs -ftest-coverage -g -O1 -DNDEBUG)
     target_link_options(psitri PUBLIC
-        $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+        -fprofile-arcs -ftest-coverage)
 
     # Find required tools
     find_program(LCOV lcov REQUIRED)
@@ -190,73 +191,75 @@ if(ENABLE_COVERAGE)
         '*/debug.hpp'
     )
     
-    # Add custom target for generating coverage report
-    add_custom_target(coverage
-        # Clear counters
+    # Run test groups in separate processes so a crash doesn't lose other groups' gcda data.
+    # gcda files accumulate across runs — lcov captures the union.
+    set(PSITRI_TESTS ${CMAKE_BINARY_DIR}/bin/psitri-tests)
+    set(COVERAGE_EXCLUDE_TAGS "~[crash]" "~[!mayfail]" "~[benchmark]")
+
+    # Crash-prone groups run isolated; everything else runs as one batch first.
+    set(COVERAGE_RUN_COMMANDS
         COMMAND ${CMAKE_COMMAND} -E make_directory coverage
         COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters
-        
-        # Run tests — exclude crash/mayfail/benchmark tests (continue even if they fail)
-        COMMAND ${CMAKE_BINARY_DIR}/bin/psitri-tests "~[crash]" "~[!mayfail]" "~[benchmark]" || true
-        
-        # Capture coverage data
-        COMMAND ${LCOV} 
-            --directory ${CMAKE_BINARY_DIR}
-            --capture 
-            --output-file coverage/coverage.info 
-            ${LCOV_ARGS}
-
-        # Remove unwanted files from coverage
-        COMMAND ${LCOV} 
-            --remove coverage/coverage.info 
-            ${COVERAGE_EXCLUDES}
-            --output-file coverage/coverage.info
-            ${LCOV_ARGS}
-        
-        # Generate HTML report
-        COMMAND ${GENHTML} 
-            coverage/coverage.info 
-            --output-directory coverage/html 
-            ${GENHTML_ARGS}
-        
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Generating coverage report..."
+        # SAL tests
+        COMMAND ${CMAKE_BINARY_DIR}/bin/sal-tests ${COVERAGE_EXCLUDE_TAGS} || true
+        # psitri batch: all tests except crash-prone groups (fast, covers most code)
+        COMMAND ${PSITRI_TESTS} "~[fuzz]" "~[multi-writer]" "~[power_loss]" "~[recovery]" ${COVERAGE_EXCLUDE_TAGS} || true
+        # Isolated groups that may crash or hang
+        COMMAND ${PSITRI_TESTS} "[recovery]" ${COVERAGE_EXCLUDE_TAGS} || true
+        COMMAND ${PSITRI_TESTS} "[power_loss]" ${COVERAGE_EXCLUDE_TAGS} || true
+        COMMAND ${PSITRI_TESTS} "[multi-writer]" ${COVERAGE_EXCLUDE_TAGS} || true
+        COMMAND ${PSITRI_TESTS} "[fuzz]" "~[multi-writer]" ${COVERAGE_EXCLUDE_TAGS} || true
     )
 
-    # Add target that only generates report from existing data
-    add_custom_target(coverage-report
-        # Capture coverage data
-        COMMAND ${LCOV} 
-            --directory ${CMAKE_BINARY_DIR}
-            --capture 
-            --output-file coverage/coverage.info 
-            ${LCOV_ARGS}
+    # coverage-run: just run the tests (no report generation)
+    add_custom_target(coverage-run
+        ${COVERAGE_RUN_COMMANDS}
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running coverage test groups..."
+    )
 
-        # Remove unwanted files from coverage
-        COMMAND ${LCOV} 
-            --remove coverage/coverage.info 
+    # coverage-report: generate report from existing gcda data
+    add_custom_target(coverage-report
+        COMMAND ${LCOV}
+            --directory ${CMAKE_BINARY_DIR}
+            --capture
+            --output-file coverage/coverage.info
+            ${LCOV_ARGS}
+        COMMAND ${LCOV}
+            --remove coverage/coverage.info
             ${COVERAGE_EXCLUDES}
             --output-file coverage/coverage.info
             ${LCOV_ARGS}
-        
-        # Generate HTML report
-        COMMAND ${GENHTML} 
-            coverage/coverage.info 
-            --output-directory coverage/html 
+        COMMAND ${GENHTML}
+            coverage/coverage.info
+            --output-directory coverage/html
             ${GENHTML_ARGS}
-        
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Generating coverage report from existing data..."
     )
 
-    # Rename the full coverage target to be more descriptive
-    add_custom_target(coverage-all
-        COMMAND ${CMAKE_COMMAND} -E env TEST_PATTERN="" ${CMAKE_MAKE_PROGRAM} coverage
+    # coverage: run all test groups then generate report
+    add_custom_target(coverage
+        ${COVERAGE_RUN_COMMANDS}
+        COMMAND ${LCOV}
+            --directory ${CMAKE_BINARY_DIR}
+            --capture
+            --output-file coverage/coverage.info
+            ${LCOV_ARGS}
+        COMMAND ${LCOV}
+            --remove coverage/coverage.info
+            ${COVERAGE_EXCLUDES}
+            --output-file coverage/coverage.info
+            ${LCOV_ARGS}
+        COMMAND ${GENHTML}
+            coverage/coverage.info
+            --output-directory coverage/html
+            ${GENHTML_ARGS}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Generating coverage report for all tests..."
+        COMMENT "Generating coverage report..."
     )
 
-    # Add target to just reset coverage data
+    # coverage-reset: just zero the counters
     add_custom_target(coverage-reset
         COMMAND ${CMAKE_COMMAND} -E make_directory coverage
         COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters

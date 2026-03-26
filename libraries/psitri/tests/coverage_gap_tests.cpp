@@ -532,3 +532,55 @@ TEST_CASE("database::reset_reference_counts on live database", "[database][recov
 
    std::filesystem::remove_all(dir);
 }
+
+// Exercise collapse paths with inner_prefix_node subtrees.
+// Inserts keys with long shared prefixes to create inner_prefix nodes,
+// then removes keys to trigger collapse/promotion.
+TEST_CASE("collapse with inner_prefix subtree", "[coverage][collapse]")
+{
+   test_db tdb("collapse_ipn_testdb");
+   auto    cur = tdb.ses->create_write_cursor();
+
+   // Group A: 18 keys with long shared prefix → inner_prefix subtree
+   std::vector<std::string> group_a;
+   for (int i = 0; i < 18; ++i)
+   {
+      std::string k;
+      k += '\x01';
+      k += std::string(180, 'X');
+      char buf[8];
+      snprintf(buf, sizeof(buf), "%03d", i);
+      k += buf;
+      group_a.push_back(k);
+      cur->upsert(to_key_view(k), to_value_view(gval(i, 40)));
+   }
+
+   // Group B: keys under a different byte to create second branch
+   std::vector<std::string> group_b;
+   for (int i = 0; i < 4; ++i)
+   {
+      std::string k;
+      k += '\x40';
+      char buf[8];
+      snprintf(buf, sizeof(buf), "%03d", i);
+      k += buf;
+      group_b.push_back(k);
+      cur->upsert(to_key_view(k), to_value_view(gval(i + 100, 40)));
+   }
+
+   REQUIRE(cur->count_keys() == 22);
+
+   // Remove all B keys one at a time → triggers merge/promotion paths
+   // at the top inner_node, exercising collapse with the inner_prefix subtree
+   for (auto& k : group_b)
+      cur->remove(to_key_view(k));
+
+   REQUIRE(cur->count_keys() == 18);
+
+   // Verify all A keys survived
+   for (auto& k : group_a)
+   {
+      std::string val;
+      REQUIRE(cur->get(to_key_view(k), &val) >= 0);
+   }
+}

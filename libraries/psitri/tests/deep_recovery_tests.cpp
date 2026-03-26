@@ -418,12 +418,7 @@ TEST_CASE("power_loss after insert-remove-reinsert cycles", "[recovery][power_lo
 // Database continues to work after recovery (write after recover)
 // ============================================================
 
-// BUG: Transaction commit after full_verify recovery destroys existing keys
-// that the transaction did not modify. The first verify (pre-write) passes,
-// but after committing new keys, old keys like "!fan/0" become unreachable.
-// This suggests full_verify recovery does not properly restore the root state
-// for subsequent write transactions.
-TEST_CASE("writes succeed after full_verify recovery", "[recovery][full_verify][!mayfail]")
+TEST_CASE("writes succeed after full_verify recovery", "[recovery][full_verify]")
 {
    const std::string dir = "deep_recovery_testdb";
    std::filesystem::remove_all(dir);

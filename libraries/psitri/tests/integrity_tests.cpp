@@ -82,10 +82,9 @@ namespace
 // The oracle (std::map) is the ground truth. Every operation is
 // applied to both the map and the trie, then we verify they match.
 
-// BUG FOUND: leaf node free_space goes negative (-1) during update_value
-// with 82 entries and 6 cachelines. Assertion: validate_invariants() fails
-// in update_value (leaf.cpp:748). Triggered by mixed upsert/remove/range_remove
-// with 3-byte keys and variable-size values crossing value_node threshold.
+// Regression test for leaf node free_space going negative during update_value.
+// Originally triggered by mixed upsert/remove/range_remove with 3-byte keys
+// and variable-size values crossing value_node threshold. Now fixed.
 TEST_CASE("integrity: random ops oracle comparison forcing structural changes", "[integrity][oracle]")
 {
    integrity_db t;

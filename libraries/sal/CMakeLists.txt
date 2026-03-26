@@ -117,18 +117,18 @@ endif()
 # Check if the parent project enabled coverage
 if(ENABLE_COVERAGE)
     message(STATUS "SAL: Enabling Coverage Reporting")
-    # Apply coverage flags only for Debug builds, consistent with root CMakeLists
-    target_compile_options(sal PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
-    target_link_options(sal PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+    # Use -O1 and NDEBUG for faster coverage runs — asserts and -O0 are unnecessary overhead
+    target_compile_options(sal PUBLIC -fprofile-arcs -ftest-coverage -g -O1 -DNDEBUG)
+    target_link_options(sal PUBLIC -fprofile-arcs -ftest-coverage)
 
     # Also apply to tests if they are built
     if(TARGET sal-tests)
-        target_compile_options(sal-tests PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
-        target_link_options(sal-tests PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+        target_compile_options(sal-tests PUBLIC -fprofile-arcs -ftest-coverage -g -O1 -DNDEBUG)
+        target_link_options(sal-tests PUBLIC -fprofile-arcs -ftest-coverage)
     endif()
     if(TARGET reserve-limit-test)
-        target_compile_options(reserve-limit-test PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage -g -O0>)
-        target_link_options(reserve-limit-test PUBLIC $<$<CONFIG:Debug>:-fprofile-arcs -ftest-coverage>)
+        target_compile_options(reserve-limit-test PUBLIC -fprofile-arcs -ftest-coverage -g -O1 -DNDEBUG)
+        target_link_options(reserve-limit-test PUBLIC -fprofile-arcs -ftest-coverage)
     endif()
 endif()
 

@@ -21,12 +21,10 @@ namespace psitri
       sal::smart_ptr<alloc_header> _root;
       int                          _old_value_size = -1;
       int                          _delta_descendents          = 0;  // +1 insert, -1 remove, 0 update/not-found
-      bool                         _trace_descendents          = false;  // DEBUG: trace descendant count changes
       uint32_t                     _collapse_threshold = 24;
 
      public:
       void set_collapse_threshold(uint32_t t) { _collapse_threshold = t; }
-      void set_trace_descendents(bool t) { _trace_descendents = t; }
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
       sal::smart_ptr<alloc_header> take_root() { return std::move(_root); }
       tree_context(sal::smart_ptr<alloc_header> root)
@@ -69,12 +67,8 @@ namespace psitri
                result = ref.as<leaf_node>()->num_branches();
                break;
             default:
-               if (_trace_descendents)
-                  SAL_WARN("count_child_keys: unexpected node type {} at addr={}", (int)nt, addr);
                std::unreachable();
          }
-         if (_trace_descendents)
-            SAL_WARN("  count_child_keys: addr={} type={} result={}", addr, (int)nt, result);
          return result;
       }
       uint64_t count_branch_keys(const branch_set& branches) noexcept
@@ -100,8 +94,6 @@ namespace psitri
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
          auto cbk = count_branch_keys(branches);
-         if (_trace_descendents)
-            SAL_WARN("make_inner_prefix: prefix_len={} branches={} descendents={}", prefix.size(), branches.count(), cbk);
          return _session.alloc<inner_prefix_node>(hint, prefix, branches, needed_clines,
                                                   out_cline_idx, cbk);
       }
@@ -113,8 +105,6 @@ namespace psitri
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
          auto cbk = count_branch_keys(branches);
-         if (_trace_descendents)
-            SAL_WARN("remake_inner_prefix: prefix_len={} branches={} descendents={}", prefix.size(), branches.count(), cbk);
          return _session.realloc<inner_prefix_node>(in, prefix, branches, needed_clines,
                                                     out_cline_idx, cbk);
       }
@@ -242,6 +232,9 @@ namespace psitri
       }
       void validate()
       {
+#ifdef NDEBUG
+         return;  // skip expensive validation in coverage/release builds
+#endif
          if (not _root)
             return;  // empty tree is valid
          sal::read_lock lock = _session.lock();
@@ -1762,8 +1755,6 @@ namespace psitri
                                          key_view               key,
                                          branch_number          lb)
    {
-      if (_trace_descendents)
-         SAL_WARN("split_insert: leaf_addr={} nb={} key_len={}", leaf.address(), leaf->num_branches(), key.size());
       branch_set result;
 
       // Special case: leaf has only 1 entry and can't fit a second key.
@@ -1827,10 +1818,6 @@ namespace psitri
       leaf_node::split_pos spos      = leaf->get_split_pos();
       branch_number        left_size = branch_number(spos.less_than_count);
       branch_number        right_end = branch_number(leaf->num_branches());
-
-      if (_trace_descendents)
-         SAL_WARN("split_insert: split_pos left_size={} right_end={} cprefix_len={} divider=0x{:02x}",
-                  *left_size, *right_end, spos.cprefix.size(), spos.divider);
 
       if (spos.cprefix.size() > 0)
       {

@@ -341,27 +341,22 @@ namespace psitri
          for (uint16_t i = *rm.lo; i < *rm.hi; ++i)
             cl_head[c_branches[i].line()].dec_ref();
 
-         // Copy divisions: skip dividers in [lo, hi) range
-         // Division at index i separates branch i from branch i+1.
+         // Copy divisions: divider[i] separates branch[i] from branch[i+1].
          // When removing branches [lo, hi):
-         //   - Keep divisions [0, lo) as-is (before the removed range)
-         //   - Skip divisions [lo, hi-1) — these are between removed branches
-         //   - Also skip the division that connected the removed range to the next branch:
-         //     if lo > 0, skip div[lo-1]; if lo == 0, skip div[hi-1]
-         //   - Keep divisions [hi, old_nd) as-is (after the removed range)
+         //   lo==0: keep dividers [hi .. old_nd). New first branch has no lower divider.
+         //   lo>0:  keep dividers [0 .. lo-2] and [hi-1 .. old_nd-1].
+         //          Divider[hi-1] becomes boundary between branch[lo-1] and branch[hi].
          uint32_t old_nd = clone->num_branches() - 1;
          if (*rm.lo == 0)
          {
-            // Remove from start: skip first (hi-1) dividers, keep [hi-1, old_nd)
-            uint32_t remaining = old_nd - (*rm.hi - 1);
-            memcpy(d_divs, c_divs + *rm.hi - 1, remaining);
+            uint32_t remaining = old_nd - *rm.hi;
+            memcpy(d_divs, c_divs + *rm.hi, remaining);
          }
          else
          {
-            // Remove from middle/end: keep [0, lo-1), skip [lo-1, hi-1), keep [hi-1, old_nd)
-            uint32_t head = *rm.lo - 1;
-            memcpy(d_divs, c_divs, head);
+            uint32_t head       = *rm.lo - 1;
             uint32_t tail_start = *rm.hi - 1;
+            memcpy(d_divs, c_divs, head);
             memcpy(d_divs + head, c_divs + tail_start, old_nd - tail_start);
          }
 
@@ -634,15 +629,21 @@ namespace psitri
       // If lo==0: remove dividers [0, count-1) i.e. first (count-1) divs + the one at hi-1
       //           Actually we remove divs [0, hi-1), keep [hi-1, old_nd)
       // If lo>0: remove divs [lo-1, hi-1), keep [0, lo-1) and [hi-1, old_nd)
+      // Divider[i] separates branch[i] from branch[i+1].
+      // When removing branches [lo, hi):
+      //   lo==0: first remaining branch is hi. As the new branch 0, it needs
+      //          no lower divider. Keep dividers [hi .. old_nd), i.e. skip hi.
+      //   lo>0:  keep dividers [0 .. lo-2] (before gap) and [hi-1 .. old_nd-1]
+      //          (after gap). Divider[hi-1] becomes the boundary between
+      //          branch[lo-1] and branch[hi].
       if (*lo == 0)
       {
-         uint32_t skip = *hi - 1;
-         memmove(old_divs, old_divs + skip, old_nd - skip);
+         memmove(old_divs, old_divs + *hi, old_nd - *hi);
       }
       else
       {
-         uint32_t head = *lo - 1;
-         uint32_t tail_start = *hi - 1;
+         uint32_t head       = *lo - 1;  // dividers to keep before the gap
+         uint32_t tail_start = *hi - 1;  // first divider to keep after the gap
          memmove(old_divs + head, old_divs + tail_start, old_nd - tail_start);
       }
 
