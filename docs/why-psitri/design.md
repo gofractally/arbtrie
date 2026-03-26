@@ -12,9 +12,9 @@ PsiTri's inner nodes average **67 bytes**. Copy-on-write copies 67 bytes per lev
 
 ### Cacheline-Shared Branch Encoding
 
-Every persistent data structure that uses indirection pays for it in **cache line loads**. When a tree node has 64 children, dereferencing their control blocks touches 64 separate cache lines.
+Every persistent data structure that uses indirection pays for it in **cache line loads**. When a tree node has 64 children, dereferencing their control blocks touches 64 separate cache lines. Most systems store reference counts and metadata inline with each node -- so traversing children means loading each child's data page just to read its refcount.
 
-PsiTri solves this by **engineering the allocator to co-locate sibling nodes within shared cache lines**. When a node splits or children are allocated, the allocator receives **hints** (the parent's existing cacheline addresses) and preferentially places new objects adjacent to their siblings in the control block array.
+PsiTri separates the **control blocks** (reference counts, segment pointers, metadata) from the **node data** and co-locates sibling control blocks within shared cache lines. When a node splits or children are allocated, the allocator receives **hints** (the parent's existing cacheline addresses) and preferentially places new control blocks adjacent to their siblings.
 
 Instead of storing N separate 8-byte addresses, PsiTri stores up to 16 **cacheline base addresses** (8 bytes each) and encodes each branch as a **1-byte index** (4 bits selecting which cacheline, 4 bits selecting which slot):
 
