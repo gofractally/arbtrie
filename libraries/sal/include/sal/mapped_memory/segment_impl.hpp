@@ -43,7 +43,7 @@ namespace sal
          _last_aheader_pos = alloc_pos;
 
          // TODO: maybe restore this once we are validating it in recovery
-         if (cfg.checksum_commits)
+         if (cfg.checksum_on_commit)
             ahead->set_sync_checksum(XXH3_64bits(data + ahead->start_checksum_pos(), cheksum_size));
 
          auto old_first_writable_page_pos =

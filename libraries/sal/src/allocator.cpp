@@ -1407,13 +1407,14 @@ namespace sal
       // to prevent any accidential modifications. The source was read only, so the
       // destination should be as well.
 
-      // calling sync here may be overkill and introduce extra padding in a segment,
-      // but perhaps if we hold off until there are no more segments to compact and
-      // then call sync and then push to the recycle queue we can save syncs and space.
-
-      // a truly paranoid approach would be to write protect the copy, then validate,
-      // and then sync... but not sure what that gains us.
-      ses.sync(_mapped_state->_config.sync_mode, _mapped_state->_config);
+      // Sync the compacted segment. Use checksum_on_compact to control whether
+      // the segment-level checksum is written — independent of checksum_on_commit
+      // which only applies to user write paths.
+      {
+         auto compact_cfg = _mapped_state->_config;
+         compact_cfg.checksum_on_commit = compact_cfg.checksum_on_compact;
+         ses.sync(_mapped_state->_config.sync_mode, compact_cfg);
+      }
 
       // ensures that the segment will not get selected for compaction again until
       // after it is reused by the provider thread.

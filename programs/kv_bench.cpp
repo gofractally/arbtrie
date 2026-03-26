@@ -72,6 +72,8 @@ struct benchmark_config
    uint32_t    value_size = 8;
    uint32_t    threads    = 4;
    std::string sync_mode  = "none";
+   bool        checksum   = false;  // PsiTri: checksum_on_commit (compactor checksums independently)
+   bool        wp_commit  = true;   // PsiTri: write_protect_on_commit
 };
 
 // ============================================================
@@ -149,7 +151,7 @@ struct KVEngine
    virtual ~KVEngine() = default;
    virtual const char* name() const = 0;
 
-   virtual void open(const std::string& path, const std::string& sync_mode) = 0;
+   virtual void open(const std::string& path, const benchmark_config& cfg) = 0;
    virtual void close() = 0;
 
    // Batch write (= one transaction / commit unit)
@@ -225,15 +227,17 @@ class PsiTriEngine : public KVEngine
   public:
    const char* name() const override { return "PsiTri"; }
 
-   void open(const std::string& path, const std::string& sync_mode) override
+   void open(const std::string& path, const benchmark_config& bcfg) override
    {
       psitri::runtime_config cfg;
-      if (sync_mode == "safe")
+      if (bcfg.sync_mode == "safe")
          cfg.sync_mode = sal::sync_type::fsync;
-      else if (sync_mode == "full")
+      else if (bcfg.sync_mode == "full")
          cfg.sync_mode = sal::sync_type::full;
       else
          cfg.sync_mode = sal::sync_type::none;
+      cfg.checksum_on_commit      = bcfg.checksum;
+      cfg.write_protect_on_commit = bcfg.wp_commit;
       _db  = psitri::database::create(path, cfg);
       _ses = _db->start_write_session();
    }
@@ -416,9 +420,9 @@ class RocksDbEngine : public KVEngine
 #endif
    }
 
-   void open(const std::string& path, const std::string& sync_mode) override
+   void open(const std::string& path, const benchmark_config& bcfg) override
    {
-      _sync_mode = sync_mode;
+      _sync_mode = bcfg.sync_mode;
       rocksdb::DestroyDB(path, {});
       rocksdb::Options options;
       options.create_if_missing = true;
@@ -428,7 +432,7 @@ class RocksDbEngine : public KVEngine
          fprintf(stderr, "RocksDB open failed: %s\n", s.ToString().c_str());
          std::exit(1);
       }
-      _wo.sync = (sync_mode == "full");
+      _wo.sync = (bcfg.sync_mode == "full");
    }
 
    void close() override
@@ -626,9 +630,9 @@ class MdbxEngine : public KVEngine
   public:
    const char* name() const override { return "MDBX"; }
 
-   void open(const std::string& path, const std::string& sync_mode) override
+   void open(const std::string& path, const benchmark_config& bcfg) override
    {
-      _sync_mode = sync_mode;
+      _sync_mode = bcfg.sync_mode;
       MDBX_CHECK(mdbx_env_create(&_env));
       MDBX_CHECK(mdbx_env_set_geometry(_env, 1024 * 1024, 1024 * 1024,
                                         64ULL * 1024 * 1024 * 1024, -1, -1, -1));
@@ -831,12 +835,12 @@ class TidesDbEngine : public KVEngine
   public:
    const char* name() const override { return "TidesDB"; }
 
-   void open(const std::string& path, const std::string& sync_mode) override
+   void open(const std::string& path, const benchmark_config& bcfg) override
    {
       int sm = TDB_WRAP_SYNC_NONE;
-      if (sync_mode == "safe")
+      if (bcfg.sync_mode == "safe")
          sm = TDB_WRAP_SYNC_SAFE;
-      else if (sync_mode == "full")
+      else if (bcfg.sync_mode == "full")
          sm = TDB_WRAP_SYNC_FULL;
       _db = tdb_open(path.c_str(), sm);
       if (!_db)
@@ -1561,6 +1565,8 @@ int main(int argc, char** argv)
    opt("sync", po::value<std::string>(&sync_str)->default_value("none"),
        "sync mode: none, safe, full");
    opt("reset", po::bool_switch(&reset), "reset database before running");
+   opt("checksum-on-commit", po::bool_switch(), "PsiTri: enable per-commit segment checksum (default: off, compactor checksums independently)");
+   opt("no-write-protect", po::bool_switch(), "PsiTri: disable write_protect_on_commit (default: on)");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -1572,19 +1578,24 @@ int main(int argc, char** argv)
       return 0;
    }
 
+   bool checksum  = vm["checksum-on-commit"].as<bool>();
+   bool wp_commit = !vm["no-write-protect"].as<bool>();
+
    auto eng = make_engine();
 
    if (reset)
       std::filesystem::remove_all(db_dir);
 
-   eng->open(db_dir, sync_str);
+   benchmark_config cfg = {rounds, items, batch, value_size, threads, sync_str, checksum, wp_commit};
 
-   benchmark_config cfg = {rounds, items, batch, value_size, threads, sync_str};
+   eng->open(db_dir, cfg);
 
    std::cout << "kv-benchmark [" << eng->name() << "]: db=" << db_dir << "\n";
    std::cout << "rounds=" << rounds << " items=" << format_comma(items)
              << " batch=" << batch << " value_size=" << value_size
-             << " threads=" << threads << " sync=" << sync_str << "\n\n";
+             << " threads=" << threads << " sync=" << sync_str
+             << " checksum=" << (checksum ? "on" : "off")
+             << " write_protect=" << (wp_commit ? "on" : "off") << "\n\n";
 
    auto run_all    = (bench == "all");
    auto be_seq_key = [](uint64_t seq, auto& v) { to_key(to_big_endian(seq), v); };

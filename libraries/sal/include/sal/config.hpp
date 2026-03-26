@@ -222,20 +222,22 @@ namespace sal
       ///@{
 
       /**
-       * @brief Compute checksums when segments are frozen on commit.
-       *
-       * Each commit advances the write-protected region. When enabled, the
-       * 16-bit XXH3-64 truncated checksum in each object's alloc_header is
-       * updated at this point. This detects corruption of data at rest.
-       *
-       * Independent of this, each key/value pair has a 1-byte hash for
-       * fast point-lookup filtering.
-       *
-       * ~10% performance impact on write-heavy workloads.
-       *
-       * Default: true.
+       * When true, every user commit checksums the newly-frozen
+       * region of each dirty segment (XXH3-64). This detects
+       * corruption of data at rest but costs ~3-4% throughput
+       * at typical batch sizes. Disable for maximum write speed
+       * when the compactor's checksums provide sufficient coverage.
        */
-      bool checksum_commits = true;
+      bool checksum_on_commit = false;
+
+      /**
+       * When true, the compactor checksums each segment it writes
+       * after copying live objects into it. Because compaction runs
+       * in the background, this is essentially free from the user's
+       * perspective and ensures all data at rest is checksummed
+       * once compaction catches up.
+       */
+      bool checksum_on_compact = true;
 
       /**
        * @brief Update object checksums on every upsert (not just commit).
