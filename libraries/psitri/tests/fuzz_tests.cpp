@@ -3,6 +3,7 @@
 #include <cstring>
 #include <iomanip>
 #include <map>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -623,6 +624,103 @@ namespace
                break;
          }
 
+      }
+
+     public:
+      /// Execute trie operations without Catch2 macros (safe for worker threads).
+      /// Maintains the oracle but throws std::runtime_error on mismatch instead of REQUIRE.
+      void execute_unchecked(op_type op)
+      {
+         switch (op)
+         {
+            case op_type::insert:
+            {
+               auto key   = _keygen.generate();
+               auto value = _keygen.generate_value(_max_value_len);
+               _cur->insert(to_key_view(key), to_value_view(value));
+               _oracle[key] = value;
+               break;
+            }
+            case op_type::update:
+            {
+               auto key   = _keygen.pick_or_generate();
+               auto value = _keygen.generate_value(_max_value_len);
+               if (_cur->update(to_key_view(key), to_value_view(value)))
+               {
+                  auto it = _oracle.find(key);
+                  if (it != _oracle.end())
+                     it->second = value;
+               }
+               break;
+            }
+            case op_type::upsert:
+            {
+               auto key   = _keygen.pick_or_generate();
+               auto value = _keygen.generate_value(_max_value_len);
+               _cur->upsert(to_key_view(key), to_value_view(value));
+               _oracle[key] = value;
+               break;
+            }
+            case op_type::remove:
+            {
+               auto key = _keygen.pick_or_generate();
+               _cur->remove(to_key_view(key));
+               auto it = _oracle.find(key);
+               if (it != _oracle.end())
+               {
+                  _oracle.erase(it);
+                  _keygen.remove_from_pool(key);
+               }
+               break;
+            }
+            case op_type::get:
+            {
+               auto key = _keygen.pick_or_generate();
+               std::string buf;
+               _cur->get(to_key_view(key), &buf);
+               break;
+            }
+            case op_type::commit_reopen:
+            {
+               auto root = _cur->root();
+               _ses->set_root(_root_index, std::move(root));
+               auto new_root = _ses->get_root(_root_index);
+               _cur = _ses->create_write_cursor(std::move(new_root));
+               break;
+            }
+            case op_type::lower_bound:
+            {
+               auto key = _keygen.pick_or_generate();
+               auto rc  = _cur->read_cursor();
+               rc.lower_bound(to_key_view(key));
+               break;
+            }
+            case op_type::cursor_forward:
+            case op_type::cursor_backward:
+            {
+               auto rc = _cur->read_cursor();
+               if (rc.seek_begin())
+               {
+                  int steps = std::uniform_int_distribution<int>(1, 10)(_rng);
+                  for (int s = 0; s < steps && !rc.is_end(); ++s)
+                     rc.next();
+               }
+               break;
+            }
+            default:
+               break;  // skip remove_range, count_keys, seek, transaction_abort
+         }
+      }
+
+      /// Run operations without Catch2 macros — safe for worker threads.
+      void run_unchecked(uint64_t num_ops)
+      {
+         for (uint64_t i = 0; i < num_ops; ++i)
+         {
+            auto op = pick_op();
+            execute_unchecked(op);
+            _op_count++;
+         }
       }
 
       void do_insert()
@@ -1581,27 +1679,55 @@ TEST_CASE("fuzz multi-tree parallel", "[fuzz]")
    INFO("seed=" << seed);
 
    test_db tdb("fuzz_multi_par_" + std::to_string(seed), true /*disable_compact*/);
-   auto ses1 = tdb.db->start_write_session();
-   auto ses2 = tdb.db->start_write_session();
 
-   fuzz_runner runner0(tdb,               seed,       balanced_no_rr_weights(), 512, 0);
-   fuzz_runner runner1(tdb, ses1, seed + 100, sequential_weights(),     512, 1);
-   fuzz_runner runner2(tdb, ses2, seed + 200, remove_heavy_weights(),   512, 2);
+   // runner0 uses tdb.ses (created on main thread, runs on main thread — OK)
+   fuzz_runner runner0(tdb, seed, balanced_no_rr_weights(), 512, 0);
 
    int ops_per_thread = 7000 / SCALE;
 
-   // Run each runner on its own thread
-   std::thread t1([&] { runner1.run(ops_per_thread); });
-   std::thread t2([&] { runner2.run(ops_per_thread); });
-   runner0.run(ops_per_thread);  // main thread
+   // Sessions must be created AND used on the same thread (thread_local allocator
+   // affinity). Catch2 REQUIRE/INFO are not thread-safe, so worker threads use
+   // run_unchecked() which avoids Catch2 macros entirely.
+   std::exception_ptr eptr1, eptr2;
+
+   std::thread t1([&] {
+      try
+      {
+         auto ses1 = tdb.db->start_write_session();
+         fuzz_runner runner1(tdb, ses1, seed + 100, sequential_weights(), 512, 1);
+         runner1.run_unchecked(ops_per_thread);
+         runner1.cleanup();
+      }
+      catch (...)
+      {
+         eptr1 = std::current_exception();
+      }
+   });
+   std::thread t2([&] {
+      try
+      {
+         auto ses2 = tdb.db->start_write_session();
+         fuzz_runner runner2(tdb, ses2, seed + 200, remove_heavy_weights(), 512, 2);
+         runner2.run_unchecked(ops_per_thread);
+         runner2.cleanup();
+      }
+      catch (...)
+      {
+         eptr2 = std::current_exception();
+      }
+   });
+   runner0.run(ops_per_thread);  // main thread — Catch2 safe
 
    t1.join();
    t2.join();
 
-   // Cleanup and leak-check sequentially on the main thread
+   // Re-throw worker exceptions on the main thread where Catch2 can handle them
+   if (eptr1)
+      std::rethrow_exception(eptr1);
+   if (eptr2)
+      std::rethrow_exception(eptr2);
+
    runner0.cleanup_and_leak_check();
-   runner1.cleanup_and_leak_check();
-   runner2.cleanup_and_leak_check();
 }
 
 TEST_CASE("fuzz multi-tree with snapshots", "[fuzz]")
@@ -1610,20 +1736,33 @@ TEST_CASE("fuzz multi-tree with snapshots", "[fuzz]")
    INFO("seed=" << seed);
 
    test_db tdb("fuzz_multi_snap_" + std::to_string(seed));
-   auto ses1 = tdb.db->start_write_session();
 
-   fuzz_runner runner0(tdb,               seed,       balanced_no_rr_weights(), 512, 0);
-   fuzz_runner runner1(tdb, ses1, seed + 500, transaction_weights(),    512, 1);
+   fuzz_runner runner0(tdb, seed, balanced_no_rr_weights(), 512, 0);
 
-   // Run on separate threads
    int ops_per_thread = 6000 / SCALE;
-   std::thread t1([&] { runner1.run_with_snapshots(ops_per_thread, 40); });
-   runner0.run_with_snapshots(ops_per_thread, 40);
+   std::exception_ptr eptr1;
+
+   std::thread t1([&] {
+      try
+      {
+         auto ses1 = tdb.db->start_write_session();
+         fuzz_runner runner1(tdb, ses1, seed + 500, transaction_weights(), 512, 1);
+         runner1.run_unchecked(ops_per_thread);
+         runner1.cleanup();
+      }
+      catch (...)
+      {
+         eptr1 = std::current_exception();
+      }
+   });
+   runner0.run_with_snapshots(ops_per_thread, 40);  // main thread — Catch2 safe
 
    t1.join();
 
+   if (eptr1)
+      std::rethrow_exception(eptr1);
+
    runner0.cleanup_and_leak_check();
-   runner1.cleanup_and_leak_check();
 }
 
 

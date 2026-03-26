@@ -145,8 +145,10 @@ namespace sal
 
    namespace detail
    {
-      // RESTORED MUTEX
-      static inline std::mutex& debug_mutex()
+      // Global mutex for serializing debug output to std::cerr.
+      // Must NOT be 'static inline' — 'static' gives internal linkage, creating
+      // a separate mutex per translation unit and defeating synchronization.
+      inline std::mutex& debug_mutex()
       {
          static std::mutex m;
          return m;
