@@ -17,6 +17,8 @@
 #include <thread>
 #include <vector>
 
+#include "bench_signal.hpp"
+
 #include <boost/program_options/cmdline.hpp>
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/parsers.hpp>
@@ -167,7 +169,7 @@ static void insert_test(benchmark_config   cfg,
    std::vector<char> value(cfg.value_size, 'v');
    uint64_t          seq = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
@@ -210,7 +212,7 @@ static void upsert_test(benchmark_config   cfg,
    std::vector<char> value(cfg.value_size, 'u');
    uint64_t          seq = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start = std::chrono::steady_clock::now();
       uint32_t count = 0;
@@ -256,7 +258,7 @@ static void get_test(benchmark_config   cfg,
 
    auto     start = std::chrono::steady_clock::now();
    uint64_t found = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       MDBX_val k{key.data(), key.size()};
@@ -314,7 +316,7 @@ static void remove_test(benchmark_config   cfg,
    std::vector<char> key;
    uint64_t          seq = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
@@ -358,7 +360,7 @@ static void remove_rand_test(benchmark_config   cfg,
 
    uint64_t              total = uint64_t(cfg.items) * cfg.rounds;
    std::vector<uint64_t> indices(total);
-   for (uint64_t i = 0; i < total; ++i)
+   for (uint64_t i = 0; i < total && !bench::interrupted(); ++i)
       indices[i] = i;
    for (uint64_t i = total - 1; i > 0; --i)
    {
@@ -369,7 +371,7 @@ static void remove_rand_test(benchmark_config   cfg,
    std::vector<char> key;
    uint64_t          pos = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
@@ -421,7 +423,7 @@ static void lower_bound_test(benchmark_config   cfg,
 
    auto     start = std::chrono::steady_clock::now();
    uint64_t count = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       MDBX_val k{key.data(), key.size()};
@@ -453,7 +455,7 @@ static void get_rand_test(benchmark_config   cfg,
    auto     start = std::chrono::steady_clock::now();
    uint64_t count = 0;
    uint64_t found = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       MDBX_val k{key.data(), key.size()};
@@ -543,7 +545,7 @@ static void multithread_rw_test(benchmark_config   cfg,
                 MDBX_CHECK(mdbx_cursor_open(txn, mdb.dbi, &cursor));
              }
 
-             while (!done.load(std::memory_order_relaxed))
+             while (!done.load(std::memory_order_relaxed) && !bench::interrupted())
              {
                 // Refresh read snapshot every 10 batches via txn_renew
                 if (++refresh_counter >= 10)
@@ -611,7 +613,7 @@ static void multithread_rw_test(benchmark_config   cfg,
    uint64_t          seq = cfg.items;
 
    int64_t prev_ops = 0;
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       MDBX_txn* txn = nullptr;
       MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
@@ -667,6 +669,7 @@ static void multithread_rw_test(benchmark_config   cfg,
 
 int main(int argc, char** argv)
 {
+   bench::install_interrupt_handler();
    uint32_t    rounds;
    uint32_t    batch;
    uint32_t    items;

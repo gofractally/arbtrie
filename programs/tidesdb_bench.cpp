@@ -17,6 +17,8 @@
 #include <thread>
 #include <vector>
 
+#include "bench_signal.hpp"
+
 #include <boost/program_options/cmdline.hpp>
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/parsers.hpp>
@@ -137,7 +139,7 @@ static void insert_test(benchmark_config   cfg,
    std::vector<uint8_t> value(cfg.value_size, 'v');
    uint64_t             seq = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
@@ -183,7 +185,7 @@ static void upsert_test(benchmark_config   cfg,
    std::vector<uint8_t> value(cfg.value_size, 'u');
    uint64_t             seq = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start = std::chrono::steady_clock::now();
       uint32_t count = 0;
@@ -230,7 +232,7 @@ static void get_test(benchmark_config   cfg,
 
    auto     start = std::chrono::steady_clock::now();
    uint64_t found = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       uint8_t* val_out  = nullptr;
@@ -293,7 +295,7 @@ static void remove_test(benchmark_config   cfg,
    std::vector<uint8_t> key;
    uint64_t             seq = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
@@ -334,7 +336,7 @@ static void remove_rand_test(benchmark_config   cfg,
 
    uint64_t              total = uint64_t(cfg.items) * cfg.rounds;
    std::vector<uint64_t> indices(total);
-   for (uint64_t i = 0; i < total; ++i)
+   for (uint64_t i = 0; i < total && !bench::interrupted(); ++i)
       indices[i] = i;
    for (uint64_t i = total - 1; i > 0; --i)
    {
@@ -345,7 +347,7 @@ static void remove_rand_test(benchmark_config   cfg,
    std::vector<uint8_t> key;
    uint64_t             pos = 0;
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
@@ -399,7 +401,7 @@ static void lower_bound_test(benchmark_config   cfg,
 
    auto     start = std::chrono::steady_clock::now();
    uint64_t count = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       tdb_iter_seek(iter, key.data(), key.size());
@@ -430,7 +432,7 @@ static void get_rand_test(benchmark_config   cfg,
    auto     start = std::chrono::steady_clock::now();
    uint64_t count = 0;
    uint64_t found = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       uint8_t* val_out  = nullptr;
@@ -599,7 +601,7 @@ static void multithread_rw_test(benchmark_config   cfg,
    uint64_t             seq = cfg.items;
 
    int64_t prev_ops = 0;
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto* txn = tdb_txn_begin(tdb.db);
       if (!txn)
@@ -655,6 +657,7 @@ static void multithread_rw_test(benchmark_config   cfg,
 
 int main(int argc, char** argv)
 {
+   bench::install_interrupt_handler();
    uint32_t    rounds;
    uint32_t    batch;
    uint32_t    items;

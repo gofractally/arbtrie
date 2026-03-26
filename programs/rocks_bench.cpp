@@ -26,6 +26,8 @@
 #include <sstream>
 #include <string>
 #include <thread>
+
+#include "bench_signal.hpp"
 #include <vector>
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -172,7 +174,7 @@ namespace
 
       if (cfg.batch_size <= 1)
       {
-         for (int i = 0; i < cfg.num; i++)
+         for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
          {
             auto key = make_key(i, cfg.key_size);
             auto val = make_value(cfg.value_size, i);
@@ -206,7 +208,7 @@ namespace
 
       // Generate shuffled indices
       std::vector<uint64_t> indices(cfg.num);
-      for (int i = 0; i < cfg.num; i++)
+      for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
          indices[i] = i;
       std::shuffle(indices.begin(), indices.end(), rng);
 
@@ -214,7 +216,7 @@ namespace
 
       if (cfg.batch_size <= 1)
       {
-         for (int i = 0; i < cfg.num; i++)
+         for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
          {
             auto key = make_key(indices[i], cfg.key_size);
             auto val = make_value(cfg.value_size, indices[i]);
@@ -249,7 +251,7 @@ namespace
 
       auto start = Clock::now();
 
-      for (int i = 0; i < cfg.num; i++)
+      for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
       {
          uint64_t k   = rng() % cfg.num;
          auto     key = make_key(k, cfg.key_size);
@@ -270,7 +272,7 @@ namespace
       uint64_t found    = 0;
       auto     start    = Clock::now();
 
-      for (int i = 0; i < cfg.num; i++)
+      for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
       {
          uint64_t k   = rng() % cfg.num;
          auto     key = make_key(k, cfg.key_size);
@@ -332,7 +334,7 @@ namespace
       auto     start = Clock::now();
 
       auto* iter = db->NewIterator(ro);
-      for (int i = 0; i < cfg.num; i++)
+      for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
       {
          uint64_t k   = rng() % cfg.num;
          auto     key = make_key(k, cfg.key_size);
@@ -353,7 +355,7 @@ namespace
 
       auto start = Clock::now();
 
-      for (int i = 0; i < cfg.num; i++)
+      for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
       {
          auto key = make_key(i, cfg.key_size);
          db->Delete(wo, key);
@@ -371,7 +373,7 @@ namespace
 
       auto start = Clock::now();
 
-      for (int i = 0; i < cfg.num; i++)
+      for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
       {
          uint64_t k   = rng() % cfg.num;
          auto     key = make_key(k, cfg.key_size);
@@ -395,7 +397,7 @@ namespace
       auto writer = std::thread([&]()
       {
          std::mt19937_64 rng(333);
-         while (!stop.load(std::memory_order_relaxed))
+         while (!stop.load(std::memory_order_relaxed) && !bench::interrupted())
          {
             uint64_t k   = rng() % cfg.num;
             auto     key = make_key(k, cfg.key_size);
@@ -412,7 +414,7 @@ namespace
 
       auto start = Clock::now();
 
-      for (int i = 0; i < cfg.num; i++)
+      for (int i = 0; i < cfg.num && !bench::interrupted(); i++)
       {
          uint64_t k   = rng() % cfg.num;
          auto     key = make_key(k, cfg.key_size);
@@ -446,7 +448,7 @@ namespace
       auto writer = std::thread([&]()
       {
          std::mt19937_64 rng(333);
-         while (!stop.load(std::memory_order_relaxed))
+         while (!stop.load(std::memory_order_relaxed) && !bench::interrupted())
          {
             uint64_t k   = rng() % cfg.num;
             auto     key = make_key(k, cfg.key_size);
@@ -526,7 +528,7 @@ namespace
       auto writer = std::thread([&]()
       {
          std::mt19937_64 rng(333);
-         while (!stop.load(std::memory_order_relaxed))
+         while (!stop.load(std::memory_order_relaxed) && !bench::interrupted())
          {
             uint64_t k   = rng() % cfg.num;
             auto     key = make_key(k, cfg.key_size);
@@ -586,6 +588,7 @@ namespace
 
 int main(int argc, char** argv)
 {
+   bench::install_interrupt_handler();
    Config cfg;
    cfg.parse(argc, argv);
 

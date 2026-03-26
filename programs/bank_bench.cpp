@@ -24,6 +24,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "bench_signal.hpp"
+
 #include <boost/program_options/cmdline.hpp>
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/parsers.hpp>
@@ -1099,6 +1101,7 @@ class TidesDbEngine : public BankEngine
 
 int main(int argc, char** argv)
 {
+   bench::install_interrupt_handler();
    BankConfig cfg;
 
    po::options_description desc("Bank Benchmark Options");
@@ -1216,7 +1219,7 @@ int main(int argc, char** argv)
                 std::mt19937_64 read_rng(seed + 999);  // different seed from writer
                 reader_start = Clock::now();
                 uint64_t local_count = 0;
-                while (!stop_reader.load(std::memory_order_relaxed))
+                while (!stop_reader.load(std::memory_order_relaxed) && !bench::interrupted())
                 {
                    // Each "read transaction" does N point lookups
                    for (uint64_t r = 0; r < cfg.reads_per_tx; ++r)
@@ -1236,7 +1239,7 @@ int main(int argc, char** argv)
       auto p_start = Clock::now();
 
       engine->begin_batch();
-      for (uint64_t i = 0; i < num_tx; ++i)
+      for (uint64_t i = 0; i < num_tx && !bench::interrupted(); ++i)
       {
          uint64_t src_idx = pick_account(rng, cfg.num_accounts);
          uint64_t dst_idx = pick_account(rng, cfg.num_accounts);

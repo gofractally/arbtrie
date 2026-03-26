@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "bench_signal.hpp"
+
 #include <boost/program_options/cmdline.hpp>
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/parsers.hpp>
@@ -140,7 +142,7 @@ void insert_test(benchmark_config cfg,
 
    auto tx = ses.start_transaction(0);
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
@@ -164,7 +166,8 @@ void insert_test(benchmark_config cfg,
       if (cfg.validate)
          validate_tree(ses);
    }
-   tx.commit();
+   if (!bench::interrupted())
+      tx.commit();
 }
 
 void upsert_test(benchmark_config   cfg,
@@ -181,7 +184,7 @@ void upsert_test(benchmark_config   cfg,
 
    auto tx = ses.start_transaction(0);
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start    = std::chrono::steady_clock::now();
       uint32_t count    = 0;
@@ -203,7 +206,8 @@ void upsert_test(benchmark_config   cfg,
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  upserts/sec\n";
    }
-   tx.commit();
+   if (!bench::interrupted())
+      tx.commit();
 }
 
 // -- Get benchmark --
@@ -222,7 +226,7 @@ void get_test(benchmark_config   cfg,
 
    auto     start = std::chrono::steady_clock::now();
    uint64_t found = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       auto result = cur.get(key_view(key.data(), key.size()), &buf);
@@ -248,7 +252,7 @@ void iterate_test(benchmark_config cfg, write_session& ses)
    auto     start = std::chrono::steady_clock::now();
    uint64_t count = 0;
    cur.seek_begin();
-   while (!cur.is_end())
+   while (!cur.is_end() && !bench::interrupted())
    {
       ++count;
       cur.next();
@@ -274,7 +278,7 @@ void remove_test(benchmark_config   cfg,
 
    auto tx = ses.start_transaction(0);
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
@@ -296,7 +300,8 @@ void remove_test(benchmark_config   cfg,
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(rps)
                 << "  removes/sec\n";
    }
-   tx.commit();
+   if (!bench::interrupted())
+      tx.commit();
 }
 
 // -- Random remove of known keys --
@@ -327,7 +332,7 @@ void remove_rand_test(benchmark_config   cfg,
 
    auto tx = ses.start_transaction(0);
 
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
@@ -349,7 +354,8 @@ void remove_rand_test(benchmark_config   cfg,
                 << format_comma(pos) << "  " << std::setw(12) << std::right << format_comma(rps)
                 << "  removes/sec\n";
    }
-   tx.commit();
+   if (!bench::interrupted())
+      tx.commit();
 }
 
 // -- Lower-bound benchmark --
@@ -367,7 +373,7 @@ void lower_bound_test(benchmark_config   cfg,
 
    auto     start = std::chrono::steady_clock::now();
    uint64_t count = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       cur.lower_bound(key_view(key.data(), key.size()));
@@ -396,7 +402,7 @@ void get_rand_test(benchmark_config   cfg,
    auto     start = std::chrono::steady_clock::now();
    uint64_t count = 0;
    uint64_t found = 0;
-   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds; ++i)
+   for (uint64_t i = 0; i < uint64_t(cfg.items) * cfg.rounds && !bench::interrupted(); ++i)
    {
       make_key(i, key);
       auto result = cur.get(key_view(key.data(), key.size()), &buf);
@@ -455,11 +461,11 @@ void multiwriter_test(benchmark_config            cfg,
              while (!start_flag.load(std::memory_order_relaxed))
                 ;
 
-             for (uint32_t r = 0; r < cfg.rounds && !done.load(std::memory_order_relaxed); ++r)
+             for (uint32_t r = 0; r < cfg.rounds && !done.load(std::memory_order_relaxed) && !bench::interrupted(); ++r)
              {
                 auto     tx       = ws->start_transaction(root_index);
                 uint32_t inserted = 0;
-                while (inserted < cfg.items)
+                while (inserted < cfg.items && !bench::interrupted())
                 {
                    uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
                    for (uint32_t i = 0; i < batch; ++i)
@@ -472,6 +478,7 @@ void multiwriter_test(benchmark_config            cfg,
                       ++inserted;
                    }
                 }
+                if (bench::interrupted()) { tx.abort(); break; }
                 tx.commit();
                 total_inserted += inserted;
                 counters[t].count.store(total_inserted, std::memory_order_relaxed);
@@ -508,7 +515,7 @@ void multiwriter_test(benchmark_config            cfg,
       std::cout << std::setw(4) << std::left << report_num++ << " " << std::setw(12) << std::right
                 << format_comma(cur) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  inserts/sec (aggregate)\n";
-      if (cur >= target_inserts)
+      if (cur >= target_inserts || bench::interrupted())
          break;
    }
 
@@ -594,7 +601,7 @@ void multithread_rw_test(benchmark_config            cfg,
              // Per-thread salt so threads probe different keys
              const uint64_t    salt = rand_from_seq(t * 999983ULL + 1);
 
-             while (!done.load(std::memory_order_relaxed))
+             while (!done.load(std::memory_order_relaxed) && !bench::interrupted())
              {
                 if (++refresh_counter >= 10)
                 {
@@ -651,12 +658,12 @@ void multithread_rw_test(benchmark_config            cfg,
    uint64_t          seq = cfg.items;
 
    int64_t prev_ops = 0;
-   for (uint32_t r = 0; r < cfg.rounds; ++r)
+   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       auto     tx       = ses.start_transaction(0);
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
-      while (inserted < cfg.items)
+      while (inserted < cfg.items && !bench::interrupted())
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
          for (uint32_t i = 0; i < batch; ++i)
@@ -666,6 +673,7 @@ void multithread_rw_test(benchmark_config            cfg,
             ++inserted;
          }
       }
+      if (bench::interrupted()) break;
       tx.commit();
       committed_seq.store(seq, std::memory_order_relaxed);
 
@@ -717,6 +725,7 @@ int main(int argc, char** argv)
    sigaction(SIGBUS, &sa, nullptr);
    sigaction(SIGSEGV, &sa, nullptr);
    sigaction(SIGILL, &sa, nullptr);
+   bench::install_interrupt_handler();
 
    sal::set_current_thread_name("main");
    uint32_t    rounds;
@@ -809,97 +818,100 @@ int main(int argc, char** argv)
    auto rand_key   = [](uint64_t seq, auto& v) { to_key(rand_from_seq(seq), v); };
    auto str_rand_key = [](uint64_t seq, auto& v) { to_key(std::to_string(rand_from_seq(seq)), v); };
 
+   auto should_run = [&](const std::string& name) {
+      return !bench::interrupted() && (run_all || bench == name);
+   };
+
    // -- Insert --
-   if (run_all || bench == "insert")
+   if (should_run("insert"))
    {
       insert_test(cfg, *ses, "big endian seq insert", be_seq_key);
       print_stats(*ses);
 
-      insert_test(cfg, *ses, "dense random insert", rand_key);
-      print_stats(*ses);
-
-      insert_test(cfg, *ses, "string number rand insert", str_rand_key);
-      print_stats(*ses);
+      if (!bench::interrupted())
+      {
+         insert_test(cfg, *ses, "dense random insert", rand_key);
+         print_stats(*ses);
+      }
+      if (!bench::interrupted())
+      {
+         insert_test(cfg, *ses, "string number rand insert", str_rand_key);
+         print_stats(*ses);
+      }
    }
 
    // -- Get --
-   if (run_all || bench == "get")
+   if (should_run("get"))
    {
       get_test(cfg, *ses, "big endian seq get", be_seq_key);
-      get_test(cfg, *ses, "dense random get", rand_key);
+      if (!bench::interrupted())
+         get_test(cfg, *ses, "dense random get", rand_key);
    }
 
    // -- Upsert --
-   if (run_all || bench == "upsert")
+   if (should_run("upsert"))
    {
       upsert_test(cfg, *ses, "big endian seq upsert", be_seq_key);
       print_stats(*ses);
    }
 
    // -- Iterate --
-   if (run_all || bench == "iterate")
-   {
+   if (should_run("iterate"))
       iterate_test(cfg, *ses);
-   }
 
    // -- Lower-bound --
-   if (run_all || bench == "lower-bound")
-   {
+   if (should_run("lower-bound"))
       lower_bound_test(cfg, *ses, "random lower_bound", rand_key);
-   }
 
    // -- Random get (point lookups, mix of found/not-found) --
-   if (run_all || bench == "get-rand")
-   {
+   if (should_run("get-rand"))
       get_rand_test(cfg, *ses, "random get", rand_key);
-   }
 
    // -- Remove --
-   if (run_all || bench == "remove")
+   if (should_run("remove"))
    {
       remove_test(cfg, *ses, "big endian seq remove", be_seq_key);
       print_stats(*ses);
    }
 
    // -- Random remove of known keys (run after random insert) --
-   if (run_all || bench == "remove-rand")
+   if (should_run("remove-rand"))
    {
       remove_rand_test(cfg, *ses, "random remove (known keys)", rand_key);
       print_stats(*ses);
    }
 
    // -- Multi-writer --
-   if (run_all || bench == "multiwriter-rand")
-   {
+   if (should_run("multiwriter-rand"))
       multiwriter_test(cfg, db, threads, rand_key, "multi-writer rand insert");
-   }
-   if (run_all || bench == "multiwriter-seq")
-   {
+   if (should_run("multiwriter-seq"))
       multiwriter_test(cfg, db, threads, be_seq_key, "multi-writer seq insert");
-   }
 
    // -- Multithread read+write variants --
-   if (run_all || bench == "multithread-lowerbound-rand")
+   if (should_run("multithread-lowerbound-rand"))
    {
       multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "rand");
       print_stats(*ses);
    }
-   if (run_all || bench == "multithread-lowerbound-known")
+   if (should_run("multithread-lowerbound-known"))
    {
       multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "known");
       print_stats(*ses);
    }
-   if (run_all || bench == "multithread-get-rand")
+   if (should_run("multithread-get-rand"))
    {
       multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "rand");
       print_stats(*ses);
    }
-   if (run_all || bench == "multithread-get-known")
+   if (should_run("multithread-get-known"))
    {
       multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "known");
       print_stats(*ses);
    }
 
-   std::cout << "\ndone.\n";
+   if (bench::interrupted())
+      std::cout << "\nInterrupted — exiting gracefully.\n";
+   else
+      std::cout << "\ndone.\n";
    return 0;
 }
