@@ -17,8 +17,10 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <atomic>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +32,8 @@
 #if defined(BANK_ENGINE_PSITRI)
 #include <psitri/cursor.hpp>
 #include <psitri/database.hpp>
+#include <psitri/read_session.hpp>
+#include <psitri/read_session_impl.hpp>
 #include <psitri/transaction.hpp>
 #include <psitri/tree_ops.hpp>
 #include <psitri/value_type.hpp>
@@ -69,6 +73,7 @@ struct BankConfig
    uint64_t    initial_balance  = 1'000'000;
    uint64_t    batch_size       = 1;
    uint64_t    sync_every       = 0;  // sync every N commits (0 = never)
+   uint64_t    reads_per_tx     = 100; // point reads per reader "transaction"
 };
 
 // ============================================================
@@ -330,6 +335,18 @@ class BankEngine
    virtual void audit_freed() {}
    virtual void wait_compactor() {}
 
+   /// Read a single account balance from a reader thread (concurrent with writes).
+   /// Each engine creates its own read session/transaction internally.
+   /// Returns true if the key was found, false otherwise.
+   virtual bool read_account(const std::string& key, uint64_t& balance_out) = 0;
+
+   /// Called once from the reader thread before reads begin.
+   /// Engines that need per-thread state (e.g. PsiTri read_session) set it up here.
+   virtual void reader_thread_init() {}
+
+   /// Called once from the reader thread when reads are done.
+   virtual void reader_thread_teardown() {}
+
    virtual uint64_t scan_all(
        std::function<void(const std::string& key, uint64_t bal)> visitor) = 0;
 };
@@ -497,6 +514,29 @@ class PsiTriEngine : public BankEngine
       _db->wait_for_compactor();
    }
 
+   // Reader thread state — separate read_session per thread
+   std::shared_ptr<psitri::read_session> _reader_rs;
+
+   void reader_thread_init() override
+   {
+      _reader_rs = _db->start_read_session();
+   }
+
+   void reader_thread_teardown() override
+   {
+      _reader_rs.reset();
+   }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto cur = _reader_rs->create_cursor(0);
+      auto val = cur.get<std::string>(psitri::to_key_view(key));
+      if (!val)
+         return false;
+      balance_out = decode_balance(*val);
+      return true;
+   }
+
    uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
    {
       auto     tx  = _ses->start_transaction(0);
@@ -647,6 +687,15 @@ class RocksDbEngine : public BankEngine
       return r;
    }
 
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      std::string val;
+      if (!_db->Get(_ro, key, &val).ok())
+         return false;
+      balance_out = decode_balance(val);
+      return true;
+   }
+
    uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
    {
       uint64_t count = 0;
@@ -699,7 +748,7 @@ class MdbxEngine : public BankEngine
                                         1024 * 1024,              // initial
                                         64ULL * 1024 * 1024 * 1024,  // upper (64 GB)
                                         -1, -1, -1));
-      MDBX_CHECK(mdbx_env_set_maxreaders(_env, 4));
+      MDBX_CHECK(mdbx_env_set_maxreaders(_env, 8));
 
       unsigned sync_flags = 0;
       if (sync_mode == "none")
@@ -804,6 +853,37 @@ class MdbxEngine : public BankEngine
       r.live_size = live_pages * stat.ms_psize;
       r.free_size = r.file_size > r.live_size ? r.file_size - r.live_size : 0;
       return r;
+   }
+
+   // Reader thread state — read-only transaction renewed per batch
+   MDBX_txn* _read_txn = nullptr;
+
+   void reader_thread_init() override
+   {
+      MDBX_CHECK(mdbx_txn_begin(_env, nullptr, (MDBX_txn_flags_t)MDBX_TXN_RDONLY, &_read_txn));
+   }
+
+   void reader_thread_teardown() override
+   {
+      if (_read_txn)
+      {
+         mdbx_txn_abort(_read_txn);
+         _read_txn = nullptr;
+      }
+   }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      // Renew the read txn to see latest committed state
+      MDBX_CHECK(mdbx_txn_renew(_read_txn));
+      MDBX_val k{const_cast<char*>(key.data()), key.size()};
+      MDBX_val v;
+      int rc = mdbx_get(_read_txn, _dbi, &k, &v);
+      mdbx_txn_reset(_read_txn);
+      if (rc != MDBX_SUCCESS)
+         return false;
+      std::memcpy(&balance_out, v.iov_base, sizeof(balance_out));
+      return true;
    }
 
    uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
@@ -950,6 +1030,20 @@ class TidesDbEngine : public BankEngine
       // TidesDB doesn't expose a standalone sync API; commits are durable
    }
 
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto*    txn  = tdb_txn_begin(_db);
+      uint8_t* val  = nullptr;
+      size_t   vlen = 0;
+      int rc = tdb_get(txn, CF, (const uint8_t*)key.data(), key.size(), &val, &vlen);
+      tdb_txn_free(txn);
+      if (rc != TDB_WRAP_SUCCESS)
+         return false;
+      std::memcpy(&balance_out, val, sizeof(balance_out));
+      free(val);
+      return true;
+   }
+
    SizeReport report_size(const std::string& db_path) override
    {
       SizeReport r;
@@ -1024,6 +1118,8 @@ int main(int argc, char** argv)
        "Number of transfers per commit batch");
    opt("sync-every", po::value(&cfg.sync_every)->default_value(0),
        "Sync to disk every N batch commits (0 = no periodic sync)");
+   opt("reads-per-tx", po::value(&cfg.reads_per_tx)->default_value(100),
+       "Point reads per reader thread read-transaction batch");
    opt("help,h", "Show help");
 
    po::variables_map vm;
@@ -1082,66 +1178,155 @@ int main(int argc, char** argv)
    print_phase("Bulk load", p2_secs, cfg.num_accounts);
    engine->report_size(cfg.db_path).print();
 
-   // ── Phase 3: Transaction Processing ──
-   printf("\nPhase 3: Transaction Processing\n");
-   std::mt19937_64 rng(cfg.seed);
-   std::uniform_int_distribution<uint64_t> amt_dist(1, cfg.initial_balance);
-
-   uint64_t successful     = 0;
-   uint64_t skipped        = 0;
-   uint64_t batch_counter  = 0;
-   uint64_t commit_counter = 0;
-   auto     p3_start       = Clock::now();
-
-   engine->begin_batch();
-   for (uint64_t i = 0; i < cfg.num_transactions; ++i)
+   // ── Helper: run transaction phase with optional reader thread ──
+   struct TxPhaseResult
    {
-      uint64_t src_idx = pick_account(rng, cfg.num_accounts);
-      uint64_t dst_idx = pick_account(rng, cfg.num_accounts);
-      uint64_t amount  = amt_dist(rng);
+      double   secs;
+      uint64_t successful;
+      uint64_t skipped;
+      uint64_t reader_reads;    // total point reads completed by reader
+      double   reader_read_sec; // reader elapsed time
+   };
 
-      // Deterministic fallback if same account
-      if (dst_idx == src_idx)
-         dst_idx = (src_idx + 1) % cfg.num_accounts;
+   auto run_tx_phase = [&](const char*    label,
+                           uint64_t       num_tx,
+                           uint64_t       seed,
+                           uint64_t       seq_start,
+                           bool           with_reader) -> TxPhaseResult
+   {
+      std::mt19937_64                         rng(seed);
+      std::uniform_int_distribution<uint64_t> amt_dist(1, cfg.initial_balance);
 
-      if (engine->transfer(accounts[src_idx], accounts[dst_idx], amount, successful + 1))
-         ++successful;
-      else
-         ++skipped;
+      uint64_t           successful     = 0;
+      uint64_t           skipped        = 0;
+      uint64_t           batch_counter  = 0;
+      uint64_t           commit_counter = 0;
+      std::atomic<bool>  stop_reader{false};
+      std::atomic<uint64_t> reader_count{0};
+      Clock::time_point  reader_start, reader_end;
 
-      if (++batch_counter >= cfg.batch_size)
+      // Launch reader thread if requested
+      std::thread reader_thread;
+      if (with_reader)
       {
+         reader_thread = std::thread(
+             [&]()
+             {
+                engine->reader_thread_init();
+                std::mt19937_64 read_rng(seed + 999);  // different seed from writer
+                reader_start = Clock::now();
+                uint64_t local_count = 0;
+                while (!stop_reader.load(std::memory_order_relaxed))
+                {
+                   // Each "read transaction" does N point lookups
+                   for (uint64_t r = 0; r < cfg.reads_per_tx; ++r)
+                   {
+                      uint64_t idx = pick_account(read_rng, cfg.num_accounts);
+                      uint64_t bal;
+                      engine->read_account(accounts[idx], bal);
+                      ++local_count;
+                   }
+                }
+                reader_count.store(local_count, std::memory_order_relaxed);
+                reader_end = Clock::now();
+                engine->reader_thread_teardown();
+             });
+      }
+
+      auto p_start = Clock::now();
+
+      engine->begin_batch();
+      for (uint64_t i = 0; i < num_tx; ++i)
+      {
+         uint64_t src_idx = pick_account(rng, cfg.num_accounts);
+         uint64_t dst_idx = pick_account(rng, cfg.num_accounts);
+         uint64_t amount  = amt_dist(rng);
+
+         if (dst_idx == src_idx)
+            dst_idx = (src_idx + 1) % cfg.num_accounts;
+
+         if (engine->transfer(accounts[src_idx], accounts[dst_idx], amount,
+                              seq_start + successful + 1))
+            ++successful;
+         else
+            ++skipped;
+
+         if (++batch_counter >= cfg.batch_size)
+         {
+            engine->commit_batch();
+            batch_counter = 0;
+            ++commit_counter;
+
+            if (cfg.sync_every > 0 && commit_counter % cfg.sync_every == 0)
+               engine->sync();
+            if (i + 1 < num_tx)
+               engine->begin_batch();
+         }
+
+         if ((i + 1) % 1'000'000 == 0)
+         {
+            double secs = elapsed_sec(p_start);
+            printf("  %s / %s  (%s tx/sec, %s ok, %s skip)\n",
+                   format_comma(i + 1).c_str(),
+                   format_comma(num_tx).c_str(),
+                   format_comma((uint64_t)((i + 1) / secs)).c_str(),
+                   format_comma(successful).c_str(),
+                   format_comma(skipped).c_str());
+         }
+      }
+      if (batch_counter > 0)
          engine->commit_batch();
-         batch_counter = 0;
-         ++commit_counter;
 
-         // Periodic sync — applied equally to all engines
-         if (cfg.sync_every > 0 && commit_counter % cfg.sync_every == 0)
-            engine->sync();
-         if (i + 1 < cfg.num_transactions)
-            engine->begin_batch();
-      }
+      // Stop reader
+      stop_reader.store(true, std::memory_order_relaxed);
+      if (reader_thread.joinable())
+         reader_thread.join();
 
-      if ((i + 1) % 1'000'000 == 0)
+      auto p_secs = elapsed_sec(p_start);
+      double reader_secs = with_reader
+                               ? std::chrono::duration<double>(reader_end - reader_start).count()
+                               : 0.0;
+
+      print_phase(label, p_secs, num_tx);
+      printf("  Successful: %s  Skipped: %s\n",
+             format_comma(successful).c_str(), format_comma(skipped).c_str());
+      if (with_reader)
       {
-         double secs = elapsed_sec(p3_start);
-         printf("  %s / %s  (%s tx/sec, %s ok, %s skip)\n",
-                format_comma(i + 1).c_str(),
-                format_comma(cfg.num_transactions).c_str(),
-                format_comma((uint64_t)((i + 1) / secs)).c_str(),
-                format_comma(successful).c_str(),
-                format_comma(skipped).c_str());
+         uint64_t rc = reader_count.load();
+         printf("  Reader: %s reads in %.3fs (%s reads/sec)\n",
+                format_comma(rc).c_str(), reader_secs,
+                reader_secs > 0 ? format_comma((uint64_t)(rc / reader_secs)).c_str() : "N/A");
       }
-   }
-   // Commit any remaining transfers in the last partial batch
-   if (batch_counter > 0)
-      engine->commit_batch();
+      engine->report_size(cfg.db_path).print();
 
-   auto p3_secs = elapsed_sec(p3_start);
-   print_phase("Transactions", p3_secs, cfg.num_transactions);
-   printf("  Successful: %s  Skipped: %s\n",
-          format_comma(successful).c_str(), format_comma(skipped).c_str());
-   engine->report_size(cfg.db_path).print();
+      return {p_secs, successful, skipped, reader_count.load(), reader_secs};
+   };
+
+   // ── Phase 3a: Write-only transactions ──
+   printf("\nPhase 3a: Transactions (write-only)\n");
+   auto p3a = run_tx_phase("Write-only", cfg.num_transactions, cfg.seed, 0, false);
+   uint64_t successful = p3a.successful;
+
+   // ── Phase 3b: Transactions with concurrent reader ──
+   printf("\nPhase 3b: Transactions (with 1 reader, %s reads/batch)\n",
+          format_comma(cfg.reads_per_tx).c_str());
+   auto p3b = run_tx_phase("Write+Read", cfg.num_transactions, cfg.seed + 1,
+                           p3a.successful, true);
+   successful += p3b.successful;
+
+   // ── Phase 3 Summary ──
+   {
+      uint64_t wo_tps = (uint64_t)(cfg.num_transactions / p3a.secs);
+      uint64_t wr_tps = (uint64_t)(cfg.num_transactions / p3b.secs);
+      double   impact = 100.0 * (1.0 - (double)wr_tps / wo_tps);
+      printf("\n  --- Phase 3 Summary ---\n");
+      printf("  Write-only: %s tx/sec\n", format_comma(wo_tps).c_str());
+      printf("  Write+Read: %s tx/sec  (write impact: %+.1f%%)\n",
+             format_comma(wr_tps).c_str(), -impact);
+      if (p3b.reader_read_sec > 0)
+         printf("  Reader:     %s reads/sec\n",
+                format_comma((uint64_t)(p3b.reader_reads / p3b.reader_read_sec)).c_str());
+   }
 
    // ── Phase 4: Validation ──
    printf("\nPhase 4: Validation\n");
