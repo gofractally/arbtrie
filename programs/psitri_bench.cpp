@@ -2,6 +2,8 @@
 #include <chrono>
 #include <csignal>
 #include <execinfo.h>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <thread>
@@ -38,6 +40,34 @@ struct benchmark_config
 int64_t rand_from_seq(uint64_t seq)
 {
    return XXH3_64bits((char*)&seq, sizeof(seq));
+}
+
+/// 1MB buffer of pseudo-random bytes. Values are sliced from random offsets
+/// into this buffer, making them incompressible without per-insert overhead.
+static constexpr size_t RANDOM_BUF_SIZE = 1 << 20;  // 1 MB
+static char             g_random_buf[RANDOM_BUF_SIZE];
+
+static uint64_t g_random_seed = 0xdeadbeefcafebabe;
+
+/// Reshuffle the random buffer with a new seed. Call once per round
+/// outside the timing loop to ensure every round has unique values.
+static void reshuffle_random_buf()
+{
+   auto* p = reinterpret_cast<uint64_t*>(g_random_buf);
+   for (size_t i = 0; i < RANDOM_BUF_SIZE / 8; ++i)
+   {
+      g_random_seed ^= g_random_seed << 13;
+      g_random_seed ^= g_random_seed >> 7;
+      g_random_seed ^= g_random_seed << 17;
+      p[i] = g_random_seed;
+   }
+}
+
+/// Return a value_view into the random buffer at a byte-level offset.
+static value_view random_value(uint64_t seq, uint32_t value_size)
+{
+   size_t offset = rand_from_seq(seq) % (RANDOM_BUF_SIZE - value_size);
+   return value_view(g_random_buf + offset, value_size);
 }
 
 void to_key(uint64_t val, std::vector<char>& v)
@@ -136,14 +166,13 @@ void insert_test(benchmark_config cfg,
    print_header(name, cfg);
 
    std::vector<char> key;
-   std::vector<char> value(cfg.value_size, 'v');
-   value_view        vv(value.data(), value.size());
    uint64_t          seq = 0;
 
    auto tx = ses.start_transaction(0);
 
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
       while (inserted < cfg.items)
@@ -151,8 +180,9 @@ void insert_test(benchmark_config cfg,
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
-            tx.insert(key_view(key.data(), key.size()), vv);
+            make_key(seq, key);
+            tx.insert(key_view(key.data(), key.size()), random_value(seq, cfg.value_size));
+            ++seq;
             ++inserted;
          }
       }
@@ -178,14 +208,13 @@ void upsert_test(benchmark_config   cfg,
    print_header(name, cfg);
 
    std::vector<char> key;
-   std::vector<char> value(cfg.value_size, 'u');
-   value_view        vv(value.data(), value.size());
    uint64_t          seq = 0;
 
    auto tx = ses.start_transaction(0);
 
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       auto     start    = std::chrono::steady_clock::now();
       uint32_t count    = 0;
       while (count < cfg.items)
@@ -193,8 +222,9 @@ void upsert_test(benchmark_config   cfg,
          uint32_t batch = std::min(cfg.batch_size, cfg.items - count);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
-            tx.upsert(key_view(key.data(), key.size()), vv);
+            make_key(seq, key);
+            tx.upsert(key_view(key.data(), key.size()), random_value(seq, cfg.value_size));
+            ++seq;
             ++count;
          }
       }
@@ -452,8 +482,6 @@ void multiwriter_test(benchmark_config            cfg,
              auto              ws  = db->start_write_session();
              ws->set_sync(cfg.sync);
              std::vector<char> key;
-             std::vector<char> value(cfg.value_size, 'v');
-             value_view        vv(value.data(), value.size());
              uint32_t          root_index = t + 1;  // each writer owns its own tree
              int64_t           total_inserted = 0;
 
@@ -474,7 +502,7 @@ void multiwriter_test(benchmark_config            cfg,
                       uint64_t seq = uint64_t(r) * cfg.items + inserted + i;
                       seq = seq * num_writers + t;
                       make_key(seq, key);
-                      tx.insert(key_view(key.data(), key.size()), vv);
+                      tx.insert(key_view(key.data(), key.size()), random_value(seq, cfg.value_size));
                       ++inserted;
                    }
                 }
@@ -544,7 +572,9 @@ void multithread_rw_test(benchmark_config            cfg,
                          uint32_t                     num_threads,
                          auto                         make_key,
                          const std::string&           read_op,
-                         const std::string&           key_mode)
+                         const std::string&           key_mode,
+                         const std::filesystem::path& db_dir = {},
+                         const std::string&           csv_path = {})
 {
    std::string label = "multithread " + read_op + " (" + key_mode + " keys)";
    std::cout << "---------------------  " << label << "  "
@@ -553,19 +583,26 @@ void multithread_rw_test(benchmark_config            cfg,
              << "  read threads: " << num_threads << "\n";
    std::cout << "-----------------------------------------------------------------------\n";
 
+   // Open CSV file for per-round stats if requested
+   std::ofstream csv;
+   if (!csv_path.empty())
+   {
+      csv.open(csv_path);
+      csv << "round,total_keys,inserts_per_sec,reads_per_sec,db_size_bytes,total_segments,"
+             "control_block_zones,control_block_capacity\n";
+   }
+
    bool use_get   = (read_op == "get");
    bool use_known = (key_mode == "known");
 
    // Seed the tree so readers start with data
    {
       std::vector<char> key;
-      std::vector<char> value(cfg.value_size, 'v');
-      value_view        vv(value.data(), value.size());
       auto              tx = ses.start_transaction(0);
       for (uint32_t i = 0; i < cfg.items; ++i)
       {
          make_key(i, key);
-         tx.insert(key_view(key.data(), key.size()), vv);
+         tx.insert(key_view(key.data(), key.size()), random_value(i, cfg.value_size));
       }
       tx.commit();
    }
@@ -653,13 +690,12 @@ void multithread_rw_test(benchmark_config            cfg,
    auto overall_start = std::chrono::steady_clock::now();
 
    std::vector<char> key;
-   std::vector<char> value(cfg.value_size, 'v');
-   value_view        vv(value.data(), value.size());
    uint64_t          seq = cfg.items;
 
    int64_t prev_ops = 0;
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       auto     tx       = ses.start_transaction(0);
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
@@ -668,8 +704,9 @@ void multithread_rw_test(benchmark_config            cfg,
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
-            tx.insert(key_view(key.data(), key.size()), vv);
+            make_key(seq, key);
+            tx.insert(key_view(key.data(), key.size()), random_value(seq, cfg.value_size));
+            ++seq;
             ++inserted;
          }
       }
@@ -687,7 +724,22 @@ void multithread_rw_test(benchmark_config            cfg,
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  inserts/sec  " << std::setw(12) << std::right << format_comma(rps)
-                << "  " << read_op << "s/sec\n";
+                << "  " << read_op << "s/sec" << std::endl;
+
+      if (csv.is_open())
+      {
+         uint64_t db_size = 0;
+         if (!db_dir.empty())
+         {
+            std::error_code ec;
+            db_size = std::filesystem::file_size(db_dir / "segs", ec);
+         }
+         auto d = db->dump();
+         csv << r << "," << seq << "," << ips << "," << rps << "," << db_size << ","
+             << d.total_segments << "," << d.control_block_zones << ","
+             << d.control_block_capacity << "\n";
+         csv.flush();
+      }
    }
 
    done.store(true, std::memory_order_relaxed);
@@ -728,6 +780,7 @@ int main(int argc, char** argv)
    bench::install_interrupt_handler();
 
    sal::set_current_thread_name("main");
+   reshuffle_random_buf();
    uint32_t    rounds;
    uint32_t    batch;
    uint32_t    items;
@@ -739,6 +792,7 @@ int main(int argc, char** argv)
    std::string db_dir   = "./psitridb";
    std::string bench    = "all";
    std::string sync_str = "none";
+   std::string csv_file;
 
    po::options_description desc("psitri-benchmark options");
    auto                    opt = desc.add_options();
@@ -759,6 +813,8 @@ int main(int argc, char** argv)
    opt("reset", po::bool_switch(&reset), "reset database before running");
    opt("stat", po::bool_switch(&stat)->default_value(false), "print database stats and exit");
    opt("validate", po::bool_switch(&validate)->default_value(false), "validate tree after each round");
+   opt("csv", po::value<std::string>(&csv_file)->default_value(""),
+       "write per-round CSV stats to this file (multithread benchmarks)");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -890,22 +946,22 @@ int main(int argc, char** argv)
    // -- Multithread read+write variants --
    if (should_run("multithread-lowerbound-rand"))
    {
-      multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "rand");
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "rand", db_dir, csv_file);
       print_stats(*ses);
    }
    if (should_run("multithread-lowerbound-known"))
    {
-      multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "known");
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "lower_bound", "known", db_dir, csv_file);
       print_stats(*ses);
    }
    if (should_run("multithread-get-rand"))
    {
-      multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "rand");
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "rand", db_dir, csv_file);
       print_stats(*ses);
    }
    if (should_run("multithread-get-known"))
    {
-      multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "known");
+      multithread_rw_test(cfg, db, *ses, threads, rand_key, "get", "known", db_dir, csv_file);
       print_stats(*ses);
    }
 

@@ -75,6 +75,7 @@ int tdb_ensure_cf(tdb_wrapper_t* w, const char* name)
       return TDB_WRAP_SUCCESS;
 
    tidesdb_column_family_config_t cfg = tidesdb_default_column_family_config();
+   cfg.compression_algorithm = TDB_COMPRESS_NONE;
    cfg.sync_mode = wrap_to_tdb_sync(w->sync_mode);
    return tidesdb_create_column_family(w->db, name, &cfg) == TDB_SUCCESS
               ? TDB_WRAP_SUCCESS

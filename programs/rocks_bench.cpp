@@ -59,13 +59,29 @@ namespace
       return s;
    }
 
+   /// 1MB buffer of pseudo-random bytes for incompressible values.
+   static constexpr size_t RANDOM_BUF_SIZE = 1 << 20;
+   static char             g_random_buf[RANDOM_BUF_SIZE];
+   static bool             g_random_buf_init = false;
+
+   static uint64_t g_random_seed = 0xdeadbeefcafebabe;
+
+   void reshuffle_random_buf()
+   {
+      auto* p = reinterpret_cast<uint64_t*>(g_random_buf);
+      for (size_t i = 0; i < RANDOM_BUF_SIZE / 8; ++i)
+      {
+         g_random_seed ^= g_random_seed << 13;
+         g_random_seed ^= g_random_seed >> 7;
+         g_random_seed ^= g_random_seed << 17;
+         p[i] = g_random_seed;
+      }
+   }
+
    std::string make_value(int value_size, uint64_t seed)
    {
-      std::string v(value_size, 'x');
-      // Mix in some variation
-      for (int i = 0; i < value_size && i < 8; i++)
-         v[i] = 'a' + ((seed >> (i * 4)) & 0xf) % 26;
-      return v;
+      size_t offset = (seed * 2654435761ULL) % (RANDOM_BUF_SIZE - value_size);
+      return std::string(g_random_buf + offset, value_size);
    }
 
    struct BenchmarkResult

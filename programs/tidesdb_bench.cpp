@@ -46,6 +46,32 @@ static int64_t rand_from_seq(uint64_t seq)
    return XXH3_64bits((char*)&seq, sizeof(seq));
 }
 
+/// 1MB buffer of pseudo-random bytes. Values are sliced from random offsets.
+static constexpr size_t RANDOM_BUF_SIZE = 1 << 20;  // 1 MB
+static uint8_t          g_random_buf[RANDOM_BUF_SIZE];
+
+static uint64_t g_random_seed = 0xdeadbeefcafebabe;
+
+/// Reshuffle the random buffer with a new seed. Call once per round
+/// outside the timing loop to ensure every round has unique values.
+static void reshuffle_random_buf()
+{
+   auto* p = reinterpret_cast<uint64_t*>(g_random_buf);
+   for (size_t i = 0; i < RANDOM_BUF_SIZE / 8; ++i)
+   {
+      g_random_seed ^= g_random_seed << 13;
+      g_random_seed ^= g_random_seed >> 7;
+      g_random_seed ^= g_random_seed << 17;
+      p[i] = g_random_seed;
+   }
+}
+
+static const uint8_t* random_value_ptr(uint64_t seq, uint32_t value_size)
+{
+   size_t offset = rand_from_seq(seq) % (RANDOM_BUF_SIZE - value_size);
+   return g_random_buf + offset;
+}
+
 static void to_key(uint64_t val, std::vector<uint8_t>& v)
 {
    v.resize(sizeof(val));
@@ -98,6 +124,21 @@ static void print_header(const std::string& name, const benchmark_config& cfg)
 
 static const char* CF_NAME = "bench";
 
+/// TidesDB limits transactions to 100K ops. Auto-commit helper commits
+/// the current txn and opens a new one when the op count reaches the limit.
+static constexpr uint32_t TDB_TXN_OP_LIMIT = 90000;  // leave headroom below 100K
+
+static void tdb_auto_commit(tdb_wrapper_txn_t*& txn, tdb_wrapper_t* db, uint32_t& op_count)
+{
+   if (op_count >= TDB_TXN_OP_LIMIT)
+   {
+      tdb_txn_commit(txn);
+      tdb_txn_free(txn);
+      txn = tdb_txn_begin(db);
+      op_count = 0;
+   }
+}
+
 struct tdb_guard
 {
    tdb_wrapper_t* db = nullptr;
@@ -136,11 +177,11 @@ static void insert_test(benchmark_config   cfg,
    print_header(name, cfg);
 
    std::vector<uint8_t> key;
-   std::vector<uint8_t> value(cfg.value_size, 'v');
    uint64_t             seq = 0;
 
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
 
@@ -150,15 +191,20 @@ static void insert_test(benchmark_config   cfg,
          std::cerr << "txn_begin failed\n";
          return;
       }
+      uint32_t op_count = 0;
 
       while (inserted < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
-            tdb_put(txn, CF_NAME, key.data(), key.size(), value.data(), value.size());
+            make_key(seq, key);
+            auto* vp = random_value_ptr(seq, cfg.value_size);
+            tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
+            ++seq;
             ++inserted;
+            ++op_count;
+            tdb_auto_commit(txn, tdb.db, op_count);
          }
       }
 
@@ -182,26 +228,31 @@ static void upsert_test(benchmark_config   cfg,
    print_header(name, cfg);
 
    std::vector<uint8_t> key;
-   std::vector<uint8_t> value(cfg.value_size, 'u');
    uint64_t             seq = 0;
 
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       auto     start = std::chrono::steady_clock::now();
       uint32_t count = 0;
 
       auto* txn = tdb_txn_begin(tdb.db);
       if (!txn)
          return;
+      uint32_t op_count = 0;
 
       while (count < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - count);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
-            tdb_put(txn, CF_NAME, key.data(), key.size(), value.data(), value.size());
+            make_key(seq, key);
+            auto* vp = random_value_ptr(seq, cfg.value_size);
+            tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
+            ++seq;
             ++count;
+            ++op_count;
+            tdb_auto_commit(txn, tdb.db, op_count);
          }
       }
 
@@ -469,7 +520,7 @@ static void multithread_rw_test(benchmark_config   cfg,
              << std::string(std::max(0, int(52 - int(label.size()))), '-') << "\n";
    std::cout << "write rounds: " << cfg.rounds << "  items: " << format_comma(cfg.items)
              << "  read threads: " << num_threads << "\n";
-   std::cout << "-----------------------------------------------------------------------\n";
+   std::cout << "-----------------------------------------------------------------------" << std::endl;
 
    bool use_get   = (read_op == "get");
    bool use_known = (key_mode == "known");
@@ -479,17 +530,20 @@ static void multithread_rw_test(benchmark_config   cfg,
       auto* txn = tdb_txn_begin(tdb.db);
       if (!txn)
          return;
+      uint32_t op_count = 0;
       std::vector<uint8_t> key;
-      std::vector<uint8_t> value(cfg.value_size, 'v');
       for (uint32_t i = 0; i < cfg.items; ++i)
       {
          make_key(i, key);
-         tdb_put(txn, CF_NAME, key.data(), key.size(), value.data(), value.size());
+         auto* vp = random_value_ptr(i, cfg.value_size);
+         tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
+         ++op_count;
+         tdb_auto_commit(txn, tdb.db, op_count);
       }
       tdb_txn_commit(txn);
       tdb_txn_free(txn);
    }
-   std::cout << "seeded " << format_comma(cfg.items) << " keys\n";
+   std::cout << "seeded " << format_comma(cfg.items) << " keys" << std::endl;
 
    struct alignas(128) padded_counters
    {
@@ -597,15 +651,16 @@ static void multithread_rw_test(benchmark_config   cfg,
    auto overall_start = std::chrono::steady_clock::now();
 
    std::vector<uint8_t> key;
-   std::vector<uint8_t> value(cfg.value_size, 'v');
    uint64_t             seq = cfg.items;
 
    int64_t prev_ops = 0;
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       auto* txn = tdb_txn_begin(tdb.db);
       if (!txn)
          break;
+      uint32_t op_count = 0;
 
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
@@ -614,9 +669,13 @@ static void multithread_rw_test(benchmark_config   cfg,
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
-            tdb_put(txn, CF_NAME, key.data(), key.size(), value.data(), value.size());
+            make_key(seq, key);
+            auto* vp = random_value_ptr(seq, cfg.value_size);
+            tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
+            ++seq;
             ++inserted;
+            ++op_count;
+            tdb_auto_commit(txn, tdb.db, op_count);
          }
       }
       tdb_txn_commit(txn);
@@ -633,7 +692,7 @@ static void multithread_rw_test(benchmark_config   cfg,
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  inserts/sec  " << std::setw(12) << std::right << format_comma(rps)
-                << "  " << read_op << "s/sec\n";
+                << "  " << read_op << "s/sec" << std::endl;
    }
 
    done.store(true, std::memory_order_relaxed);
@@ -658,6 +717,7 @@ static void multithread_rw_test(benchmark_config   cfg,
 int main(int argc, char** argv)
 {
    bench::install_interrupt_handler();
+   reshuffle_random_buf();
    uint32_t    rounds;
    uint32_t    batch;
    uint32_t    items;

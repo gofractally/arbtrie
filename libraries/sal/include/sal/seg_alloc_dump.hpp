@@ -75,6 +75,10 @@ namespace sal
       // Free release count
       int64_t free_release_count = 0;
 
+      // Control block stats
+      uint32_t control_block_zones    = 0;  // Number of allocated control block zones
+      uint64_t control_block_capacity = 0;  // Max number of control blocks that can be allocated
+
       // Detailed info per component
       std::vector<segment_info>    segments;
       std::vector<session_info>    sessions;

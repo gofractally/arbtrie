@@ -1401,6 +1401,10 @@ namespace sal
       result.free_release_count = _id_alloc.free_release_count();
       */
 
+      // Control block stats
+      result.control_block_zones    = _ptr_alloc.num_allocated_zones();
+      result.control_block_capacity = _ptr_alloc.current_max_address_count();
+
       return result;
    }
 
