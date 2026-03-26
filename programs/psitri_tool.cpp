@@ -158,6 +158,117 @@ void cmd_defrag(database& db, const fs::path& dir)
    std::cout << "Remove it manually after verifying the new database.\n";
 }
 
+std::string format_number(uint64_t n)
+{
+   auto s = std::to_string(n);
+   int  pos = s.size() - 3;
+   while (pos > 0)
+   {
+      s.insert(pos, ",");
+      pos -= 3;
+   }
+   return s;
+}
+
+int cmd_verify(database& db)
+{
+   std::cout << "Verifying database integrity...\n\n";
+
+   auto r = db.verify();
+
+   // Segment sync checksums
+   std::cout << "-- Segment Sync Checksums --\n";
+   std::cout << "  " << std::setw(22) << std::left << "Checked"
+             << format_number(r.segment_checksums.total()) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Passed"
+             << format_number(r.segment_checksums.passed) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Failed"
+             << format_number(r.segment_checksums.failed) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Not checksummed"
+             << format_number(r.segment_checksums.unknown) << "\n";
+
+   // Object checksums
+   std::cout << "\n-- Object Checksums --\n";
+   std::cout << "  " << std::setw(22) << std::left << "Reachable objects"
+             << format_number(r.object_checksums.total()) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Passed"
+             << format_number(r.object_checksums.passed) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Failed"
+             << format_number(r.object_checksums.failed) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Not checksummed"
+             << format_number(r.object_checksums.unknown) << "\n";
+
+   // Key hashes
+   std::cout << "\n-- Key Hashes --\n";
+   std::cout << "  " << std::setw(22) << std::left << "Keys checked"
+             << format_number(r.key_checksums.total()) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Passed"
+             << format_number(r.key_checksums.passed) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Failed"
+             << format_number(r.key_checksums.failed) << "\n";
+
+   // Value checksums
+   std::cout << "\n-- Value Checksums --\n";
+   std::cout << "  " << std::setw(22) << std::left << "Values checked"
+             << format_number(r.value_checksums.total()) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Passed"
+             << format_number(r.value_checksums.passed) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Failed"
+             << format_number(r.value_checksums.failed) << "\n";
+
+   // Tree structure
+   std::cout << "\n-- Tree Structure --\n";
+   std::cout << "  " << std::setw(22) << std::left << "Roots checked"
+             << r.roots_checked << " / " << num_top_roots << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Nodes visited"
+             << format_number(r.nodes_visited) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Reachable size"
+             << format_bytes(r.reachable_bytes) << "\n";
+   std::cout << "  " << std::setw(22) << std::left << "Dangling pointers"
+             << format_number(r.dangling_pointers) << "\n";
+
+   if (db.ref_counts_stale())
+      std::cout << "\n  Warning: ref counts stale (deferred_cleanup recovery pending)\n";
+
+   // Failure details
+   if (!r.ok())
+   {
+      std::cout << "\n-- Failures --\n";
+
+      for (auto& f : r.segment_failures)
+      {
+         std::cout << "  FAIL: segment " << f.segment << " sync checksum at pos "
+                   << f.range_start << "-" << f.range_end << "\n";
+      }
+
+      for (auto& f : r.node_failures)
+      {
+         std::cout << "  FAIL: " << f.failure_type << " at address 0x" << std::hex << *f.address
+                   << std::dec;
+         if (f.node_type != sal::header_type::undefined)
+            std::cout << " (" << static_cast<psitri::node_type>(f.node_type) << ")";
+         std::cout << "\n";
+         if (!f.key_prefix_hex.empty())
+            std::cout << "        Affected keys: prefix 0x" << f.key_prefix_hex << "...\n";
+         std::cout << "        Root: " << f.root_index << "\n";
+      }
+
+      for (auto& f : r.key_failures)
+      {
+         std::cout << "  FAIL: " << f.failure_type << " at key 0x" << f.key_hex << "\n";
+         std::cout << "        Root: " << f.root_index
+                   << "  Leaf: 0x" << std::hex << *f.leaf_address << std::dec
+                   << "  Branch: " << f.branch_index << "\n";
+      }
+
+      std::cout << "\n  " << format_number(r.total_failures()) << " integrity failure(s) found.\n";
+      return 1;
+   }
+
+   std::cout << "\n  Database integrity verified.\n";
+   return 0;
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv)
@@ -171,7 +282,7 @@ int main(int argc, char** argv)
    opt("help,h", "show this help message");
    opt("db-dir,d", po::value<std::string>(&db_dir), "database directory");
    opt("command", po::value<std::string>(&command)->default_value("info"),
-       "command: info, defrag");
+       "command: info, verify, defrag");
    opt("recovery,r", po::value<std::string>(&recovery_str)->default_value("none"),
        "recovery mode: none, deferred, app_crash, power_loss, full_verify");
 
@@ -196,6 +307,7 @@ int main(int argc, char** argv)
       std::cout << "Usage: psitri-tool [command] <db-dir> [options]\n\n"
                 << "Commands:\n"
                 << "  info       Show database size summary (default)\n"
+                << "  verify     Full integrity verification (offline)\n"
                 << "  defrag     Compact and truncate to minimum size\n"
                 << "\n"
                 << desc << "\n";
@@ -215,12 +327,14 @@ int main(int argc, char** argv)
 
       if (command == "info")
          cmd_info(*db, db_dir);
+      else if (command == "verify")
+         return cmd_verify(*db);
       else if (command == "defrag")
          cmd_defrag(*db, db_dir);
       else
       {
          std::cerr << "Unknown command: " << command << "\n";
-         std::cerr << "Valid commands: info, defrag\n";
+         std::cerr << "Valid commands: info, verify, defrag\n";
          return 1;
       }
    }

@@ -278,6 +278,23 @@ namespace psitri
       {
          return XXH3_64bits(key.data(), key.size());
       }
+
+      /// Verify the stored key hash for branch bn matches computed hash.
+      bool verify_key_hash(branch_number bn) const noexcept
+      {
+         auto key = get_key(bn);
+         return key_hashs()[*bn] == calc_key_hash(key);
+      }
+
+      /// Verify the inline value checksum for branch bn.
+      /// Returns true if value is valid or not inline (only inline values have checksums).
+      bool verify_value_checksum(branch_number bn) const noexcept
+      {
+         auto vb = value_offsets()[*bn];
+         if (vb.type() != value_type_flag::inline_data)
+            return true;  // non-inline values don't have leaf-level checksums
+         return get_value_ptr(vb.offset())->is_valid();
+      }
       /// uses hash to find key
       branch_number get(key_view key) const noexcept
       {
@@ -589,7 +606,8 @@ namespace psitri
          value_view get() const noexcept { return value_view((const char*)_data, _size); }
          bool       is_valid() const noexcept
          {
-            return _checksum == XXH3_64bits((char*)&_size, sizeof(_size) + _size);
+            return _checksum ==
+                   static_cast<uint8_t>(XXH3_64bits((char*)&_size, sizeof(_size) + _size));
          }
          uint8_t checksum() const noexcept { return _checksum; }
       };

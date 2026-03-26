@@ -8,6 +8,7 @@
 #include <sal/mapped_memory/allocator_state.hpp>
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/segment_thread.hpp>
+#include <sal/verify.hpp>
 #include <shared_mutex>
 #include "sal/config.hpp"
 
@@ -122,6 +123,19 @@ namespace sal
       /// its control blocks are set up with the correct locations and ref counts.
       /// Root addresses are also copied.
       void copy_live_objects_to(allocator& dest);
+
+      /// Verify all segment sync checksums. Walks each segment's sync_header chain
+      /// and verifies the XXH3 checksum covering each sync range.
+      /// Populates segment_checksums counters and segment_failures in the result.
+      void verify_segments(verify_result& result);
+
+      /// Resolve a ptr_address to its alloc_header and location.
+      /// Returns {nullptr, {}} if address is invalid (no control block, ref==0,
+      /// or address mismatch).
+      std::pair<const alloc_header*, location> resolve(ptr_address addr);
+
+      /// Access root objects for iteration
+      auto& root_objects() const { return *_root_objects; }
 
       /// Check if corruption has been detected (e.g. by compactor).
       /// Writers should call this before starting transactions.

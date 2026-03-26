@@ -387,6 +387,77 @@ namespace sal
       return total;
    }
 
+   std::pair<const alloc_header*, location> allocator::resolve(ptr_address addr)
+   {
+      if (addr == null_ptr_address)
+         return {nullptr, {}};
+
+      auto* cb = _ptr_alloc.try_get(addr);
+      if (!cb || cb->ref() == 0)
+         return {nullptr, {}};
+
+      auto  loc    = cb->loc();
+      auto  seg    = loc.segment();
+      auto* segptr = get_segment(seg);
+      auto* obj    = reinterpret_cast<const alloc_header*>(segptr->data + loc.segment_offset());
+
+      if (obj->address() != addr)
+         return {nullptr, {}};
+
+      return {obj, loc};
+   }
+
+   void allocator::verify_segments(verify_result& result)
+   {
+      uint32_t num_segs = _block_alloc.num_blocks();
+
+      for (uint32_t seg_idx = 0; seg_idx < num_segs; ++seg_idx)
+      {
+         auto* seg = get_segment(segment_number(seg_idx));
+         if (seg->get_alloc_pos() == 0)
+            continue;
+
+         // Walk the sync_header chain from the last sync header backward
+         uint32_t pos = seg->_last_aheader_pos;
+         while (pos > 0)
+         {
+            auto* ah = reinterpret_cast<const alloc_header*>(seg->data + pos);
+            if (ah->type() != header_type::sync_head)
+               break;
+
+            auto* sh = reinterpret_cast<const sync_header*>(ah);
+
+            if (sh->sync_checksum() != 0)
+            {
+               auto checksum_size =
+                   pos + sh->checksum_offset() - sh->start_checksum_pos();
+               auto computed =
+                   XXH3_64bits(seg->data + sh->start_checksum_pos(), checksum_size);
+
+               if (computed == sh->sync_checksum())
+               {
+                  ++result.segment_checksums.passed;
+               }
+               else
+               {
+                  ++result.segment_checksums.failed;
+                  result.segment_failures.push_back(
+                      {seg_idx, pos, sh->start_checksum_pos(),
+                       pos + static_cast<uint32_t>(sh->checksum_offset())});
+               }
+            }
+            else
+            {
+               ++result.segment_checksums.unknown;
+            }
+
+            if (pos == sh->prev_aheader_pos())
+               break;  // prevent infinite loop
+            pos = sh->prev_aheader_pos();
+         }
+      }
+   }
+
    std::vector<allocator::segment_freed_audit> allocator::audit_freed_space()
    {
       std::vector<segment_freed_audit> results;

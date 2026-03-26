@@ -7,6 +7,7 @@
 #include <sal/config.hpp>
 #include <sal/mapping.hpp>
 #include <sal/seg_alloc_dump.hpp>
+#include <sal/verify.hpp>
 #include <thread>
 
 namespace psitri
@@ -79,6 +80,11 @@ namespace psitri
       /// This is the expensive O(live objects) walk that deferred_cleanup skips.
       /// No-op if ref counts are not stale.
       void reclaim_leaked_memory();
+
+      /// Full offline integrity verification: segment checksums, object checksums,
+      /// key hashes, value checksums, and tree structure.
+      /// Returns detailed results including per-failure context for targeted repair.
+      sal::verify_result verify();
 
       /// Full recovery: rebuild control blocks from segments and reclaim leaked memory
       void recover() { _allocator.recover(); }
