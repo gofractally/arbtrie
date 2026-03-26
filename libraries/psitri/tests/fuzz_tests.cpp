@@ -401,34 +401,18 @@ namespace
             _total_weight += _ow.weights[i];
       }
 
-      void run(uint64_t num_ops, bool trace_allocs = false, bool check_descendents = false)
+      void run(uint64_t num_ops, bool check_descendents = false)
       {
-         uint64_t prev_alloc = 0;
          for (uint64_t i = 0; i < num_ops; ++i)
          {
             auto op = pick_op();
-            execute(op, trace_allocs);
+            execute(op);
             _op_count++;
 
             // Full tree structure validation to catch descendents mismatches
             if (check_descendents && *_cur && _oracle.size() > 0)
             {
                _cur->validate();
-            }
-
-            if (trace_allocs)
-            {
-               auto alloc = _ses->get_total_allocated_objects();
-               if (op == op_type::commit_reopen || op == op_type::update ||
-                   op == op_type::upsert || op == op_type::insert || op == op_type::remove ||
-                   op == op_type::transaction_abort || op == op_type::remove_range ||
-                   alloc != prev_alloc)
-               {
-                  std::cerr << "op#" << _op_count << " " << op_name(op)
-                            << " oracle=" << _oracle.size()
-                            << " alloc=" << alloc << std::endl;
-               }
-               prev_alloc = alloc;
             }
 
             if (_op_count % (100 / std::max(1, SCALE)) == 0)
@@ -534,7 +518,7 @@ namespace
          // Wait for the compactor to process all pending releases.
          // Multiple waits needed: first drains the queue, second handles
          // any cascading releases from freed subtrees.
-         for (int i = 0; i < 10; ++i)
+         for (int i = 0; i < 3; ++i)
          {
             _tdb.db->wait_for_compactor(std::chrono::milliseconds(5000));
             if (_ses->get_pending_release_count() == 0)
@@ -542,8 +526,6 @@ namespace
          }
          return _ses->get_total_allocated_objects();
       }
-
-      uint64_t alloc_count() { return _ses->get_total_allocated_objects(); }
 
       void print_tree()
       {
@@ -592,7 +574,7 @@ namespace
          return op_type::upsert;
       }
 
-      void execute(op_type op, bool trace_txn = false)
+      void execute(op_type op)
       {
          INFO("op #" << _op_count << " type=" << op_name(op) << " oracle_size=" << _oracle.size());
 
@@ -635,7 +617,7 @@ namespace
                do_commit_reopen();
                break;
             case op_type::transaction_abort:
-               do_transaction_abort(trace_txn);
+               do_transaction_abort();
                break;
             default:
                break;
@@ -971,34 +953,13 @@ namespace
          }
       }
 
-      void do_transaction_abort(bool trace = false)
+      void do_transaction_abort()
       {
          // Commit current state so we have a persisted root to transact on
          auto root = _cur->root();
          if (!root)
             return;  // empty tree, nothing to do
          _ses->set_root(_root_index, std::move(root));
-
-         // Helper to snapshot value_nodes with ref counts
-         using vn_snap = std::map<uint64_t, uint32_t>;  // addr → ref
-         auto snap_vn = [this]() {
-            vn_snap s;
-            _ses->for_each_live_object(
-                [&](sal::ptr_address adr, uint32_t ref, const sal::alloc_header* obj) {
-                   if ((int)obj->type() == (int)psitri::node_type::value)
-                      s[*adr] = ref;
-                });
-            return s;
-         };
-
-         auto alloc_before_txn = _ses->get_total_allocated_objects();
-         vn_snap snap_before;
-         if (trace)
-         {
-            snap_before = snap_vn();
-            std::cerr << "  TXN_ABORT start: alloc=" << alloc_before_txn
-                      << " vn=" << snap_before.size() << std::endl;
-         }
 
          {  // txn scope — destroyed at end of block
             auto txn = _ses->start_transaction(_root_index);
@@ -1012,9 +973,6 @@ namespace
             {
                std::uniform_int_distribution<int> mut_dist(0, 3);
                int mut = mut_dist(_rng);
-               auto alloc_pre = _ses->get_total_allocated_objects();
-               vn_snap snap_pre_mut;
-               if (trace) snap_pre_mut = snap_vn();
                try
                {
                   switch (mut)
@@ -1024,11 +982,6 @@ namespace
                         auto key   = txn_keygen.generate();
                         auto value = txn_keygen.generate_value(txn_max_val);
                         txn.insert(to_key_view(key), to_value_view(value));
-                        if (trace)
-                           std::cerr << "  txn_mut[" << i << "] insert key_len=" << key.size()
-                                     << " val_len=" << value.size()
-                                     << " alloc=" << alloc_pre << "→" << _ses->get_total_allocated_objects()
-                                     << std::endl;
                         break;
                      }
                      case 1:
@@ -1036,11 +989,6 @@ namespace
                         auto key   = txn_keygen.pick_or_generate();
                         auto value = txn_keygen.generate_value(txn_max_val);
                         txn.update(to_key_view(key), to_value_view(value));
-                        if (trace)
-                           std::cerr << "  txn_mut[" << i << "] update key_len=" << key.size()
-                                     << " val_len=" << value.size()
-                                     << " alloc=" << alloc_pre << "→" << _ses->get_total_allocated_objects()
-                                     << std::endl;
                         break;
                      }
                      case 2:
@@ -1048,93 +996,21 @@ namespace
                         auto key   = txn_keygen.pick_or_generate();
                         auto value = txn_keygen.generate_value(txn_max_val);
                         txn.upsert(to_key_view(key), to_value_view(value));
-                        if (trace)
-                           std::cerr << "  txn_mut[" << i << "] upsert key_len=" << key.size()
-                                     << " val_len=" << value.size()
-                                     << " alloc=" << alloc_pre << "→" << _ses->get_total_allocated_objects()
-                                     << std::endl;
                         break;
                      }
                      case 3:
                      {
                         auto key = txn_keygen.pick_existing();
                         txn.remove(to_key_view(key));
-                        if (trace)
-                           std::cerr << "  txn_mut[" << i << "] remove key_len=" << key.size()
-                                     << " alloc=" << alloc_pre << "→" << _ses->get_total_allocated_objects()
-                                     << std::endl;
                         break;
                      }
                   }
                }
-               catch (...)
-               {
-                  if (trace)
-                     std::cerr << "  txn_mut[" << i << "] EXCEPTION alloc=" << alloc_pre
-                               << "→" << _ses->get_total_allocated_objects() << std::endl;
-               }
-               if (trace)
-               {
-                  auto snap_post_mut = snap_vn();
-                  for (auto& [a, r] : snap_post_mut)
-                  {
-                     auto it = snap_before.find(a);
-                     if (it != snap_before.end() && r > it->second)
-                     {
-                        auto it2 = snap_pre_mut.find(a);
-                        if (it2 == snap_pre_mut.end() || r > it2->second)
-                           std::cerr << "    mut[" << i << "] BUMP vn addr=" << a
-                                     << " orig=" << it->second << " now=" << r << std::endl;
-                     }
-                  }
-               }
+               catch (...) {}  // ignore errors in aborted mutations
             }
 
-            if (trace)
-            {
-               // Check for any value_node whose ref increased during this txn
-               auto snap_after_mut = snap_vn();
-               for (auto& [a, r] : snap_after_mut)
-               {
-                  auto it = snap_before.find(a);
-                  if (it != snap_before.end() && r > it->second)
-                     std::cerr << "  BUMP vn addr=" << a << " ref=" << it->second << "→" << r << std::endl;
-               }
-            }
-
-            auto alloc_before_abort = _ses->get_total_allocated_objects();
             txn.abort();
-            if (trace)
-               std::cerr << "  TXN_ABORT after abort(): alloc=" << alloc_before_abort
-                         << "→" << _ses->get_total_allocated_objects() << std::endl;
          }  // txn destroyed here — its internal cursor releases COW tree
-
-         if (trace)
-         {
-            _tdb.db->wait_for_compactor(std::chrono::milliseconds(1000));
-            auto alloc_after_destroy = _ses->get_total_allocated_objects();
-            std::cerr << "  TXN_ABORT after destroy+compact: alloc=" << alloc_before_txn
-                      << "→" << alloc_after_destroy
-                      << " delta=" << (int64_t)(alloc_after_destroy - alloc_before_txn)
-                      << std::endl;
-
-            // Snapshot after abort+compact
-            auto snap_post_abort = snap_vn();
-            // Show value_nodes with higher ref than before txn (over-retained)
-            for (auto& [a, r] : snap_post_abort)
-            {
-               auto it = snap_before.find(a);
-               if (it == snap_before.end())
-                  std::cerr << "    LEAKED(new) vn addr=" << a << " ref=" << r << std::endl;
-               else if (r > it->second)
-                  std::cerr << "    OVER-RETAINED vn addr=" << a << " ref=" << it->second << "→" << r << std::endl;
-               else if (r < it->second)
-                  std::cerr << "    UNDER-RETAINED vn addr=" << a << " ref=" << it->second << "→" << r << std::endl;
-            }
-            for (auto& [a, r] : snap_before)
-               if (!snap_post_abort.count(a))
-                  std::cerr << "    FREED vn addr=" << a << " (was ref=" << r << ")" << std::endl;
-         }
 
          // Reopen cursor from the persisted root (unchanged by abort)
          auto new_root = _ses->get_root(_root_index);
@@ -1873,24 +1749,6 @@ TEST_CASE("fuzz keylost no compact", "[fuzz][diag]")
 
    runner.run(5000 / SCALE);
    runner.cleanup_and_leak_check();
-}
-
-TEST_CASE("bisect txn abort leak", "[fuzz][diag]")
-{
-   uint64_t seed = 1357913ULL;
-   int leaking_op = 2707;
-   INFO("seed=" << seed);
-
-   // Replay with tracing to identify the over-retained vn
-   test_db tdb("bisect_txn_diag");
-   fuzz_runner runner(tdb, seed, transaction_abort_weights());
-   runner.run(leaking_op, true);
-
-   auto leaks = runner.cleanup_and_count_leaks();
-   std::cerr << "Leaks: " << leaks << std::endl;
-   if (leaks > 0)
-      tdb.ses->dump_live_objects();
-   REQUIRE(leaks == 0);
 }
 
 #if 0  // Diagnostic tests kept for reference but disabled
