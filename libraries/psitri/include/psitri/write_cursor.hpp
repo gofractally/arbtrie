@@ -144,6 +144,7 @@ namespace psitri
       tree_context::stats get_stats() { return _ctx.get_stats(); }
       void                print() { _ctx.print(); }
       void                validate() { _ctx.validate(); }
+      void                set_trace_descendents(bool t) { _ctx.set_trace_descendents(t); }
 
      private:
       friend class transaction;

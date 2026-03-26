@@ -9,13 +9,13 @@
 - **Likely cause**: Bookkeeping bug in SAL's ptr_alloc — a release decremented the ref but not the `used()` counter, or a root-table operation created an untracked allocation.
 - **Pattern**: Double `commit_reopen` (making root shared via root table + cursor + snapshot) followed by shared-mode upsert. The upsert triggers COW, and somewhere in the release cascade the counter gets out of sync.
 
-### 2. count_keys returns garbage values
-- **Repro**: Various fuzz seeds; `count_keys()` returns values like 549755813886 when oracle has 12 entries. Iteration count is always correct.
-- **Symptom**: `count_keys(lower, upper)` returns wildly incorrect values. Full iteration with `seek_begin/next` counts correctly.
-- **Likely cause**: Descendant count tracking (`_delta_descendents`) gets corrupted during some tree restructuring operation (split, merge, or update overflow).
-- **Workaround**: Fuzz tests use WARN instead of REQUIRE for count_keys checks.
-
 ## Fixed (recent)
+
+### count_keys returns garbage values (split_merge forwarding bug)
+- **Repro**: `psitri-tests "fuzz long run balanced" -c "seed=314159"` — descendant count mismatch at depth 2.
+- **Symptom**: `count_keys()` returns wildly incorrect values because inner node `_descendents` fields accumulate errors over time.
+- **Root cause**: In `split_merge`, the `split` function creates new inner nodes by calling `count_subrange_keys`, which uses `count_child_keys` → `get_ref` to count each child's keys. `get_ref` follows control-block forwarding. The recursive upsert already realloc'd branch `br`, so forwarding returns the POST-upsert count for that branch. The split half containing `br` gets an inflated descendant count. Then `merge_branches` applies `_delta_descendents` on top, double-counting the change.
+- **Fix**: In `split_merge`, compute the forwarding error (`forwarded_count - original_count`) and subtract it from the split half's descendant count before calling `merge_branches`.
 
 ### range_remove ghost keys when both start and boundary branches COW (this session)
 - **Repro**: `psitri-tests "fuzz shared mode remove heavy" -c "seed=11332302"`

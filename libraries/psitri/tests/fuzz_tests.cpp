@@ -385,7 +385,7 @@ namespace
             _total_weight += _ow.weights[i];
       }
 
-      void run(uint64_t num_ops, bool trace_allocs = false)
+      void run(uint64_t num_ops, bool trace_allocs = false, bool check_descendents = false)
       {
          uint64_t prev_alloc = 0;
          for (uint64_t i = 0; i < num_ops; ++i)
@@ -393,6 +393,12 @@ namespace
             auto op = pick_op();
             execute(op);
             _op_count++;
+
+            // Full tree structure validation to catch descendents mismatches
+            if (check_descendents && *_cur && _oracle.size() > 0)
+            {
+               _cur->validate();
+            }
 
             if (trace_allocs)
             {
@@ -687,6 +693,11 @@ namespace
          auto value = _keygen.generate_value(_max_value_len);
          INFO("upsert key=" << hex_encode(key) << " len=" << key.size());
 
+         if (_op_count >= 8682 && _op_count <= 8684)
+            WARN("op#" << (_op_count+1) << " upsert key=" << hex_encode(key)
+                 << " len=" << key.size() << " val_len=" << value.size()
+                 << " exists=" << (_oracle.count(key) > 0));
+
          _cur->upsert(to_key_view(key), to_value_view(value));
          _oracle[key] = value;
 
@@ -837,13 +848,7 @@ namespace
             INFO("unbounded count: iter=" << iter_count << " count_keys=" << psitri_count
                                           << " oracle=" << _oracle.size());
             REQUIRE(iter_count == _oracle.size());
-            // count_keys has known bugs — use WARN instead of REQUIRE
-            if (psitri_count != _oracle.size())
-            {
-               WARN("count_keys mismatch: count_keys=" << psitri_count
-                                                        << " expected=" << _oracle.size()
-                                                        << " (may be a count_keys bug)");
-            }
+            REQUIRE(psitri_count == _oracle.size());
          }
          else
          {
@@ -862,12 +867,7 @@ namespace
             INFO("bounded count: iter=" << iter_count << " count_keys=" << psitri_count
                                         << " oracle=" << oracle_count);
             REQUIRE(iter_count == oracle_count);
-            if (psitri_count != oracle_count)
-            {
-               WARN("count_keys mismatch: count_keys=" << psitri_count
-                                                        << " expected=" << oracle_count
-                                                        << " (may be a count_keys bug)");
-            }
+            REQUIRE(psitri_count == oracle_count);
          }
       }
 
@@ -1383,7 +1383,7 @@ TEST_CASE("fuzz churn", "[fuzz]")
 TEST_CASE("fuzz long run balanced", "[fuzz]")
 {
    // Longer run with balanced weights for sustained stress
-   uint64_t seed = GENERATE(42, 314159, 0xCAFEBABE, 0xDEADBEEF, 1000000007, 7777777);
+   uint64_t seed = GENERATE(314159, 42, 0xDEAD, 987654, 0xCAFEBABE, 7654321, 161803);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_long_balanced_" + std::to_string(seed));

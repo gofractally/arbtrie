@@ -21,10 +21,12 @@ namespace psitri
       sal::smart_ptr<alloc_header> _root;
       int                          _old_value_size = -1;
       int                          _delta_descendents          = 0;  // +1 insert, -1 remove, 0 update/not-found
+      bool                         _trace_descendents          = false;  // DEBUG: trace descendant count changes
       uint32_t                     _collapse_threshold = 24;
 
      public:
       void set_collapse_threshold(uint32_t t) { _collapse_threshold = t; }
+      void set_trace_descendents(bool t) { _trace_descendents = t; }
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
       sal::smart_ptr<alloc_header> take_root() { return std::move(_root); }
       tree_context(sal::smart_ptr<alloc_header> root)
@@ -53,17 +55,27 @@ namespace psitri
       uint64_t count_child_keys(ptr_address addr) noexcept
       {
          auto ref = _session.get_ref(addr);
-         switch (node_type(ref->type()))
+         auto nt = node_type(ref->type());
+         uint64_t result = 0;
+         switch (nt)
          {
             case node_type::inner:
-               return ref.as<inner_node>()->descendents();
+               result = ref.as<inner_node>()->descendents();
+               break;
             case node_type::inner_prefix:
-               return ref.as<inner_prefix_node>()->descendents();
+               result = ref.as<inner_prefix_node>()->descendents();
+               break;
             case node_type::leaf:
-               return ref.as<leaf_node>()->num_branches();
+               result = ref.as<leaf_node>()->num_branches();
+               break;
             default:
+               if (_trace_descendents)
+                  SAL_WARN("count_child_keys: unexpected node type {} at addr={}", (int)nt, addr);
                std::unreachable();
          }
+         if (_trace_descendents)
+            SAL_WARN("  count_child_keys: addr={} type={} result={}", addr, (int)nt, result);
+         return result;
       }
       uint64_t count_branch_keys(const branch_set& branches) noexcept
       {
@@ -87,8 +99,11 @@ namespace psitri
       {
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
+         auto cbk = count_branch_keys(branches);
+         if (_trace_descendents)
+            SAL_WARN("make_inner_prefix: prefix_len={} branches={} descendents={}", prefix.size(), branches.count(), cbk);
          return _session.alloc<inner_prefix_node>(hint, prefix, branches, needed_clines,
-                                                  out_cline_idx, count_branch_keys(branches));
+                                                  out_cline_idx, cbk);
       }
       template <typename NodeType>
       smart_ref<inner_prefix_node> remake_inner_prefix(const smart_ref<NodeType>& in,
@@ -97,8 +112,11 @@ namespace psitri
       {
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
+         auto cbk = count_branch_keys(branches);
+         if (_trace_descendents)
+            SAL_WARN("remake_inner_prefix: prefix_len={} branches={} descendents={}", prefix.size(), branches.count(), cbk);
          return _session.realloc<inner_prefix_node>(in, prefix, branches, needed_clines,
-                                                    out_cline_idx, count_branch_keys(branches));
+                                                    out_cline_idx, cbk);
       }
 
       template <typename InnerNodeType>
@@ -608,17 +626,39 @@ namespace psitri
       {
          PSITRI_ASSERT_INVARIANTS(r->validate_invariants());
          uint64_t total_keys = 0;
+         // Store per-branch recursive counts for comparison
+         std::vector<uint64_t> recursive_counts(r->num_branches());
          for (int i = 0; i < r->num_branches(); ++i)
          {
             auto br  = r->get_branch(branch_number(i));
             auto ref = _session.get_ref(br);
             assert(ref.ref() > 0);
-            total_keys += validate_subtree(ref, depth);
+            recursive_counts[i] = validate_subtree(ref, depth);
+            total_keys += recursive_counts[i];
          }
          if (r->descendents() != total_keys)
          {
-            SAL_ERROR("validate: descendents mismatch at depth {}: stored={} actual={} num_branches={}",
-                      depth, r->descendents(), total_keys, r->num_branches());
+            SAL_ERROR("validate: descendents mismatch at depth {}: addr={} stored={} actual={} num_branches={}",
+                      depth, r.address(), r->descendents(), total_keys, r->num_branches());
+            // Dump all branch counts: O(1) stored vs recursive actual
+            for (int i = 0; i < r->num_branches(); ++i)
+            {
+               auto br  = r->get_branch(branch_number(i));
+               auto ref = _session.get_ref(br);
+               auto nt = node_type(ref->type());
+               uint64_t stored_count = 0;
+               if (nt == node_type::inner)
+                  stored_count = ref.template as<inner_node>()->descendents();
+               else if (nt == node_type::inner_prefix)
+                  stored_count = ref.template as<inner_prefix_node>()->descendents();
+               else if (nt == node_type::leaf)
+                  stored_count = ref.template as<leaf_node>()->num_branches();
+               if (stored_count != recursive_counts[i])
+                  SAL_ERROR("  branch[{}]: addr={} type={} stored={} actual={} MISMATCH",
+                            i, br, (int)nt, stored_count, recursive_counts[i]);
+               else
+                  SAL_ERROR("  branch[{}]: addr={} type={} count={}", i, br, (int)nt, stored_count);
+            }
             assert(r->descendents() == total_keys);
          }
          return total_keys;
@@ -866,16 +906,32 @@ namespace psitri
                                         const branch_set&         sub_branches)
    {
       auto nb = in->num_branches();
-      // we need to split the node which will produce 2 branches
-      // TODO: this split<> method assumes the parent handles inner_prefix differently...
-      // but we don't do anything different with inner_prefix nodes,
-      // merge_branches() has check for is_inner_prefix_node<InnerNodeType>
+
+      // split() computes descendant counts via count_child_keys which follows
+      // control-block forwarding. The recursive upsert already realloc'd the
+      // child at branch `br`, so forwarding returns the POST-upsert count for
+      // that branch. This makes the split half containing `br` have an inflated
+      // descendant count. Compute the error so we can fix it after split.
+      uint64_t forwarded_count = count_child_keys(in->get_branch(br));
+      // in->descendents() is still the correct pre-upsert total because the
+      // inner node itself hasn't been modified yet.
+      // original_count = in->descendents() - sum_of_all_other_branches
+      // But that's expensive. Instead, compute it from the sub_branches total:
+      // _delta_descendents = sub_branches_total - original_count
+      // => original_count = sub_branches_total - _delta_descendents
+      uint64_t sub_total = count_branch_keys(sub_branches);
+      uint64_t original_count = sub_total - _delta_descendents;
+      int64_t  forwarding_error = int64_t(forwarded_count) - int64_t(original_count);
+
       auto [left, right] = split<mode>(parent_hint, in, br, sub_branches);
-      // at this point both branches can be considered unique
+
+      // Fix the descendant count of the half containing branch `br`
+      // to undo the forwarding-induced inflation.
       if (br < nb / 2)
       {
          smart_ref<inner_node> left_ref = _session.get_ref<inner_node>(left);
-         // the new branch is on the left side
+         if (forwarding_error != 0)
+            left_ref.modify()->add_descendents(-forwarding_error);
          auto left_result =
              merge_branches<upsert_mode::unique>(parent_hint, left_ref, br, sub_branches);
          left_result.push_back(in->divs()[nb / 2 - 1], right);
@@ -884,7 +940,8 @@ namespace psitri
       else
       {
          smart_ref<inner_node> right_ref = _session.get_ref<inner_node>(right);
-         // the new branch is on the right side
+         if (forwarding_error != 0)
+            right_ref.modify()->add_descendents(-forwarding_error);
          branch_set right_result = merge_branches<upsert_mode::unique>(
              parent_hint, right_ref, branch_number(*br - nb / 2), sub_branches);
          right_result.push_front(left, in->divs()[nb / 2 - 1]);
@@ -930,20 +987,24 @@ namespace psitri
       if constexpr (mode.is_unique())
       {
          op::replace_branch update = {br, sub_branches, needed_clines, cline_indices, _delta_descendents};
+
          /// this is the likely path because realloc grows by cachelines and
          /// most updates don't force a node to grow.
+         ptr_address result_addr;
          if (in->can_apply(update)) [[likely]]
          {
             in.modify()->apply(update);
-            return in.address();
+            result_addr = in.address();
          }
          else
          {
             if constexpr (is_inner_node<InnerNodeType>)
-               return _session.realloc<InnerNodeType>(in, in.obj(), update).address();
+               result_addr = _session.realloc<InnerNodeType>(in, in.obj(), update).address();
             else if constexpr (is_inner_prefix_node<InnerNodeType>)
-               return _session.realloc<InnerNodeType>(in, in->prefix(), in.obj(), update).address();
+               result_addr = _session.realloc<InnerNodeType>(in, in->prefix(), in.obj(), update).address();
          }
+
+         return result_addr;
       }
       else if constexpr (mode.is_shared())
       {
@@ -1399,7 +1460,6 @@ namespace psitri
             in.modify()->add_descendents(_delta_descendents);
          return in.address();
       }
-      //      SAL_ERROR(" merge branches: {}", sub_branches);
       // integrate the sub_branches into the current node, and return the resulting branch set
       // to the parent node.
       return merge_branches<mode.make_shared_or_unique_only()>(parent_hint, in, br, sub_branches);
@@ -1702,7 +1762,8 @@ namespace psitri
                                          key_view               key,
                                          branch_number          lb)
    {
-      //SAL_INFO("split_insert: leaf {} key: {}", leaf.address(), key);
+      if (_trace_descendents)
+         SAL_WARN("split_insert: leaf_addr={} nb={} key_len={}", leaf.address(), leaf->num_branches(), key.size());
       branch_set result;
 
       // Special case: leaf has only 1 entry and can't fit a second key.
@@ -1767,6 +1828,10 @@ namespace psitri
       branch_number        left_size = branch_number(spos.less_than_count);
       branch_number        right_end = branch_number(leaf->num_branches());
 
+      if (_trace_descendents)
+         SAL_WARN("split_insert: split_pos left_size={} right_end={} cprefix_len={} divider=0x{:02x}",
+                  *left_size, *right_end, spos.cprefix.size(), spos.divider);
+
       if (spos.cprefix.size() > 0)
       {
          ptr_address left =
@@ -1798,16 +1863,11 @@ namespace psitri
                     .address();
       else
       {
-         //         SAL_WARN("alloc left hint: {}", format(parent_hint));
          left =
              _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), branch_zero, left_size);
       }
-
-      // there is a rare case with a root node having no parent_hint where this causes
-      // left and right not to share a cline.
       ptr_address right =
           _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), left_size, right_end);
-      // _session.alloc<leaf_node>({&left, 1}, leaf.obj(), key_view(), left_size, right_end);
       //     SAL_WARN("left: {} right: {} delta: {}", left, right, right - left);
 
       if (key < spos.divider_key())
