@@ -821,3 +821,132 @@ TEST_CASE("tree_ops: size_subtree through inner_node children", "[tree_ops][coll
       CHECK(wc.count_keys() == total_inserted);
    }
 }
+
+// Exercise Phase 2 single-branch collapse when the remaining child is an
+// inner_prefix_node. This covers two uncovered paths in tree_ops.hpp:
+//
+// 1. Parent is inner_node, child is inner_prefix_node (line 1242-1245):
+//    Root inner_node has 2 first-byte groups. One group has enough large keys
+//    to create an inner_prefix_node child. Remove all keys from the other group
+//    → root has 1 branch → remaining child is inner_prefix_node.
+//
+// 2. Parent is inner_prefix_node, child is inner_prefix_node (line 1247-1256):
+//    Keys share a common prefix, creating a parent inner_prefix_node. Under it,
+//    two subgroups each have enough keys to create child inner_prefix_nodes.
+//    Remove all keys from one subgroup → parent has 1 branch → remaining child
+//    is inner_prefix_node. The two prefixes get concatenated.
+TEST_CASE("tree_ops: Phase 2 collapse inner_prefix child", "[tree_ops][collapse][phase2]")
+{
+   test_db env("tree_ops_phase2_prefix_db");
+
+   // 1000-byte keys: only 2 fit per leaf, so 3 keys per group overflows a leaf
+   // and creates an inner_prefix_node.
+   auto make_key = [](char prefix_byte, int group, int idx) -> std::string {
+      std::string k(1000, 'K');
+      k[0] = prefix_byte;
+      snprintf(k.data() + 1, 999, "g%02d-k%02d", group, idx);
+      return k;
+   };
+
+   // --- Case 1: inner_node parent, inner_prefix child (line 1242) ---
+   // Root inner_node branches on byte 0. Byte 0x00 has 3 keys → inner_prefix.
+   // Byte 0x01 has 1 key → leaf. Remove the 0x01 key.
+   // Uses write_cursor directly (not transaction) so root ref==1, keeping
+   // unique mode — otherwise root ref>1 from root table forces shared mode
+   // which hits a different Phase 2 code path.
+   SECTION("inner_node parent absorbs inner_prefix child")
+   {
+      auto wc = env.ses->create_write_cursor();
+
+      // Group under byte 0x00: 3 keys → inner_prefix_node
+      for (int k = 0; k < 3; ++k)
+         wc->upsert(make_key(0x00, 0, k), small_val(k));
+      // Single key under byte 0x01: leaf
+      wc->upsert(make_key(0x01, 0, 0), small_val(100));
+
+      // Verify structure: root inner_node, at least 1 inner_prefix child
+      {
+         auto stats = wc->get_stats();
+         INFO("case1 before: inner=" << stats.inner_nodes
+              << " prefix=" << stats.inner_prefix_nodes
+              << " leaf=" << stats.leaf_nodes);
+         REQUIRE(stats.inner_nodes >= 1);
+         REQUIRE(stats.inner_prefix_nodes >= 1);
+         REQUIRE(stats.total_keys == 4);
+      }
+
+      // Remove the lone key under 0x01 → unique Phase 2 collapses root
+      wc->remove(make_key(0x01, 0, 0));
+
+      // Verify: root should now be an inner_prefix_node (absorbed from child)
+      {
+         auto stats = wc->get_stats();
+         INFO("case1 after: inner=" << stats.inner_nodes
+              << " prefix=" << stats.inner_prefix_nodes
+              << " leaf=" << stats.leaf_nodes);
+         CHECK(stats.total_keys == 3);
+         // All 3 remaining keys must be valid
+         for (int k = 0; k < 3; ++k)
+         {
+            auto val = wc->get<std::string>(make_key(0x00, 0, k));
+            REQUIRE(val.has_value());
+            CHECK(*val == small_val(k));
+         }
+         wc->validate();
+      }
+   }
+
+   // --- Case 2: inner_prefix parent absorbs inner_prefix child (line 1247) ---
+   // All keys share byte 0x00, creating an inner_prefix_node under the root.
+   // Under that inner_prefix, two subgroups (distinguished by a byte after
+   // the shared prefix) each have 3 keys → each creates a child inner_prefix.
+   // Remove all keys from one subgroup → parent prefix merges with child prefix.
+   SECTION("inner_prefix parent absorbs inner_prefix child")
+   {
+      // Keys: byte0=0x00, then "g00-k0X..." or "g01-k0X..."
+      // "g00" and "g01" share "g0" before diverging at byte 3.
+      // Parent inner_prefix(prefix including "g0") branches on '0' vs '1'.
+      // Each child has 3 keys with long shared suffix → child inner_prefix.
+      // Uses write_cursor directly so root ref==1 (unique mode).
+      auto wc = env.ses->create_write_cursor();
+
+      // Subgroup 0: 3 keys under byte0=0x00, distinguished by "g00-k0{0,1,2}"
+      for (int k = 0; k < 3; ++k)
+         wc->upsert(make_key(0x00, 0, k), small_val(k));
+      // Subgroup 1: 3 keys under byte0=0x00, distinguished by "g01-k0{0,1,2}"
+      for (int k = 0; k < 3; ++k)
+         wc->upsert(make_key(0x00, 1, k), small_val(10 + k));
+
+      // Verify structure
+      {
+         auto stats = wc->get_stats();
+         INFO("case2 before: inner=" << stats.inner_nodes
+              << " prefix=" << stats.inner_prefix_nodes
+              << " leaf=" << stats.leaf_nodes
+              << " depth=" << stats.max_depth);
+         REQUIRE(stats.total_keys == 6);
+         // Need nested inner_prefix: parent + at least 2 children
+         REQUIRE(stats.inner_prefix_nodes >= 2);
+      }
+
+      // Remove all keys from subgroup 1 → parent inner_prefix absorbs child
+      for (int k = 0; k < 3; ++k)
+         wc->remove(make_key(0x00, 1, k));
+
+      // Verify: prefixes merged, all remaining keys valid
+      {
+         auto stats = wc->get_stats();
+         INFO("case2 after: inner=" << stats.inner_nodes
+              << " prefix=" << stats.inner_prefix_nodes
+              << " leaf=" << stats.leaf_nodes);
+         CHECK(stats.total_keys == 3);
+         for (int k = 0; k < 3; ++k)
+         {
+            auto val = wc->get<std::string>(make_key(0x00, 0, k));
+            REQUIRE(val.has_value());
+            CHECK(*val == small_val(k));
+         }
+         wc->validate();
+      }
+   }
+}
