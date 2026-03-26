@@ -299,6 +299,63 @@ namespace sal
       return total;
    }
 
+   std::vector<allocator::segment_freed_audit> allocator::audit_freed_space()
+   {
+      std::vector<segment_freed_audit> results;
+      auto                             total_segs = _block_alloc.num_blocks();
+      const auto&                      seg_data   = _mapped_state->_segment_data;
+
+      for (segment_number i{0}; i < total_segs; ++i)
+      {
+         const auto* s = get_segment(i);
+         // Only audit read-only segments that have data
+         if (!s->is_read_only())
+            continue;
+
+         segment_freed_audit audit;
+         audit.seg             = i;
+         audit.estimated_freed = seg_data.get_freed_space(i);
+
+         const auto* shead = (const mapped_memory::segment*)s;
+         const auto* send  = (const alloc_header*)shead->end();
+         const alloc_header* obj = (const alloc_header*)(shead);
+
+         while (obj < send)
+         {
+            if (obj->type() == header_type::sync_head)
+            {
+               audit.sync_headers += obj->size();
+            }
+            else
+            {
+               audit.total_objects++;
+               auto* cb = _ptr_alloc.try_get(obj->address());
+               if (!cb || cb->ref() == 0)
+               {
+                  audit.actual_dead += obj->size();
+               }
+               else
+               {
+                  auto  cdata = cb->load(std::memory_order_relaxed);
+                  auto  loc   = cdata.loc();
+                  auto* live_ptr =
+                      reinterpret_cast<const alloc_header*>(get_segment(loc.segment())->data +
+                                                            loc.segment_offset());
+                  if (live_ptr != obj)
+                     audit.actual_dead += obj->size();
+                  else
+                     audit.actual_live += obj->size();
+               }
+            }
+            assert(obj != obj->next());
+            obj = obj->next();
+         }
+         if (audit.total_objects > 0)
+            results.push_back(audit);
+      }
+      return results;
+   }
+
    void allocator::recover()
    {
       SAL_WARN("Recovering... rebuilding control blocks from segments!");
@@ -1034,9 +1091,15 @@ namespace sal
             if (not vcall::has_checksum(head))
                vcall::update_checksum(head);
 
-         if (not obj_ref.control().cas_move(obj_ref.loc(), loc))
+         if (obj_ref.control().cas_move(obj_ref.loc(), loc))
+         {
+            ses.record_freed_space(obj_ref.obj());
+         }
+         else
+         {
             if (not ses.unalloc(head->size()))
                ses.record_freed_space(head);
+         }
       };  /// end try_copy_node lambda
 
       msec_timestamp src_vage(s->age_accumulator.average());
@@ -1120,6 +1183,8 @@ namespace sal
          seg_info.alloc_pos     = seg->get_alloc_pos();
          seg_info.is_pinned     = seg_data.is_pinned(i);
          seg_info.is_read_only  = seg_data.is_read_only(i);
+         seg_info.hdr_read_only = seg->is_read_only();
+         seg_info.is_finalized  = seg->is_finalized();
          seg_info.is_free       = _mapped_state->_segment_provider.free_segments.test(*i);
          seg_info.bitmap_pinned = _mapped_state->_segment_provider.mlock_segments.test(*i);
          seg_info.age =

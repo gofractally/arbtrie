@@ -266,7 +266,7 @@ namespace sal
       int                          _nested_read_lock = 0;
       allocator_session_number     _session_num;  // index into _sega's active sessions list
       rcache_queue_type&           _rcache_queue;
-      rcache_queue_type&           _release_queue;
+      release_queue_type&          _release_queue;
       allocator&                   _sega;
       control_block_alloc&         _ptr_alloc;
       mapped_memory::segment*      _alloc_seg_ptr  = nullptr;

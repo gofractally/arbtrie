@@ -325,6 +325,11 @@ class BankEngine
    /// Report detailed size breakdown: file, live, and free/reclaimable.
    virtual SizeReport report_size(const std::string& db_path) = 0;
 
+   /// Print segment-level diagnostics (only meaningful for PsiTri)
+   virtual void dump_segments(const char* label) { (void)label; }
+   virtual void audit_freed() {}
+   virtual void wait_compactor() {}
+
    virtual uint64_t scan_all(
        std::function<void(const std::string& key, uint64_t bal)> visitor) = 0;
 };
@@ -353,6 +358,7 @@ class PsiTriEngine : public BankEngine
          cfg.sync_mode = sal::sync_type::msync_sync;
       else
          cfg.sync_mode = sal::sync_type::none;
+      // Use default compaction thresholds
       _db  = psitri::database::create(path, cfg);
       _ses = _db->start_write_session();
    }
@@ -433,6 +439,62 @@ class PsiTriEngine : public BankEngine
       // Walk reachable objects from roots to get true data footprint
       r.reachable_size = _db->reachable_size();
       return r;
+   }
+
+   void dump_segments(const char* label) override
+   {
+      auto     d     = _db->dump();
+      uint32_t free_segs = 0, meta_ro = 0, hdr_ro = 0, finalized = 0, writing = 0, empty = 0;
+      uint64_t total_freed = 0, total_alloc = 0;
+      for (auto& seg : d.segments)
+      {
+         if (seg.is_free) { ++free_segs; continue; }
+         if (seg.is_read_only) ++meta_ro;
+         if (seg.hdr_read_only) ++hdr_ro;
+         if (seg.is_finalized) ++finalized;
+         if (!seg.is_free && !seg.is_finalized && seg.alloc_pos > 0) ++writing;
+         if (!seg.is_free && !seg.is_finalized && seg.alloc_pos == 0) ++empty;
+         total_freed += seg.freed_bytes;
+         total_alloc += seg.alloc_pos > 0 ? seg.alloc_pos : 0;
+      }
+      uint64_t total_segs = d.segments.size();
+      printf("    [%s] segs: %llu total  free=%u  meta_ro=%u  hdr_ro=%u  "
+             "finalized=%u  writing=%u  empty=%u  "
+             "alloc=%.0f MB  freed=%.0f MB\n",
+             label, (unsigned long long)total_segs, free_segs, meta_ro, hdr_ro,
+             finalized, writing, empty,
+             total_alloc / (1024.0 * 1024.0),
+             total_freed / (1024.0 * 1024.0));
+   }
+
+   void audit_freed() override
+   {
+      auto audit = _db->audit_freed_space();
+      uint64_t total_estimated = 0, total_actual_dead = 0, total_actual_live = 0;
+      uint64_t total_sync = 0, total_objects = 0;
+      for (auto& a : audit)
+      {
+         total_estimated   += a.estimated_freed;
+         total_actual_dead += a.actual_dead;
+         total_actual_live += a.actual_live;
+         total_sync        += a.sync_headers;
+         total_objects     += a.total_objects;
+      }
+      double est_mb  = total_estimated / (1024.0 * 1024.0);
+      double dead_mb = total_actual_dead / (1024.0 * 1024.0);
+      double live_mb = total_actual_live / (1024.0 * 1024.0);
+      printf("    [freed audit] %zu ro segments, %llu objects\n"
+             "      estimated freed: %.1f MB\n"
+             "      actual dead:     %.1f MB\n"
+             "      actual live:     %.1f MB\n"
+             "      gap (dead - estimated): %.1f MB\n",
+             audit.size(), (unsigned long long)total_objects,
+             est_mb, dead_mb, live_mb, dead_mb - est_mb);
+   }
+
+   void wait_compactor() override
+   {
+      _db->wait_for_compactor();
    }
 
    uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override

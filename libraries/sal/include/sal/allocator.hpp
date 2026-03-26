@@ -85,6 +85,20 @@ namespace sal
       /// Returns total bytes occupied by live, reachable objects.
       uint64_t reachable_size();
 
+      /// Linear scan of all segments comparing actual dead space to estimated freed space.
+      /// For each read-only segment, walks all objects and checks whether the control block
+      /// still points at that location. Returns per-segment data for diagnostics.
+      struct segment_freed_audit
+      {
+         segment_number seg;
+         uint64_t       estimated_freed = 0;  // from get_freed_space()
+         uint64_t       actual_dead     = 0;  // objects whose CB points elsewhere or ref==0
+         uint64_t       actual_live     = 0;  // objects whose CB still points here with ref>0
+         uint64_t       total_objects   = 0;
+         uint64_t       sync_headers    = 0;  // sync header bytes
+      };
+      std::vector<segment_freed_audit> audit_freed_space();
+
       /// Total pending releases across all session queues
       inline uint64_t total_pending_releases() const;
 

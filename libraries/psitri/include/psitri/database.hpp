@@ -39,6 +39,7 @@ namespace psitri
       sal::seg_alloc_dump dump() const { return _allocator.dump(); }
       void print_stats(std::ostream& os = std::cout) const { dump().print(os); }
       uint64_t reachable_size() { return _allocator.reachable_size(); }
+      auto audit_freed_space() { return _allocator.audit_freed_space(); }
 
       /// Block until the compactor has drained all pending releases across all sessions.
       /// Returns true if drained, false if timed out.

@@ -10,7 +10,7 @@
 namespace sal
 {
    using rcache_queue_type  = ucc::circular_buffer<ptr_address, 1024 * 256>;
-   using release_queue_type = ucc::circular_buffer<ptr_address, 1024 * 256>;
+   using release_queue_type = ucc::circular_buffer<ptr_address, 1024 * 32>;
 
    namespace mapped_memory
    {

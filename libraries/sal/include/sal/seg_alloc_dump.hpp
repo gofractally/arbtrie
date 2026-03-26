@@ -26,7 +26,9 @@ namespace sal
          bool           is_alloc      = false;
          bool           is_pinned     = false;  // From segment metadata
          bool           bitmap_pinned = false;  // From mlock_segments bitmap
-         bool           is_read_only  = false;
+         bool           is_read_only  = false;  // metadata flag (compactor eligible)
+         bool           hdr_read_only = false;  // segment header _first_writable_page check
+         bool           is_finalized  = false;  // segment header close time set
          bool           is_free       = false;
          uint64_t       age           = 0;
          uint32_t       read_nodes    = 0;  // Count of valid objects in segment

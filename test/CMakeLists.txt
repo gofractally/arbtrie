@@ -26,6 +26,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/fuzz_tests.cpp
     ../libraries/psitri/tests/cursor_tests.cpp
     ../libraries/psitri/tests/integrity_tests.cpp
+    ../libraries/psitri/tests/freed_space_tests.cpp
     ../libraries/psitri/tests/edge_case_tests.cpp
     ../libraries/psitri/tests/update_value_tests.cpp
     ../libraries/psitri/tests/zip_tests.cpp

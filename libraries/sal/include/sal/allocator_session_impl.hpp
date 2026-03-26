@@ -173,7 +173,9 @@ namespace sal
       else
          ptr->copy_to(node_ptr);
 
-      ptr._cached = ptr._control.move(loc);
+      auto old_cached = ptr._control.move(loc);
+      record_freed_space(get<alloc_header>(old_cached.loc()));
+      ptr._cached = old_cached;
       ptr._obj    = node_ptr;
       return static_cast<T*>(node_ptr);
    }

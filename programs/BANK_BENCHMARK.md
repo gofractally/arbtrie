@@ -48,16 +48,16 @@ xychart-beta
     title "Transaction Throughput (transfers/sec)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
     y-axis "Transfers per second" 0 --> 400000
-    bar [372175, 355126, 214125, 134911, 58756]
+    bar [378849, 358499, 253449, 137906, 61902]
 ```
 
 | Engine | Transfers/sec | Relative |
 |--------|--------------|----------|
-| **PsiTri** | **372,175** | **1.00x** |
-| PsiTriRocks | 355,126 | 0.95x |
-| TidesDB | 214,125 | 0.58x |
-| RocksDB | 134,911 | 0.36x |
-| MDBX | 58,756 | 0.16x |
+| **PsiTri** | **378,849** | **1.00x** |
+| PsiTriRocks | 358,499 | 0.95x |
+| TidesDB | 253,449 | 0.67x |
+| RocksDB | 137,906 | 0.36x |
+| MDBX | 61,902 | 0.16x |
 
 PsiTri's adaptive radix trie uses **memory-mapped copy-on-write nodes** with an arena
 allocator. A transfer touches a small number of trie nodes already in the page cache.
@@ -66,7 +66,7 @@ to the memory-mapped data structure. Batching 100 transfers per commit amortizes
 cost of the COW root update. The RocksDB compatibility shim (PsiTriRocks) adds only
 ~5% overhead, confirming the shim layer is thin.
 
-TidesDB's skip-list + SSTable architecture delivers 214K tx/sec — faster than both
+TidesDB's skip-list + SSTable architecture delivers 253K tx/sec — faster than both
 RocksDB and MDBX — thanks to efficient in-memory buffering with hash-accelerated
 read-your-own-writes within transactions.
 
@@ -92,22 +92,22 @@ with no read contention.
 xychart-beta
     title "Bulk Load — 1M Accounts (ops/sec)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
-    y-axis "Operations per second" 0 --> 2000000
-    bar [1680597, 1799838, 849857, 1828189, 1892768]
+    y-axis "Operations per second" 0 --> 3500000
+    bar [3294905, 1799931, 959912, 1961333, 3078055]
 ```
 
 | Engine | Time | Ops/sec |
 |--------|------|---------|
-| **MDBX** | 0.53s | **1.89M** |
-| RocksDB | 0.55s | 1.83M |
+| **PsiTri** | 0.30s | **3.29M** |
+| MDBX | 0.33s | 3.08M |
+| RocksDB | 0.51s | 1.96M |
 | PsiTriRocks | 0.56s | 1.80M |
-| PsiTri | 0.60s | 1.68M |
-| TidesDB | 1.18s | 0.85M |
+| TidesDB | 1.04s | 0.96M |
 
-Bulk load performance is tightly clustered across the top four engines (1.68–1.89M
-ops/sec). MDBX's B+tree excels at sequential insertion — keys are sorted and appended
-to leaf pages with minimal page splits. RocksDB's memtable absorbs writes quickly
-with WAL buffering.
+PsiTri leads bulk load at 3.29M ops/sec, benefiting from its arena allocator writing
+sequentially into memory-mapped segments with no WAL or memtable overhead. MDBX's
+B+tree is close behind at 3.08M ops/sec — its sorted insertion with contiguous leaf
+pages is highly efficient. RocksDB's memtable absorbs writes quickly with WAL buffering.
 
 TidesDB is slowest because its 100K operation transaction limit forces 12 separate
 commit cycles, each flushing the write-ahead log.
@@ -122,19 +122,19 @@ visualized to emphasize the absolute time cost difference between engines.
 xychart-beta
     title "Transaction Phase Wall Time (seconds)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
-    y-axis "Seconds" 0 --> 180
-    bar [26.869, 28.159, 46.702, 74.122, 170.193]
+    y-axis "Seconds" 0 --> 170
+    bar [26.396, 27.894, 39.456, 72.513, 161.544]
 ```
 
 | Engine | Time | vs. PsiTri |
 |--------|------|-----------|
-| **PsiTri** | **26.9s** | — |
-| PsiTriRocks | 28.2s | +4.8% |
-| TidesDB | 46.7s | +74% |
-| RocksDB | 74.1s | +176% |
-| MDBX | 170.2s | +533% |
+| **PsiTri** | **26.4s** | — |
+| PsiTriRocks | 27.9s | +5.7% |
+| TidesDB | 39.5s | +50% |
+| RocksDB | 72.5s | +175% |
+| MDBX | 161.5s | +512% |
 
-The gap between PsiTri and MDBX is over 143 seconds on the same workload. For
+The gap between PsiTri and MDBX is over 135 seconds on the same workload. For
 applications running millions of transactions per hour (financial systems,
 blockchain state, game servers), this translates directly into throughput
 capacity. PsiTri completes the same work in one-sixth the time MDBX requires.
@@ -150,33 +150,33 @@ throughput across the entire dataset.
 xychart-beta
     title "Validation Scan — 7.9M Entries (ops/sec)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
-    y-axis "Operations per second" 0 --> 90000000
-    bar [25625412, 34508643, 1633442, 11799588, 83361880]
+    y-axis "Operations per second" 0 --> 115000000
+    bar [27619781, 37644460, 1843029, 14153353, 109856761]
 ```
 
 | Engine | Time | Ops/sec |
 |--------|------|---------|
-| **MDBX** | 0.094s | **83.4M** |
-| PsiTriRocks | 0.228s | 34.5M |
-| PsiTri | 0.307s | 25.6M |
-| RocksDB | 0.666s | 11.8M |
-| TidesDB | 4.810s | 1.63M |
+| **MDBX** | 0.072s | **109.9M** |
+| PsiTriRocks | 0.209s | 37.6M |
+| PsiTri | 0.284s | 27.6M |
+| RocksDB | 0.555s | 14.2M |
+| TidesDB | 4.263s | 1.84M |
 
-MDBX dominates sequential scanning at 83.4M ops/sec — its B+tree stores keys
+MDBX dominates sequential scanning at 109.9M ops/sec — its B+tree stores keys
 in sorted order with contiguous leaf pages, enabling pure sequential memory
 access with excellent prefetch behavior. This is MDBX's architectural sweet
 spot: the same structure that penalizes random writes rewards sequential reads.
 
-PsiTri achieves 25.6M ops/sec via cursor-based trie traversal. While tries
+PsiTri achieves 27.6M ops/sec via cursor-based trie traversal. While tries
 don't store keys contiguously, PsiTri's memory-mapped nodes and arena layout
-provide reasonable locality. PsiTriRocks is faster here (34.5M) likely due to
+provide reasonable locality. PsiTriRocks is faster here (37.6M) likely due to
 iterator implementation differences in the shim layer.
 
 RocksDB must merge results across multiple SSTable levels during iteration,
-which explains the 11.8M ops/sec — still fast, but the merge overhead across
+which explains the 14.2M ops/sec — still fast, but the merge overhead across
 the now-larger dataset (accounts + log entries) is measurable.
 
-TidesDB's scan is **51x slower** than MDBX because its C API iterator does not
+TidesDB's scan is **60x slower** than MDBX because its C API iterator does not
 expose key/value accessors, forcing the benchmark to fall back to individual
 point lookups on all known account names plus sequential log key probes. This
 is an API limitation, not necessarily a reflection of TidesDB's underlying
@@ -201,7 +201,7 @@ xychart-beta
     title "Reachable Data Size (MB)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
     y-axis "Megabytes" 0 --> 600
-    bar [509, 509, 263, 320, 366]
+    bar [508, 508, 263, 320, 366]
 ```
 
 The theoretical minimum raw data size is **275 MB** — the sum of all key bytes and
@@ -214,8 +214,8 @@ value bytes with zero structural overhead. This baseline is identical for all en
 | **TidesDB** | 263 MB | 0.96x | 263 MB | Likely compressed below raw size |
 | **RocksDB** | 314 MB | 1.14x | 320 MB | Block compression offsets index overhead |
 | **MDBX** | 366 MB | 1.33x | 640 MB | B+tree page overhead |
-| **PsiTri** | 509 MB | 1.85x | 5,344 MB | Fixed 2 KB leaf allocation (see below) |
-| **PsiTriRocks** | 509 MB | 1.85x | 5,344 MB | Same engine, same footprint |
+| **PsiTri** | 508 MB | 1.85x | 1,440 MB | Fixed 2 KB leaf allocation (see below) |
+| **PsiTriRocks** | 508 MB | 1.85x | 1,594 MB | Same engine, same footprint |
 
 PsiTri's 1.85x overhead relative to the theoretical minimum is primarily due to
 fixed-size leaf node allocation: every leaf is allocated at 2,048 bytes regardless
@@ -229,26 +229,23 @@ small fixed-size values in this workload.
 
 #### File Size
 
-The raw on-disk file size tells a different story — PsiTri's file is 10x larger
-than its reachable data. This is a consequence of copy-on-write without immediate
-compaction: every modified node creates a new copy, and the old version remains
-in the segment file until the background compactor reclaims it. During a sustained
-write workload with 6.9M transactions, dead COW copies accumulate faster than
-compaction can reclaim them.
+The raw on-disk file size includes dead COW copies and allocator free space that
+has not yet been reclaimed. PsiTri's background compactor continuously reclaims
+dead space during the benchmark, keeping the file size within ~3x of reachable data.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#DC2626'}}}}%%
 xychart-beta
     title "On-Disk File Size (MB)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
-    y-axis "Megabytes" 0 --> 5600
-    bar [5344, 5344, 263, 320, 640]
+    y-axis "Megabytes" 0 --> 1700
+    bar [1440, 1594, 263, 320, 640]
 ```
 
 | Engine | File Size | Reachable | Dead/Free Space | Notes |
 |--------|-----------|-----------|-----------------|-------|
-| **PsiTri** | 5,344 MB | 509 MB | 4,835 MB (91%) | COW copies + allocator free space |
-| **PsiTriRocks** | 5,344 MB | 509 MB | 4,835 MB (91%) | Same engine via RocksDB API shim |
+| **PsiTri** | 1,440 MB | 508 MB | 932 MB (65%) | COW copies + allocator free space |
+| **PsiTriRocks** | 1,594 MB | 508 MB | 1,086 MB (68%) | Same engine via RocksDB API shim |
 | **MDBX** | 640 MB | 366 MB | 274 MB (43%) | COW pages accumulate between syncs |
 | **RocksDB** | 320 MB | 314 MB | 6 MB (2%) | LSM compaction + block compression |
 | **TidesDB** | 263 MB | 263 MB | 0 MB | No detailed stats exposed |
@@ -261,22 +258,22 @@ MDBX's 640 MB file is 43% free space — dead COW pages that the GC cannot recla
 without an fsync. The transaction log inserts grow the B+tree significantly because
 each new sequential key requires page allocation under COW.
 
-PsiTri's file size is the primary area for improvement. The 91% dead space
-represents an opportunity to tune the compactor's aggressiveness during sustained
-write workloads, or to implement segment-level truncation after the benchmark
-completes. The reachable data measurement confirms the trie structure itself is
-space-competitive — the issue is garbage collection throughput, not data structure
-overhead.
+PsiTri's file size is 2.8x its reachable data. The dead space consists of COW copies
+awaiting compaction and allocator free space within segments. The background compactor
+reclaims segments as they accumulate dead objects, keeping growth bounded during
+sustained write workloads. The reachable data measurement confirms the trie structure
+itself is space-competitive — the overhead is from in-flight garbage collection, not
+data structure inefficiency.
 
 ### Summary
 
 | Engine | Architecture | Strength | Weakness |
 |--------|-------------|----------|----------|
-| **PsiTri** | Adaptive radix trie, mmap COW | Fastest transactions (372K/s) | Large file footprint (compaction lag) |
+| **PsiTri** | Adaptive radix trie, mmap COW | Fastest transactions (379K/s) | Larger file footprint (COW + compaction) |
 | **PsiTriRocks** | PsiTri via RocksDB API shim | Drop-in RocksDB replacement | Slight shim overhead |
-| **TidesDB** | Skip-list + SSTables | Good tx speed (214K/s), compact | Slow scan, 100K txn op limit |
-| **RocksDB** | LSM-tree | Compact storage (320 MB) | 2.8x slower than PsiTri |
-| **MDBX** | B+tree, MVCC COW | Fastest sequential scan (83M/s) | 6.3x slower transactions |
+| **TidesDB** | Skip-list + SSTables | Good tx speed (253K/s), compact | Slow scan, 100K txn op limit |
+| **RocksDB** | LSM-tree | Compact storage (320 MB) | 2.7x slower than PsiTri |
+| **MDBX** | B+tree, MVCC COW | Fastest sequential scan (110M/s) | 6.1x slower transactions |
 
 All five engines pass validation: balance conservation verified (1,000,000,000,000
 total) and transaction log entry counts match (6,856,951). Each engine processes
