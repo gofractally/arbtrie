@@ -690,6 +690,110 @@ TEST_CASE("tree_ops: stats counts sparse_subtree_inners and single_branch_inners
    CHECK(stats.total_nodes() > 0);
 }
 
+TEST_CASE("tree_ops: shared-mode phase 3 multi-branch collapse", "[tree_ops][collapse]")
+{
+   test_db env("tree_ops_shared_phase3_db");
+
+   // Strategy:
+   // 1. Build a tree, then remove keys in unique mode (threshold=0 to prevent
+   //    collapse) until we have an inner_node with 4 branches and 25 descendants.
+   // 2. Snapshot the root (makes it shared).
+   // 3. Remove 1 key that empties a branch, using a new tree_context with
+   //    threshold=25. Phase 3 fires: num_branches>2, new_desc=24<=25.
+   //
+   // Use 10 groups × 60 keys = 600 keys to force a multi-branch root inner_node.
+   const int groups    = 10;
+   const int per_group = 60;
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int g = 0; g < groups; ++g)
+         for (int k = 0; k < per_group; ++k)
+         {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%c_item_%03d", 'A' + g, k);
+            trx.upsert(std::string(buf), small_val(g * per_group + k));
+         }
+      trx.commit();
+   }
+
+   // Step 2: Remove keys in unique mode with collapse disabled (threshold=0).
+   // Remove all groups except A, B, C, D. Then trim A,B,C to 8 keys each
+   // and D to 1 key. Final state: inner_node with 4+ branches, 25 descendants.
+   {
+      auto root = env.ses->get_root(0);
+      tree_context ctx(std::move(root));
+      ctx.set_collapse_threshold(0);  // disable collapse during pruning
+
+      // Remove groups E-J entirely
+      for (int g = 4; g < groups; ++g)
+         for (int k = 0; k < per_group; ++k)
+         {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%c_item_%03d", 'A' + g, k);
+            ctx.remove(std::string(buf));
+         }
+      // Trim A, B, C to 8 keys each
+      for (int g = 0; g < 3; ++g)
+         for (int k = 8; k < per_group; ++k)
+         {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%c_item_%03d", 'A' + g, k);
+            ctx.remove(std::string(buf));
+         }
+      // Trim D to 1 key
+      for (int k = 1; k < per_group; ++k)
+      {
+         char buf[32];
+         snprintf(buf, sizeof(buf), "%c_item_%03d", 'D', k);
+         ctx.remove(std::string(buf));
+      }
+
+      // Persist the pruned tree
+      env.ses->set_root(0, ctx.get_root());
+   }
+
+   // Step 3: Snapshot to force shared mode
+   auto snapshot = env.ses->get_root(0);
+
+   // Step 4: Remove D_item_000 in shared mode with collapse_threshold=25.
+   // The inner_node has 4+ branches (>2), and new_desc = 25-1 = 24 <= 25.
+   {
+      auto root = env.ses->get_root(0);
+      tree_context ctx(std::move(root));
+      ctx.set_collapse_threshold(25);
+      ctx.remove("D_item_000");
+      env.ses->set_root(0, ctx.get_root());
+   }
+
+   // Verify remaining 24 keys
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int g = 0; g < 3; ++g)
+         for (int k = 0; k < 8; ++k)
+         {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%c_item_%03d", 'A' + g, k);
+            auto val = trx.get<std::string>(std::string(buf));
+            CHECK(val.has_value());
+         }
+      CHECK_FALSE(trx.get<std::string>("D_item_000").has_value());
+   }
+
+   // Snapshot should still see all 25 keys
+   {
+      cursor c(snapshot);
+      std::string val;
+      CHECK(c.get("D_item_000", &val) >= 0);
+      for (int g = 0; g < 3; ++g)
+         for (int k = 0; k < 8; ++k)
+         {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%c_item_%03d", 'A' + g, k);
+            CHECK(c.get(std::string(buf), &val) >= 0);
+         }
+   }
+}
+
 TEST_CASE("tree_ops: validate on empty tree", "[tree_ops][validate]")
 {
    test_db env("tree_ops_validate_empty_db");
