@@ -75,18 +75,47 @@ namespace psitri
    }
    uint32_t leaf_node::compact_size() const noexcept
    {
-      return max_leaf_size;
-      auto ccline     = clines();
-      auto ccline_end = ccline.data() + ccline.size();
-      auto head_size  = (char*)ccline_end - (char*)this;
-      return ucc::round_up_multiple<64>(_alloc_pos) + ucc::round_up_multiple<64>(head_size);
+      // Only shrink when there's no dead space — dead space means the alloc area
+      // contains gaps that can't be skipped with a simple memcpy. The next COW
+      // will rebuild via clone_from to eliminate dead space, then compaction can shrink.
+      if (_dead_space > 0)
+         return size();
+      auto     ccline     = clines();
+      auto     ccline_end = ccline.data() + ccline.size();
+      uint32_t head_size  = (const char*)ccline_end - (const char*)this;
+      uint32_t result     = ucc::round_up_multiple<64>(head_size) +
+                            ucc::round_up_multiple<64>(_alloc_pos);
+      // Floor: at least one cacheline for a valid node
+      result = std::max<uint32_t>(result, 64u);
+      return std::min<uint32_t>(result, size());
    }
 
    void leaf_node::compact_to(alloc_header* compact_dst) const noexcept
    {
-      //  SAL_WARN("compacting from {} to {} {}", address(), compact_dst->address(), compact_size());
       assert(compact_dst->size() == compact_size());
-      ucc::memcpy_aligned_64byte(compact_dst, this, size());
+      if (compact_dst->size() == size())
+      {
+         // Same size: fast full copy
+         ucc::memcpy_aligned_64byte(compact_dst, this, size());
+         return;
+      }
+      // Different sizes: copy header+arrays forward, alloc area backward.
+      // Save the destination's alloc_header (size, address_seq set by allocator)
+      auto saved_header = *compact_dst;
+
+      auto     ccline     = clines();
+      auto     ccline_end = ccline.data() + ccline.size();
+      uint32_t head_bytes = (const char*)ccline_end - (const char*)this;
+      // Copy fixed header + dynamic arrays (everything from start to clines_end)
+      memcpy(compact_dst, this, head_bytes);
+      // Restore the alloc_header fields
+      memcpy(compact_dst, &saved_header, sizeof(alloc_header));
+
+      // Copy alloc area (grows backward from tail)
+      auto* dst = reinterpret_cast<leaf_node*>(compact_dst);
+      memcpy((char*)dst->tail() - _alloc_pos,
+             (const char*)tail() - _alloc_pos,
+             _alloc_pos);
    }
 
    void leaf_node::clone_from(const leaf_node* clone)
