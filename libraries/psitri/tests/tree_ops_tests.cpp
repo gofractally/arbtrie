@@ -701,3 +701,123 @@ TEST_CASE("tree_ops: validate on empty tree", "[tree_ops][validate]")
    // validate on empty tree should not throw
    REQUIRE_NOTHROW(wc->validate());
 }
+
+// Exercise size_subtree traversal through inner_node (non-prefix) children.
+//
+// The inner_node case in size_subtree (line 362) is hit when collapse checks a
+// node whose children include inner_nodes. This happens when:
+// 1. An inner_prefix_node accumulates enough branches to split, producing two
+//    inner_node children (see split() at line 877-884)
+// 2. Removing keys causes the parent's descendents to drop below the collapse
+//    threshold, triggering size_subtree on all children
+// 3. Sibling inner_nodes NOT on the remove path remain as inner_nodes
+//
+// Strategy: insert many keys under a shared prefix (byte 0 = 0x00) to force
+// the inner_prefix_node at that branch to split into inner_node children.
+// Then hold a snapshot (shared mode) and remove enough keys to trigger collapse.
+TEST_CASE("tree_ops: size_subtree through inner_node children", "[tree_ops][collapse][size_subtree]")
+{
+   test_db env("tree_ops_size_subtree_inner_db");
+
+   // Phase 1: Build a tree where inner_prefix_node children survive collapse.
+   //
+   // size_subtree has paths for inner_prefix_node (line 369) and inner_node
+   // (line 362). To hit these, the collapsing parent must have children that
+   // are inner_prefix_nodes (not leaves). This requires:
+   //
+   // 1. Children are inner_prefix_nodes (created by leaf overflow)
+   // 2. Untouched children remain as inner_prefix_nodes during removal
+   // 3. Parent descendents ≤ collapse_threshold (24)
+   //
+   // The key challenge: normal keys (~10 bytes) allow ~100 entries per leaf,
+   // so inner_prefix is only created with >100 keys per group — far exceeding
+   // the collapse threshold. Solution: use VERY LARGE keys (~1000 bytes) so
+   // only 2 entries fit per leaf. Then 3 keys per group overflows a leaf and
+   // creates an inner_prefix_node. 8 groups × 3 keys = 24 = threshold.
+   //
+   // After removing 1 key from one group, root has 23 descendents. Root's
+   // collapse fires, and untouched sibling groups are still inner_prefix_nodes.
+   const int NUM_GROUPS = 8;
+   const int KEYS_PER_GROUP = 3;
+
+   // Generate 1000-byte keys: {group_byte, idx_byte, padding...}
+   auto make_key = [](int group, int idx) -> std::string {
+      std::string k(1000, 'K');
+      k[0] = (char)group;
+      snprintf(k.data() + 1, 999, "g%02d-k%02d", group, idx);
+      return k;
+   };
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int g = 0; g < NUM_GROUPS; ++g)
+         for (int k = 0; k < KEYS_PER_GROUP; ++k)
+            trx.upsert(make_key(g, k), small_val(g * KEYS_PER_GROUP + k));
+      trx.commit();
+   }
+
+   int total_inserted = NUM_GROUPS * KEYS_PER_GROUP;
+
+   // Check tree structure
+   {
+      auto root = env.ses->get_root(0);
+      REQUIRE(root);
+      write_cursor wc(root);
+      auto stats = wc.get_stats();
+      INFO("before remove: inner_nodes=" << stats.inner_nodes
+           << " inner_prefix=" << stats.inner_prefix_nodes
+           << " leaves=" << stats.leaf_nodes
+           << " keys=" << stats.total_keys
+           << " depth=" << stats.max_depth);
+      REQUIRE(stats.total_keys == total_inserted);
+      // Root is inner_node; with 3 large keys per group, leaves overflow
+      // creating inner_prefix_node children
+      REQUIRE(stats.inner_nodes >= 1);
+      REQUIRE(stats.inner_prefix_nodes >= 1);
+   }
+
+   // Hold snapshot for shared mode (COW path during removes)
+   auto snapshot = env.ses->get_root(0);
+
+   // Phase 2: Remove ALL keys from group 0 so its branch returns empty.
+   // In unique_remove mode, Phase 3 (collapse) only fires when
+   // sub_branches.count()==0 (branch completely emptied). After the branch
+   // is removed, the root has 7 branches, 21 descendents ≤ 24.
+   // Phase 3 fires and size_subtree encounters groups 1-7 as inner_prefix_nodes.
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int k = 0; k < KEYS_PER_GROUP; ++k)
+         trx.remove(make_key(0, k));
+      trx.commit();
+   }
+
+   // Phase 3: Verify correctness
+   {
+      auto root = env.ses->get_root(0);
+      REQUIRE(root);
+      write_cursor wc(root);
+      auto stats = wc.get_stats();
+      const int remaining = total_inserted - KEYS_PER_GROUP;  // 21 keys
+      INFO("after remove: inner_nodes=" << stats.inner_nodes
+           << " inner_prefix=" << stats.inner_prefix_nodes
+           << " leaves=" << stats.leaf_nodes
+           << " keys=" << stats.total_keys);
+      CHECK(stats.total_keys == remaining);
+
+      // Verify remaining keys
+      for (int g = 1; g < NUM_GROUPS; ++g)
+         for (int k = 0; k < KEYS_PER_GROUP; ++k)
+         {
+            auto val = wc.get<std::string>(make_key(g, k));
+            REQUIRE(val.has_value());
+            CHECK(*val == small_val(g * KEYS_PER_GROUP + k));
+         }
+      wc.validate();
+   }
+
+   // Snapshot should still have all original keys
+   {
+      write_cursor wc(snapshot);
+      CHECK(wc.count_keys() == total_inserted);
+   }
+}
