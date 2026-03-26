@@ -1143,10 +1143,11 @@ namespace psitri
       {
          if (sub_branches.count() == 0) [[unlikely]]
          {
+
             if (in->num_branches() == 1)
             {
-               // badr was pre-retained above; in's destructor will release it,
-               // balancing the dispatcher's release.
+               // badr was pre-retained above (unique mode only); in's destructor
+               // will release it, balancing the dispatcher's release.
                return {};  // cascade empty to parent — dispatch releases this node
             }
 
@@ -1422,9 +1423,8 @@ namespace psitri
                   }
                }
 
-               // retain_children gave +1 to all children including the removed one.
-               // The removed child's extra retain will be balanced by the original
-               // node's destroy() when the snapshot chain is released.
+               // retain_children gave +1 to all remaining children; the removed
+               // child's extra retain was already released above.
                op::inner_remove_branch rm{br, _delta_descendents};
                if constexpr (is_inner_node<InnerNodeType>)
                   return _session.alloc<InnerNodeType>(parent_hint, in.obj(), rm);
@@ -1809,7 +1809,7 @@ namespace psitri
          }
          else if constexpr (mode.is_shared())
          {
-            retain_children(leaf);
+            // retain_children(leaf) already called by insert() before entering split_insert
             return make_inner_prefix(parent_hint, cprefix, branches);
          }
          std::unreachable();
