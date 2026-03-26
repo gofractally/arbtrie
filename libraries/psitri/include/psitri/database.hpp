@@ -67,6 +67,10 @@ namespace psitri
          _allocator.truncate_free_tail();
       }
 
+      /// Create a defragmented copy of the database, then swap it in.
+      /// The old database files are preserved as dir.old until verification passes.
+      void defrag();
+
       /// True if ref counts are stale from a deferred_cleanup recovery.
       /// Leaked memory is not reclaimed until reclaim_leaked_memory() is called.
       bool ref_counts_stale() const;

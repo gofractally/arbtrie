@@ -112,6 +112,17 @@ namespace sal
       /// Must be called after background threads are stopped and compaction is complete.
       void truncate_free_tail();
 
+      /// Stop background threads and truncate trailing free segments without
+      /// restarting.  Use when the allocator is about to be destroyed.
+      void truncate_free_tail_final();
+
+      /// Copy all live objects from this allocator into dest, using dest's session
+      /// for allocation.  Both allocators must have background threads stopped.
+      /// After this call, dest contains a packed copy of every live object and
+      /// its control blocks are set up with the correct locations and ref counts.
+      /// Root addresses are also copied.
+      void copy_live_objects_to(allocator& dest);
+
       /// Check if corruption has been detected (e.g. by compactor).
       /// Writers should call this before starting transactions.
       bool corruption_detected() const noexcept

@@ -222,6 +222,94 @@ namespace sal
       start_background_threads();
    }
 
+   void allocator::truncate_free_tail_final()
+   {
+      stop_background_threads();
+      truncate_free_tail_stopped();
+      // Intentionally do NOT restart threads or repopulate provider queues.
+   }
+
+   void allocator::copy_live_objects_to(allocator& dest)
+   {
+      uint64_t objects_copied = 0;
+      uint64_t bytes_copied   = 0;
+
+      {  // Scope the dest session so it's released before truncation
+         auto  dst_ses  = dest.get_session();
+         auto& dst_sesr = *dst_ses;
+
+         uint32_t num_segs = _block_alloc.num_blocks();
+
+         for (uint32_t seg_idx = 0; seg_idx < num_segs; ++seg_idx)
+         {
+            auto* seg = get_segment(segment_number(seg_idx));
+            if (seg->get_alloc_pos() == 0)
+               continue;
+
+            auto* obj = reinterpret_cast<const alloc_header*>(seg->data);
+            auto* end = reinterpret_cast<const alloc_header*>(
+                seg->data +
+                std::min<uint32_t>(segment_size - mapped_memory::segment_footer_size,
+                                   seg->get_alloc_pos()));
+
+            while (obj < end && obj->address() != null_ptr_address)
+            {
+               if (obj->size() == 0)
+                  break;
+
+               // Skip sync headers
+               if (obj->type() == header_type::sync_head)
+               {
+                  obj = obj->next();
+                  continue;
+               }
+
+               // Check if this object is live: control block points here with ref > 0
+               auto* cb = _ptr_alloc.try_get(obj->address());
+               if (cb)
+               {
+                  auto cb_data = cb->load(std::memory_order_relaxed);
+                  if (cb_data.ref > 0)
+                  {
+                     // Verify the control block's location matches this object
+                     uint64_t obj_abs =
+                         uint64_t(seg_idx) * segment_size +
+                         (reinterpret_cast<const char*>(obj) - seg->data);
+                     auto obj_loc = location::from_absolute_address(obj_abs);
+
+                     if (cb_data.loc() == obj_loc)
+                     {
+                        // Live object — allocate in dest and copy
+                        auto [new_loc, new_ptr] = dst_sesr.alloc_data<alloc_header>(
+                            obj->size(), obj->type(), obj->address_seq());
+                        memcpy(new_ptr, obj, obj->size());
+
+                        // Set up control block in dest
+                        auto& dst_cb = dest._ptr_alloc.get_or_alloc(obj->address());
+                        dst_cb.reset(new_loc, cb_data.ref);
+
+                        ++objects_copied;
+                        bytes_copied += obj->size();
+                     }
+                  }
+               }
+
+               obj = obj->next();
+            }
+         }
+
+         // Copy root addresses
+         for (uint32_t i = 0; i < _root_objects->size(); ++i)
+         {
+            auto addr = (*_root_objects)[i].load(std::memory_order_relaxed);
+            (*dest._root_objects)[i].store(addr, std::memory_order_relaxed);
+         }
+      }  // dest session released here, active segment finalized
+
+      SAL_WARN("defrag: copied {} objects ({} bytes) to new database",
+               objects_copied, bytes_copied);
+   }
+
    void allocator::recursive_retain_all(ptr_address addr)
    {
       if (addr == null_ptr_address)

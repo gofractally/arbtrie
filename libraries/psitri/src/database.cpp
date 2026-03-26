@@ -130,4 +130,65 @@ namespace psitri
       return std::make_shared<read_session>(*this);
    }
 
+   void database::defrag()
+   {
+      namespace fs = std::filesystem;
+
+      auto defrag_dir = fs::path(_dir.string() + ".defrag");
+      auto backup_dir = fs::path(_dir.string() + ".old");
+
+      // Clean up any leftover defrag directory from a prior interrupted run
+      fs::remove_all(defrag_dir);
+
+      // Create the destination database
+      auto dest_db = database::create(defrag_dir, _cfg);
+
+      // Stop source background threads for consistent segment access
+      _allocator.stop_background_threads();
+
+      // Copy all live objects from source to dest
+      _allocator.copy_live_objects_to(dest_db->_allocator);
+
+      // Sync destination to disk
+      dest_db->sync();
+
+      // Verify: walk the entire tree structure in the new database.
+      // reachable_size() follows all child pointers from every root,
+      // proving the tree is navigable and all control blocks resolve.
+      auto src_reachable = _allocator.reachable_size();
+      auto dst_reachable = dest_db->_allocator.reachable_size();
+
+      if (src_reachable != dst_reachable)
+      {
+         dest_db.reset();
+         fs::remove_all(defrag_dir);
+         throw std::runtime_error(
+             "defrag verification failed: reachable size mismatch (src=" +
+             std::to_string(src_reachable) + " dst=" + std::to_string(dst_reachable) + ")");
+      }
+
+      SAL_WARN("defrag: verified reachable_size = {} bytes in both databases",
+               dst_reachable);
+
+      // Truncate trailing free segments to minimize file size.
+      // Use truncate_free_tail_final (not truncate_free_tail) to avoid
+      // provider_populate re-allocating segments we just freed.
+      dest_db->_allocator.truncate_free_tail_final();
+
+      // Close destination database (destructor won't restart threads)
+      dest_db.reset();
+
+      // Restart source background threads (needed for clean destructor)
+      _allocator.start_background_threads();
+
+      // Swap: source → backup, defrag → source
+      if (fs::exists(backup_dir))
+         fs::remove_all(backup_dir);
+      fs::rename(_dir, backup_dir);
+      fs::rename(defrag_dir, _dir);
+
+      SAL_WARN("defrag complete. Old database preserved at: {}", backup_dir.string());
+      SAL_WARN("Verify the new database, then remove {} manually", backup_dir.string());
+   }
+
 }  // namespace psitri

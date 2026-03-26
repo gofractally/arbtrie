@@ -328,6 +328,12 @@ set_target_properties(psitri-benchmark
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+# Psitri database inspection & defrag tool
+add_executable(psitri-tool programs/psitri_tool.cpp)
+target_link_libraries(psitri-tool PUBLIC Boost::program_options psitri)
+target_include_directories(psitri-tool PUBLIC ${Boost_INCLUDE_DIRS})
+set_target_properties(psitri-tool PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # psitri benchmark in TidesDB-style format (same workload/output for direct comparison)
 # Configurable via BENCH_* cmake variables (same defaults as TidesDB bench)
 if(NOT DEFINED BENCH_NUM_OPERATIONS)
