@@ -59,8 +59,8 @@ Store an entire tree as the value of a key. Useful for hierarchical data -- user
 </div>
 
 <div class="feature-card" markdown>
-### Adaptive Caching
-Automatically keeps hot data pinned in RAM based on access frequency, not recency. Prevents cache poisoning from sequential scans. No tuning required.
+### Scales Beyond RAM
+Databases can grow far larger than available memory. Hot data is pinned in RAM at object granularity; cold data is paged by the OS from memory-mapped files. No buffer pool tuning, no cliff -- performance degrades smoothly.
 </div>
 
 <div class="feature-card" markdown>

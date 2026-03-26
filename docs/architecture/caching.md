@@ -1,4 +1,31 @@
-# Caching & Compaction
+# Caching, Compaction & Beyond-RAM Scaling
+
+PsiTri databases can grow far larger than available RAM while maintaining high performance on the hot working set. This page explains how.
+
+## Why PsiTri Scales Beyond RAM
+
+Many embedded databases are described as "memory-mapped" but perform poorly once the dataset exceeds RAM because they rely on the OS page cache with no control over what stays resident. PsiTri takes a fundamentally different approach: it **actively manages which data stays in RAM** at object granularity while letting the OS handle the rest.
+
+Three mechanisms work together:
+
+1. **MFU-based physical data tiering.** PsiTri physically relocates hot objects into `mlock`'d segments that are guaranteed to stay in RAM. Cold objects live in unpinned segments that the OS can page out. Unlike a traditional buffer pool, this operates at individual object granularity (67 bytes for inner nodes, up to 2 KB for leaves), not 4-16 KB pages -- so pinned memory holds only the data that matters.
+
+2. **Write protection enables clean eviction.** All committed segments are marked `PROT_READ` via `mprotect`. Read-only pages are cheap for the OS to evict: they can be dropped instantly and re-faulted from the memory-mapped file with no writeback. In contrast, dirty pages in a traditional database must be flushed to disk before eviction, creating I/O stalls under memory pressure.
+
+3. **Copy-on-write keeps writes sequential.** New data is always appended to the current write segment. This means page faults from writes are sequential (one fault per new segment, amortized over 32 MB of data), not random. Sequential I/O is 10-100x faster than random I/O on both SSDs and HDDs.
+
+The practical effect: a PsiTri database with 100 GB of data and 8 GB of RAM performs nearly as well as a fully in-memory database for the hot working set, while gracefully degrading to disk speed for cold data. There is no cliff -- performance scales smoothly with the ratio of hot data to available RAM.
+
+### Comparison with Other Approaches
+
+| Approach | Granularity | Eviction control | Write path | Beyond-RAM behavior |
+|----------|-------------|-----------------|------------|-------------------|
+| **OS page cache** (LMDB, BoltDB) | 4 KB pages | None (OS LRU) | Random I/O | Full table scan evicts working set |
+| **Buffer pool** (PostgreSQL, MySQL) | 8-16 KB pages | LRU/clock sweep | Random I/O | Requires manual tuning of pool size |
+| **Block cache** (RocksDB) | 4-64 KB blocks | LRU with priority | Sequential (LSM) | Good for writes, reads compete with compaction |
+| **PsiTri MFU tiering** | 67 B - 2 KB objects | Frequency-based, self-tuning | Sequential (COW) | Hot set guaranteed in RAM, cold set paged by OS |
+
+---
 
 The goal of caching is to minimize the number of disk page swaps because they hurt both performance and SSD wear. Frequently modified pages and most frequently read data should reside on memory segments pinned to RAM. Data should be grouped with other data that is accessed at similar frequency so that when a page swap does occur it isn't bringing along unnecessary data.
 
