@@ -1,0 +1,116 @@
+site_name: PsiTri
+site_url: https://gofractally.github.io/arbtrie/
+site_description: >-
+  A persistent, transactional key-value store built on an adaptive radix trie.
+  3x faster than RocksDB. 60x less write amplification than page-based COW.
+repo_url: https://github.com/gofractally/arbtrie
+repo_name: gofractally/arbtrie
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - toc.follow
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.critic
+  - pymdownx.caret
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.tilde
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - def_list
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/gofractally/arbtrie
+  generator: false
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Why PsiTri:
+      - The Problem: why-psitri/problem.md
+      - Design Philosophy: why-psitri/design.md
+  - Getting Started:
+      - Quick Start: getting-started/quickstart.md
+      - API Reference: getting-started/api.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Control Blocks & Addressing: architecture/control-blocks.md
+      - Branchless Design: architecture/branchless-design.md
+      - Concurrent Writers: architecture/concurrent-writers.md
+      - Segment Allocator (SAL): architecture/sal.md
+      - Caching & Compaction: architecture/caching.md
+  - Internals:
+      - Recovery: internals/recovery.md
+      - Write Protection & Durability: internals/write-protection.md
+      - Known Issues: internals/known-issues.md
+  - Benchmarks:
+      - Bank Transaction Benchmark: benchmarks/bank.md
+  - Development:
+      - Code Coverage: development/coverage.md
+      - Contributing: development/contributing.md

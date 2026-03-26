@@ -74,9 +74,15 @@ namespace sal
 
       void set_runtime_config(const runtime_config& cfg);
 
-      // gets the current thread's session, increments its ref count
-      // becomes get_thread_session() returns a non-atomic smart pointer that will
-      // release the session when it goes out of scope
+      /// Returns the allocator_session for the calling thread, creating one if
+      /// none exists.  Sessions are stored in thread_local storage and are
+      /// 1:1 with (thread, allocator) pairs.
+      ///
+      /// IMPORTANT: The returned session is bound to the calling thread.
+      /// Do not create a session on one thread and use it from another.
+      /// In multi-threaded code, each thread must call get_session()
+      /// (or start_write_session / start_read_session) from its own
+      /// context.
       allocator_session_ptr get_session();
 
       seg_alloc_dump dump() const;
@@ -299,6 +305,7 @@ namespace sal
       }
       ///@}
 
+      /// @see get_session() — same thread-affinity constraints apply.
       allocator_session_ptr get_session() const;
       void                  end_session(allocator_session* ses);
 

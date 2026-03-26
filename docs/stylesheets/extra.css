@@ -1,0 +1,73 @@
+/* Hero section styling for landing page */
+.md-typeset .hero-headline {
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 0.5rem;
+}
+
+.md-typeset .hero-tagline {
+  font-size: 1.25rem;
+  opacity: 0.8;
+  margin-bottom: 2rem;
+  max-width: 48rem;
+}
+
+/* Feature grid */
+.md-typeset .feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.md-typeset .feature-card {
+  padding: 1.25rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  background: var(--md-code-bg-color);
+}
+
+.md-typeset .feature-card h3 {
+  margin-top: 0;
+  font-size: 1rem;
+}
+
+.md-typeset .feature-card p {
+  margin-bottom: 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+/* Stat highlights */
+.md-typeset .stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2rem;
+  margin: 2rem 0;
+  justify-content: center;
+}
+
+.md-typeset .stat {
+  text-align: center;
+}
+
+.md-typeset .stat-value {
+  font-size: 2.25rem;
+  font-weight: 700;
+  color: var(--md-primary-fg-color);
+  display: block;
+  line-height: 1.1;
+}
+
+.md-typeset .stat-label {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  display: block;
+  margin-top: 0.25rem;
+}
+
+/* Comparison table accent */
+.md-typeset .comparison-table td:first-child {
+  font-weight: 600;
+}

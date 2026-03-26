@@ -82,7 +82,20 @@ namespace psitri
       /// Lightweight recovery: reset reference counts and reclaim leaked memory
       void reset_reference_counts() { _allocator.reset_reference_counts(); }
 
+      /// Creates a new write session backed by the calling thread's
+      /// allocator_session.  The returned session must only be used
+      /// from the thread that created it -- the underlying allocator
+      /// session is thread_local and not safe to share across threads.
+      ///
+      /// For multi-writer patterns, call start_write_session() from
+      /// each writer thread rather than creating sessions on a
+      /// coordinator thread and distributing them.
       std::shared_ptr<write_session> start_write_session();
+
+      /// Creates a new read session backed by the calling thread's
+      /// allocator_session.  Same thread-affinity rule as
+      /// start_write_session(): create the session on the thread
+      /// that will use it.
       std::shared_ptr<read_session>  start_read_session();
 
      private:

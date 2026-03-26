@@ -59,9 +59,7 @@ open coverage/html/index.html
 ### No `.gcda` files generated (0% coverage)
 
 **Cause:** A test triggered a C++ `assert()` or `SIGABRT`, killing the process
-before the gcov runtime could write `.gcda` files. Unlike Catch2 `REQUIRE`
-failures (which are exceptions), a raw `assert()` failure calls `abort()` and
-destroys all pending coverage data for the entire run.
+before the gcov runtime could write `.gcda` files.
 
 **Fix:** Exclude the offending test tags:
 ```bash
@@ -69,14 +67,13 @@ destroys all pending coverage data for the entire run.
 ```
 
 Known tags that can cause `abort()` in debug builds:
-- `[crash]` — tests with known SIGABRT behavior (hidden by default via `[.]`)
-- `[!mayfail]` — tests that exercise code paths which hit internal assertions
+
+- `[crash]` -- tests with known SIGABRT behavior (hidden by default via `[.]`)
+- `[!mayfail]` -- tests that exercise code paths which hit internal assertions
 
 ### Coverage numbers look too low
 
-**Cause:** Multiple test runs without clearing `.gcda` files can produce
-corrupted/stale data. The gcov counters accumulate across runs, and if a
-later run aborts, it can zero out previously-collected data.
+**Cause:** Multiple test runs without clearing `.gcda` files can produce corrupted/stale data.
 
 **Fix:** Always delete `.gcda` files before a fresh run:
 ```bash
@@ -85,22 +82,15 @@ find . -name "*.gcda" -delete
 
 ### lcov reports "no .gcda files found"
 
-**Cause:** Either the tests weren't run, or they aborted (see above).
-Verify files exist before running lcov:
+**Cause:** Either the tests weren't run, or they aborted.
 ```bash
 find . -name "*.gcda" | wc -l   # should be > 0
 ```
 
 ### `--coverage` not working with Homebrew LLVM/Clang
 
-The project uses Homebrew clang (`/opt/homebrew/opt/llvm/bin/clang++`).
-With `--coverage`, this compiler generates gcov-compatible `.gcda`/`.gcno`
-files (not LLVM `.profraw` files), so standard `lcov`/`genhtml` work fine.
-
-If you switch compilers, verify coverage instrumentation is present:
-```bash
-nm bin/psitri-tests | grep gcov   # should show ___gcov_dump etc.
-```
+The project uses Homebrew clang. With `--coverage`, this compiler generates
+gcov-compatible `.gcda`/`.gcno` files, so standard `lcov`/`genhtml` work fine.
 
 ## Build Configurations
 
