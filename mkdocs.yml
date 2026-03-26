@@ -106,6 +106,7 @@ nav:
       - Segment Allocator (SAL): architecture/sal.md
       - Caching & Compaction: architecture/caching.md
   - Internals:
+      - Data Integrity & Verification: internals/data-integrity.md
       - Recovery: internals/recovery.md
       - Write Protection & Durability: internals/write-protection.md
       - Known Issues: internals/known-issues.md
