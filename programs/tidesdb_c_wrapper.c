@@ -219,6 +219,20 @@ int tdb_iter_valid(tdb_wrapper_iter_t* wi)
    return tidesdb_iter_valid(wi->iter);
 }
 
+int tdb_iter_key(tdb_wrapper_iter_t* wi, uint8_t** key_out, size_t* key_size_out)
+{
+   return tidesdb_iter_key(wi->iter, key_out, key_size_out) == TDB_SUCCESS
+              ? TDB_WRAP_SUCCESS
+              : TDB_WRAP_ERR;
+}
+
+int tdb_iter_value(tdb_wrapper_iter_t* wi, uint8_t** value_out, size_t* value_size_out)
+{
+   return tidesdb_iter_value(wi->iter, value_out, value_size_out) == TDB_SUCCESS
+              ? TDB_WRAP_SUCCESS
+              : TDB_WRAP_ERR;
+}
+
 void tdb_iter_free(tdb_wrapper_iter_t* wi)
 {
    if (!wi)

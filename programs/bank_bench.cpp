@@ -812,6 +812,7 @@ class RocksDbEngine : public BankEngine
    rocksdb::DB*           _db = nullptr;
    rocksdb::WriteOptions  _wo;
    rocksdb::ReadOptions   _ro;
+   std::string            _sync_mode;
 
    // Batch state: pending writes buffered in a map so reads see prior writes
    rocksdb::WriteBatch                          _batch;
@@ -829,6 +830,7 @@ class RocksDbEngine : public BankEngine
 
    void open(const std::string& path, const std::string& sync_mode) override
    {
+      _sync_mode = sync_mode;
       rocksdb::DestroyDB(path, {});
       rocksdb::Options options;
       options.create_if_missing = true;
@@ -912,7 +914,16 @@ class RocksDbEngine : public BankEngine
       _pending.clear();
    }
 
-   void sync() override { _db->Flush(rocksdb::FlushOptions()); }
+   void sync() override
+   {
+      if (_sync_mode == "none")
+         return;
+      // async and sync both flush memtable to SST files;
+      // for sync mode, _wo.sync=true already forces WAL sync per write
+      rocksdb::FlushOptions fo;
+      fo.wait = (_sync_mode == "sync");  // blocking flush for sync, non-blocking for async
+      _db->Flush(fo);
+   }
 
    SizeReport report_size(const std::string& db_path) override
    {
@@ -1002,15 +1013,17 @@ class RocksDbEngine : public BankEngine
 
 class MdbxEngine : public BankEngine
 {
-   MDBX_env* _env = nullptr;
-   MDBX_dbi  _dbi = 0;
-   MDBX_txn* _txn = nullptr;  // current batch transaction
+   MDBX_env*   _env = nullptr;
+   MDBX_dbi    _dbi = 0;
+   MDBX_txn*   _txn = nullptr;  // current batch transaction
+   std::string _sync_mode;
 
   public:
    const char* name() const override { return "MDBX"; }
 
    void open(const std::string& path, const std::string& sync_mode) override
    {
+      _sync_mode = sync_mode;
       std::filesystem::remove_all(path);
       MDBX_CHECK(mdbx_env_create(&_env));
       MDBX_CHECK(mdbx_env_set_geometry(_env, 1024 * 1024,       // lower
@@ -1019,13 +1032,8 @@ class MdbxEngine : public BankEngine
                                         -1, -1, -1));
       MDBX_CHECK(mdbx_env_set_maxreaders(_env, 8));
 
-      unsigned sync_flags = 0;
-      if (sync_mode == "none")
-         sync_flags = MDBX_SAFE_NOSYNC;
-      else if (sync_mode == "async")
-         sync_flags = MDBX_SAFE_NOSYNC;
-      else
-         sync_flags = MDBX_SYNC_DURABLE;
+      // All modes use SAFE_NOSYNC for commits — durability comes from periodic sync()
+      unsigned sync_flags = MDBX_SAFE_NOSYNC;
 
       unsigned flags = sync_flags | MDBX_LIFORECLAIM | MDBX_NOSUBDIR;
       MDBX_CHECK(mdbx_env_open(_env, path.c_str(), (MDBX_env_flags_t)flags, 0664));
@@ -1108,7 +1116,15 @@ class MdbxEngine : public BankEngine
       _txn = nullptr;
    }
 
-   void sync() override { mdbx_env_sync_ex(_env, true, false); }
+   void sync() override
+   {
+      if (_sync_mode == "none")
+         return;
+      // async: nonblocking sync (force=true, nonblock=true)
+      // sync:  blocking sync   (force=true, nonblock=false)
+      bool nonblock = (_sync_mode == "async");
+      mdbx_env_sync_ex(_env, true, nonblock);
+   }
 
    SizeReport report_size(const std::string&) override
    {

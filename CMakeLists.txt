@@ -640,6 +640,52 @@ if(BUILD_TIDESDB_BENCH AND TARGET tidesdb_lib)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
+# ── KV Benchmark ──
+# PsiTri kv bench (always available)
+add_executable(kv-bench-psitri programs/kv_bench.cpp)
+target_compile_definitions(kv-bench-psitri PRIVATE KV_ENGINE_PSITRI=1)
+target_link_libraries(kv-bench-psitri PRIVATE psitri hash Boost::program_options)
+set_target_properties(kv-bench-psitri PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+if(BUILD_ROCKSDB_BENCH)
+    # PsiTriRocks kv bench
+    add_executable(kv-bench-psitrirocks programs/kv_bench.cpp)
+    target_compile_definitions(kv-bench-psitrirocks PRIVATE KV_ENGINE_ROCKSDB=1 PSITRIROCKS_BACKEND=1)
+    target_link_libraries(kv-bench-psitrirocks PRIVATE psitrirocks hash Boost::program_options)
+    set_target_properties(kv-bench-psitrirocks PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # Real RocksDB kv bench
+    add_executable(kv-bench-rocksdb programs/kv_bench.cpp)
+    target_compile_definitions(kv-bench-rocksdb PRIVATE KV_ENGINE_ROCKSDB=1 XXH_INLINE_ALL)
+    target_link_libraries(kv-bench-rocksdb PRIVATE rocksdb hash Boost::program_options)
+    target_include_directories(kv-bench-rocksdb PRIVATE ${rocksdb_SOURCE_DIR}/include)
+    set_target_properties(kv-bench-rocksdb PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # MDBX kv bench
+    add_executable(kv-bench-mdbx programs/kv_bench.cpp)
+    target_compile_definitions(kv-bench-mdbx PRIVATE KV_ENGINE_MDBX=1 XXH_INLINE_ALL)
+    target_link_libraries(kv-bench-mdbx PRIVATE mdbx-static hash Boost::program_options)
+    set_target_properties(kv-bench-mdbx PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+if(BUILD_TIDESDB_BENCH AND TARGET tidesdb_lib)
+    add_executable(kv-bench-tidesdb
+        programs/kv_bench.cpp
+        programs/tidesdb_c_wrapper.c)
+    target_compile_definitions(kv-bench-tidesdb PRIVATE KV_ENGINE_TIDESDB=1 XXH_INLINE_ALL)
+    target_include_directories(kv-bench-tidesdb PRIVATE
+        ${TIDESDB_INCLUDE_DIR} ${tidesdb_SOURCE_DIR}/external
+        ${tidesdb_BINARY_DIR} ${CMAKE_SOURCE_DIR}/programs ${Boost_INCLUDE_DIRS})
+    target_link_libraries(kv-bench-tidesdb PRIVATE
+        tidesdb_lib hash Boost::program_options Threads::Threads)
+    set_target_properties(kv-bench-tidesdb PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
 # ── Examples ──
 option(BUILD_EXAMPLES "Build example programs" ON)
 if(BUILD_EXAMPLES)

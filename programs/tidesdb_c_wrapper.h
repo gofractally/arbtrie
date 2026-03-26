@@ -61,6 +61,10 @@ int                 tdb_iter_seek(tdb_wrapper_iter_t* it,
                                   const uint8_t* key, size_t key_size);
 int                 tdb_iter_next(tdb_wrapper_iter_t* it);
 int                 tdb_iter_valid(tdb_wrapper_iter_t* it);
+int                 tdb_iter_key(tdb_wrapper_iter_t* it,
+                                  uint8_t** key_out, size_t* key_size_out);
+int                 tdb_iter_value(tdb_wrapper_iter_t* it,
+                                    uint8_t** value_out, size_t* value_size_out);
 void                tdb_iter_free(tdb_wrapper_iter_t* it);
 
 #ifdef __cplusplus
