@@ -203,8 +203,9 @@ if(ENABLE_COVERAGE)
         # SAL tests
         COMMAND ${CMAKE_BINARY_DIR}/bin/sal-tests ${COVERAGE_EXCLUDE_TAGS} || true
         # psitri batch: all tests except crash-prone groups (fast, covers most code)
-        COMMAND ${PSITRI_TESTS} "~[fuzz]" "~[multi-writer]" "~[power_loss]" "~[recovery]" ${COVERAGE_EXCLUDE_TAGS} || true
+        COMMAND ${PSITRI_TESTS} "~[fuzz]" "~[multi-writer]" "~[power_loss]" "~[recovery]" "~[truncate]" ${COVERAGE_EXCLUDE_TAGS} || true
         # Isolated groups that may crash or hang
+        COMMAND ${PSITRI_TESTS} "[truncate]" ${COVERAGE_EXCLUDE_TAGS} || true
         COMMAND ${PSITRI_TESTS} "[recovery]" ${COVERAGE_EXCLUDE_TAGS} || true
         COMMAND ${PSITRI_TESTS} "[power_loss]" ${COVERAGE_EXCLUDE_TAGS} || true
         COMMAND ${PSITRI_TESTS} "[multi-writer]" ${COVERAGE_EXCLUDE_TAGS} || true
@@ -215,6 +216,7 @@ if(ENABLE_COVERAGE)
     add_custom_target(coverage-run
         ${COVERAGE_RUN_COMMANDS}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        DEPENDS sal-tests psitri-tests
         COMMENT "Running coverage test groups..."
     )
 
@@ -240,6 +242,7 @@ if(ENABLE_COVERAGE)
 
     # coverage: run all test groups then generate report
     add_custom_target(coverage
+        DEPENDS sal-tests psitri-tests
         ${COVERAGE_RUN_COMMANDS}
         COMMAND ${LCOV}
             --directory ${CMAKE_BINARY_DIR}
@@ -270,54 +273,7 @@ endif()
 
 # MDBX benchmark test (optional)
 option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
-if(BUILD_MDBX_TEST)
-    message(STATUS "Building MDBX benchmark test")
-    # Look for header directly in external/libmdbx
-    find_path(MDBX_INCLUDE_DIR mdbx.h PATHS external/libmdbx HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" NO_CACHE)
-    
-    # Look for library directly in external/libmdbx or its build dir, prefer static
-    find_library(MDBX_LIBRARY NAMES libmdbx-static.a libmdbx.a mdbx
-                 PATHS external/libmdbx external/libmdbx/build
-                 HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" "${CMAKE_SOURCE_DIR}/external/libmdbx/build"
-                 NO_DEFAULT_PATH NO_CACHE)
-
-    # If static wasn't found, maybe dynamic exists (less preferred but okay for testing)
-    if(NOT MDBX_LIBRARY)
-         find_library(MDBX_LIBRARY NAMES mdbx
-                      PATHS external/libmdbx external/libmdbx/build
-                      HINTS "${CMAKE_SOURCE_DIR}/external/libmdbx" "${CMAKE_SOURCE_DIR}/external/libmdbx/build"
-                      NO_DEFAULT_PATH NO_CACHE)
-    endif()
-
-
-    if(MDBX_INCLUDE_DIR AND MDBX_LIBRARY)
-        message(STATUS "Found MDBX include: ${MDBX_INCLUDE_DIR}")
-        message(STATUS "Found MDBX library: ${MDBX_LIBRARY}")
-
-        # Standardized benchmark (mirrors psitri-benchmark)
-        add_executable(mdbx-benchmark programs/mdbx_bench.cpp)
-        target_compile_definitions(mdbx-benchmark PRIVATE XXH_INLINE_ALL)
-        target_include_directories(mdbx-benchmark PRIVATE ${MDBX_INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
-        target_link_libraries(mdbx-benchmark PRIVATE
-            ${MDBX_LIBRARY} Boost::program_options hash Threads::Threads)
-        set_target_properties(mdbx-benchmark PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-        if(ENABLE_SANITIZER)
-            target_compile_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
-            target_link_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
-        endif()
-
-    else()
-        message(WARNING "MDBX library or includes not found. Skipping lmdbx_arb_test build. Looked in external/libmdbx")
-        if(NOT MDBX_INCLUDE_DIR)
-            message(WARNING "MDBX_INCLUDE_DIR not found.")
-        endif()
-        if(NOT MDBX_LIBRARY)
-            message(WARNING "MDBX_LIBRARY not found.")
-        endif()
-    endif()
-endif()
+# mdbx-benchmark is created later, after FetchContent_MakeAvailable(libmdbx)
 
 # Psitri benchmark
 add_executable(psitri-benchmark programs/psitri_bench.cpp)
@@ -420,6 +376,16 @@ if(BUILD_ROCKSDB_BENCH)
     set_target_properties(rocksdb-bench PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+    # Scale benchmark (mirrors psitri_bench / tidesdb_bench pattern)
+    add_executable(rocksdb-scale-bench programs/rocksdb_scale_bench.cpp)
+    target_compile_definitions(rocksdb-scale-bench PRIVATE XXH_INLINE_ALL)
+    target_link_libraries(rocksdb-scale-bench PRIVATE rocksdb Boost::program_options hash)
+    target_include_directories(rocksdb-scale-bench PRIVATE
+        ${rocksdb_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/programs)
+    set_target_properties(rocksdb-scale-bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
     # ── libmdbx for MDBX comparison benchmark ──
     message(STATUS "Fetching libmdbx for comparison benchmark")
 
@@ -434,6 +400,21 @@ if(BUILD_ROCKSDB_BENCH)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(libmdbx)
+
+    # MDBX scale benchmark (mirrors psitri-benchmark), now that mdbx-static target exists
+    if(BUILD_MDBX_TEST AND TARGET mdbx-static)
+        message(STATUS "Building mdbx-benchmark (scale test)")
+        add_executable(mdbx-benchmark programs/mdbx_bench.cpp)
+        target_compile_definitions(mdbx-benchmark PRIVATE XXH_INLINE_ALL)
+        target_link_libraries(mdbx-benchmark PRIVATE
+            mdbx-static Boost::program_options hash Threads::Threads)
+        set_target_properties(mdbx-benchmark PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        if(ENABLE_SANITIZER)
+            target_compile_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
+            target_link_options(mdbx-benchmark PRIVATE -fsanitize=thread -g)
+        endif()
+    endif()
 
     add_subdirectory(libraries/mdbxrocks)
 
