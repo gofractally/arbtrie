@@ -120,9 +120,11 @@ TEST_CASE("cursor-prev-next", "[cursor]")
    cur.lower_bound(to_key_view("boyz"));
    REQUIRE(not cur.is_end());
    REQUIRE(cur.key() == key_view(*itr));
+   auto itr3 = std::lower_bound(words.begin(), words.end(), "Ancerata");
    SAL_WARN("lower bound Ancerata");
    cur.lower_bound(to_key_view("Ancerata"));
-   assert(cur.key() == key_view("Ancerata"));
+   REQUIRE(not cur.is_end());
+   REQUIRE(cur.key() == key_view(*itr3));
 }
 
 TEST_CASE("cursor-lowerbound", "[cursor]")

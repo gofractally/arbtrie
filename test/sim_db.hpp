@@ -307,11 +307,17 @@ namespace sim
 
       int upsert(node_handle& r, std::string_view key, std::string_view val)
       {
-         auto new_root = upsert_impl(r, key, std::string(val));
-         int  result   = r->data.find(std::string(key)) != r->data.end()
-                             ? 0
-                             : -1;  // Approximate: -1 for insert
-         r             = std::move(new_root);
+         // Capture old value size before modifying (matches real API: -1 on insert, old size on update)
+         int  result = -1;
+         auto it     = r->data.find(std::string(key));
+         if (it != r->data.end())
+         {
+            if (auto* s = std::get_if<std::string>(&it->second))
+               result = static_cast<int>(s->size());
+            else
+               result = 0;
+         }
+         r = upsert_impl(r, key, std::string(val));
          return result;
       }
 
@@ -476,13 +482,7 @@ namespace sim
           : _rs(rs), _root(root), _current_position(begin_position)
       {
          if (root)
-         {
             flatten_tree(root, "");
-            if (!_flattened_keys.empty())
-            {
-               _current_position = 0;
-            }
-         }
       }
 
       bool is_start() const { return _current_position == begin_position; }
@@ -607,7 +607,7 @@ namespace sim
 
       node_handle root_handle() const { return _root; }
 
-     private:
+        protected:
       static constexpr size_t begin_position = std::numeric_limits<size_t>::max();
       static constexpr size_t end_position   = std::numeric_limits<size_t>::max() - 1;
 
@@ -615,6 +615,7 @@ namespace sim
       node_handle              _root;
       size_t                   _current_position;
       std::vector<std::string> _flattened_keys;
+   private:
 
       void flatten_tree(const node_handle& node, const std::string& prefix)
       {
@@ -669,22 +670,18 @@ namespace sim
       template <typename T>
       auto upsert(std::string_view key, T&& val)
       {
-         node_handle r      = root_handle();
-         auto        result = _ws.upsert(r, key, std::forward<T>(val));
-         return result;
+         return _ws.upsert(_root, key, std::forward<T>(val));
       }
 
       template <typename T>
       void insert(std::string_view key, T&& val)
       {
-         node_handle r = root_handle();
-         _ws.insert(r, key, std::forward<T>(val));
+         _ws.insert(_root, key, std::forward<T>(val));
       }
 
       int remove(std::string_view key)
       {
-         node_handle r = root_handle();
-         return _ws.remove(r, key);
+         return _ws.remove(_root, key);
       }
 
      private:

@@ -11,10 +11,43 @@ cmake --build build/release -j8
 
 ### Prerequisites
 
-- C++20 compiler (Clang 15+ or GCC 12+)
-- CMake 3.16+
-- Ninja (recommended) or Make
-- Boost (program_options, for benchmarks)
+**Compiler:** Clang 18+ is required. GCC is not supported — the codebase uses
+Clang-specific flags (`-Wno-vla-extension`) and ARM NEON code that is Clang-only
+in several benchmark files.
+
+**macOS (Apple Silicon)**
+```bash
+brew install llvm cmake ninja boost catch2
+```
+CMake picks up Homebrew LLVM automatically via the `if(APPLE)` block in
+`CMakeLists.txt`.
+
+**Linux (Ubuntu 22.04+ / Debian)**
+```bash
+sudo apt-get install -y \
+    clang-20 \
+    cmake \
+    ninja-build \
+    libsqlite3-dev \
+    libboost-all-dev \
+    libcatch2-dev
+```
+Pass the compiler explicitly when configuring:
+```bash
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_COMPILER=clang++-20 \
+      -DCMAKE_C_COMPILER=clang-20 \
+      -B build/debug
+```
+
+| Dependency | Minimum version | Purpose |
+|------------|----------------|---------|
+| Clang      | 18             | Compiler (GCC not supported) |
+| CMake      | 3.16           | Build system |
+| Ninja      | any            | Build engine (recommended) |
+| SQLite3    | 3.x            | sqlite-arb-test benchmark (optional) |
+| Boost      | 1.71           | `program_options` (benchmarks) |
+| Catch2     | 3.x            | Unit test framework |
 
 ### Build Configurations
 

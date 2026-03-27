@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <ucc/padded_atomic.hpp>
 #include <stdexcept>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block_alloc.hpp>
@@ -372,7 +373,7 @@ namespace sal
 
       /// Corruption flag — set by compactor on checksum failure, checked by writers.
       /// Own cacheline to avoid false sharing (128 bytes for Apple M-series).
-      alignas(std::hardware_destructive_interference_size) std::atomic<bool> _corruption_detected{false};
+      alignas(ucc::hardware_cacheline_size) std::atomic<bool> _corruption_detected{false};
 
       inline bool config_validate_checksum_on_compact() const;
       inline bool config_update_checksum_on_compact() const;

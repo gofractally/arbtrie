@@ -29,9 +29,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(STATUS "Setting Debug flags: ${CMAKE_CXX_FLAGS_DEBUG}")
 endif()
 
-# Set the C++ compiler to LLVM from Homebrew on macOS
+# Set the C++ compiler to LLVM clang (required — GCC is not supported)
 if(APPLE)
     set(CMAKE_CXX_COMPILER "/opt/homebrew/opt/llvm/bin/clang++")
+elseif(UNIX AND NOT CMAKE_CXX_COMPILER)
+    find_program(CLANGPP clang++ clang++-20 clang++-19 clang++-18 REQUIRED)
+    set(CMAKE_CXX_COMPILER "${CLANGPP}")
 endif()
 
 # Enable compile commands for IDE support
@@ -112,7 +115,17 @@ endif()
 
 # Find required packages
 find_package(Threads REQUIRED)
-find_package(SQLite3 REQUIRED)
+find_package(SQLite3)
+# CMake's FindSQLite3 creates SQLite::SQLite3 on Linux but some installations
+# (Homebrew on macOS) provide SQLite3::SQLite3. Normalise to SQLite3::SQLite3.
+if(TARGET SQLite::SQLite3 AND NOT TARGET SQLite3::SQLite3)
+    add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+endif()
+if(SQLite3_FOUND)
+    message(STATUS "SQLite3 found -- sqlite-arb-test benchmark will be built")
+else()
+    message(STATUS "SQLite3 not found -- sqlite-arb-test benchmark will be skipped")
+endif()
 
 # Find Boost
 set(Boost_NO_WARN_NEW_VERSIONS ON)

@@ -275,7 +275,7 @@ namespace sal
       }
    }
 
-   bool block_allocator::fsync(bool full) noexcept
+   bool block_allocator::fsync([[maybe_unused]] bool full) noexcept
    {
       if (_fd)
       {

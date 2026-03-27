@@ -13,6 +13,7 @@
 //#include <syncstream>
 // #undef NDEBUG
 #include <cassert>
+#include <cstring>
 
 namespace sal
 {

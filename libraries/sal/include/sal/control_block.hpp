@@ -103,7 +103,7 @@ namespace sal
          control_block_data prior = _data.fetch_add(1, std::memory_order_relaxed);
          if (prior.ref >= max_ref_count)
          {
-            control_block_data prior = _data.fetch_sub(1, std::memory_order_relaxed);
+            _data.fetch_sub(1, std::memory_order_relaxed);
             throw std::runtime_error("reference count exceeded limits");
          }
          assert(prior.ref > 0);

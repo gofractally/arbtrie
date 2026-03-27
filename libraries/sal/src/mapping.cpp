@@ -153,7 +153,10 @@ namespace sal
       }
       auto prot = get_prot(_mode);
 #ifdef MAP_FIXED_NOREPLACE
-      // Try to extend the existing mapping
+      // Try to extend the existing mapping (only when a mapping already exists —
+      // if _data is null there is nothing to extend and nullptr+0==nullptr would
+      // falsely pass the addr==end check below)
+      if (_data.load() != nullptr)
       {
          auto end = (char*)_data.load() + _size;
          auto addr =

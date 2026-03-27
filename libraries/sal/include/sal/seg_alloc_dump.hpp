@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>  // Add include for std::sort
+#include <cmath>      // for std::round
 #include <cassert>    // Add include for assert
 #include <cstdint>
 #include <iomanip>

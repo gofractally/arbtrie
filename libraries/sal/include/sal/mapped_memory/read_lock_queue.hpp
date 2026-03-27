@@ -180,7 +180,7 @@ namespace sal
          // between the two positions is max_segment_count which is less than
          // 2^31
          return min_read_pos - uint32_t(recycled_segments.get_read_pos());
-         static_assert(max_segment_count < (1 << 31));
+         static_assert(max_segment_count < (1ull << 31));
       }
 
       // pop_recycled_segments implementation

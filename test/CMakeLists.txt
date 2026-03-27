@@ -97,17 +97,21 @@ target_compile_options(min_index_benchmark PRIVATE -O3 -march=native)
 target_compile_options(min_index_32_benchmark PRIVATE -O3 -march=native)
 target_compile_options(min_index_combined_benchmark PRIVATE -O3 -march=native)
 
-add_executable(hint_benchmark hint_benchmark.cpp)
-set_target_properties(hint_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|aarch64|ARM|AARCH64")
+    add_executable(hint_benchmark hint_benchmark.cpp)
+    set_target_properties(hint_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    target_compile_options(hint_benchmark PRIVATE -O3 -march=native)
+endif()
 
 add_subdirectory(min_index)
 
-# SQLite benchmark test
-add_executable(sqlite-arb-test sqlite_arb_test.cpp)
-target_link_libraries(sqlite-arb-test
-    PRIVATE
-        Boost::program_options
-        SQLite3::SQLite3
-)
-set_target_properties(sqlite-arb-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+# SQLite benchmark test (optional -- requires libsqlite3-dev)
+if(SQLite3_FOUND)
+    add_executable(sqlite-arb-test sqlite_arb_test.cpp)
+    target_link_libraries(sqlite-arb-test
+        PRIVATE
+            Boost::program_options
+            SQLite3::SQLite3
+    )
+    set_target_properties(sqlite-arb-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()

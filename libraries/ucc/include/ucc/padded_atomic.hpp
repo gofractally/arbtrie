@@ -4,12 +4,21 @@
 
 namespace ucc
 {
+   // Avoid std::hardware_destructive_interference_size: GCC warns about ABI-dependence
+   // and does not treat the value as a constant expression in all contexts.
+   // 64 bytes is the coherence granularity on x86-64; ARM64 (Apple M-series) is 128.
+#if defined(__aarch64__) || defined(__arm__)
+   inline constexpr std::size_t hardware_cacheline_size = 128;
+#else
+   inline constexpr std::size_t hardware_cacheline_size = 64;
+#endif
+
    /**
     * @brief A padded atomic type that is aligned to the hardware destructive interference size.
-    * 
+    *
     * This type is designed to provide thread-safe operations on a single variable across multiple
     * threads, while also ensuring that the variable is aligned to the hardware's cache line size.
-    * 
+    *
     * prevents false sharing of cache lines by padding the atomic variable to the cache line size.
     */
    template <typename T>
@@ -17,7 +26,7 @@ namespace ucc
    {
       using std::atomic<T>::atomic;
 
-      char padding[std::hardware_destructive_interference_size - sizeof(std::atomic<T>)];
+      char padding[hardware_cacheline_size - sizeof(std::atomic<T>)];
 
       using std::atomic<T>::load;
       using std::atomic<T>::store;
@@ -30,15 +39,15 @@ namespace ucc
       using std::atomic<T>::notify_one;
       using std::atomic<T>::notify_all;
 
-   } __attribute__((__aligned__(std::hardware_destructive_interference_size)));
+   } __attribute__((__aligned__(hardware_cacheline_size)));
 
-   static_assert(sizeof(padded_atomic<uint64_t>) == std::hardware_destructive_interference_size);
+   static_assert(sizeof(padded_atomic<uint64_t>) == hardware_cacheline_size);
 
    /**
    * These bit manipulation functions are designed to allow ONE thread to modify the high 32 bits
    * and ONE thread to modify the low 32 bits concurrently. They are NOT designed to support
    * multiple threads modifying the same portion (high or low) simultaneously.
-   * 
+   *
    * @group atomc_bit_manipulation Atomic Bit Manipulation Functions
    */
    ///@{
