@@ -1,6 +1,10 @@
 # Code Coverage
 
-## Quick Start
+[:material-open-in-new: View Latest Coverage Report](https://gofractally.github.io/arbtrie/coverage/){ .md-button }
+
+The coverage report is updated automatically on every push to `main`.
+
+## Quick Start (local)
 
 ```bash
 # 1. Configure coverage build (one-time)

@@ -1,0 +1,44 @@
+name: Coverage report
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build lcov libboost-program-options-dev libboost-container-dev
+
+      - name: Configure
+        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
+
+      - name: Build tests and examples
+        run: |
+          ninja -C build sal-tests psitri-tests
+          ninja -C build psitri-benchmark psitri-tool psitrirocks-bench
+          ninja -C build example-basic_crud example-cursor_iteration example-range_operations example-snapshots example-subtrees
+
+      - name: Generate coverage report
+        run: ninja -C build coverage
+
+      - name: Deploy to gh-pages/coverage
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: build/coverage/html
+          destination_dir: coverage
+          keep_files: true
