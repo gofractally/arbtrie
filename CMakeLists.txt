@@ -116,7 +116,7 @@ endif()
 option(ENABLE_NATIVE_ARCH
     "Compile for the native CPU architecture (-march=native). Enables SSE4.1, SSSE3, AVX2, etc. \
 on x86 and Apple Silicon tuning on ARM. Produces binaries that may not run on older CPUs."
-    OFF)
+    ON)
 if(ENABLE_NATIVE_ARCH)
     message(STATUS "Native arch optimizations ENABLED (-march=native)")
     add_compile_options(-march=native)

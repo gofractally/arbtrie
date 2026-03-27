@@ -6,7 +6,9 @@
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
-#if defined(__SSE2__)
+#if defined(__AVX512F__)
+#include <immintrin.h>
+#elif defined(__SSE2__)
 #include <emmintrin.h>
 #endif
 
@@ -496,7 +498,19 @@ namespace ucc
       return size < result ? size : result;
    }
 #endif
-#if defined(__SSE2__)
+#if defined(__AVX512F__)
+   /**
+    * AVX-512F: single 512-bit load + vpcmpeqd → k-register mask in 5 instructions.
+    * Requires arr to have at least 16 elements of accessible (possibly padded) memory.
+    */
+   inline int find_u32x16_avx512(const uint32_t* arr, size_t size, uint32_t value)
+   {
+      __m512i  data   = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(arr));
+      __m512i  needle = _mm512_set1_epi32((int)value);
+      uint16_t mask   = _mm512_cmpeq_epi32_mask(data, needle);
+      return __builtin_ctz((uint32_t)mask | (1u << size));
+   }
+#elif defined(__SSE2__)
    /**
     * SSE2: finds first occurrence of value in arr[0..size-1], where arr has at
     * least 16 elements of accessible (possibly padded) memory.
@@ -515,20 +529,15 @@ namespace ucc
                      ((uint32_t)_mm_movemask_ps(_mm_castsi128_ps(cmp3)) << 12);
       return __builtin_ctz(mask | (1u << size));
    }
-#endif  // __SSE2__
+#endif  // __AVX512F__ / __SSE2__
 
    inline int find_u32x16(const uint32_t* arr, size_t size, uint32_t value)
    {
       assert(size <= 16);
 #if defined(__ARM_NEON)
-      /*
-      uint32x4_t v0 = vld1q_u32(arr);
-      uint32x4_t v1 = vld1q_u32(arr + 4);
-      uint32x4_t v2 = vld1q_u32(arr + 8);
-      uint32x4_t v3 = vld1q_u32(arr + 12);
-      return find_u32x16_neon(v0, v1, v2, v3, value);
-      */
       return find_u32_padded16_neon(arr, size, value);
+#elif defined(__AVX512F__)
+      return find_u32x16_avx512(arr, size, value);
 #elif defined(__SSE2__)
       return find_u32x16_sse2(arr, size, value);
 #else

@@ -286,55 +286,26 @@ namespace psitri
 #endif
 #if defined(__SSSE3__)
    /**
-    * SSSE3 implementation using _mm_shuffle_epi8 (PSHUFB) as the table-lookup equivalent
-    * of NEON's vqtbl1q_u8. Processes branches end-aligned first (branchless for N < 16)
-    * then in forward 16-byte chunks — see NEON version for full design rationale.
+    * SSSE3 table-lookup using _mm_shuffle_epi8 (PSHUFB), equivalent to NEON vqtbl1q_u8.
+    *
+    * Unlike the NEON version, this does not use pointer wraparound for small N — that trick
+    * requires caller-provided pre-padding and is specific to how NEON code is laid out.
+    * Instead, full 16-byte chunks are processed forward, then a plain scalar tail handles
+    * any remainder.  No special alignment or padding requirements on caller.
     */
-   PSITRI_NO_SANITIZE_ALIGNMENT
-#if PSITRI_PLATFORM_OPTIMIZATIONS
-   __attribute__((no_sanitize("pointer-overflow")))
-#endif
    inline void copy_branches_and_update_cline_index_ssse3(
        const uint8_t*                 input_data,
        uint8_t*                       output_data,
        size_t                         N,
        const std::array<uint8_t, 16>& lut) noexcept
    {
-#if !PSITRI_PLATFORM_OPTIMIZATIONS
-      if (N < 16)
-      {
-         for (size_t i = 0; i < N; ++i)
-         {
-            uint8_t byte   = input_data[i];
-            output_data[i] = (lut[byte >> 4] << 4) | (byte & 0x0F);
-         }
-         return;
-      }
-#endif
       const __m128i lut_vec         = _mm_loadu_si128(reinterpret_cast<const __m128i*>(lut.data()));
       const __m128i low_nibble_mask = _mm_set1_epi8(0x0F);
       const __m128i hi_nibble_mask  = _mm_set1_epi8((char)0xF0);
 
-      // End-aligned chunk (handles the N < 16 wraparound case with caller-guaranteed padding)
-      const size_t final_offset = N - 16;
+      size_t i = 0;
+      for (; i + 16 <= N; i += 16)
       {
-         __m128i data     = _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_data + final_offset));
-         // Extract high nibble of each byte as index (0-15) for table lookup
-         __m128i indices  = _mm_and_si128(_mm_srli_epi16(data, 4), low_nibble_mask);
-         // _mm_shuffle_epi8: lut_vec[indices[i]] — equivalent to vqtbl1q_u8
-         __m128i lut_vals = _mm_shuffle_epi8(lut_vec, indices);
-         // Shift LUT result into high nibble and OR with preserved low nibble
-         __m128i new_hi   = _mm_and_si128(_mm_slli_epi16(lut_vals, 4), hi_nibble_mask);
-         __m128i orig_lo  = _mm_and_si128(data, low_nibble_mask);
-         _mm_storeu_si128(reinterpret_cast<__m128i*>(output_data + final_offset),
-                          _mm_or_si128(new_hi, orig_lo));
-      }
-
-      // Forward chunks before the final one
-      const size_t num_iterations = (N - 1) / 16;
-      for (size_t k = 0; k < num_iterations; ++k)
-      {
-         size_t  i        = k * 16;
          __m128i data     = _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_data + i));
          __m128i indices  = _mm_and_si128(_mm_srli_epi16(data, 4), low_nibble_mask);
          __m128i lut_vals = _mm_shuffle_epi8(lut_vec, indices);
@@ -342,6 +313,12 @@ namespace psitri
          __m128i orig_lo  = _mm_and_si128(data, low_nibble_mask);
          _mm_storeu_si128(reinterpret_cast<__m128i*>(output_data + i),
                           _mm_or_si128(new_hi, orig_lo));
+      }
+      // Scalar tail — no padding requirement, handles N < 16 and remainders cleanly
+      for (; i < N; ++i)
+      {
+         uint8_t byte   = input_data[i];
+         output_data[i] = static_cast<uint8_t>((lut[byte >> 4] << 4) | (byte & 0x0F));
       }
    }
 #endif  // __SSSE3__

@@ -153,7 +153,7 @@ namespace sal
       return _mm_add_epi8(popcount_low, popcount_high);
    }
 
-   size_t max_pop_cnt8_index64_sse(const uint8_t* data)
+   inline size_t max_pop_cnt8_index64_sse(const uint8_t* data)
    {
       // Assumes data is 16-byte aligned. Use aligned loads.
       __m128i v0 = _mm_load_si128(reinterpret_cast<const __m128i*>(data + 0));

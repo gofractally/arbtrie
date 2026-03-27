@@ -563,7 +563,7 @@ void multiwriter_test(benchmark_config            cfg,
 
    auto   overall_end  = std::chrono::steady_clock::now();
    double overall_secs = std::chrono::duration<double>(overall_end - overall_start).count();
-   auto   final_inserts = sum_inserts();
+   auto   final_inserts = sum_committed();
    std::cout << "total: " << format_comma(final_inserts) << " inserts across " << num_writers
              << " writers in " << std::fixed << std::setprecision(3) << overall_secs << " sec\n";
    std::cout << "  aggregate: " << format_comma(uint64_t(final_inserts / overall_secs))

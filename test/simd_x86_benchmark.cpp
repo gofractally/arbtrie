@@ -206,9 +206,18 @@ static void bench_find_u32x16()
       arr[i] = static_cast<uint32_t>(i * 7 + 1);
    uint32_t target = arr[15];  // worst case
 
+   // Explicitly compare scalar_unrolled vs the best available SIMD path.
    double s = bench_ns([&] { SINK(ucc::find_u32x16_scalar_unrolled(arr, 16, target)); });
+#if defined(__AVX512F__)
+   double f = bench_ns([&] { SINK(ucc::find_u32x16_avx512(arr, 16, target)); });
+   print_result("ucc::find_u32x16 (size=16, worst-case, scalar vs AVX-512)", s, f);
+#elif defined(__SSE2__)
+   double f = bench_ns([&] { SINK(ucc::find_u32x16_sse2(arr, 16, target)); });
+   print_result("ucc::find_u32x16 (size=16, worst-case, scalar vs SSE2)", s, f);
+#else
    double f = bench_ns([&] { SINK(ucc::find_u32x16(arr, 16, target)); });
    print_result("ucc::find_u32x16 (size=16, worst-case)", s, f);
+#endif
 }
 
 // ── create_nth_set_bit_table ──────────────────────────────────────────────────
@@ -231,11 +240,29 @@ static void test_create_nth_set_bit_table()
 
 static void bench_create_nth_set_bit_table()
 {
-   std::array<uint8_t, 16> input = {3, 0, 1, 7, 0, 2, 9, 0, 5, 0, 0, 4, 0, 8, 1, 0};
+   // This function is tiny (~0.1 ns). Batch 64 calls to get measurable time,
+   // then explicitly call scalar vs SSE2 to avoid measuring the same dispatch path.
+   std::array<std::array<uint8_t, 16>, 64> inputs;
+   for (auto& inp : inputs)
+      for (auto& b : inp) b = static_cast<uint8_t>(rng() & 0xFF);
 
-   double s = bench_ns([&] { SINK(psitri::create_nth_set_bit_table_scalar(input)[0]); });
-   double f = bench_ns([&] { SINK(psitri::create_nth_set_bit_table(input)[0]); });
+#if defined(__SSE2__)
+   double s = bench_ns(
+       [&] {
+          for (auto& inp : inputs) SINK(psitri::create_nth_set_bit_table_scalar(inp)[0]);
+       },
+       200'000);
+   double f = bench_ns(
+       [&] {
+          for (auto& inp : inputs) SINK(psitri::create_nth_set_bit_table_sse2(inp)[0]);
+       },
+       200'000);
+   print_result("psitri::create_nth_set_bit_table (x64 batch, scalar vs SSE2)", s / 64, f / 64);
+#else
+   double s = bench_ns([&] { SINK(psitri::create_nth_set_bit_table_scalar(inputs[0])[0]); });
+   double f = bench_ns([&] { SINK(psitri::create_nth_set_bit_table(inputs[0])[0]); });
    print_result("psitri::create_nth_set_bit_table", s, f);
+#endif
 }
 
 // ── find_min_index ────────────────────────────────────────────────────────────
@@ -262,6 +289,15 @@ static void test_find_min_index()
    assert(failures == 0);
 }
 
+// Naive linear scan — reference baseline showing what we'd have without optimization.
+static int find_min_index_naive(const uint16_t* v, int n)
+{
+   int best = 0;
+   for (int i = 1; i < n; ++i)
+      if (v[i] < v[best]) best = i;
+   return best;
+}
+
 static void bench_find_min_index()
 {
    alignas(64) uint16_t arr32[32];
@@ -269,15 +305,18 @@ static void bench_find_min_index()
    for (auto& v : arr32) v = static_cast<uint16_t>(rng() & 0xFFFF);
    for (auto& v : arr64) v = static_cast<uint16_t>(rng() & 0xFFFF);
 
+   // On x86: find_min_index_32/64 dispatch to the tournament (no SSE path — SSE4.1 was
+   // benchmarked and found slower than tournament due to _mm_extract_epi16 latency chains).
+   // Compare naive linear scan vs tournament so the baseline reflects real savings.
    {
-      double s = bench_ns([&] { SINK(sal::find_min_index32_tournament(arr32)); });
-      double f = bench_ns([&] { SINK(sal::find_min_index_32(arr32)); });
-      print_result("sal::find_min_index_32 (32 elements)", s, f);
+      double s = bench_ns([&] { SINK(find_min_index_naive(arr32, 32)); });
+      double f = bench_ns([&] { SINK(sal::find_min_index32_tournament(arr32)); });
+      print_result("sal::find_min_index_32 (naive scan vs tournament)", s, f);
    }
    {
-      double s = bench_ns([&] { SINK(sal::find_min_index64_tournament(arr64)); });
-      double f = bench_ns([&] { SINK(sal::find_min_index_64(arr64)); });
-      print_result("sal::find_min_index_64 (64 elements)", s, f);
+      double s = bench_ns([&] { SINK(find_min_index_naive(arr64, 64)); });
+      double f = bench_ns([&] { SINK(sal::find_min_index64_tournament(arr64)); });
+      print_result("sal::find_min_index_64 (naive scan vs tournament)", s, f);
    }
 }
 
@@ -285,10 +324,10 @@ static void bench_find_min_index()
 
 static void test_copy_branches()
 {
-   alignas(16) uint8_t inp_buf[256 + 32] = {};
-   alignas(16) uint8_t out_scalar[256 + 32] = {};
-   alignas(16) uint8_t out_simd[256 + 32] = {};
-   uint8_t* inp = inp_buf + 16;
+   alignas(16) uint8_t inp_buf[256] = {};
+   alignas(16) uint8_t out_scalar[256] = {};
+   alignas(16) uint8_t out_simd[256] = {};
+   uint8_t* inp = inp_buf;
 
    std::array<uint8_t, 16> lut;
    int                     failures = 0;
@@ -300,11 +339,11 @@ static void test_copy_branches()
       {
          memset(out_scalar + 16, 0, 128);
          memset(out_simd + 16, 0, 128);
-         psitri::copy_branches_and_update_cline_index_scalar(inp, out_scalar + 16, N, lut);
+         psitri::copy_branches_and_update_cline_index_scalar(inp, out_scalar, N, lut);
          psitri::copy_branches_and_update_cline_index(
              reinterpret_cast<psitri::branch*>(inp),
-             reinterpret_cast<psitri::branch*>(out_simd + 16), N, lut);
-         if (memcmp(out_scalar + 16, out_simd + 16, N) != 0)
+             reinterpret_cast<psitri::branch*>(out_simd), N, lut);
+         if (memcmp(out_scalar, out_simd, N) != 0)
             ++failures;
       }
    }
@@ -315,9 +354,9 @@ static void test_copy_branches()
 
 static void bench_copy_branches()
 {
-   alignas(16) uint8_t inp_buf[256 + 32] = {};
-   alignas(16) uint8_t out[256 + 32] = {};
-   uint8_t* inp = inp_buf + 16;
+   alignas(16) uint8_t inp_buf[256] = {};
+   alignas(16) uint8_t out[256] = {};
+   uint8_t* inp = inp_buf;
    for (int i = 0; i < 128; ++i) inp[i] = static_cast<uint8_t>(rng() & 0xFF);
    std::array<uint8_t, 16> lut;
    for (auto& v : lut) v = static_cast<uint8_t>(rng() % 16);
@@ -325,14 +364,14 @@ static void bench_copy_branches()
    for (int N : {16, 64, 128})
    {
       double s = bench_ns([&] {
-         psitri::copy_branches_and_update_cline_index_scalar(inp, out + 16, N, lut);
-         SINK(out[16]);
+         psitri::copy_branches_and_update_cline_index_scalar(inp, out, N, lut);
+         SINK(out[0]);
       });
       double f = bench_ns([&] {
          psitri::copy_branches_and_update_cline_index(
              reinterpret_cast<psitri::branch*>(inp),
-             reinterpret_cast<psitri::branch*>(out + 16), N, lut);
-         SINK(out[16]);
+             reinterpret_cast<psitri::branch*>(out), N, lut);
+         SINK(out[0]);
       });
       char name[64];
       snprintf(name, sizeof(name), "psitri::copy_branches (N=%d)", N);
