@@ -3,6 +3,9 @@
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+#if defined(__SSE4_1__)
+#include <smmintrin.h>
+#endif
 
 namespace sal
 {
@@ -122,6 +125,51 @@ namespace sal
    }
 #endif
 
+#if defined(__SSE4_1__)
+   /**
+    * @return the index [0, 31] of the element with the minimum value
+    * Uses PHMINPOSUW (SSE4.1) which finds the min and its position in each 8-element block.
+    */
+   inline int find_min_index_32_sse41(const uint16_t* values)
+   {
+      __m128i mp[4];
+      for (int i = 0; i < 4; i++)
+         mp[i] = _mm_minpos_epu16(
+             _mm_loadu_si128(reinterpret_cast<const __m128i*>(values + i * 8)));
+
+      // Pack the four per-block minimums into a vector and find the global min
+      uint16_t mins[8] = {
+          (uint16_t)_mm_extract_epi16(mp[0], 0), (uint16_t)_mm_extract_epi16(mp[1], 0),
+          (uint16_t)_mm_extract_epi16(mp[2], 0), (uint16_t)_mm_extract_epi16(mp[3], 0),
+          0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+      __m128i global_mp  = _mm_minpos_epu16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(mins)));
+      int     block_idx  = _mm_extract_epi16(global_mp, 1);  // bits[18:16] = index 0-3
+      int     pos_in_blk = _mm_extract_epi16(mp[block_idx], 1);  // bits[18:16] = index 0-7
+      return block_idx * 8 + pos_in_blk;
+   }
+
+   /**
+    * @return the index [0, 63] of the element with the minimum value
+    * Uses PHMINPOSUW (SSE4.1) which finds the min and its position in each 8-element block.
+    */
+   inline int find_min_index_64_sse41(const uint16_t* values)
+   {
+      __m128i mp[8];
+      for (int i = 0; i < 8; i++)
+         mp[i] = _mm_minpos_epu16(
+             _mm_loadu_si128(reinterpret_cast<const __m128i*>(values + i * 8)));
+
+      uint16_t mins[8];
+      for (int i = 0; i < 8; i++)
+         mins[i] = (uint16_t)_mm_extract_epi16(mp[i], 0);
+
+      __m128i global_mp  = _mm_minpos_epu16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(mins)));
+      int     block_idx  = _mm_extract_epi16(global_mp, 1);  // 0-7
+      int     pos_in_blk = _mm_extract_epi16(mp[block_idx], 1);  // 0-7
+      return block_idx * 8 + pos_in_blk;
+   }
+#endif  // __SSE4_1__
+
    /**
     * @return the index [0, 31] of the value in the array that is the minimum
     * Implements a tournament-style reduction algorithm with branchless comparisons
@@ -234,6 +282,7 @@ namespace sal
 #if defined(__ARM_NEON)
       return find_min_index32_neon(const_cast<uint16_t*>(values));
 #else
+      // The branchless tournament is faster than _mm_minpos_epu16 + extract chains on x86.
       return find_min_index32_tournament(values);
 #endif
    }

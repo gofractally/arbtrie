@@ -199,7 +199,7 @@ namespace sal
       {
          return 0;  // All bytes were 0
       }
-      size_t index = count_trailing_zeros(combined_mask);
+      size_t index = __builtin_ctzll(combined_mask);
       return (index < 64) ? index : 0;  // Should be < 64 if mask != 0
    }
 

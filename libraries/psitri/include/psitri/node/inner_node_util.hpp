@@ -2,6 +2,12 @@
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 #endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+#if defined(__SSSE3__)
+#include <tmmintrin.h>
+#endif
 #include <psitri/node/node.hpp>
 #include <psitri/util.hpp>
 
@@ -147,11 +153,43 @@ namespace psitri
       }
    }
 
+#if defined(__SSE2__)
+   /**
+    * SSE2 parallel prefix sum: same algorithm as the NEON version using _mm_slli_si128
+    * (byte-shift left) instead of vextq_u8.
+    */
+   inline std::array<uint8_t, 16> create_nth_set_bit_table_sse2(
+       const std::array<uint8_t, 16>& freq_table)
+   {
+      __m128i input = _mm_loadu_si128(reinterpret_cast<const __m128i*>(freq_table.data()));
+      __m128i zeros = _mm_setzero_si128();
+
+      // ones[i] = 1 if freq_table[i] != 0, else 0
+      __m128i ones = _mm_andnot_si128(_mm_cmpeq_epi8(input, zeros), _mm_set1_epi8(1));
+
+      // Parallel prefix sum: sum[i] = count of non-zero elements in [0..i]
+      __m128i sum = ones;
+      sum         = _mm_add_epi8(sum, _mm_slli_si128(sum, 1));
+      sum         = _mm_add_epi8(sum, _mm_slli_si128(sum, 2));
+      sum         = _mm_add_epi8(sum, _mm_slli_si128(sum, 4));
+      sum         = _mm_add_epi8(sum, _mm_slli_si128(sum, 8));
+
+      // Exclusive prefix sum: subtract ones to get count before index i
+      sum = _mm_sub_epi8(sum, ones);
+
+      std::array<uint8_t, 16> result;
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(result.data()), sum);
+      return result;
+   }
+#endif  // __SSE2__
+
    inline std::array<uint8_t, 16> create_nth_set_bit_table(
        const std::array<uint8_t, 16>& freq_table)
    {
 #ifdef __ARM_NEON
       return create_nth_set_bit_table_neon(freq_table);
+#elif defined(__SSE2__)
+      return create_nth_set_bit_table_sse2(freq_table);
 #else
       return create_nth_set_bit_table_scalar(freq_table);
 #endif
@@ -246,6 +284,68 @@ namespace psitri
       }
    }
 #endif
+#if defined(__SSSE3__)
+   /**
+    * SSSE3 implementation using _mm_shuffle_epi8 (PSHUFB) as the table-lookup equivalent
+    * of NEON's vqtbl1q_u8. Processes branches end-aligned first (branchless for N < 16)
+    * then in forward 16-byte chunks — see NEON version for full design rationale.
+    */
+   PSITRI_NO_SANITIZE_ALIGNMENT
+#if PSITRI_PLATFORM_OPTIMIZATIONS
+   __attribute__((no_sanitize("pointer-overflow")))
+#endif
+   inline void copy_branches_and_update_cline_index_ssse3(
+       const uint8_t*                 input_data,
+       uint8_t*                       output_data,
+       size_t                         N,
+       const std::array<uint8_t, 16>& lut) noexcept
+   {
+#if !PSITRI_PLATFORM_OPTIMIZATIONS
+      if (N < 16)
+      {
+         for (size_t i = 0; i < N; ++i)
+         {
+            uint8_t byte   = input_data[i];
+            output_data[i] = (lut[byte >> 4] << 4) | (byte & 0x0F);
+         }
+         return;
+      }
+#endif
+      const __m128i lut_vec         = _mm_loadu_si128(reinterpret_cast<const __m128i*>(lut.data()));
+      const __m128i low_nibble_mask = _mm_set1_epi8(0x0F);
+      const __m128i hi_nibble_mask  = _mm_set1_epi8((char)0xF0);
+
+      // End-aligned chunk (handles the N < 16 wraparound case with caller-guaranteed padding)
+      const size_t final_offset = N - 16;
+      {
+         __m128i data     = _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_data + final_offset));
+         // Extract high nibble of each byte as index (0-15) for table lookup
+         __m128i indices  = _mm_and_si128(_mm_srli_epi16(data, 4), low_nibble_mask);
+         // _mm_shuffle_epi8: lut_vec[indices[i]] — equivalent to vqtbl1q_u8
+         __m128i lut_vals = _mm_shuffle_epi8(lut_vec, indices);
+         // Shift LUT result into high nibble and OR with preserved low nibble
+         __m128i new_hi   = _mm_and_si128(_mm_slli_epi16(lut_vals, 4), hi_nibble_mask);
+         __m128i orig_lo  = _mm_and_si128(data, low_nibble_mask);
+         _mm_storeu_si128(reinterpret_cast<__m128i*>(output_data + final_offset),
+                          _mm_or_si128(new_hi, orig_lo));
+      }
+
+      // Forward chunks before the final one
+      const size_t num_iterations = (N - 1) / 16;
+      for (size_t k = 0; k < num_iterations; ++k)
+      {
+         size_t  i        = k * 16;
+         __m128i data     = _mm_loadu_si128(reinterpret_cast<const __m128i*>(input_data + i));
+         __m128i indices  = _mm_and_si128(_mm_srli_epi16(data, 4), low_nibble_mask);
+         __m128i lut_vals = _mm_shuffle_epi8(lut_vec, indices);
+         __m128i new_hi   = _mm_and_si128(_mm_slli_epi16(lut_vals, 4), hi_nibble_mask);
+         __m128i orig_lo  = _mm_and_si128(data, low_nibble_mask);
+         _mm_storeu_si128(reinterpret_cast<__m128i*>(output_data + i),
+                          _mm_or_si128(new_hi, orig_lo));
+      }
+   }
+#endif  // __SSSE3__
+
    inline void copy_branches_and_update_cline_index(const branch*                  input_data,
                                                     branch*                        output_data,
                                                     size_t                         N,
@@ -254,6 +354,9 @@ namespace psitri
 #ifdef __ARM_NEON
       copy_branches_and_update_cline_index_neon((uint8_t*)input_data, (uint8_t*)output_data, N,
                                                 lut);
+#elif defined(__SSSE3__)
+      copy_branches_and_update_cline_index_ssse3((uint8_t*)input_data, (uint8_t*)output_data, N,
+                                                 lut);
 #else
       copy_branches_and_update_cline_index_scalar((uint8_t*)input_data, (uint8_t*)output_data, N,
                                                   lut);

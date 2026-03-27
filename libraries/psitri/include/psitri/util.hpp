@@ -30,6 +30,9 @@
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 namespace psitri
 {
@@ -119,6 +122,34 @@ namespace psitri
    }
 #endif
 
+#if defined(__SSE2__)
+   inline int lower_bound_sse2(const uint8_t* arr, size_t size, uint8_t value) noexcept
+   {
+      const __m128i sign_flip   = _mm_set1_epi8((char)0x80);
+      const __m128i val_flipped = _mm_set1_epi8((char)(value ^ 0x80));
+
+      int total_count  = 0;
+      int offset       = 0;
+      const int size16 = (int)size - 16;
+
+      while (offset <= size16)
+      {
+         __m128i data  = _mm_loadu_si128(reinterpret_cast<const __m128i*>(arr + offset));
+         __m128i cmp   = _mm_cmplt_epi8(_mm_xor_si128(data, sign_flip), val_flipped);
+         int     count = __builtin_popcount((uint32_t)(uint16_t)_mm_movemask_epi8(cmp));
+         total_count += count;
+         if (count < 16)
+            return total_count;
+         offset += 16;
+      }
+
+      if (offset == (int)size)
+         return (int)size;
+
+      return total_count + lower_bound_small(arr + offset, size - offset, value);
+   }
+#endif  // __SSE2__
+
    // Using find_byte_unroll in a loop to support any size
    inline int lower_bound_scalar(const uint8_t* arr, size_t size, uint8_t value) noexcept
    {
@@ -154,6 +185,8 @@ namespace psitri
          return lower_bound_scalar(data, size, byte);
 #if defined(__ARM_NEON)
       return lower_bound_neon(data, size, byte);
+#elif defined(__SSE2__)
+      return lower_bound_sse2(data, size, byte);
 #else
       return lower_bound_scalar(data, size, byte);
 #endif

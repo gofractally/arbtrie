@@ -6,6 +6,9 @@
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 namespace ucc
 {
@@ -95,6 +98,38 @@ namespace ucc
    }
 #endif
 
+#if defined(__SSE2__)
+   /**
+    * SSE2 lower_bound: counts bytes strictly less than value in a sorted array.
+    * Uses the sign-flip trick for unsigned byte comparison via _mm_cmplt_epi8.
+    */
+   inline int lower_bound_sse2(const uint8_t* arr, size_t size, uint8_t value) noexcept
+   {
+      const __m128i sign_flip   = _mm_set1_epi8((char)0x80);
+      const __m128i val_flipped = _mm_set1_epi8((char)(value ^ 0x80));
+
+      int total_count  = 0;
+      int offset       = 0;
+      const int size16 = (int)size - 16;
+
+      while (offset <= size16)
+      {
+         __m128i data  = _mm_loadu_si128(reinterpret_cast<const __m128i*>(arr + offset));
+         __m128i cmp   = _mm_cmplt_epi8(_mm_xor_si128(data, sign_flip), val_flipped);
+         int     count = __builtin_popcount((uint32_t)(uint16_t)_mm_movemask_epi8(cmp));
+         total_count += count;
+         if (count < 16)
+            return total_count;
+         offset += 16;
+      }
+
+      if (offset == (int)size)
+         return (int)size;
+
+      return total_count + lower_bound_small(arr + offset, size - offset, value);
+   }
+#endif  // __SSE2__
+
    // Using find_byte_unroll in a loop to support any size
    inline int lower_bound_scalar(const uint8_t* arr, size_t size, uint8_t value) noexcept
    {
@@ -131,6 +166,8 @@ namespace ucc
          return lower_bound_scalar(data, size, byte);
 #if defined(__ARM_NEON)
       return lower_bound_neon(data, size, byte);
+#elif defined(__SSE2__)
+      return lower_bound_sse2(data, size, byte);
 #else
       return lower_bound_scalar(data, size, byte);
 #endif
@@ -222,9 +259,42 @@ namespace ucc
 
       return total_count;
 
+#elif defined(__SSE2__)
+      // SSE2 padded implementation: same logic as NEON padded but using sign-flip trick
+      // for unsigned byte comparison.
+      const __m128i sign_flip   = _mm_set1_epi8((char)0x80);
+      const __m128i val_flipped = _mm_set1_epi8((char)(byte ^ 0x80));
+
+      uint16_t     total_count    = 0;
+      const size_t num_full_chunks = size / 16;
+
+      for (size_t i = num_full_chunks; i--;)
+      {
+         __m128i d     = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data));
+         __m128i cmp   = _mm_cmplt_epi8(_mm_xor_si128(d, sign_flip), val_flipped);
+         int     count = __builtin_popcount((uint32_t)(uint16_t)_mm_movemask_epi8(cmp));
+         total_count += (uint16_t)count;
+         if (count < 16)
+            return total_count;
+         data += 16;
+      }
+
+      size_t remaining = size - num_full_chunks * 16;
+      if (remaining > 0) [[likely]]
+      {
+         // Padding guarantee: safe to read 16 bytes from data
+         __m128i d    = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data));
+         __m128i cmp  = _mm_cmplt_epi8(_mm_xor_si128(d, sign_flip), val_flipped);
+         int     mask = _mm_movemask_epi8(cmp);
+         // Zero out bits beyond the valid range
+         total_count += (uint16_t)__builtin_popcount(mask & ((1 << remaining) - 1));
+      }
+
+      return total_count;
+
 #else
       // Fallback if NEON is not available
-      // Note: This fallback is doesn't leverage the padding guarantee.
+      // Note: This fallback doesn't leverage the padding guarantee.
       return ucc::lower_bound(data, size, byte);  // Use original pointer for fallback
 #endif
    }
@@ -238,89 +308,9 @@ namespace ucc
    {
 #if defined(__ARM_NEON)
       return lower_bound_neon(data, size, byte);
-      const uint8_t* start_data =
-          data;  // Keep original start pointer for partial chunk calculation/fallback
-      uint16_t         total_count = 0;
-      const uint8x16_t search_val  = vdupq_n_u8(byte);
-      const uint8x16_t one_mask    = vdupq_n_u8(1);  // For converting 0xFF to 0x01
-
-      // Calculate number of full chunks
-      const size_t num_full_chunks = size / 16;
-
-      // Process full 16-byte chunks first (safe to read directly)
-      for (size_t i = num_full_chunks; i--;)
-      {
-         // Load 16 bytes directly using the current data pointer
-         uint8x16_t data_vec = vld1q_u8(data);
-
-         // Compare: 0xFF where data < byte
-         uint8x16_t cmp_lt_byte = vcltq_u8(data_vec, search_val);
-
-         // Mask the comparison result to get 0x01 for matches instead of 0xFF
-         uint8x16_t masked_result = vandq_u8(cmp_lt_byte, one_mask);
-
-         // Count elements in this chunk that are < value using horizontal add
-         uint16_t chunk_count = vaddlvq_u8(masked_result);
-
-         // Otherwise, at least one element was less. Add the count from this chunk
-         // and decide if we need to continue based on whether the chunk was full.
-         if (chunk_count < 16)
-         {
-            return total_count + chunk_count;
-         }
-
-         // If we get here, chunk_count must have been 16.
-         total_count += 16;
-
-         // Advance the data pointer for the next chunk
-         data += 16;
-      }
-
-      // Process the final potentially partial chunk using a temporary buffer
-      size_t remaining_bytes = size - (num_full_chunks * 16);
-      if (remaining_bytes > 0) [[likely]]
-      {
-         uint8_t temp_buffer[16];
-         // Copy remaining data into the temporary buffer
-         std::memcpy(temp_buffer, data, remaining_bytes);
-         // Optional: Zero out the rest (might not be strictly necessary due to masking below)
-         std::memset(temp_buffer + remaining_bytes, 0xff, 16 - remaining_bytes);
-
-         // const uint8x16_t indices = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-
-         // Load from the temporary buffer (always safe)
-         uint8x16_t data_vec = vld1q_u8(temp_buffer);
-
-         // Compare: 0xFF where data < byte
-         uint8x16_t cmp_lt_byte = vcltq_u8(data_vec, search_val);
-
-         // Create mask for valid indices within the remaining bytes
-         //   uint8x16_t size_vec = vdupq_n_u8((uint8_t)remaining_bytes);
-         //      uint8x16_t valid_index_mask =
-         //         vcltq_u8(indices, size_vec);  // 0xFF where index < remaining_bytes
-
-         // Combine masks: count only if (data < byte) AND (index is valid)
-         //    uint8x16_t combined_mask = vandq_u8(cmp_lt_byte, valid_index_mask);
-
-         // Mask the combined result to get 0x01 for matches instead of 0xFF
-         //   uint8x16_t masked_result = vandq_u8(combined_mask, one_mask);
-
-         // Count elements in the masked final chunk using horizontal add
-         //    uint16_t chunk_count = vaddlvq_u8(masked_result);
-         // Mask the comparison result to get 0x01 for matches instead of 0xFF
-         uint8x16_t masked_result = vandq_u8(cmp_lt_byte, one_mask);
-
-         // Count elements in this chunk that are < value using horizontal add
-         uint16_t chunk_count = vaddlvq_u8(masked_result);
-
-         // Add count from the final chunk to the total
-         total_count += chunk_count;
-      }
-
-      return total_count;
-
+#elif defined(__SSE2__)
+      return lower_bound_sse2(data, size, byte);
 #else
-      // Fallback if NEON is not available
       return lower_bound_scalar(data, size, byte);
 #endif
    }
@@ -506,6 +496,27 @@ namespace ucc
       return size < result ? size : result;
    }
 #endif
+#if defined(__SSE2__)
+   /**
+    * SSE2: finds first occurrence of value in arr[0..size-1], where arr has at
+    * least 16 elements of accessible (possibly padded) memory.
+    * Uses _mm_movemask_ps to extract 1 bit per 32-bit comparison result.
+    */
+   inline int find_u32x16_sse2(const uint32_t* arr, size_t size, uint32_t value)
+   {
+      const __m128i search = _mm_set1_epi32((int)value);
+      __m128i       cmp0   = _mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(arr)), search);
+      __m128i       cmp1   = _mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(arr + 4)), search);
+      __m128i       cmp2   = _mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(arr + 8)), search);
+      __m128i       cmp3   = _mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(arr + 12)), search);
+      uint32_t mask = (uint32_t)_mm_movemask_ps(_mm_castsi128_ps(cmp0)) |
+                     ((uint32_t)_mm_movemask_ps(_mm_castsi128_ps(cmp1)) << 4) |
+                     ((uint32_t)_mm_movemask_ps(_mm_castsi128_ps(cmp2)) << 8) |
+                     ((uint32_t)_mm_movemask_ps(_mm_castsi128_ps(cmp3)) << 12);
+      return __builtin_ctz(mask | (1u << size));
+   }
+#endif  // __SSE2__
+
    inline int find_u32x16(const uint32_t* arr, size_t size, uint32_t value)
    {
       assert(size <= 16);
@@ -518,6 +529,8 @@ namespace ucc
       return find_u32x16_neon(v0, v1, v2, v3, value);
       */
       return find_u32_padded16_neon(arr, size, value);
+#elif defined(__SSE2__)
+      return find_u32x16_sse2(arr, size, value);
 #else
       return find_u32x16_scalar_unrolled(arr, size, value);
 #endif

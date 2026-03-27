@@ -105,6 +105,16 @@ endif()
 
 add_subdirectory(min_index)
 
+# x86 SIMD correctness + performance benchmark
+add_executable(simd-x86-benchmark simd_x86_benchmark.cpp)
+target_link_libraries(simd-x86-benchmark PRIVATE psitri)
+target_include_directories(simd-x86-benchmark
+    PUBLIC
+        $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>
+)
+target_compile_definitions(simd-x86-benchmark PUBLIC XXH_INLINE_ALL)
+set_target_properties(simd-x86-benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # SQLite benchmark test (optional -- requires libsqlite3-dev)
 if(SQLite3_FOUND)
     add_executable(sqlite-arb-test sqlite_arb_test.cpp)
