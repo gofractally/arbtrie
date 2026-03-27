@@ -924,6 +924,11 @@ class TidesDbEngine : public BankEngine
    static constexpr const char*    CF  = "bank";
    const std::vector<std::string>* _account_names = nullptr;
    tdb_wrapper_txn_t*              _txn = nullptr;
+   uint64_t                        _ops_in_txn = 0;
+   // TidesDB hard limit: 100,000 ops per transaction.
+   // Each transfer does 5 ops (2 get + 2 put + 1 log put).
+   // Sub-commit automatically when approaching the limit.
+   static constexpr uint64_t MAX_OPS_PER_TXN = 90'000;
 
   public:
    void set_account_names(const std::vector<std::string>* names) { _account_names = names; }
@@ -976,7 +981,8 @@ class TidesDbEngine : public BankEngine
 
    void begin_batch() override
    {
-      _txn = tdb_txn_begin(_db);
+      _txn        = tdb_txn_begin(_db);
+      _ops_in_txn = 0;
    }
 
    bool transfer(const std::string& src,
@@ -1017,6 +1023,16 @@ class TidesDbEngine : public BankEngine
       auto lv = encode_log_value(src, dst, amount);
       tdb_put(_txn, CF, (const uint8_t*)lk.data(), lk.size(),
               (const uint8_t*)lv.data(), lv.size());
+      _ops_in_txn += 5;  // 2 get + 2 put + 1 log put
+
+      // Sub-commit if approaching the 100K ops/tx limit
+      if (_ops_in_txn >= MAX_OPS_PER_TXN)
+      {
+         tdb_txn_commit(_txn);
+         tdb_txn_free(_txn);
+         _txn        = tdb_txn_begin(_db);
+         _ops_in_txn = 0;
+      }
       return true;
    }
 
@@ -1024,7 +1040,8 @@ class TidesDbEngine : public BankEngine
    {
       tdb_txn_commit(_txn);
       tdb_txn_free(_txn);
-      _txn = nullptr;
+      _txn        = nullptr;
+      _ops_in_txn = 0;
    }
 
    void sync() override

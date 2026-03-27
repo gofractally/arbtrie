@@ -384,6 +384,150 @@ xychart-beta
 PsiTri and PsiTriRocks have the most compact reachable data. The larger file size
 reflects COW free space awaiting compaction, consistent with the M5 Max results.
 
+### Commit Granularity
+
+Batch size controls how many transfers are grouped into a single atomic commit. Larger
+batches amortize commit overhead and improve throughput, but at the cost of read-visibility
+latency: a concurrent reader cannot see any transfer in the batch until the whole batch
+commits.
+
+> **Note:** In PsiTri, uncommitted writes are invisible to readers but are **not at risk** —
+> committing is a single atomic root-pointer advance. There is no WAL replay needed on crash
+> recovery for in-flight batches. In RocksDB, large batches mirror the memtable (up to ~64 MB
+> for a 1M-transfer batch). TidesDB has a hard limit of **100K ops per transaction**; at 5 ops
+> per transfer that allows at most ~20K transfers per commit, so it is only valid at batch=100
+> and is excluded from the scaling charts.
+
+#### Write-Only Throughput vs Batch Size
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB,#7C3AED,#DC2626,#D97706'}}}}%%
+xychart-beta
+    title "Write-Only Throughput vs Batch Size (tx/sec)"
+    x-axis ["100", "10K", "100K", "1M"]
+    y-axis "Transfers per second" 0 --> 650000
+    line [163614, 254421, 481361, 593556]
+    line [159186, 212378, 274096, 360102]
+    line [242402, 286117, 475811, 603124]
+    line [108884, 159623, 144383, 185796]
+```
+
+*Series order: PsiTri (blue), PsiTriRocks (purple), MDBX (red), RocksDB (amber)*
+
+| Engine | batch=100 | batch=10K | batch=100K | batch=1M | Peak gain |
+|--------|----------:|----------:|-----------:|---------:|----------:|
+| **PsiTri** | 163,614 | 254,421 | 481,361 | **593,556** | +263% |
+| **MDBX** | 242,402 | 286,117 | 475,811 | **603,124** | +149% |
+| PsiTriRocks | 159,186 | 212,378 | 274,096 | 360,102 | +126% |
+| RocksDB | 108,884 | 159,623 | 144,383 | 185,796 | +71% |
+| TidesDB | 180,654 | — | — | — | N/A |
+
+PsiTri and MDBX both reach ~600K tx/sec at batch=1M and scale similarly — PsiTri benefits
+from amortizing the root-pointer CAS, while MDBX amortizes its B+tree page COW. RocksDB
+shows a dip at batch=100K before recovering at 1M, likely reflecting memtable pressure
+interacting with compaction.
+
+#### Write+Read Throughput vs Batch Size
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB,#7C3AED,#DC2626,#D97706'}}}}%%
+xychart-beta
+    title "Write+Read Throughput vs Batch Size (tx/sec)"
+    x-axis ["100", "10K", "100K", "1M"]
+    y-axis "Transfers per second" 0 --> 550000
+    line [181168, 272840, 468694, 509351]
+    line [117094, 177691, 230013, 361591]
+    line [263524, 292664, 444587, 490456]
+    line [119185, 138015, 144091, 181406]
+```
+
+*Series order: PsiTri (blue), PsiTriRocks (purple), MDBX (red), RocksDB (amber)*
+
+| Engine | batch=100 | batch=10K | batch=100K | batch=1M |
+|--------|----------:|----------:|-----------:|---------:|
+| **PsiTri** | 181,168 | 272,840 | 468,694 | **509,351** |
+| **MDBX** | 263,524 | 292,664 | 444,587 | **490,456** |
+| PsiTriRocks | 117,094 | 177,691 | 230,013 | 361,591 |
+| RocksDB | 119,185 | 138,015 | 144,091 | 181,406 |
+| TidesDB | 178,478 | — | — | — |
+
+PsiTri overtakes MDBX in write+read mode at batch=100K and beyond. MDBX's reader/writer
+lock becomes relatively more costly as the write thread holds the lock for longer batches,
+while PsiTri's lock-free MVCC is unaffected.
+
+#### Concurrent Reader Throughput vs Batch Size
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB,#7C3AED,#DC2626,#D97706'}}}}%%
+xychart-beta
+    title "Concurrent Reader Throughput vs Batch Size (reads/sec)"
+    x-axis ["100", "10K", "100K", "1M"]
+    y-axis "Reads per second" 0 --> 1800000
+    bar [1117771, 1278498, 1358428, 1356727]
+    bar [872316, 1095787, 1388806, 1669767]
+    bar [1055486, 1166392, 1306705, 1100886]
+    bar [275903, 324247, 347816, 296904]
+```
+
+*Series order: PsiTri (blue), PsiTriRocks (purple), MDBX (red), RocksDB (amber)*
+
+| Engine | batch=100 | batch=10K | batch=100K | batch=1M |
+|--------|----------:|----------:|-----------:|---------:|
+| **PsiTri** | 1,117,771 | 1,278,498 | 1,358,428 | 1,356,727 |
+| **PsiTriRocks** | 872,316 | 1,095,787 | 1,388,806 | **1,669,767** |
+| **MDBX** | 1,055,486 | 1,166,392 | 1,306,705 | 1,100,886 |
+| RocksDB | 275,903 | 324,247 | 347,816 | 296,904 |
+
+PsiTri and PsiTriRocks reader throughput improves monotonically with batch size: larger
+batches mean the writer holds the current root longer, giving readers more time on a stable
+snapshot. MDBX reader throughput peaks at batch=100K and drops at batch=1M, where longer
+write transactions increase reader-visible stall events. RocksDB readers are consistently
+the slowest across all batch sizes.
+
+#### Per-Round Throughput Curves
+
+The write+read phase runs 10M transfers in 10 rounds of 1M each. The round-by-round
+breakdown reveals stability (or instability) in each engine's throughput profile.
+
+| Round | PsiTri 1M | MDBX 100K | RocksDB 10K | PsiTriRocks 100K |
+|-------|----------:|----------:|------------:|-----------------:|
+| 1 | 548K | 453K | 165K | 254K |
+| 2 | 523K | 453K | 157K | 249K |
+| 3 | 510K | 452K | 156K | 243K |
+| 4 | 504K | 452K | 142K | 235K |
+| 5 | 505K | 452K | 139K | 230K |
+| 6 | 508K | 453K | 134K | 229K |
+| 7 | 505K | 452K | 133K | 230K |
+| 8 | 505K | 452K | 134K | 230K |
+| 9 | 508K | 450K | 137K | 230K |
+| 10 | 509K | 444K | 138K | 230K |
+
+- **PsiTri (batch=1M):** Starts hot (548K) as the working set is warm, settles to a stable
+  ~505–509K after round 3. No compaction stalls.
+- **MDBX (batch=100K):** Essentially flat at 452–453K through round 9, with a small dip in
+  round 10. Highly predictable.
+- **RocksDB (batch=10K):** Falls from 165K to a 133–134K trough in rounds 6–8 — a classic
+  compaction cliff as L0→L1 compaction competes with writes — then partially recovers to 138K.
+- **PsiTriRocks (batch=100K):** Sharp drop from 254K to ~230K by round 5 (RocksDB compaction
+  absorbing the write path through the shim), then fully stable through rounds 5–10.
+
+#### MDBX File Bloat Under Large Batches
+
+MDBX copies full pages on each write. Larger batches create more dirty pages per commit,
+and MDBX's free-page recycler can leave significant dead space in the file.
+
+| Batch size | File size | Live data | Waste |
+|------------|----------:|----------:|------:|
+| 100 | 1,344 MB | 1,257 MB | 6% |
+| 10K | 3,968 MB | 1,257 MB | 68% |
+| 100K | 4,928 MB | 1,257 MB | 74% |
+| 1M | 2,048 MB | 1,257 MB | 39% |
+
+File bloat peaks at batch=100K (4,928 MB — nearly 4x live data) then shrinks at batch=1M as
+fewer, larger commits leave the free-page recycler more time per commit to consolidate space.
+PsiTri's file size is not meaningfully affected by batch size because its COW operates at
+64-byte node granularity rather than 4 KB page granularity.
+
 ---
 
 ## Cross-Platform Comparison
