@@ -34,7 +34,7 @@ All engines use identical batching and sync parameters:
 | Initial balance | 1,000,000 per account |
 | RNG seed | 12345 |
 
-## Results
+## Results: Apple M5 Max (ARM64, macOS)
 
 ### Transaction Throughput
 
@@ -219,6 +219,138 @@ xychart-beta
 
 All five engines pass validation: balance conservation verified and transaction log entry counts match across both phases.
 
+---
+
+## Results: AMD EPYC-Turin (x86-64, Linux)
+
+### Environment
+
+| Component | Spec |
+|-----------|------|
+| CPU | AMD EPYC-Turin, 8 cores / 16 threads (SMT), 2.4 GHz |
+| ISA extensions | SSE2, SSE4.1, SSSE3, AVX2, AVX-512F/BW/DQ/VL/VBMI/VNNI |
+| RAM | 121 GB |
+| Storage | 960 GB virtual disk (cloud VM — Linux 6.17, 4 KB page size) |
+| Compiler | Clang 20, C++20, `-O3 -flto -march=native` |
+
+### Transaction Throughput
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
+xychart-beta
+    title "Transaction Throughput — Write-Only (transfers/sec)"
+    x-axis ["MDBX", "TidesDB", "PsiTriRocks", "PsiTri", "RocksDB"]
+    y-axis "Transfers per second" 0 --> 280000
+    bar [239041, 167093, 159938, 135651, 104102]
+```
+
+| Engine | Transfers/sec | KV Ops/sec | Relative to MDBX |
+|--------|--------------|------------|-----------------|
+| **MDBX** | **239,041** | **1,195,205** | **1.00x** |
+| TidesDB | 167,093 | 835,465 | 0.70x |
+| PsiTriRocks | 159,938 | 799,690 | 0.67x |
+| PsiTri | 135,651 | 678,255 | 0.57x |
+| RocksDB | 104,102 | 520,510 | 0.44x |
+
+On this x86 server MDBX leads on raw write throughput. PsiTri's random-access COW node
+pattern has higher cache miss cost on x86 DRAM compared to ARM's Unified Memory
+Architecture (see [cross-platform comparison](#cross-platform-comparison) below).
+
+### Bulk Load
+
+| Engine | Time | Ops/sec |
+|--------|------|---------|
+| **PsiTri** | 0.37s | **2.74M** |
+| MDBX | 0.45s | 2.23M |
+| PsiTriRocks | 1.05s | 0.96M |
+| RocksDB | 0.86s | 1.16M |
+| TidesDB | 1.58s | 0.63M |
+
+PsiTri still leads bulk load on x86 — sequential arena writes benefit from AVX-512
+`copy_branches` (9x speedup over scalar).
+
+### Transaction Time (Write-Only Phase)
+
+| Engine | Time | vs. MDBX |
+|--------|------|----------|
+| **MDBX** | **41.8s** | -- |
+| TidesDB | 59.8s | +43% |
+| PsiTriRocks | 62.5s | +50% |
+| PsiTri | 73.7s | +76% |
+| RocksDB | 96.1s | +130% |
+
+### Validation Scan
+
+| Engine | Time | Ops/sec |
+|--------|------|---------|
+| **MDBX** | 0.38s | **38.1M** |
+| PsiTriRocks | 0.74s | 19.3M |
+| PsiTri | 0.72s | 19.8M |
+| RocksDB | 1.28s | 11.2M |
+| TidesDB | 11.9s | 1.20M |
+
+### Concurrent Read Performance
+
+| Engine | Write-Only | Write+Read | Write Impact | Reader reads/sec |
+|--------|-----------|------------|-------------|-----------------|
+| MDBX | 239,041 | 229,280 | **-4.1%** | **927,734** |
+| TidesDB | 167,093 | 163,275 | -2.3% | 326,596 |
+| **PsiTriRocks** | 159,938 | 121,276 | -24.2% | 785,868 |
+| **PsiTri** | 135,651 | 115,521 | -14.8% | 698,948 |
+| RocksDB | 104,102 | 87,423 | -16.0% | 223,149 |
+
+On x86, PsiTri shows a 14.8% write penalty under concurrent reads — unlike the near-zero
+penalty on M5 Max. MDBX's B+tree write path is relatively unaffected (-4.1%).
+
+### Storage
+
+| Engine | Reachable | File Size |
+|--------|-----------|-----------|
+| PsiTri | 562 MB | 2,400 MB |
+| PsiTriRocks | 558 MB | 2,298 MB |
+| RocksDB | 567 MB | 579 MB |
+| TidesDB | 675 MB | 675 MB |
+| MDBX | 1,257 MB | 1,344 MB |
+
+---
+
+## Cross-Platform Comparison
+
+The same workload produces dramatically different engine rankings on ARM vs x86.
+
+### Write Throughput: ARM M5 Max vs x86 EPYC-Turin
+
+| Engine | M5 Max (ARM64) | EPYC-Turin (x86) | x86 / ARM |
+|--------|----------------|------------------|-----------|
+| **PsiTri** | **376,691** | 135,651 | 0.36x |
+| PsiTriRocks | 356,703 | 159,938 | 0.45x |
+| TidesDB | 225,937 | 167,093 | 0.74x |
+| RocksDB | 126,341 | 104,102 | 0.82x |
+| MDBX | 57,138 | **239,041** | **4.18x** |
+
+MDBX goes from **last** on ARM to **first** on x86. PsiTri reverses in the opposite direction.
+
+**Why the reversal?**
+
+- **PsiTri** traverses small random-access nodes scattered across memory-mapped files.
+  On M5 Max, Apple's Unified Memory Architecture gives ~50 ns DRAM latency and extremely
+  high bandwidth — the random access pattern is cheap. On x86 with traditional DRAM,
+  cache miss cost is higher, making each COW node traversal more expensive.
+
+- **MDBX** uses a B+tree where keys within a page are densely packed. On x86, hardware
+  prefetchers handle sequential B+tree page scans well, and the larger L3 caches (relative
+  to working set) reduce miss rates. x86 AES and CRC hardware also accelerates MDBX's
+  internal checksums.
+
+- **PsiTri's concurrent read impact** is near-zero on M5 Max (+1.5%) but 14.8% on x86.
+  On ARM, readers and the writer access the same mmap pages with almost no contention
+  (high memory bandwidth absorbs it). On x86 DRAM, the shared page-cache pressure from
+  a concurrent reader is measurable.
+
+The takeaway: **PsiTri excels in high-bandwidth memory environments** (unified memory,
+high-end workstations). **MDBX excels in cache-friendly access patterns** typical of
+commodity x86 server VMs with standard DRAM.
+
 ## Reproducing
 
 ```bash
@@ -262,7 +394,15 @@ done
 
 ## Environment
 
-- **Hardware**: Apple M5 Max (ARM64)
+### Apple M5 Max (ARM64)
+- **Hardware**: Apple M5 Max, 128 GB Unified Memory
 - **OS**: macOS (Darwin 25.3.0)
 - **Compiler**: Clang 17 (LLVM), C++20, `-O3 -flto=thin`
 - **Engine versions**: RocksDB 9.9.3, libmdbx 0.13.11, TidesDB 8.9.4
+
+### AMD EPYC-Turin (x86-64)
+- **Hardware**: AMD EPYC-Turin, 8 cores / 16 threads, 2.4 GHz, 121 GB RAM (cloud VM — Vultr)
+- **ISA**: AVX-512F/BW/DQ/VL/VBMI/VBMI2/VNNI, AVX2, SSSE3, SSE4.1
+- **OS**: Ubuntu Linux 6.17.0 x86_64, 4 KB page size
+- **Compiler**: Clang 20 (LLVM), C++20, `-O3 -flto -march=native`
+- **Engine versions**: RocksDB (built from source), libmdbx (built from source), TidesDB (built from source)

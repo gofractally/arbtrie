@@ -115,6 +115,7 @@ nav:
   - Benchmarks:
       - Bank Transaction Benchmark: benchmarks/bank.md
       - Scale Benchmark (419M Keys): benchmarks/scale.md
+      - x86 SIMD Optimizations: benchmarks/x86_simd.md
   - Development:
       - Contributing: development/contributing.md
       - Code Coverage: development/coverage.md
