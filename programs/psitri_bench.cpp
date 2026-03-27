@@ -463,7 +463,8 @@ void multiwriter_test(benchmark_config            cfg,
 
    struct alignas(128) padded_counter
    {
-      std::atomic<int64_t> count{0};
+      std::atomic<int64_t> committed{0};
+      std::atomic<int64_t> in_progress{0};
    };
 
    std::atomic<bool>           start_flag{false};
@@ -505,20 +506,28 @@ void multiwriter_test(benchmark_config            cfg,
                       tx.insert(key_view(key.data(), key.size()), random_value(seq, cfg.value_size));
                       ++inserted;
                    }
+                   counters[t].in_progress.store(total_inserted + inserted, std::memory_order_relaxed);
                 }
                 if (bench::interrupted()) { tx.abort(); break; }
                 tx.commit();
                 total_inserted += inserted;
-                counters[t].count.store(total_inserted, std::memory_order_relaxed);
+                counters[t].committed.store(total_inserted, std::memory_order_relaxed);
              }
           });
    }
 
-   auto sum_inserts = [&]()
+   auto sum_committed = [&]()
    {
       int64_t total = 0;
       for (uint32_t i = 0; i < num_writers; ++i)
-         total += counters[i].count.load(std::memory_order_relaxed);
+         total += counters[i].committed.load(std::memory_order_relaxed);
+      return total;
+   };
+   auto sum_in_progress = [&]()
+   {
+      int64_t total = 0;
+      for (uint32_t i = 0; i < num_writers; ++i)
+         total += counters[i].in_progress.load(std::memory_order_relaxed);
       return total;
    };
 
@@ -535,15 +544,16 @@ void multiwriter_test(benchmark_config            cfg,
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
       auto    now   = std::chrono::steady_clock::now();
       double  secs  = std::chrono::duration<double>(now - prev_time).count();
-      int64_t cur   = sum_inserts();
+      int64_t cur   = sum_in_progress();
       int64_t delta = cur - prev_inserts;
       prev_inserts  = cur;
       prev_time     = now;
-      auto ips      = uint64_t(delta / secs);
+      auto    ips   = uint64_t(delta / secs);
+      int64_t committed = sum_committed();
       std::cout << std::setw(4) << std::left << report_num++ << " " << std::setw(12) << std::right
-                << format_comma(cur) << "  " << std::setw(12) << std::right << format_comma(ips)
-                << "  inserts/sec (aggregate)\n";
-      if (cur >= target_inserts || bench::interrupted())
+                << format_comma(committed) << "  " << std::setw(12) << std::right << format_comma(ips)
+                << "  inserts/sec (aggregate)" << std::endl;
+      if (committed >= target_inserts || bench::interrupted())
          break;
    }
 
