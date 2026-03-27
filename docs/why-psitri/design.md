@@ -2,13 +2,13 @@
 
 PsiTri is built on three novel subsystems that work together to deliver performance characteristics impossible with traditional database architectures.
 
-## 1. Node-Level Copy-on-Write: 60x Less Write Amplification
+## 1. Node-Level Copy-on-Write: Dramatically Less Write Amplification
 
 ### The Insight
 
 **Copy-on-write (COW)** is a technique where shared data is never modified in place -- instead, a copy is made before any mutation, so the original remains intact for other readers and for crash recovery. This is the foundation of snapshot isolation and crash safety. But in every existing COW database, the unit of copying is a **page** -- 4KB to 16KB of data. When you change one key, you copy 4KB at every level of the tree. For a 4-level B-tree, that's 16KB of writes for a single byte change.
 
-PsiTri's inner nodes average **67 bytes**. Copy-on-write copies 67 bytes per level, not 4KB. For a 5-level tree, a single mutation writes ~335 bytes total -- roughly **60x less** than a page-level COW B-tree.
+PsiTri's inner nodes are allocated in 64-byte multiples. Their size depends on the number of branches and how many distinct cachelines those branches span in the control block array -- when the allocator successfully co-locates siblings on shared cachelines, fewer cacheline base addresses are needed and the node stays smaller. In practice, most inner nodes fit in **1-2 cache lines** (64-128 bytes). For a 5-level tree, a typical mutation copies 4 inner nodes plus one leaf (up to 2 KB) -- **far less** than the **5 x 4 KB = 20 KB** a page-level COW B-tree would write.
 
 ### Cacheline-Shared Branch Encoding
 
@@ -16,14 +16,14 @@ Every persistent data structure that uses indirection pays for it in **cache lin
 
 PsiTri separates the **control blocks** (reference counts, segment pointers, metadata) from the **node data** and co-locates sibling control blocks within shared cache lines. When a node splits or children are allocated, the allocator receives **hints** (the parent's existing cacheline addresses) and preferentially places new control blocks adjacent to their siblings.
 
-Instead of storing N separate 8-byte addresses, PsiTri stores up to 16 **cacheline base addresses** (8 bytes each) and encodes each branch as a **1-byte index** (4 bits selecting which cacheline, 4 bits selecting which slot):
+Instead of storing N separate 4-byte addresses, PsiTri stores up to 16 **cacheline base addresses** (4 bytes each) and encodes each branch as a **1-byte index** (4 bits selecting which cacheline, 4 bits selecting which slot):
 
 ```
-Traditional:  16 branches x 8 bytes = 128 bytes of pointers, 16 cache line loads
-PsiTri:       4 cachelines x 8 bytes + 16 branches x 1 byte = 48 bytes, 4 cache line loads
+Traditional:  16 branches x 4 bytes = 64 bytes of pointers, 16 cache line loads
+PsiTri:       4 cachelines x 4 bytes + 16 branches x 1 byte = 32 bytes, 4 cache line loads
 ```
 
-This supports up to 256 branches (16 cachelines x 16 slots) in a node that fits in 1-2 cache lines.
+This gives PsiTri the **lowest per-child pointer overhead of any pointer-based tree structure**: 1.25-2.0 bytes per child, compared to 4-8 bytes in B-trees, ART, HOT, Masstree, and every other design in the literature. At 256 branches with 16 cacheline groups, each child costs just 1.25 bytes. See [Control Blocks](../architecture/control-blocks.md#per-child-pointer-overhead-how-psitri-compares) for the full analysis.
 
 ### Radix/B-tree Hybrid with SIMD Routing
 
@@ -42,15 +42,15 @@ inner_prefix_node("user/")
 
 ### Sorted Leaf Nodes
 
-Leaf nodes store sorted keys with hash-accelerated binary search, packing up to **512 keys** per node. In practice, leaves hold ~58 keys each. This avoids the depth explosion of pure radix trees (which need one level per byte of key) while keeping the compact inner nodes that make node-level copy-on-write practical.
+Leaf nodes store sorted keys with hash-accelerated lookup, holding ~58 keys each in up to 2 KB. This avoids the depth explosion of pure radix trees (which need one level per byte of key) while keeping the compact inner nodes that make node-level copy-on-write practical.
 
-| Metric              | B-tree (LMDB)   | Pure ART        | PsiTri         |
-|---------------------|-----------------|-----------------|-----------------|
-| Copy-on-write unit  | 4KB page        | N/A (in-memory) | 67 bytes        |
-| Leaf keys           | 50-200 per page | 1               | ~58 per node    |
-| Depth (30M keys)    | 3-4             | 5-8             | 5               |
-| Write amplification | ~20KB/mutation  | N/A             | ~335B/mutation  |
-| Persistent          | Yes             | No              | Yes             |
+| Metric              | B-tree (LMDB)   | Pure ART        | PsiTri                  |
+|---------------------|-----------------|-----------------|--------------------------|
+| Copy-on-write unit  | 4KB page        | N/A (in-memory) | Per-node (64 B multiples)  |
+| Leaf keys           | 50-200 per page | 1               | ~58 per node             |
+| Depth (30M keys)    | 3-4             | 5-8             | 5                        |
+| Write amplification | ~20KB/mutation  | N/A             | ~2.3 KB/mutation (typical) |
+| Persistent          | Yes             | No              | Yes                      |
 
 ---
 
@@ -120,7 +120,7 @@ SAL tracks frequency with **2 bits per object**, embedded in the existing contro
 - **`active` bit**: Set when the object is read
 - **`pending_cache` bit**: Set when the object is read while already active
 
-A background thread clears these bits on a rolling 60-second window. Objects that get re-marked between decay cycles are "hot."
+A background thread clears these bits on a rolling window (default 5 hours, configurable via `read_cache_window_sec`). Objects that get re-marked between decay cycles are "hot."
 
 ### Bitcoin-Inspired Difficulty Adjustment
 
@@ -205,7 +205,7 @@ Root tree
 PsiTri has no WAL. Recovery is built into the data layout:
 
 - **Append-only writes** guarantee committed data is never overwritten
-- **Hardware write protection**: All committed data is marked read-only via `mprotect(PROT_READ)` before the atomic root swap -- stray writes cause an immediate SIGSEGV, not silent corruption
+- **Hardware write protection** (when enabled): Committed data can be marked read-only via `mprotect(PROT_READ)` -- stray writes cause an immediate SIGSEGV, not silent corruption. This is configurable via sync mode; the default (`sync_type::none`) does not call mprotect.
 - **Segment scanning** reconstructs control blocks from the append-only segment structure
 - **Reachability walk** from root pointers rebuilds reference counts
 
@@ -215,7 +215,7 @@ The segments themselves serve as the recovery log. The tradeoff: recovery time i
 
 | Level          | Mechanism                       | App crash | Power loss | Write latency |
 |----------------|---------------------------------|-----------|------------|---------------|
-| `none`         | OS writes when convenient       | Maybe     | No         | Zero          |
+| `none`         | OS writes when convenient       | No        | No         | Zero          |
 | `mprotect`     | Hardware write-protect pages    | Yes       | No         | ~microseconds |
 | `msync_async`  | Hint to OS: flush soon          | Yes       | Probably   | ~microseconds |
 | `msync_sync`   | Block until OS buffers written  | Yes       | Mostly     | ~milliseconds |

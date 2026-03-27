@@ -197,7 +197,7 @@ RocksDB is an LSM-tree that protects data at the block and file level.
 
 - **No per-key checksums.** If a block checksum passes but a single key within that block has a bit flip, RocksDB cannot detect it. Block checksums cover 4-64 KB at a time -- corruption that spans exactly the right bytes to produce a valid CRC32 collision would be undetected.
 - **No structural verification.** RocksDB doesn't walk the LSM tree structure to verify that all referenced SST files exist and are readable. The manifest tracks file references, but there is no single command that verifies end-to-end reachability from the manifest through every key.
-- **CRC32 weakness.** Many RocksDB checksum paths still use CRC32 (32-bit), which has a collision probability of ~1 in 4 billion. PsiTri uses XXH3-64 for segment and object checksums (1 in ~18 quintillion), and XXH3-derived 8-bit hashes for per-key/per-value checks where the primary function is fast filtering with corruption detection as a secondary benefit.
+- **CRC32 weakness.** Many RocksDB checksum paths still use CRC32 (32-bit), which has a collision probability of ~1 in 4 billion. PsiTri uses XXH3-64 for segment sync checksums (1 in ~18 quintillion collision probability). Object checksums store the lower 16 bits of an XXH3-64 hash (~1 in 65,536 collision probability) -- weaker than CRC32 per-object, but objects are additionally protected by per-key and per-value checksums. The 8-bit per-key/per-value hashes serve primarily as fast lookup filters with corruption detection as a secondary benefit.
 - **Compaction can propagate corruption.** If a corrupt block has a valid checksum (due to collision or the corruption happening after checksumming), compaction will read and rewrite the corrupt data into new SST files, preserving the corruption with a fresh valid checksum. PsiTri's copy-on-write model has the same theoretical risk, but the additional per-key and per-value checksums provide a second line of defense.
 
 ---
@@ -292,10 +292,10 @@ When running on ZFS, the filesystem provides the equivalent of PsiTri's Levels 1
 
 | Feature | PsiTri | RocksDB | MDBX | SQLite | PostgreSQL |
 |---------|--------|---------|------|--------|------------|
-| **Segment/range checksums** | XXH3-64 | -- | -- | -- | -- |
-| **Object/page checksums** | XXH3-16 per object | CRC32 per block | Optional per page | Optional per page | CRC32 per 8KB page |
-| **Per-key checksums** | XXH3-8 per key | -- | -- | -- | -- |
-| **Per-value checksums** | XXH3-8 per value | -- | -- | -- | -- |
+| **Segment/range checksums** | XXH3-64 per sync range | -- | -- | -- | -- |
+| **Object/page checksums** | 16-bit (XXH3-64 truncated) per object | CRC32 per block | Optional per page | Optional per page | CRC32 per 8KB page |
+| **Per-key checksums** | 8-bit (XXH3-64 truncated) per key | -- | -- | -- | -- |
+| **Per-value checksums** | 8-bit (XXH3-64 truncated) per value | -- | -- | -- | -- |
 | **WAL checksums** | N/A (no WAL) | CRC32 per record | -- | CRC32 per frame | CRC32 per record |
 | **Structural verification** | Full tree walk | Partial (SST-level) | `mdbx_chk` tree walk | `integrity_check` | `amcheck` B-tree walk |
 | **Failure localization** | Per-key + hex prefix | Per-block | Per-page | Per-page | Per-page |

@@ -61,7 +61,7 @@ Given two segments with a copy of a node with the same ID, recovery must correct
 - Within a segment, later offset = newer
 - Each segment tracks the session that allocated it
 - Segment timestamps provide ordering between sessions
-- A 24-bit allocation sequence number in the node header disambiguates across overlapping segments
+- A 16-bit allocation sequence number in the node header (`ptr_address_seq::sequence`) disambiguates across overlapping segments
 
 ### Worst Case Scenario
 

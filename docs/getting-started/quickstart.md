@@ -12,7 +12,7 @@ cmake --build build/release -j8
 ### Prerequisites
 
 - C++20 compiler (Clang 15+ or GCC 12+)
-- CMake 3.22+
+- CMake 3.16+
 - Ninja (recommended) or Make
 - Boost (program_options, for benchmarks)
 
@@ -22,7 +22,7 @@ cmake --build build/release -j8
 |-----------|------|-------|-----|
 | `build/release` | Release | `-O3`, LTO | Performance testing |
 | `build/debug` | Debug | `-O0 -g` | Development/debugging |
-| `build/coverage` | Debug | `-O0 -g --coverage` | Coverage reports |
+| `build/coverage` | Coverage | `-O1 -DNDEBUG -fprofile-arcs -ftest-coverage -g` | Coverage reports |
 
 ## Running Tests
 
@@ -121,7 +121,7 @@ tx.commit();
 auto cursor = read_ses->create_cursor(0);
 
 // O(log n) -- does not scan the keys
-uint64_t count = psitri::count_keys(cursor, "user:", "user:\xFF");
+uint64_t count = cursor.count_keys("user:", "user:\xFF");
 ```
 
 ### Subtrees
@@ -147,7 +147,7 @@ tx.commit();
 
 ```cpp
 // Set sync mode per session
-session->set_sync(sal::sync_type::mprotect);  // default: crash-safe for app crashes
+session->set_sync(sal::sync_type::mprotect);  // default is sync_type::none (no sync)
 
 // Or sync the entire database explicitly
 db->sync();

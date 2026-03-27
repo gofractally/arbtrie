@@ -231,7 +231,7 @@ At 419M keys we can estimate the theoretical performance from first principles a
 
 | Component | Count | Size each | Total |
 |-----------|-------|-----------|-------|
-| Inner nodes | ~125K | 67 B | ~8 MB |
+| Inner nodes | ~125K | 64 B (1 cache line) | ~8 MB |
 | Leaf nodes | ~7.2M | ~2 KB | ~14.4 GB |
 | Value nodes | ~419M | ~320 B (256 B value + header, cacheline-aligned) | ~134 GB |
 | Control blocks | ~419M | 8 B | ~3.4 GB |

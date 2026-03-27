@@ -2,13 +2,13 @@
 
 Every persistent key-value store makes the same set of tradeoffs:
 
-- **B-trees** (LMDB, BoltDB, SQLite, InnoDB) operate on fixed-size pages (4KB-16KB). To support snapshots and crash safety, they use **copy-on-write** (COW) -- instead of modifying data in place, they copy it first so the original remains intact. But the unit of copying is an entire page, so changing a single byte means copying 4KB-16KB. Write amplification is proportional to page size, not data size.
+- **B-trees** (LMDB, BoltDB, SQLite, InnoDB) operate on fixed-size pages (4KB-16KB). COW-based B-trees (LMDB, BoltDB) copy entire pages on mutation for snapshot isolation and crash safety -- changing a single byte means copying 4KB-16KB. WAL-based B-trees (InnoDB, SQLite) avoid COW but add write-ahead logging overhead. In both cases, write amplification is proportional to page size, not data size.
 - **LSM trees** (RocksDB, LevelDB, Cassandra) batch writes for throughput but pay for it with read amplification, compaction stalls, and space amplification from tombstones.
 - **Adaptive radix trees** (ART) achieve optimal depth and cache-line efficiency, but only in memory. No persistent ART implementation exists that matches B-tree durability.
 
 PsiTri eliminates these tradeoffs by combining three novel subsystems:
 
-1. **A radix/B-tree hybrid with sorted leaf nodes and 67-byte copy-on-write**
+1. **A radix/B-tree hybrid with sorted leaf nodes and node-level copy-on-write**
 2. **A relocatable object allocator with lock-free O(1) compaction moves**
 3. **A self-tuning physical data layout that sorts objects by access frequency**
 
@@ -18,7 +18,7 @@ PsiTri eliminates these tradeoffs by combining three novel subsystems:
 
 | System          | Insert/sec (persistent) | Depth (30M keys) | Persistent | Copy-on-Write | Node Size |
 |-----------------|-------------------------|-------------------|------------|-----|-----------|
-| **PsiTri**      | **1.1-3.7M**            | **5**             | Yes        | Yes | 67B avg   |
+| **PsiTri**      | **1.1-3.7M**            | **5**             | Yes        | Yes | Per-node (64 B multiples) |
 | LMDB            | 0.3-0.8M                | 3-4               | Yes        | Yes | 4KB pages |
 | RocksDB         | 0.5-1.5M                | N/A (LSM)         | Yes        | No  | variable  |
 | ART (in-memory) | 5-10M                   | 5-8               | No         | No  | 52-2048B  |
@@ -57,11 +57,11 @@ PsiTri occupies a region of the design space that was previously empty:
 | Capability                   | B-tree            | LSM-tree                | In-memory ART | PsiTri                                  |
 |------------------------------|-------------------|-------------------------|---------------|------------------------------------------|
 | Persistent + crash-safe      | Yes               | Yes                     | No            | Yes                                      |
-| Copy-on-write granularity    | 4KB page          | N/A                     | N/A           | 67 bytes                                 |
+| Copy-on-write granularity    | 4KB page          | N/A                     | N/A           | Per-node (64 B multiples)                |
 | Online compaction            | No (offline copy) | Background (file-level) | N/A           | Background (object-level)                |
 | Object relocation cost       | Cannot            | File rewrite            | N/A           | memcpy + 1 atomic CAS                    |
 | Cache management             | OS or buffer pool | OS or buffer pool       | N/A           | Self-tuning MFU with physical relocation |
 | Range count                  | O(k)              | O(k)                    | O(k)          | O(log n)                                 |
 | Range delete                 | O(k)              | O(k) tombstones         | O(k)          | O(log n)                                 |
-| Write amplification          | High (page-level) | High (compaction)       | N/A           | Minimal (node-level, tunable)            |
+| Write amplification          | High (page-level) | High (compaction)       | N/A           | ~2.3KB/mutation (node-level COW)         |
 | Composable hierarchical data | Flattened + joins | Embedded blobs          | N/A           | Native subtrees with O(1) operations     |

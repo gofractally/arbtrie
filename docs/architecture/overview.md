@@ -62,7 +62,7 @@ database
                                      |        |-- upsert(key, value)
                                      |        |-- remove(key)
                                      |        |-- remove_range(lower, upper)
-                                     |        |-- count_keys(lower, upper)
+                                     |        |-- get(key)
                                      |        |-- commit()
                                      |        +-- ~transaction() --> auto-abort
                                      |
@@ -92,7 +92,7 @@ location (41-bit cacheline)       Physical offset in segments
 segment (32 MB)                   Contiguous mmap region
      |
      v
-alloc_header (12 bytes)           checksum, size, type
+alloc_header (12 bytes)           checksum, address+seq, size, type
      |
      v
 Object Data                       User-defined node content
@@ -126,7 +126,7 @@ Object Data                       User-defined node content
 
 ## Tree Structure
 
-PsiTri is a hybrid of a radix tree and a B-tree. Inner nodes route on **single-byte dividers** with prefix compression collapsing shared key prefixes. Leaf nodes store **sorted key suffixes** with hash-accelerated binary search (like B-tree pages).
+PsiTri is a hybrid of a radix tree and a B-tree. Inner nodes route on **single-byte dividers** with prefix compression collapsing shared key prefixes. Leaf nodes store **sorted key suffixes** with hash-accelerated point lookups (1-byte XXH3 hash per key for fast filtering) and binary search for range queries.
 
 ```
                 +------------------------------------+
@@ -144,14 +144,14 @@ In this example, the prefix `"appl"` is stored once in the inner node and stripp
 
 This hybrid gets the best of both designs:
 
-- **From radix trees**: prefix compression, up to 256-way fan-out per level, compact inner nodes (avg 67 bytes)
+- **From radix trees**: prefix compression, up to 256-way fan-out per level, compact inner nodes (allocated in 64-byte multiples; size depends on branch count and cacheline co-location)
 - **From B-trees**: sorted keys in leaves (~58 keys per node), efficient range scans, hash-accelerated point lookups
 
 ## Node Types
 
 ### Leaf Node
 
-Leaf nodes store sorted key suffixes (the portion remaining after prefix bytes are stripped by ancestor inner_prefix_nodes) with hash-accelerated binary search. Each key has a 1-byte XXH3 hash for fast filtering before full key comparison. Leaves pack ~58 keys per node in up to 2KB.
+Leaf nodes store sorted key suffixes (the portion remaining after prefix bytes are stripped by ancestor inner_prefix_nodes). Each key has a 1-byte XXH3 hash stored in a compact array; point lookups scan this hash array first for fast filtering before full key comparison. Range queries use binary search on the sorted keys directly. Leaves hold ~58 keys per node in up to 2 KB.
 
 Values up to 64 bytes are stored **inline** in the leaf. Larger values are stored as separate `value_node` objects. Subtree root pointers can also be stored as values.
 
@@ -159,7 +159,7 @@ Values up to 64 bytes are stored **inline** in the leaf. Larger values are store
 
 Inner nodes store a sorted array of **1-byte dividers** that partition the key space by the first byte. A SIMD instruction can compare the search byte against all dividers simultaneously, selecting the correct branch in constant time.
 
-Each child is referenced via a **1-byte branch encoding** into shared cacheline base addresses (4 bits for which of 16 cachelines, 4 bits for which slot). This compresses what would normally be 8-byte pointers into 1-byte references, allowing up to 256 branches per node.
+Each child is referenced via a **1-byte branch encoding** into shared cacheline base addresses (4 bits for which of 16 cachelines, 4 bits for which slot). This compresses 4-byte `ptr_address` values into 1-byte references, allowing up to 256 branches per node.
 
 There are two inner node variants:
 
@@ -244,7 +244,7 @@ Thread A (writer)            Thread B (reader)
 
 1. **Depth 5** for 30M keys -- only 5 pointer dereferences per lookup
 2. **Batched leaves** (~58 keys) -- excellent cache locality
-3. **67-byte inner nodes** -- fit in 1-2 cache lines
-4. **Node-level copy-on-write** -- copies 67 bytes per mutation, not 4KB pages
+3. **Compact inner nodes** -- typically 1-2 cache lines depending on branch count and cacheline sharing
+4. **Node-level copy-on-write** -- copies individual nodes per mutation, not 4KB pages
 5. **Inline values** -- values up to 64 bytes stored directly in leaves, no extra indirection
 6. **Lock-free reads** -- MVCC via atomic ref counts

@@ -10,14 +10,14 @@ Every resource a writer touches is partitioned so that independent writers never
 
 ### Per-Root Locking
 
-The database has 512 independent roots, each protected by its own mutex:
+The database has 512 independent roots at the PsiTri layer, each protected by its own mutex. The underlying SAL allocator has 1,024 root object slots with their own mutexes:
 
 ```cpp
-std::mutex _modify_lock[512];   // One per root
-std::mutex _write_mutex[512];   // One per root (SAL layer)
+std::mutex _modify_lock[512];        // PsiTri layer: one per top-level root
+std::array<std::mutex, 1024> _write_mutex;  // SAL layer: one per root object
 ```
 
-Writer on root 0 locks `_write_mutex[0]`. Writer on root 1 locks `_write_mutex[1]`. They never touch the same mutex.
+Writer on root 0 locks `_modify_lock[0]`. Writer on root 1 locks `_modify_lock[1]`. They never touch the same mutex.
 
 ### Per-Session Segments
 

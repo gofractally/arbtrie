@@ -209,7 +209,7 @@ public:
 
 | Mode | Durability | Performance |
 |------|-----------|-------------|
-| `none` | Process crash safe only | Fastest |
+| `none` | No durability (OS flushes when convenient) | Fastest |
 | `mprotect` | + Write protection on committed data | Fast |
 | `msync_async` | + OS flush initiated | Moderate |
 | `msync_sync` | + Block until OS writes | Slower |
@@ -226,5 +226,5 @@ public:
 | Max object size | 16 MB | Half a segment |
 | Cacheline | 64 bytes | Allocation alignment |
 | Max leaf size | 2,048 bytes | Per leaf node |
-| Max branches per leaf | 512 | Keys per leaf |
+| Max branches per leaf | Limited by 2,048 byte leaf size | Keys per leaf (typically ~58) |
 | Max inner branches | 256 | 16 cachelines x 16 slots |

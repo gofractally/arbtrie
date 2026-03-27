@@ -10,7 +10,7 @@ A modern CPU can execute hundreds of instructions in the time it takes to load a
 
 Every pointer-based tree structure -- B-trees, ART, red-black trees, skip lists -- pays a hidden cost that grows with branching factor. Consider what happens when an inner node with N children needs to visit those children:
 
-**Traditional 8-byte pointers**: Each child reference is an 8-byte pointer or ID. Dereferencing it loads a control structure (reference count, location, etc.) at an unpredictable memory address. With N children scattered across memory, that's **N cache line loads** just to read the metadata -- before touching any child data.
+**Traditional 4-8 byte pointers**: Each child reference is a 4-8 byte pointer or ID. Dereferencing it loads a control structure (reference count, location, etc.) at an unpredictable memory address. With N children scattered across memory, that's **N cache line loads** just to read the metadata -- before touching any child data.
 
 ```
 Traditional tree node with 16 children:
@@ -42,15 +42,31 @@ The node itself is also bloated by all those pointers. A B-tree node with 256 ch
 
 **This is the real write amplification problem.** Copy-on-write databases copy entire nodes on mutation. A 4 KB B-tree page holds ~200 keys but wastes most of its space on pointers and alignment. Copying 4 KB to change one key is bad, but the deeper problem is that the page was 4 KB in the first place because the pointers are so large.
 
-### PsiTri's Approach: Compress the Indirection
+### PsiTri's Approach: Separate and Compress the Indirection
 
-PsiTri attacks this problem at the root by making the indirection layer -- the control blocks -- **dense, flat, and cache-friendly**, then exploiting that layout to compress pointers from 8 bytes to 1 byte.
+An obvious objection: PsiTri adds a level of indirection -- every pointer dereference must first look up the control block to find the physical location, then load the actual node. Don't you pay *more* cache misses, not fewer?
+
+The answer is no -- and the benefit comes in two layers.
+
+**Layer 1: Separation alone is already a partial win.** Even without intentional co-location, a flat metadata array has two advantages over inline metadata. First, some siblings will randomly land on the same cache lines -- with 8 control blocks per cache line, random placement still yields incidental sharing. Second, the control block array is compact (8 bytes per object vs 64+ byte node pages) and can be pinned to RAM, ensuring metadata access never triggers a disk page fault. When inline metadata is stored in node data pages, a cold node means the refcount access pays the worst-case cost: a disk read of an entire 4 KB page just to touch 4 bytes. With a separated, pinned control block array, metadata access is always a RAM hit -- never a disk fault.
+
+**Layer 2: Intentional co-location turns a partial win into a decisive one.** PsiTri's allocator actively co-locates sibling control blocks on shared cachelines. When a node allocates a child, it passes hints (the `ptr_address` values of existing siblings), and the allocator places the new control block in the same 16-slot group. This converts N scattered RAM loads into a small constant number of loads -- typically 1-2 cache lines for nodes with up to 16 children.
+
+Most persistent tree structures that support snapshots or MVCC face this same scattered-metadata problem. Systems like WiredTiger, InnoDB, PostgreSQL, and CouchDB all store reference counts or version metadata inline with each node or row. When they need to retain, release, or scan children, they pay the full cost of loading each child's data page just to touch a few bytes of metadata. None of them separate the metadata, and none of them attempt co-location -- because without the flat control block array, there is no natural structure to co-locate *into*.
+
+**The result of separation + co-location together:**
+
+Traditional trees *also* load metadata (reference counts, flags) on every traversal -- they just hide it by storing it inline with each node's data. When a traditional tree node with 256 children needs to retain or release those children (copy-on-write, snapshot, destruction), it must load each child's data page just to touch the refcount. That's **256 cache line loads of 64+ bytes each** -- and on modern CPUs that prefetch in 128-byte pairs, potentially **256 x 128 = 32 KB of memory bandwidth**, every byte of which evicts something useful from the CPU cache.
+
+PsiTri separates the metadata into a dense, flat, contiguous control block array **and co-locates siblings within it**. The same 256-child retain/release operation touches at most **16 cacheline groups x 128 bytes = 2 KB** -- the control blocks of all 256 children packed into 16 groups. That is **16x less memory bandwidth** and **16x less cache pollution**. The control block array is small (8 bytes per object; ~4.6 MB for 580K nodes at 30M keys), heavily accessed, and stays hot in L2/L3 cache.
+
+For a single lookup traversal, PsiTri loads one control block (likely already in cache because siblings keep the surrounding entries hot) and then one node. Traditional trees load one node page but that page is 4 KB. PsiTri's path touches fewer total bytes.
 
 ---
 
 ## The Control Block Array
 
-Every allocated object gets a permanent 32-bit ID (`ptr_address`). This ID indexes into a flat, contiguous array of **8-byte atomic control blocks** -- one per object, packed 8 per CPU cache line:
+Every allocated object gets a permanent 32-bit ID (`ptr_address`). This ID indexes into a flat, contiguous array of **8-byte atomic control blocks** -- one per object, 8 per 64-byte cache line (though the allocator operates on 16-slot groups spanning two adjacent cache lines):
 
 ```
 ptr_address (32-bit permanent ID)
@@ -73,9 +89,9 @@ Because the array is flat and contiguous, adjacent `ptr_address` IDs share the s
 
 ## Engineered Cacheline Co-Location
 
-PsiTri's allocator deliberately places sibling nodes' control blocks on the **same cache lines**.
+PsiTri's allocator deliberately places sibling nodes' control blocks in the **same 16-slot group** (128 bytes, spanning two adjacent cache lines).
 
-When a node allocates a child, it passes **allocation hints** -- the `ptr_address` values of existing siblings. The allocator rounds down to the cacheline boundary and tries to place the new object on the **same 16-slot cacheline** in the control block array:
+When a node allocates a child, it passes **allocation hints** -- the `ptr_address` values of existing siblings. The allocator rounds down to a 16-element boundary and tries to place the new object in the **same 16-slot group** in the control block array:
 
 ```
 Random allocation (no hints):
@@ -92,11 +108,11 @@ Hint-based allocation (co-located):
   3 siblings = 1 cache line load
 ```
 
-A node with 16 children that all share one cacheline does **1 cache line load** to dereference all of them, instead of 16. Even a node with the maximum 256 children (spread across up to 16 cachelines) only needs 16 cache line loads -- compared to 256 in a traditional design.
+A node with 16 children that all share one 16-slot group does **1-2 cache line loads** to dereference all of them, instead of 16. Even a node with the maximum 256 children (spread across up to 16 groups) only needs 16-32 cache line loads -- compared to 256 in a traditional design.
 
 ## 1-Byte Branch Encoding
 
-Co-location enables an extreme pointer compression scheme. Instead of storing 8-byte pointers to children, inner nodes store **1-byte branch references**:
+Co-location enables an extreme pointer compression scheme. Instead of storing 4-byte addresses to children, inner nodes store **1-byte branch references**:
 
 ```
 branch (1 byte)
@@ -116,24 +132,66 @@ full_address = clines[branch >> 4].base() + (branch & 0x0f)
 This supports up to **256 branches** (16 cachelines x 16 slots) per node:
 
 ```
-Traditional:  256 branches x 8-byte pointers            = 2,048 bytes  (32 cache lines)
+Traditional:  256 branches x 4-byte addresses            = 1,024 bytes  (16 cache lines)
 PsiTri:       256 branches x 1-byte refs + 16 x 4-byte  =   320 bytes  ( 5 cache lines)
 ```
 
-This is a 6.4x space reduction, but the cache impact is even larger. The traditional node *itself* spans 32 cache lines. The PsiTri node spans 5. Reading the node pollutes 5 cache lines instead of 32 -- leaving 27 more cache lines available for other data.
+### Per-Child Pointer Overhead: How PsiTri Compares
+
+The 1-byte branch encoding gives PsiTri the lowest per-child pointer overhead of any pointer-based tree structure. Each child costs 1 byte (the branch) plus its share of the cacheline base table (4 bytes per cacheline group, amortized across all branches using that group). The more branches share each cacheline group, the lower the per-child cost:
+
+**PsiTri inner_node overhead by configuration:**
+
+| Branches | Clines | Raw bytes | Alloc size | Per-child total | Per-child pointer |
+|----------|--------|-----------|------------|-----------------|-------------------|
+| 2        | 1      | 27        | 64         | 32.0 B          | 3.00 B            |
+| 4        | 1      | 31        | 64         | 16.0 B          | 2.00 B            |
+| 8        | 2      | 43        | 64         | 8.0 B           | 2.00 B            |
+| 16       | 2      | 59        | 64         | 4.0 B           | 1.50 B            |
+| 32       | 4      | 99        | 128        | 4.0 B           | 1.50 B            |
+| 64       | 8      | 179       | 192        | 3.0 B           | 1.50 B            |
+| 128      | 12     | 323       | 384        | 3.0 B           | 1.38 B            |
+| 256      | 16     | 595       | 640        | 2.5 B           | 1.25 B            |
+
+*Raw bytes = 19 + 2×branches + clines×4 (header + dividers + branches + cline table). Alloc size = round_up to 64-byte multiple. Per-child pointer = (branches×1 + clines×4) / branches.*
+
+The "per-child pointer" column isolates the cost of encoding child references. At 256 branches with 16 cacheline groups, each child reference costs just **1.25 bytes**. Even at typical sizes (8-32 branches), it's **1.5-2.0 bytes per child**.
+
+**Comparison with other tree structures:**
+
+| Data Structure | Per-Child Pointer | Total Per-Child | Source |
+|---|---|---|---|
+| **PsiTri (16 branches, 2 clines)** | **1.50 B** | **4.0 B** | This project |
+| **PsiTri (256 branches, 16 clines)** | **1.25 B** | **2.5 B** | This project |
+| InnoDB B+tree | 4 B | ~9 B + key | 32-bit page IDs |
+| LMDB B+tree | 6 B | ~10 B + key | 48-bit pgno packed in 8 B header + 2 B offset |
+| BoltDB B+tree | 8 B | 16 B + key | `branchPageElement` = 16 B |
+| ART Node16 | 8 B | 10.0 B | 160 B / 16 children (Leis et al. 2013) |
+| ART Node256 | 8 B | 8.1 B | 2,064 B / 256 children |
+| ART Node48 | 8 B | 13.7 B | 656 B / 48 children (256 B index array) |
+| HOT | 8 B | ~11-14 B | Binna et al. 2018 |
+| Masstree | 8 B | ~15.5 B | 8 B key slice + 8 B pointer (Mao et al. 2012) |
+| Red-black tree | 8 B | 12.5 B | 2 children + parent + color |
+| Skip list (p=0.5) | 8 B | 16.0 B | Expected 2 pointers per node |
+| Bw-tree | 8 B | 16.0 B | 8 B PID + 8 B mapping table entry |
+| WiredTiger | 8 B | 56 B | In-memory `WT_REF` struct |
+
+Every other structure pays at least **4 bytes per child** for the pointer alone -- and most pay **8 bytes** (a full 64-bit pointer or page ID). PsiTri's 1-byte branch encoding with amortized cacheline bases achieves **1.25-2.0 bytes per child**, a 4-6x reduction over the state of the art.
+
+The key insight: by separating addressing into a flat control block array and encoding sibling references relative to shared cacheline groups, PsiTri converts what is normally a per-child cost (pointer storage) into a per-*group* cost (cacheline base address), then amortizes that cost across all children sharing the group.
 
 ### The Cascade Effect
 
 Smaller pointers create a cascade of benefits:
 
-1. **Smaller pointers** -> smaller nodes (avg 67 bytes vs 4 KB)
+1. **Smaller pointers** -> smaller nodes (typically 1-2 cache lines vs 4 KB)
 2. **Smaller nodes** -> fewer cache lines loaded per traversal step
 3. **Fewer cache lines per node** -> less cache pollution, more of the working set stays hot
-4. **Smaller nodes** -> node-level copy-on-write becomes practical (copying 67 bytes vs 4 KB)
-5. **Node-level COW** -> 60x less write amplification per mutation
+4. **Smaller nodes** -> node-level copy-on-write becomes practical (copying 1-2 cache lines vs 4 KB)
+5. **Node-level COW** -> dramatically less write amplification per mutation
 6. **Co-located siblings** -> dereferencing N children costs 1-2 cache line loads, not N
 
-None of this is possible with 8-byte pointers. The 1-byte branch encoding and the flat control block array are the enablers.
+None of this is possible with 4-byte pointers stored directly. The 1-byte branch encoding and the flat control block array are the enablers.
 
 ### Comparison: Cache Lines Per Tree Operation
 
@@ -215,7 +273,7 @@ PsiTri does this with a **branchless NEON/SIMD transformation**:
     - High nibble (cacheline index) is replaced via the LUT
     - Low nibble (slot within cacheline) is preserved
 
-This is 2x faster than scalar byte-by-byte transformation and completely branchless.
+This is faster than scalar byte-by-byte transformation and completely branchless.
 
 ---
 
@@ -227,8 +285,8 @@ The control block system creates a virtuous cycle:
 2. **Flat array layout** means adjacent IDs share cache lines
 3. **Hint-based allocation** places siblings on shared cache lines
 4. **1-byte branch encoding** exploits shared cache lines for 6x pointer compression
-5. **Compressed inner nodes** (avg 67 bytes) make node-level copy-on-write practical
-6. **Node-level COW** means mutations write ~335 bytes instead of ~20KB
+5. **Compressed inner nodes** (typically 1-2 cache lines) make node-level copy-on-write practical
+6. **Node-level COW** means mutations write ~2.3 KB (4 inner nodes + 1 leaf) instead of ~20 KB
 7. **O(1) relocation** via CAS means the compactor can defragment without pausing anything
 
 Remove any one piece and the others lose their leverage. The control block is the keystone that holds it all together.

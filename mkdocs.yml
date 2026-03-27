@@ -2,7 +2,7 @@ site_name: PsiTri
 site_url: https://gofractally.github.io/arbtrie/
 site_description: >-
   A persistent, transactional key-value store built on an adaptive radix trie.
-  3x faster than RocksDB. 60x less write amplification than page-based COW.
+  3x faster than RocksDB. ~9x less write amplification than page-based COW.
 repo_url: https://github.com/gofractally/arbtrie
 repo_name: gofractally/arbtrie
 edit_uri: edit/main/docs/

@@ -10,7 +10,7 @@ hide:
 
 <div class="hero-tagline" markdown>
 A persistent, transactional key-value store.
-3x faster than RocksDB. Writes 60x less data per mutation than traditional databases.
+3x faster than RocksDB. ~9x less write amplification than page-level COW databases.
 </div>
 
 <div class="stat-row" markdown>
@@ -19,16 +19,16 @@ A persistent, transactional key-value store.
 <span class="stat-label">ops/sec (bank benchmark)</span>
 </div>
 <div class="stat" markdown>
-<span class="stat-value">67 B</span>
-<span class="stat-label">avg copy-on-write size</span>
+<span class="stat-value">64 B</span>
+<span class="stat-label">inner node COW (1 cache line)</span>
 </div>
 <div class="stat" markdown>
 <span class="stat-value">5</span>
 <span class="stat-label">levels for 30M keys</span>
 </div>
 <div class="stat" markdown>
-<span class="stat-value">60x</span>
-<span class="stat-label">less write amplification</span>
+<span class="stat-value">~9x</span>
+<span class="stat-label">less write amplification vs page COW</span>
 </div>
 </div>
 

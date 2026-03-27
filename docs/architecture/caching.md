@@ -8,7 +8,7 @@ Many embedded databases are described as "memory-mapped" but perform poorly once
 
 Three mechanisms work together:
 
-1. **MFU-based physical data tiering.** PsiTri physically relocates hot objects into `mlock`'d segments that are guaranteed to stay in RAM. Cold objects live in unpinned segments that the OS can page out. Unlike a traditional buffer pool, this operates at individual object granularity (67 bytes for inner nodes, up to 2 KB for leaves), not 4-16 KB pages -- so pinned memory holds only the data that matters.
+1. **MFU-based physical data tiering.** PsiTri physically relocates hot objects into `mlock`'d segments that are guaranteed to stay in RAM. Cold objects live in unpinned segments that the OS can page out. Unlike a traditional buffer pool, this operates at individual object granularity (objects up to 4 KB are eligible for promotion), not fixed 4-16 KB pages -- so pinned memory holds only the data that matters.
 
 2. **Write protection enables clean eviction.** All committed segments are marked `PROT_READ` via `mprotect`. Read-only pages are cheap for the OS to evict: they can be dropped instantly and re-faulted from the memory-mapped file with no writeback. In contrast, dirty pages in a traditional database must be flushed to disk before eviction, creating I/O stalls under memory pressure.
 
@@ -23,7 +23,7 @@ The practical effect: a PsiTri database with 100 GB of data and 8 GB of RAM perf
 | **OS page cache** (LMDB, BoltDB) | 4 KB pages | None (OS LRU) | Random I/O | Full table scan evicts working set |
 | **Buffer pool** (PostgreSQL, MySQL) | 8-16 KB pages | LRU/clock sweep | Random I/O | Requires manual tuning of pool size |
 | **Block cache** (RocksDB) | 4-64 KB blocks | LRU with priority | Sequential (LSM) | Good for writes, reads compete with compaction |
-| **PsiTri MFU tiering** | 67 B - 2 KB objects | Frequency-based, self-tuning | Sequential (COW) | Hot set guaranteed in RAM, cold set paged by OS |
+| **PsiTri MFU tiering** | Per-object (up to 4 KB) | Frequency-based, self-tuning | Sequential (COW) | Hot set guaranteed in RAM, cold set paged by OS |
 
 ---
 
@@ -41,7 +41,7 @@ PsiTri manages memory in blocks of 32 MB. Each thread writes in append-only mode
 
 Statistics are gathered as data is freed from each segment so that a segment can be recycled once a certain percentage is empty. This groups "modified" data and "static" data together. Compaction produces write amplification as data is copied from one place to another; however, there is minimal write amplification for compacting data from one pinned memory region to another.
 
-Empty space in pinned segments wastes precious cache, so the compactor is more aggressive about compacting pinned memory segments (defragmenting to recover as little as 10% of free space), but more lazy about compacting unpinned segments because disk space is relatively plentiful.
+Empty space in pinned segments wastes precious cache, so the compactor is more aggressive about compacting pinned memory segments (defragmenting when ~12.5% of a segment is free -- 4 MB of 32 MB), but more lazy about compacting unpinned segments (requiring ~50% free -- 16 MB of 32 MB) because disk space is relatively plentiful.
 
 ## Most Frequently Used (MFU) Caching
 
@@ -73,7 +73,7 @@ All new segments start under `mlock()`. They lose their mlock status when the co
 ```
 young  |----     Hot   -|-   Warm  -|----     Cold      ----|- Prunable Tail  -| old
        |                            |                       |                  |
- age   |----     mlock          ----|---- MADV RANDOM  -----|-   MADV FREE    -| age
+ age   |----     mlock          ----|----  MADV_RANDOM  ----|-- OS-managed   --| age
        |                                                                       |
        |-      Lowest Age Alloc     -|- Alloc Earliest -|- Alloc Earliest     -|
        |                             |                                         |
