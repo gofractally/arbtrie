@@ -456,10 +456,10 @@ TEST_CASE("wait_for_compactor returns true on idle database", "[database][compac
 }
 
 // ============================================================
-// database::print_stats / dump — exercise diagnostic paths
+// database::get_stats / dump — exercise diagnostic paths
 // ============================================================
 
-TEST_CASE("database dump and print_stats", "[database][diagnostics]")
+TEST_CASE("database dump and get_stats", "[database][diagnostics]")
 {
    test_db t;
    auto    tx = t.ses->start_transaction(0);
@@ -467,12 +467,12 @@ TEST_CASE("database dump and print_stats", "[database][diagnostics]")
       tx.upsert(gkey(i), gval(i, 50));
    tx.commit();
 
-   // Exercise dump() and print_stats()
+   // Exercise dump() and get_stats()
    auto dump = t.db->dump();
-   std::ostringstream os;
-   t.db->print_stats(os);
-   std::string stats = os.str();
-   REQUIRE(!stats.empty());
+   auto stats = t.db->get_stats();
+   std::string stats_str = stats.to_string();
+   REQUIRE(!stats_str.empty());
+   REQUIRE(stats.total_live_objects > 0);
 }
 
 // ============================================================

@@ -90,7 +90,9 @@ namespace psitri
 
       std::filesystem::create_directories(dir / "data");
 
-      return std::make_shared<database>(dir, cfg);
+      auto db = std::make_shared<database>(dir, cfg);
+      db->_allocator.init_shared_ownership(db);
+      return db;
    }
 
    bool database::ref_counts_stale() const
@@ -122,12 +124,19 @@ namespace psitri
    read_session::~read_session()  = default;
    write_session::~write_session() = default;
 
+   void database::init_allocator_shared_ownership()
+   {
+      _allocator.init_shared_ownership(shared_from_this());
+   }
+
    std::shared_ptr<write_session> database::start_write_session()
    {
+      std::call_once(_alloc_shared_init, [this]() { init_allocator_shared_ownership(); });
       return std::make_shared<write_session>(*this);
    }
    std::shared_ptr<read_session> database::start_read_session()
    {
+      std::call_once(_alloc_shared_init, [this]() { init_allocator_shared_ownership(); });
       return std::make_shared<read_session>(*this);
    }
 

@@ -61,7 +61,7 @@ namespace sal
     *
     * ```
     */
-   class allocator : public std::enable_shared_from_this<allocator>
+   class allocator
    {
      public:
       /// 64 bits for session id
@@ -69,6 +69,23 @@ namespace sal
 
       allocator(std::filesystem::path dir, runtime_config cfg = runtime_config());
       ~allocator();
+
+      /**
+       * @brief Initialize shared ownership for cross-thread shared_smart_ptr use.
+       *
+       * The allocator is typically a direct member of database, not managed
+       * by shared_ptr. This stores an aliasing shared_ptr that shares
+       * ownership with the parent, so shared_from_this() works correctly.
+       *
+       * Must be called after the parent object is managed by shared_ptr.
+       */
+      template <typename Parent>
+      void init_shared_ownership(std::shared_ptr<Parent> parent)
+      {
+         _self = std::shared_ptr<allocator>(std::move(parent), this);
+      }
+
+      std::shared_ptr<allocator> shared_from_this() { return _self; }
 
       void start_background_threads();
       void stop_background_threads();
@@ -217,6 +234,8 @@ namespace sal
       }
 
      private:
+      std::shared_ptr<allocator> _self;  ///< aliasing shared_ptr for shared_from_this()
+
       /// Core truncation logic — assumes background threads are already stopped.
       /// Does not restart threads; caller is responsible for that.
       void truncate_free_tail_stopped();

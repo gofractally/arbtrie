@@ -106,6 +106,7 @@ nav:
       - Control Blocks & Addressing: architecture/control-blocks.md
       - Segment Allocator (SAL): architecture/sal.md
       - Branchless Design: architecture/branchless-design.md
+      - Smart Pointers & Thread Safety: architecture/smart-pointers.md
       - Concurrent Writers: architecture/concurrent-writers.md
       - Caching, Compaction & Beyond-RAM Scaling: architecture/caching.md
       - Write Protection & Durability: internals/write-protection.md

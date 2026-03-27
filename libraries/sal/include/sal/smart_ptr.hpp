@@ -331,7 +331,11 @@ namespace sal
    {
      public:
       shared_smart_ptr(smart_ptr<T> ptr = {}) noexcept : shared_smart_ptr_base(ptr) {}
-      smart_ptr<T> get() const noexcept { return smart_ptr<T>(shared_smart_ptr_base::get()); }
+      smart_ptr<T> get() const noexcept
+      {
+         auto base = shared_smart_ptr_base::get();
+         return smart_ptr<T>(base.session(), base.take(), false);
+      }
       smart_ptr<T> operator->() const noexcept { return get(); }
    };
 

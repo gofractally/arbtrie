@@ -88,6 +88,16 @@ namespace sal
 
    void allocator_session::sync(sync_type st, const runtime_config& cfg, std::span<char> user_data)
    {
+      // Sync the active segment to advance _first_writable_page past all
+      // committed data. Without this, is_read_only() returns false for
+      // objects in the current segment even after transaction commit.
+      if (_alloc_seg_ptr and not _alloc_seg_ptr->is_finalized() and
+          _alloc_seg_ptr->get_alloc_pos() > _alloc_seg_ptr->get_first_write_pos())
+      {
+         _sega.record_session_write(_session_num,
+                                    _alloc_seg_ptr->sync(st, cfg, user_data));
+      }
+
       // Process finalized dirty segments
       segment_number seg_num = _alloc_seg_num;
       if (seg_num != segment_number(-1))

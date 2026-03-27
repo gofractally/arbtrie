@@ -25,8 +25,11 @@ public:
     // Durability
     void sync();
 
-    // Diagnostics
-    void print_stats(std::ostream& os = std::cout) const;
+    // Statistics
+    database_stats get_stats() const;
+
+    // Low-Level Diagnostics
+    sal::seg_alloc_dump dump() const;
     uint64_t reachable_size();
 
     // Recovery

@@ -44,47 +44,32 @@ namespace sal
    }  // namespace system_config
 
    /**
-    * For ACID **Durablity** requriments this configures
-    * how agressive arbtrie will be in flushing data to disk 
-    * and protecting data from corruption.
-    * 
-    * 0. none - fastests (no system calls) but least protection,
-    *    you must be sure your program will not write to the database's
-    *    mapped memory except during a commit() call, mprotect() is probably
-    *    worth doing as it doesn't have much overhead. 
-    * 1. mprotect - mprotect() will be used to write protect the
-    *    data in memory once committed. This will prevent application
-    *    code from modifying the data and corrupting the database. This is
-    *    the level that assumes the OS will not crash or power cut. Even if
-    *    your app crashes, your data is safe.
-    * 2. msync_async - msync(MS_ASYNC) will be used which will tell
-    *    the OS to write as soon as possible without blocking
-    *    the caller. This only flushes to the OS disk-cache and
-    *    does not gaurantee that the data is on disk.
-    * 3. msync_sync - msync(MS_SYNC) will be used to block caller
-    *    until the OS has finished its msync() to disk cache.
-    * 4. fsync - in addition to msync(MS_SYNC) tells the OS to
-    *    sync the data to the physical disk. Note that while the
-    *    OS will have sent all data to the drive, this does not
-    *    gaurantee that the drive hasn't cached the data and it
-    *    may not be on the drive yet. 
-    * 5. full - F_FULLSYNC (Mac OS X), in addition to fsync() asks the 
-    *    drive to flush all data to the physical media, this will
-    *    sync all data from all processes on the system not just
-    *    the current process.
+    * @brief Controls the ACID durability guarantee for committed data.
+    *
+    * Each level adds progressively stronger guarantees at the cost of
+    * write latency and SSD wear. Choose based on your failure model:
+    *
+    * | Level        | App crash | OS crash  | Power loss | Write latency     |
+    * |--------------|-----------|-----------|------------|-------------------|
+    * | none         | No        | No        | No         | Zero (no syscall) |
+    * | mprotect     | Yes       | No        | No         | ~microseconds     |
+    * | msync_async  | Yes       | Probably  | Probably   | ~microseconds     |
+    * | msync_sync   | Yes       | Mostly    | Mostly     | ~milliseconds     |
+    * | fsync        | Yes       | Yes       | Mostly*    | ~milliseconds     |
+    * | full         | Yes       | Yes       | Yes        | ~10s of ms        |
+    *
+    * *fsync flushes to the drive controller but the drive may still cache
+    * data in its volatile write buffer. full (F_FULLFSYNC on macOS) asks
+    * the drive to flush its cache to physical media.
     */
    enum class sync_type
    {
-      none        = 0,        // on program close or as OS chooses
-      mprotect    = 1,        // mprotect() will be used to write protect the data
-      msync_async = 2,        // nonblocking, but write soon
-      msync_sync  = 3,        // block until changes are committed to disk
-      fsync       = 4,        // in addition to msync(MS_SYNC) tells the OS to
-                              // sync the data to the physical disk. Note that while the
-                              // OS will have sent all data to the drive, this does not
-                              // gaurantee that the drive hasn't cached the data and it
-                              // may not be on the drive yet.
-      full              = 5,  // F_FULLSYNC (Mac OS X), in addition to fsync() asks the
+      none        = 0,  ///< No sync. Data persists when the OS flushes dirty pages (process exit, memory pressure).
+      mprotect    = 1,  ///< Write-protect committed pages via mprotect(PROT_READ). Stray writes cause SIGSEGV.
+      msync_async = 2,  ///< msync(MS_ASYNC): hint to OS to flush soon, non-blocking. No hard guarantee.
+      msync_sync  = 3,  ///< msync(MS_SYNC): block until OS has written pages to its disk cache.
+      fsync       = 4,  ///< fsync(): block until OS has sent data to the drive controller.
+      full        = 5,  ///< F_FULLFSYNC (macOS) / fsync + drive cache flush: data on physical media.
       default_sync_type = msync_sync
    };
    inline std::ostream& operator<<(std::ostream& os, sync_type st)
@@ -136,153 +121,209 @@ namespace sal
    };
 
    /**
-    * Parameters that can be changed at runtime.
+    * @brief Runtime-tunable parameters for database behavior.
+    *
+    * These can be changed after database creation via database::set_runtime_config().
+    * All fields have sensible defaults for general-purpose workloads.
     */
    struct runtime_config
    {
+      /** @name Cache & Memory */
+      ///@{
+
       /**
-       * The default is 1 GB, this gives 32 segments,
-       * if you have a lot of write threads you may want to 
-       * increase this to 64 MB per thread or more. The
-       * more the better, but this should be less than
-       * the system memory or you will start seeing errors
-       * in the logs about mlock() failing.
-       * 
-       * This should be a multiple of the segment size
+       * @brief Maximum RAM reserved for pinned (mlock'd) cache segments, in MB.
+       *
+       * Hot objects are physically relocated into mlock'd segments that are
+       * guaranteed to stay in RAM. This budget controls how much RAM the MFU
+       * cache can consume. Each 32 MB segment within this budget is mlock'd.
+       *
+       * - Must be a multiple of the segment size (32 MB).
+       * - Should be less than total system RAM to avoid mlock() failures.
+       * - More pinned cache = more of the hot working set guaranteed in RAM.
+       * - With many writer threads, budget at least 64 MB per thread for
+       *   write segments plus headroom for promoted hot data.
+       *
+       * Default: 8192 MB (8 GB = 256 pinned segments).
        */
       uint64_t max_pinned_cache_size_mb = 1024 * 8;
 
       /**
-       * The default is 1 hour, and this impacts the
-       * rate of cache eviction and the amount of SSD
-       * wear.  Longer windows are slower to adapt to
-       * changing access patterns, but are more effecient
-       * with respect to CPU and SSD wear. 
+       * @brief Duration of the MFU cache decay window, in seconds.
+       *
+       * A background thread clears the access-tracking bits (active and
+       * pending_cache) on a rolling schedule. Objects must be accessed
+       * frequently enough within this window to be promoted to pinned cache.
+       *
+       * - Longer window: slower to adapt to changing access patterns, but
+       *   less CPU overhead and less SSD wear from unnecessary promotions.
+       * - Shorter window: faster adaptation, but more background work and
+       *   potential for thrashing if the hot set is larger than the cache.
+       *
+       * Default: 18000 seconds (5 hours).
        */
       uint64_t read_cache_window_sec = 60 * 60 * 5;
 
       /**
-       * When true, read operations will promote
-       * the most frequently accessed data to pinned
-       * cache. This has minimal overhead for readers,
-       * because the work is offloaded to background thread,
-       * but may cause additional SSD wear and consume
-       * some memory bandwidth. Having a large 
-       * max_pinned_cache_size_mb will minimize the
-       * SSD wear when used in conjunection with 
-       * sync_mode::none
+       * @brief Enable MFU-based read cache promotion.
+       *
+       * When true, read operations probabilistically mark frequently-accessed
+       * objects for promotion to pinned (mlock'd) segments. The actual
+       * relocation is done by the background compactor, so reader overhead
+       * is minimal (a probabilistic check + queue push).
+       *
+       * Disable this if the entire dataset fits in RAM and you want to
+       * eliminate all background promotion activity.
+       *
+       * Default: true.
        */
       bool enable_read_cache = true;
 
-      /**
-       * When true, the database will write protect the
-       * data that has been committed even if it is not
-       * being actively msync() to disk. This prevents stray
-       * writes from other parts of the process from corrupting
-       * the database memory, but it comes at the cost of 
-       * increasing the amount of Copy on Write utilized and
-       * there is a small amount of overhead in system calls
-       * updating the memory protection.
-       * 
-       * This only has effect when sync_mode is "none", because
-       * we have to ensure that once data is synced that we
-       * don't modify it again.
-       */
-      bool write_protect_on_commit = true;
+      ///@}
+
+      /** @name Durability & Write Protection */
+      ///@{
 
       /**
-       * 0 = none, 
-       *    fastest, least SSD wear,
-       *    enables write_protect_on_commit option
-       *    data may not persist until program exit.
-       *    safe as long as OS doesn't crash or power loss
-       * 1 = async, background msync(), most data gets to disk
-       *    the OS gets the data to disk ASAP, but without blocking
-       *    the database will be slower, more SSD wear, but likely
-       *    most data will be recoverable even after a power loss
-       * 2 = sync, block until data is on disk
-       *    the database will be slower, more SSD wear, but the in
-       *    theory the most durable, but most OS's will not even
-       *    fully gaurantee that the data is on the physical disk 
-       *    limits according to the msync(MS_SYNC) documentation and
-       *    each OS and hardware configuration is different.
+       * @brief The sync level applied when transactions commit.
+       *
+       * Controls the durability guarantee for committed data. See sync_type
+       * for the full hierarchy from none (fastest, no crash safety) through
+       * full (slowest, survives power loss).
+       *
+       * This is the default for the database; individual write sessions can
+       * override it via write_session::set_sync().
+       *
+       * Default: sync_type::none (data persists at OS discretion).
        */
       sync_type sync_mode = sync_type::none;
 
       /**
-       * Every commit advances the write-protected region of
-       * memory, at this time there is an opportunity to calculate
-       * the checksum of the segment(s) that are being frozen; however
-       * this information is only useful for detecting corruption, and
-       * not recovering from corruption. 
-       * 
-       * Indepdnent of this checksum there is also a 1 byte checksum
-       * on every key/value pair that is stored in binary nodes, and
-       * each node also has a 1 byte checksum which is updated on
-       * commit. 
-       * 
-       * This is more expensive, but it will detect corruption
-       * of data at rest. This is about a 10% performance hit.
+       * @brief Write-protect committed pages even when sync_mode is none.
+       *
+       * When true, committed segments are marked PROT_READ via mprotect().
+       * Any stray write to committed data (e.g. from a bug) triggers SIGSEGV
+       * immediately rather than silently corrupting the database.
+       *
+       * This also forces copy-on-write for all mutations to committed data,
+       * which is already the normal path — the overhead is the mprotect()
+       * syscall itself (~microseconds per segment transition).
+       *
+       * Only has effect when sync_mode is none. Higher sync modes already
+       * write-protect as part of the sync process.
+       *
+       * Default: true.
+       */
+      bool write_protect_on_commit = true;
+
+      ///@}
+
+      /** @name Checksums & Integrity */
+      ///@{
+
+      /**
+       * @brief Compute checksums when segments are frozen on commit.
+       *
+       * Each commit advances the write-protected region. When enabled, the
+       * 16-bit XXH3-64 truncated checksum in each object's alloc_header is
+       * updated at this point. This detects corruption of data at rest.
+       *
+       * Independent of this, each key/value pair has a 1-byte hash for
+       * fast point-lookup filtering.
+       *
+       * ~10% performance impact on write-heavy workloads.
+       *
+       * Default: true.
        */
       bool checksum_commits = true;
 
       /**
-       * Calculating the checksum is expensive and mostly
-       * used to detect corruption of data at rest, generally
-       * we can rely upon background processes to keep the checksums
-       * up to date to minimize latency for the user.
+       * @brief Update object checksums on every upsert (not just commit).
+       *
+       * When true, checksums are recomputed immediately on every mutation.
+       * This catches corruption sooner but adds overhead to the hot write
+       * path. Usually unnecessary — background compaction and commit-time
+       * checksumming cover most cases.
+       *
+       * Default: false.
        */
       bool update_checksum_on_upsert = false;
 
       /**
-       * This is a perfect opportunity to discover corruption
-       * early and will halt the process when corruption is detected
-       * and give the user a chance to recover.
+       * @brief Validate object checksums during background compaction.
+       *
+       * When the compactor relocates an object, it verifies the checksum
+       * before copying. If corruption is detected, the compactor halts and
+       * the database throws corruption_error on the next write, giving the
+       * application a chance to recover.
+       *
+       * Default: true.
        */
       bool validate_checksum_on_compact = true;
 
       /**
-       * This uses more CPU, but it is in the background so it
-       * is worth having accurate checksums.
+       * @brief Recompute object checksums during background compaction.
+       *
+       * When the compactor copies an object to a new location, it can
+       * recompute the checksum to ensure accuracy. Since compaction runs
+       * in a background thread, the CPU cost does not affect foreground
+       * latency.
+       *
+       * Default: true.
        */
       bool update_checksum_on_compact = true;
-      bool update_checksum_on_modify  = false;
 
       /**
-       * This determines the tolerance of freed data in the
-       * mlock() pages before the compactor will move the
-       * remaining unpinned data to a new segment. 
-       * 
-       * If this is set too high, a lot of RAM will be wasted
-       * and not helping with performance.
-       * 
-       * If this is set too low, the compactor will be agressive
-       * and may move data around more than necessary, consuming
-       * memory bandwidth and may also cause more SSD wear, if you
-       * are using anything other than sync_type::none because the
-       * OS will have to flush the moved data to disk, even though
-       * it is mlock() for read performance. 
-       * 
-       * The default is 4MB, which means the compactor will not
-       * compact a segment unless it can convert 8 segments into
-       * 7 or fewer segments.
-       * 
-       * TODO: redefine the algorithm for the compactor such that
-       * it will always compact when it can produce at least 1
-       * recycled segment as a result. 
+       * @brief Recompute checksums on every in-place modification.
+       *
+       * Only applies when a node has ref_count == 1 (unique ownership)
+       * and is modified in place rather than copied. Usually false —
+       * commit-time or compaction-time checksumming is sufficient.
+       *
+       * Default: false.
+       */
+      bool update_checksum_on_modify = false;
+
+      ///@}
+
+      /** @name Compaction Thresholds */
+      ///@{
+
+      /**
+       * @brief Free-space threshold before compacting pinned segments, in MB.
+       *
+       * Pinned (mlock'd) segments hold the hot working set in RAM. Free
+       * space in pinned segments wastes precious cache budget, so the
+       * compactor is aggressive about defragmenting them.
+       *
+       * When a pinned segment has at least this much free space, it becomes
+       * eligible for compaction (live objects are copied to a new segment
+       * and the old segment is recycled).
+       *
+       * - Too high: RAM wasted on free space within pinned segments.
+       * - Too low: excessive compaction of pinned data, consuming memory
+       *   bandwidth. If sync_mode > none, also causes SSD wear.
+       *
+       * Default: 4 MB (~12.5% of a 32 MB segment).
        */
       uint8_t compact_pinned_unused_threshold_mb = 4;
 
       /**
-       * Unpinned data is not mlocked() and is therefore subject to
-       * the OS page cache eviction policies which operate on
-       * a 4096 page level. This threshold should be high enough
-       * that the compactor will not move data around too often 
-       * causing SSD wear. By default this is set to 50% of the
-       * segment size, meaning that the compactor will not compact
-       * unless it can combine 2 segments into 1.
+       * @brief Free-space threshold before compacting unpinned segments, in MB.
+       *
+       * Unpinned segments are subject to OS page-cache eviction (4 KB pages).
+       * Disk space is cheaper than RAM, so the compactor is lazier here to
+       * minimize SSD wear from unnecessary data movement.
+       *
+       * When an unpinned segment has at least this much free space, it
+       * becomes eligible for compaction.
+       *
+       * Default: 16 MB (50% of a 32 MB segment — only compact when you can
+       * combine 2 segments into 1).
        */
       uint8_t compact_unpinned_unused_threshold_mb = 16;
+
+      ///@}
    };
 
    /**
