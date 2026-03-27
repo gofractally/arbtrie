@@ -601,6 +601,71 @@ if(BUILD_TIDESDB_BENCH AND TARGET tidesdb_lib)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
+# ── Examples ──
+option(BUILD_EXAMPLES "Build example programs" ON)
+if(BUILD_EXAMPLES)
+    set(EXAMPLE_SOURCES
+        basic_crud
+        cursor_iteration
+        range_operations
+        snapshots
+        subtrees
+    )
+    foreach(example ${EXAMPLE_SOURCES})
+        add_executable(example-${example} examples/${example}.cpp)
+        target_link_libraries(example-${example} PRIVATE psitri)
+        set_target_properties(example-${example} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+    endforeach()
+endif()
+
+# ── Installation ──
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+# Install psitri and all dependencies as a single package
+install(TARGETS psitri psitrirocks sal hash ucc
+    EXPORT psitri-targets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Install all headers
+install(DIRECTORY libraries/psitri/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY libraries/psitrirocks/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY libraries/sal/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY libraries/hash/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY libraries/ucc/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Export targets
+install(EXPORT psitri-targets
+    FILE psitri-targets.cmake
+    NAMESPACE psitri::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psitri
+)
+
+# Config file
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/psitri-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/psitri-config.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psitri
+)
+
+# Version file
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/psitri-config-version.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/psitri-config.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/psitri-config-version.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psitri
+)
+
 # Only add test directory if testing is enabled
 if(BUILD_TESTS)
     add_subdirectory(test)

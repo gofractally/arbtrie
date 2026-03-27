@@ -62,7 +62,8 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      base_path: ["."]
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.tasklist:
@@ -97,6 +98,8 @@ nav:
       - Design Philosophy: why-psitri/design.md
   - Getting Started:
       - Quick Start: getting-started/quickstart.md
+      - Examples: examples.md
+      - RocksDB Migration: getting-started/rocksdb-migration.md
       - API Reference: getting-started/api.md
   - How It Works:
       - Overview: architecture/overview.md
