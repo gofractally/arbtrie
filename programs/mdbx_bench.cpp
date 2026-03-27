@@ -36,14 +36,53 @@ namespace po = boost::program_options;
 struct benchmark_config
 {
    uint32_t rounds;
-   uint32_t items      = 1000000;
-   uint32_t batch_size = 512;
-   uint32_t value_size = 8;
+   uint32_t items           = 1000000;
+   uint32_t batch_size      = 512;
+   uint32_t value_size      = 8;
+   uint32_t commit_interval = 0;  // 0 = commit once per round; >0 = commit every N ops
 };
 
 static int64_t rand_from_seq(uint64_t seq)
 {
    return XXH3_64bits((char*)&seq, sizeof(seq));
+}
+
+/// 1MB buffer of pseudo-random bytes. Values are sliced from random offsets.
+static constexpr size_t RANDOM_BUF_SIZE = 1 << 20;  // 1 MB
+static char             g_random_buf[RANDOM_BUF_SIZE];
+static uint64_t         g_random_seed = 0xdeadbeefcafebabe;
+
+static void reshuffle_random_buf()
+{
+   auto* p = reinterpret_cast<uint64_t*>(g_random_buf);
+   for (size_t i = 0; i < RANDOM_BUF_SIZE / 8; ++i)
+   {
+      g_random_seed ^= g_random_seed << 13;
+      g_random_seed ^= g_random_seed >> 7;
+      g_random_seed ^= g_random_seed << 17;
+      p[i] = g_random_seed;
+   }
+}
+
+static MDBX_val random_value(uint64_t seq, uint32_t value_size)
+{
+   size_t offset = rand_from_seq(seq) % (RANDOM_BUF_SIZE - value_size);
+   return MDBX_val{g_random_buf + offset, value_size};
+}
+
+static uint64_t db_size_on_disk(const std::string& path)
+{
+   uint64_t total = 0;
+   try
+   {
+      auto sz = std::filesystem::file_size(path);
+      total += sz;
+      auto lck = path + "-lck";
+      if (std::filesystem::exists(lck))
+         total += std::filesystem::file_size(lck);
+   }
+   catch (...) {}
+   return total;
 }
 
 static void to_key(uint64_t val, std::vector<char>& v)
@@ -166,13 +205,15 @@ static void insert_test(benchmark_config   cfg,
    print_header(name, cfg);
 
    std::vector<char> key;
-   std::vector<char> value(cfg.value_size, 'v');
    uint64_t          seq = 0;
+   uint32_t          ci  = cfg.commit_interval > 0 ? cfg.commit_interval : cfg.items;
 
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
+      uint32_t txn_ops  = 0;
 
       MDBX_txn* txn = nullptr;
       MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
@@ -182,11 +223,19 @@ static void insert_test(benchmark_config   cfg,
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
+            make_key(seq, key);
             MDBX_val k{key.data(), key.size()};
-            MDBX_val v{value.data(), value.size()};
+            MDBX_val v = random_value(seq, cfg.value_size);
             MDBX_CHECK(mdbx_put(txn, mdb.dbi, &k, &v, MDBX_NOOVERWRITE));
+            ++seq;
             ++inserted;
+            if (++txn_ops >= ci)
+            {
+               MDBX_CHECK(mdbx_txn_commit(txn));
+               txn = nullptr;
+               MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
+               txn_ops = 0;
+            }
          }
       }
 
@@ -197,7 +246,7 @@ static void insert_test(benchmark_config   cfg,
       auto   ips  = uint64_t(inserted / secs);
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
-                << "  inserts/sec\n";
+                << "  inserts/sec" << std::endl;
    }
 }
 
@@ -209,13 +258,15 @@ static void upsert_test(benchmark_config   cfg,
    print_header(name, cfg);
 
    std::vector<char> key;
-   std::vector<char> value(cfg.value_size, 'u');
    uint64_t          seq = 0;
+   uint32_t          ci  = cfg.commit_interval > 0 ? cfg.commit_interval : cfg.items;
 
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
-      auto     start = std::chrono::steady_clock::now();
-      uint32_t count = 0;
+      reshuffle_random_buf();
+      auto     start    = std::chrono::steady_clock::now();
+      uint32_t count    = 0;
+      uint32_t txn_ops  = 0;
 
       MDBX_txn* txn = nullptr;
       MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
@@ -225,11 +276,19 @@ static void upsert_test(benchmark_config   cfg,
          uint32_t batch = std::min(cfg.batch_size, cfg.items - count);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
+            make_key(seq, key);
             MDBX_val k{key.data(), key.size()};
-            MDBX_val v{value.data(), value.size()};
+            MDBX_val v = random_value(seq, cfg.value_size);
             MDBX_CHECK(mdbx_put(txn, mdb.dbi, &k, &v, MDBX_UPSERT));
+            ++seq;
             ++count;
+            if (++txn_ops >= ci)
+            {
+               MDBX_CHECK(mdbx_txn_commit(txn));
+               txn = nullptr;
+               MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
+               txn_ops = 0;
+            }
          }
       }
 
@@ -240,7 +299,7 @@ static void upsert_test(benchmark_config   cfg,
       auto   ips  = uint64_t(count / secs);
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
-                << "  upserts/sec\n";
+                << "  upserts/sec" << std::endl;
    }
 }
 
@@ -482,7 +541,8 @@ static void multithread_rw_test(benchmark_config   cfg,
                                 uint32_t           num_threads,
                                 auto               make_key,
                                 const std::string& read_op,
-                                const std::string& key_mode)
+                                const std::string& key_mode,
+                                const std::string& db_dir)
 {
    std::string label = "multithread " + read_op + " (" + key_mode + " keys)";
    std::cout << "---------------------  " << label << "  "
@@ -496,20 +556,29 @@ static void multithread_rw_test(benchmark_config   cfg,
 
    // Seed the database so readers start with data
    {
+      reshuffle_random_buf();
+      uint32_t ci = cfg.commit_interval > 0 ? cfg.commit_interval : cfg.items;
       MDBX_txn* txn = nullptr;
       MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
       std::vector<char> key;
-      std::vector<char> value(cfg.value_size, 'v');
+      uint32_t txn_ops = 0;
       for (uint32_t i = 0; i < cfg.items; ++i)
       {
          make_key(i, key);
          MDBX_val k{key.data(), key.size()};
-         MDBX_val v{value.data(), value.size()};
+         MDBX_val v = random_value(i, cfg.value_size);
          MDBX_CHECK(mdbx_put(txn, mdb.dbi, &k, &v, MDBX_UPSERT));
+         if (++txn_ops >= ci)
+         {
+            MDBX_CHECK(mdbx_txn_commit(txn));
+            txn = nullptr;
+            MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
+            txn_ops = 0;
+         }
       }
       MDBX_CHECK(mdbx_txn_commit(txn));
    }
-   std::cout << "seeded " << format_comma(cfg.items) << " keys\n";
+   std::cout << "seeded " << format_comma(cfg.items) << " keys" << std::endl;
 
    struct alignas(128) padded_counters
    {
@@ -609,27 +678,38 @@ static void multithread_rw_test(benchmark_config   cfg,
    auto overall_start = std::chrono::steady_clock::now();
 
    std::vector<char> key;
-   std::vector<char> value(cfg.value_size, 'v');
    uint64_t          seq = cfg.items;
 
-   int64_t prev_ops = 0;
+   int64_t  prev_ops = 0;
+   uint32_t ci       = cfg.commit_interval > 0 ? cfg.commit_interval : cfg.items;
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
+      reshuffle_random_buf();
       MDBX_txn* txn = nullptr;
       MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
 
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
+      uint32_t txn_ops  = 0;
       while (inserted < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
          for (uint32_t i = 0; i < batch; ++i)
          {
-            make_key(seq++, key);
+            make_key(seq, key);
             MDBX_val k{key.data(), key.size()};
-            MDBX_val v{value.data(), value.size()};
+            MDBX_val v = random_value(seq, cfg.value_size);
             MDBX_CHECK(mdbx_put(txn, mdb.dbi, &k, &v, MDBX_NOOVERWRITE));
+            ++seq;
             ++inserted;
+            if (++txn_ops >= ci)
+            {
+               MDBX_CHECK(mdbx_txn_commit(txn));
+               committed_seq.store(seq, std::memory_order_relaxed);
+               txn = nullptr;
+               MDBX_CHECK(mdbx_txn_begin(mdb.env, nullptr, (MDBX_txn_flags_t)0, &txn));
+               txn_ops = 0;
+            }
          }
       }
       MDBX_CHECK(mdbx_txn_commit(txn));
@@ -642,10 +722,16 @@ static void multithread_rw_test(benchmark_config   cfg,
       auto   round_ops = cur_ops - prev_ops;
       auto   rps       = uint64_t(round_ops / secs);
       prev_ops         = cur_ops;
+
+      auto   dbsz    = db_size_on_disk(db_dir);
+      double dbsz_gb = dbsz / (1024.0 * 1024.0 * 1024.0);
+
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
                 << "  inserts/sec  " << std::setw(12) << std::right << format_comma(rps)
-                << "  " << read_op << "s/sec\n";
+                << "  " << read_op << "s/sec  "
+                << std::fixed << std::setprecision(2) << dbsz_gb << " GB"
+                << std::endl;
    }
 
    done.store(true, std::memory_order_relaxed);
@@ -670,11 +756,13 @@ static void multithread_rw_test(benchmark_config   cfg,
 int main(int argc, char** argv)
 {
    bench::install_interrupt_handler();
+   reshuffle_random_buf();
    uint32_t    rounds;
    uint32_t    batch;
    uint32_t    items;
    uint32_t    value_size;
    uint32_t    threads;
+   uint32_t    commit_interval;
    uint64_t    map_size_mb;
    bool        reset    = false;
    std::string db_dir   = "./mdbxdb";
@@ -698,6 +786,8 @@ int main(int argc, char** argv)
    opt("sync", po::value<std::string>(&sync_str)->default_value("none"),
        "sync mode: none (UTTERLY_NOSYNC), safe (SAFE_NOSYNC), full (SYNC_DURABLE)");
    opt("reset", po::bool_switch(&reset), "reset database before running");
+   opt("commit-interval", po::value<uint32_t>(&commit_interval)->default_value(0),
+       "commit every N ops (0 = once per round)");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -734,7 +824,7 @@ int main(int argc, char** argv)
 
    mdbx_guard mdb(db_dir, map_size_mb, threads, sync);
 
-   benchmark_config cfg = {rounds, items, batch, value_size};
+   benchmark_config cfg = {rounds, items, batch, value_size, commit_interval};
 
    std::cout << "mdbx-benchmark: db=" << db_dir << "\n";
    std::cout << "rounds=" << rounds << " items=" << format_comma(items)
@@ -800,19 +890,19 @@ int main(int argc, char** argv)
    // -- Multithread read+write variants --
    if (run_all || bench == "multithread-lowerbound-rand")
    {
-      multithread_rw_test(cfg, mdb, threads, rand_key, "lower_bound", "rand");
+      multithread_rw_test(cfg, mdb, threads, rand_key, "lower_bound", "rand", db_dir);
    }
    if (run_all || bench == "multithread-lowerbound-known")
    {
-      multithread_rw_test(cfg, mdb, threads, rand_key, "lower_bound", "known");
+      multithread_rw_test(cfg, mdb, threads, rand_key, "lower_bound", "known", db_dir);
    }
    if (run_all || bench == "multithread-get-rand")
    {
-      multithread_rw_test(cfg, mdb, threads, rand_key, "get", "rand");
+      multithread_rw_test(cfg, mdb, threads, rand_key, "get", "rand", db_dir);
    }
    if (run_all || bench == "multithread-get-known")
    {
-      multithread_rw_test(cfg, mdb, threads, rand_key, "get", "known");
+      multithread_rw_test(cfg, mdb, threads, rand_key, "get", "known", db_dir);
    }
 
    std::cout << "\ndone.\n";
