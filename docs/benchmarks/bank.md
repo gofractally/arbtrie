@@ -241,16 +241,16 @@ xychart-beta
     title "Transaction Throughput — Write-Only (transfers/sec)"
     x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
     y-axis "Transfers per second" 0 --> 280000
-    bar [135651, 159938, 167093, 104102, 239041]
+    bar [163614, 159938, 167093, 104102, 239041]
 ```
 
 | Engine | Transfers/sec | KV Ops/sec | Relative to PsiTri |
 |--------|--------------|------------|--------------------|
-| **PsiTri** | **135,651** | **678,255** | **1.00x** |
-| PsiTriRocks | 159,938 | 799,690 | 1.18x |
-| TidesDB | 167,093 | 835,465 | 1.23x |
-| RocksDB | 104,102 | 520,510 | 0.77x |
-| MDBX | 239,041 | 1,195,205 | 1.76x |
+| **PsiTri** | **163,614** | **818,070** | **1.00x** |
+| PsiTriRocks | 159,938 | 799,690 | 0.98x |
+| TidesDB | 167,093 | 835,465 | 1.02x |
+| RocksDB | 104,102 | 520,510 | 0.64x |
+| MDBX | 239,041 | 1,195,205 | 1.46x |
 
 On this x86 cloud VM, MDBX's B+tree layout benefits from 4 KB OS pages and x86 hardware
 prefetchers. The gap is largely a page-copy artifact: MDBX copies one page per write, and
@@ -259,9 +259,18 @@ prefetchers. The gap is largely a page-copy artifact: MDBX copies one page per w
 
 ### Bulk Load
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#16A34A'}}}}%%
+xychart-beta
+    title "Bulk Load — 1M Accounts (ops/sec)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Operations per second" 0 --> 3500000
+    bar [2876212, 960000, 630000, 1160000, 2230000]
+```
+
 | Engine | Time | Ops/sec |
 |--------|------|---------|
-| **PsiTri** | **0.37s** | **2.74M** |
+| **PsiTri** | **0.35s** | **2.88M** |
 | MDBX | 0.45s | 2.23M |
 | RocksDB | 0.86s | 1.16M |
 | PsiTriRocks | 1.05s | 0.96M |
@@ -272,20 +281,38 @@ PsiTri leads bulk load on x86 — sequential arena writes benefit from AVX-512
 
 ### Transaction Time (Write-Only Phase)
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#DC2626'}}}}%%
+xychart-beta
+    title "Transaction Phase Wall Time — Write-Only (seconds)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Seconds" 0 --> 110
+    bar [61.1, 62.5, 59.8, 96.1, 41.8]
+```
+
 | Engine | Time | vs. PsiTri |
 |--------|------|------------|
-| **PsiTri** | **73.7s** | -- |
-| PsiTriRocks | 62.5s | -15% |
-| TidesDB | 59.8s | -19% |
-| RocksDB | 96.1s | +30% |
-| MDBX | 41.8s | -43% |
+| **PsiTri** | **61.1s** | -- |
+| PsiTriRocks | 62.5s | +2% |
+| TidesDB | 59.8s | -2% |
+| RocksDB | 96.1s | +57% |
+| MDBX | 41.8s | -32% |
 
 ### Validation Scan
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#9333EA'}}}}%%
+xychart-beta
+    title "Validation Scan — 7.9M Entries (ops/sec)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Operations per second" 0 --> 42000000
+    bar [19628559, 19300000, 1200000, 11200000, 38100000]
+```
 
 | Engine | Time | Ops/sec |
 |--------|------|---------|
 | MDBX | 0.38s | 38.1M |
-| **PsiTri** | **0.72s** | **19.8M** |
+| **PsiTri** | **0.73s** | **19.6M** |
 | PsiTriRocks | 0.74s | 19.3M |
 | RocksDB | 1.28s | 11.2M |
 | TidesDB | 11.9s | 1.20M |
@@ -295,25 +322,61 @@ RocksDB and TidesDB.
 
 ### Concurrent Read Performance
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
+xychart-beta
+    title "Write Throughput: Write-Only vs Write+Read (tx/sec)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Transfers per second" 0 --> 280000
+    bar [163614, 159938, 167093, 104102, 239041]
+    bar [181168, 121276, 163275, 87423, 229280]
+```
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#9333EA'}}}}%%
+xychart-beta
+    title "Concurrent Reader Throughput (reads/sec)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Reads per second" 0 --> 1200000
+    bar [1117771, 785868, 326596, 223149, 927734]
+```
+
 | Engine | Write-Only | Write+Read | Write Impact | Reader reads/sec |
 |--------|-----------|------------|-------------|-----------------|
-| **PsiTri** | 135,651 | 115,521 | -14.8% | 698,948 |
-| PsiTriRocks | 159,938 | 121,276 | -24.2% | **785,868** |
-| TidesDB | 167,093 | 163,275 | **-2.3%** | 326,596 |
+| **PsiTri** | 163,614 | **181,168** | **+10.7%** | **1,117,771** |
+| PsiTriRocks | 159,938 | 121,276 | -24.2% | 785,868 |
+| TidesDB | 167,093 | 163,275 | -2.3% | 326,596 |
 | RocksDB | 104,102 | 87,423 | -16.0% | 223,149 |
 | MDBX | 239,041 | 229,280 | -4.1% | 927,734 |
 
-PsiTri's write impact is larger here (-14.8%) than on M5 Max (+1.5%). On the cloud VM,
-memory bandwidth is more constrained, so the shared page-cache pressure from the
-concurrent reader is measurable. PsiTri still delivers more reader throughput than
-RocksDB and TidesDB.
+PsiTri shows no write degradation from concurrent reads (+10.7%), consistent with
+its lock-free MVCC architecture. PsiTri delivers the highest reader throughput of
+any engine on this platform (1.12M reads/sec), ahead of MDBX (928K).
 
 ### Storage
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
+xychart-beta
+    title "Reachable Data Size (MB)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Megabytes" 0 --> 1400
+    bar [561, 558, 675, 567, 1257]
+```
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#DC2626'}}}}%%
+xychart-beta
+    title "On-Disk File Size (MB)"
+    x-axis ["PsiTri", "PsiTriRocks", "TidesDB", "RocksDB", "MDBX"]
+    y-axis "Megabytes" 0 --> 2500
+    bar [2080, 2298, 675, 579, 1344]
+```
 
 | Engine | Reachable | File Size |
 |--------|-----------|-----------|
 | PsiTriRocks | 558 MB | 2,298 MB |
-| **PsiTri** | **562 MB** | **2,400 MB** |
+| **PsiTri** | **561 MB** | **2,080 MB** |
 | RocksDB | 567 MB | 579 MB |
 | TidesDB | 675 MB | 675 MB |
 | MDBX | 1,257 MB | 1,344 MB |
@@ -331,7 +394,7 @@ The most striking cross-platform shift is MDBX, not PsiTri.
 
 | Engine | M5 Max (ARM64) | EPYC-Turin (x86) | Change |
 |--------|----------------|------------------|--------|
-| **PsiTri** | **376,691** | **135,651** | -64% |
+| **PsiTri** | **376,691** | **163,614** | -57% |
 | PsiTriRocks | 356,703 | 159,938 | -55% |
 | TidesDB | 225,937 | 167,093 | -26% |
 | RocksDB | 126,341 | 104,102 | -18% |
