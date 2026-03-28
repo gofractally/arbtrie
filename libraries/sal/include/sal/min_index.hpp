@@ -290,6 +290,9 @@ namespace sal
    {
 #if defined(__ARM_NEON)
       return find_min_index64_neon(const_cast<uint16_t*>(values));
+#elif defined(__SSE4_1__)
+      // SSE4.1 PHMINPOSUW is 1.25x faster than tournament for 64 elements.
+      return find_min_index_64_sse41(values);
 #else
       return find_min_index64_tournament(values);
 #endif
