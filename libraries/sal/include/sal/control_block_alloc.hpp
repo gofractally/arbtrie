@@ -536,8 +536,8 @@ namespace sal
       std::unique_ptr<mapping>         _header;
       std::filesystem::path            _dir;
       detail::ptr_alloc_header*        _header_ptr;
-      control_block*                   _ptr_base;
-      std::atomic<uint64_t>*           _free_list_base;
+      control_block*                   _ptr_base       = nullptr;
+      std::atomic<uint64_t>*           _free_list_base = nullptr;
       std::mutex                       _grow_mutex;
    };
 }  // namespace sal

@@ -55,6 +55,30 @@ namespace sal
       _zone_free_list->reserve(req_zones, true);
       _zone_free_list->resize(num_zones);
       _zone_allocator->resize(num_zones);
+
+      // Verify base addresses are stable after resize. Skip on first call (when _ptr_base is
+      // still null — it's assigned after ensure_capacity(1) returns in the constructor).
+      // If the underlying reservation was too small and a remap occurred, these would change,
+      // causing every existing pointer into the control block array to become dangling.
+      if (_ptr_base != nullptr)
+      {
+         auto* new_ptr_base = _zone_allocator->get<control_block>(block_allocator::offset_ptr(0));
+         if (new_ptr_base != _ptr_base)
+            throw std::runtime_error(
+                "control_block_alloc: zone allocator base address moved after resize — "
+                "reservation was insufficient. All control block pointers are now invalid.");
+      }
+
+      if (_free_list_base != nullptr)
+      {
+         auto* new_free_list_base =
+             _zone_free_list->get<std::atomic<uint64_t>>(block_allocator::offset_ptr(0));
+         if (new_free_list_base != _free_list_base)
+            throw std::runtime_error(
+                "control_block_alloc: free list base address moved after resize — "
+                "reservation was insufficient.");
+      }
+
       while (azone < num_zones)
       {
          SAL_WARN("growing control_block capacity: {} ", azone);

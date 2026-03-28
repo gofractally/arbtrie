@@ -2,6 +2,7 @@
 
 #include <mdbx.h>
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <mutex>

@@ -131,12 +131,10 @@ namespace psitri
 
    std::shared_ptr<write_session> database::start_write_session()
    {
-      std::call_once(_alloc_shared_init, [this]() { init_allocator_shared_ownership(); });
       return std::make_shared<write_session>(*this);
    }
    std::shared_ptr<read_session> database::start_read_session()
    {
-      std::call_once(_alloc_shared_init, [this]() { init_allocator_shared_ownership(); });
       return std::make_shared<read_session>(*this);
    }
 

@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -179,6 +180,12 @@ namespace sal
       static uint64_t find_max_reservation_size(uint64_t block_size);
 
       /**
+       * Returns the cached RLIMIT_MEMLOCK value in bytes (queried once at construction).
+       * Returns RLIM_INFINITY (~0ULL) if there is no limit.
+       */
+      uint64_t mlock_limit_bytes() const noexcept { return _mlock_limit_bytes; }
+
+      /**
        * Helper method to determine if a value is a power of 2
        *
        * @param x The value to check
@@ -204,5 +211,10 @@ namespace sal
       void*    _reserved_base;     // Base address of the reserved virtual memory region
       uint64_t _reservation_size;  // Size of the reserved region
       void*    _mapped_base;       // Base address of the mapped file region
+
+      // Cached RLIMIT_MEMLOCK value (bytes). Set once in constructor.
+      // RLIM_INFINITY (~0ULL) means no limit.
+      uint64_t _mlock_limit_bytes;
    };
+
 }  // namespace sal

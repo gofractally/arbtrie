@@ -23,8 +23,7 @@ namespace
           : dir(name)
       {
          std::filesystem::remove_all(dir);
-         std::filesystem::create_directories(dir + "/data");
-         db = std::make_shared<database>(dir, runtime_config());
+         db = database::create(dir, runtime_config());
       }
 
       ~smart_ptr_db() { std::filesystem::remove_all(dir); }

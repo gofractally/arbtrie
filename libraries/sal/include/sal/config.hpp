@@ -324,6 +324,29 @@ namespace sal
       uint8_t compact_unpinned_unused_threshold_mb = 16;
 
       ///@}
+
+      /** @name Virtual Address Space */
+      ///@{
+
+      /**
+       * @brief Maximum database size, which determines how much virtual address
+       * space is reserved up front for the segment file.
+       *
+       * The segment allocator reserves this much contiguous virtual address
+       * space (PROT_NONE) at startup so that every future MAP_FIXED call lands
+       * within the reserved region. If the OS cannot satisfy the full request,
+       * it retries with half the size until it succeeds, then caps the usable
+       * database size accordingly.
+       *
+       * On machines with limited overcommit or when running many databases in
+       * one process (e.g. tests), a smaller value reduces VAS pressure and
+       * prevents fragmentation.
+       *
+       * Default: sal::max_database_size (32 TiB).
+       */
+      int64_t max_database_size = 32LL * 1024 * 1024 * 1024 * 1024;  // 32 TiB
+
+      ///@}
    };
 
    /**

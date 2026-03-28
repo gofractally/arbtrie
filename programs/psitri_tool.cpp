@@ -12,6 +12,8 @@
 #include <psitri/database.hpp>
 #include <psitri/read_session_impl.hpp>
 #include <psitri/write_cursor.hpp>
+#include <sal/block_allocator.hpp>
+#include <sal/config.hpp>
 
 namespace po = boost::program_options;
 namespace fs = std::filesystem;
@@ -269,6 +271,81 @@ int cmd_verify(database& db)
    return 0;
 }
 
+// ── vas-info command ─────────────────────────────────────────────────────────
+
+void cmd_vas_info()
+{
+   std::cout <<
+      "Virtual Address Space (VAS) Report\n"
+      "====================================\n"
+      "\n"
+      "VAS = Virtual Address Space — the range of memory addresses a process\n"
+      "can use. On 64-bit Linux each process has up to ~128 TiB of VAS.\n"
+      "\n"
+      "At startup psitri reserves a large contiguous VAS region (PROT_NONE,\n"
+      "no physical RAM used) for each internal file. This ensures that all\n"
+      "future MAP_FIXED growth stays within the reserved range and never\n"
+      "silently overwrites unrelated mappings. The reservation itself is\n"
+      "virtual-only: it does not consume RAM or swap until data is written.\n"
+      "\n"
+      "Impact of insufficient VAS:\n"
+      "  - The OS cannot satisfy the full reservation and a smaller region is\n"
+      "    used, capping the maximum database size for that process lifetime.\n"
+      "  - Running many databases in one process (e.g. a test suite) fragments\n"
+      "    VAS progressively, so later databases receive smaller reservations.\n"
+      "  - Use --max-db-size to match the reservation to your actual workload\n"
+      "    and avoid wasting VAS on space you will never use.\n"
+      "\n";
+
+   // Probe the three block_allocator types used by a psitri database.
+   struct probe
+   {
+      const char* name;
+      uint64_t    block_size;
+      uint64_t    theoretical_bytes;
+   };
+
+   const uint64_t ptrs_per_zone   = 1u << 22;  // 4 M, matches control_block_alloc
+   const uint64_t zone_size_bytes = ptrs_per_zone * 8;  // sizeof(control_block) == 8
+   const uint64_t free_list_block = ptrs_per_zone / 8;
+   const uint32_t max_zones       = static_cast<uint32_t>((1ull << 32) / ptrs_per_zone);
+
+   probe probes[] = {
+       {"segment allocator (data)", sal::segment_size, sal::max_database_size},
+       {"control blocks (zone.bin)", zone_size_bytes,
+        static_cast<uint64_t>(max_zones) * zone_size_bytes},
+       {"free list  (free_list.bin)", free_list_block,
+        static_cast<uint64_t>(max_zones) * free_list_block},
+   };
+
+   std::cout << std::left
+             << std::setw(30) << "allocator"
+             << std::setw(12) << "block size"
+             << std::setw(14) << "theoretical"
+             << std::setw(14) << "available"
+             << "headroom\n";
+   std::cout << std::string(72, '-') << "\n";
+
+   for (auto& p : probes)
+   {
+      uint64_t avail = sal::block_allocator::find_max_reservation_size(p.block_size);
+      double   pct   = p.theoretical_bytes > 0
+                           ? 100.0 * avail / p.theoretical_bytes
+                           : 0.0;
+      std::cout << std::left
+                << std::setw(30) << p.name
+                << std::setw(12) << format_bytes(p.block_size)
+                << std::setw(14) << format_bytes(p.theoretical_bytes)
+                << std::setw(14) << format_bytes(avail)
+                << std::fixed << std::setprecision(1) << pct << "%\n";
+   }
+
+   std::cout << "\n"
+             << "Recommended --max-db-size: "
+             << format_bytes(sal::block_allocator::find_max_reservation_size(sal::segment_size))
+             << "  (largest contiguous segment VAS currently available)\n";
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv)
@@ -276,15 +353,19 @@ int main(int argc, char** argv)
    std::string db_dir;
    std::string command;
    std::string recovery_str;
+   int64_t     max_db_size_gb = -1;
 
    po::options_description desc("psitri-tool — database inspection & defrag utility");
    auto                    opt = desc.add_options();
    opt("help,h", "show this help message");
    opt("db-dir,d", po::value<std::string>(&db_dir), "database directory");
    opt("command", po::value<std::string>(&command)->default_value("info"),
-       "command: info, verify, defrag");
+       "command: info, verify, defrag, vas-info");
    opt("recovery,r", po::value<std::string>(&recovery_str)->default_value("none"),
        "recovery mode: none, deferred, app_crash, power_loss, full_verify");
+   opt("max-db-size", po::value<int64_t>(&max_db_size_gb),
+       "cap the virtual address reservation in GiB (e.g. 512 for 512 GiB); "
+       "default is the compile-time max (32768 GiB = 32 TiB)");
 
    po::positional_options_description pos;
    pos.add("command", 1);
@@ -302,6 +383,13 @@ int main(int argc, char** argv)
       return 1;
    }
 
+   // vas-info doesn't need a db-dir
+   if (command == "vas-info" && db_dir.empty())
+   {
+      cmd_vas_info();
+      return 0;
+   }
+
    if (vm.count("help") || db_dir.empty())
    {
       std::cout << "Usage: psitri-tool [command] <db-dir> [options]\n\n"
@@ -309,6 +397,7 @@ int main(int argc, char** argv)
                 << "  info       Show database size summary (default)\n"
                 << "  verify     Full integrity verification (offline)\n"
                 << "  defrag     Compact and truncate to minimum size\n"
+                << "  vas-info   Query available virtual address space (no db-dir needed)\n"
                 << "\n"
                 << desc << "\n";
       return db_dir.empty() ? 1 : 0;
@@ -320,10 +409,14 @@ int main(int argc, char** argv)
       return 1;
    }
 
+   runtime_config cfg;
+   if (max_db_size_gb > 0)
+      cfg.max_database_size = max_db_size_gb * 1024LL * 1024 * 1024;
+
    try
    {
       auto mode = parse_recovery(recovery_str);
-      auto db   = std::make_shared<database>(db_dir, runtime_config{}, mode);
+      auto db   = std::make_shared<database>(db_dir, cfg, mode);
 
       if (command == "info")
          cmd_info(*db, db_dir);
@@ -331,10 +424,12 @@ int main(int argc, char** argv)
          return cmd_verify(*db);
       else if (command == "defrag")
          cmd_defrag(*db, db_dir);
+      else if (command == "vas-info")
+         cmd_vas_info();  // also works with a db-dir positional arg
       else
       {
          std::cerr << "Unknown command: " << command << "\n";
-         std::cerr << "Valid commands: info, verify, defrag\n";
+         std::cerr << "Valid commands: info, verify, defrag, vas-info\n";
          return 1;
       }
    }

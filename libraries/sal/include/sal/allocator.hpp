@@ -86,7 +86,7 @@ namespace sal
          _self = std::shared_ptr<allocator>(std::move(parent), this);
       }
 
-      std::shared_ptr<allocator> shared_from_this() { return _self; }
+      std::shared_ptr<allocator> shared_from_this() { return _self.lock(); }
 
       void start_background_threads();
       void stop_background_threads();
@@ -235,7 +235,7 @@ namespace sal
       }
 
      private:
-      std::shared_ptr<allocator> _self;  ///< aliasing shared_ptr for shared_from_this()
+      std::weak_ptr<allocator> _self;  ///< aliasing weak_ptr for shared_from_this(); weak to avoid circular ref with parent
 
       /// Core truncation logic — assumes background threads are already stopped.
       /// Does not restart threads; caller is responsible for that.

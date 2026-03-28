@@ -1,4 +1,5 @@
 #include <bit>  // Add this for std::countl_zero and std::popcount
+#include <sys/resource.h>
 #include <sal/block_allocator.hpp>
 #include <sal/debug.hpp>
 
@@ -112,6 +113,15 @@ namespace sal
       _reservation_size = 0;
       _mapped_base      = nullptr;
 
+      // Cache RLIMIT_MEMLOCK once so reserve() never needs a syscall on the hot path.
+      {
+         struct rlimit rl;
+         if (::getrlimit(RLIMIT_MEMLOCK, &rl) == 0)
+            _mlock_limit_bytes = rl.rlim_cur;  // RLIM_INFINITY if unlimited
+         else
+            _mlock_limit_bytes = RLIM_INFINITY;  // assume no limit on query failure
+      }
+
       // Reserve the maximum virtual address space early to ensure contiguity
       uint64_t max_potential_size = static_cast<uint64_t>(max_blocks) * block_size;
 
@@ -135,12 +145,25 @@ namespace sal
          }
          else
          {
-            // Reservation failed - we require this for proper operation
             SAL_ERROR("Failed to reserve address space of size {}: {}, trying lower max",
                       max_potential_size, strerror(errno));
             max_potential_size /= 2;
-            //throw std::runtime_error("Failed to reserve contiguous address space");
          }
+      }
+
+      // Cap _max_blocks to what was actually reserved. The grow() bounds check enforces
+      // this at runtime: any MAP_FIXED that would exceed the reservation throws there.
+      // Throwing here would break systems whose virtual address space overcommit limit
+      // is smaller than the theoretical max (e.g. 16 TB available vs. 32 TB requested).
+      uint64_t required = static_cast<uint64_t>(max_blocks) * block_size;
+      if (_reservation_size < required)
+      {
+         uint32_t effective_max = static_cast<uint32_t>(_reservation_size / block_size);
+         SAL_WARN(
+             "block_allocator: reserved only {} bytes of {} requested — capping max_blocks "
+             "from {} to {} (grow() will throw if data exceeds this limit)",
+             _reservation_size, required, max_blocks, effective_max);
+         _max_blocks = effective_max;
       }
 
       int flags = O_CLOEXEC;
@@ -330,6 +353,21 @@ namespace sal
       size_t map_size   = new_size - _file_size;
       off_t  map_offset = _file_size;
 
+      // Verify the new region fits within the reserved address space.
+      // If it doesn't, we would pass an out-of-bounds address to MAP_FIXED, which
+      // silently overwrites unrelated mappings and invalidates all existing base pointers.
+      if (static_cast<char*>(map_addr) + map_size >
+          static_cast<char*>(_reserved_base) + _reservation_size)
+      {
+         throw std::runtime_error(
+             "block_allocator::reserve: mapping would exceed reserved address space "
+             "(reserved_base=" +
+             std::to_string(reinterpret_cast<uintptr_t>(_reserved_base)) +
+             " reservation_size=" + std::to_string(_reservation_size) +
+             " map_addr=" + std::to_string(reinterpret_cast<uintptr_t>(map_addr)) +
+             " map_size=" + std::to_string(map_size) + ")");
+      }
+
       // Release the protection on the portion we need
       if (::munmap(map_addr, map_size) != 0)
       {
@@ -344,7 +382,28 @@ namespace sal
       {
          if (mlock)
          {
-            if (::mlock(addr, map_size) != 0)
+            // Use the cached RLIMIT_MEMLOCK (no syscall on hot path).
+            // If the limit is smaller than one block, mlock will always fail — skip it
+            // and warn once so the user knows pinned cache is unavailable.
+            if (_mlock_limit_bytes != RLIM_INFINITY && map_size > _mlock_limit_bytes)
+            {
+               static bool warned = false;
+               if (!warned)
+               {
+                  warned = true;
+                  SAL_WARN(
+                      "mlock skipped: RLIMIT_MEMLOCK ({} KB) is smaller than one segment "
+                      "({} KB) — pinned cache is disabled. "
+#ifdef __linux__
+                      "Run `ulimit -l unlimited` or set `* hard memlock unlimited` in "
+                      "/etc/security/limits.conf to enable.",
+#else
+                      "Run `ulimit -l unlimited` to enable.",
+#endif
+                      _mlock_limit_bytes / 1024, map_size / 1024);
+               }
+            }
+            else if (::mlock(addr, map_size) != 0)
             {
                SAL_ERROR("Failed to mlock file: {}", strerror(errno));
             }

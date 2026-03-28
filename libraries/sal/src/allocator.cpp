@@ -108,7 +108,10 @@ namespace sal
 
    allocator::allocator(std::filesystem::path dir, runtime_config cfg)
        : _ptr_alloc(dir / "ptrs"),
-         _block_alloc(dir / "segs", segment_size, max_segment_count),
+         _block_alloc(dir / "segs", segment_size,
+                      static_cast<uint32_t>(
+                          std::min<int64_t>(cfg.max_database_size, sal::max_database_size) /
+                          segment_size)),
          _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
          _root_object_file(dir / "roots", access_mode::read_write, true)
    {
@@ -130,6 +133,32 @@ namespace sal
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
       _root_objects = reinterpret_cast<root_object_array*>(_root_object_file.data());
       assert(_root_objects);
+      // Cap pinned cache budget to what RLIMIT_MEMLOCK will allow, using the value
+      // already cached by block_allocator (no extra syscall needed).
+      {
+         uint64_t mlock_limit = _block_alloc.mlock_limit_bytes();
+         if (mlock_limit != RLIM_INFINITY)
+         {
+            uint64_t limit_mb = mlock_limit / (1024ULL * 1024ULL);
+            if (cfg.max_pinned_cache_size_mb > limit_mb)
+            {
+#ifdef __linux__
+               SAL_WARN(
+                   "RLIMIT_MEMLOCK is {} MB — capping pinned cache from {} MB to {} MB. "
+                   "To allow more pinned RAM: `ulimit -l unlimited` (current shell) or add "
+                   "`* hard memlock unlimited` to /etc/security/limits.conf (persistent).",
+                   limit_mb, cfg.max_pinned_cache_size_mb, limit_mb);
+#else
+               SAL_WARN(
+                   "RLIMIT_MEMLOCK is {} MB — capping pinned cache from {} MB to {} MB. "
+                   "To allow more pinned RAM: `ulimit -l unlimited` (current shell).",
+                   limit_mb, cfg.max_pinned_cache_size_mb, limit_mb);
+#endif
+               cfg.max_pinned_cache_size_mb = limit_mb;
+            }
+         }
+      }
+
       _mapped_state->_config = cfg;
 
       mlock_pinned_segments();
@@ -1526,7 +1555,11 @@ namespace sal
       disable_segment_write_protection(seg_num);
 
       auto sp = _block_alloc.get<mapped_memory::segment>(block_allocator::block_number(*seg_num));
-      if (pin)
+      // Resolve effective max_count from the (already RLIMIT-capped) config.
+      // If 0, mlock would never succeed — skip the attempt entirely.
+      const int max_count =
+          _mapped_state->_config.max_pinned_cache_size_mb / (segment_size / 1024 / 1024);
+      if (pin && max_count > 0)
       {
          // if it is not already mlocked, mlock it
          if (not provider_state.mlock_segments.test(*seg_num))
