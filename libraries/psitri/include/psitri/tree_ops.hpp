@@ -1051,7 +1051,7 @@ namespace psitri
                ptr_address new_leaf_addr =
                    _session.alloc<leaf_node>(parent_hint, key, make_value(_new_value, parent_hint));
                uint8_t ipn_byte  = in->prefix()[0];
-               uint8_t leaf_byte = key[0];
+               uint8_t leaf_byte = key.empty() ? 0 : key[0];
                if (leaf_byte > ipn_byte)
                {
                   result.set_front(in->address());
