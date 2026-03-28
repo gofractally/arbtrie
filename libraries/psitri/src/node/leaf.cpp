@@ -743,10 +743,18 @@ namespace psitri
             }
             if (ref_count == 0)
             {
-               clines()[*cl_off] = sal::null_ptr_address;
-               _cline_cap -= (*cl_off == _cline_cap - 1);
+               // Access via raw pointer to avoid span bounds issues: _cline_cap must not
+               // be shrunk mid-loop because a later branch may share the same cline index.
+               auto* cl_ptr = reinterpret_cast<ptr_address*>(value_offsets() + num_branches());
+               cl_ptr[*cl_off] = sal::null_ptr_address;
             }
          }
+      }
+      // Trim _cline_cap: remove trailing null clines freed above.
+      {
+         auto* cl_ptr = reinterpret_cast<ptr_address*>(value_offsets() + num_branches());
+         while (_cline_cap > 0 && cl_ptr[_cline_cap - 1] == sal::null_ptr_address)
+            --_cline_cap;
       }
 
       // 2. Shift metadata arrays to close the gap
