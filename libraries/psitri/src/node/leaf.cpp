@@ -11,6 +11,7 @@
 #define PSITRI_LEAF_ALIGNMENT_PUSH 1
 #endif
 
+
 namespace psitri
 {
    /**
@@ -587,25 +588,27 @@ namespace psitri
       int      tail_len = num_branches() - *ins.lb;
       uint32_t bn       = *ins.lb;
 
-      constexpr const int move_size = sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
+      {
+         constexpr const int move_size = sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
 
-      char*  vo_tail          = (char*)(value_offsets() + bn);
-      size_t vo_tail_size     = tail_len * sizeof(value_branch);
-      size_t clines_tail_size = _cline_cap * sizeof(ptr_address);
-      memmove(vo_tail + move_size, vo_tail, vo_tail_size + clines_tail_size);
+         char*  vo_tail          = (char*)(value_offsets() + bn);
+         size_t vo_tail_size     = tail_len * sizeof(value_branch);
+         size_t clines_tail_size = _cline_cap * sizeof(ptr_address);
+         memmove(vo_tail + move_size, vo_tail, vo_tail_size + clines_tail_size);
 
-      char*  ko_tail      = (char*)(keys_offsets().data() + bn);
-      size_t ko_tail_size = tail_len * sizeof(key_offset);
-      size_t vo_head_size = bn * sizeof(value_branch);
-      memmove(ko_tail + move_size - sizeof(value_branch), ko_tail, ko_tail_size + vo_head_size);
+         char*  ko_tail      = (char*)(keys_offsets().data() + bn);
+         size_t ko_tail_size = tail_len * sizeof(key_offset);
+         size_t vo_head_size = bn * sizeof(value_branch);
+         memmove(ko_tail + move_size - sizeof(value_branch), ko_tail, ko_tail_size + vo_head_size);
 
-      char*  kh_tail      = (char*)(key_hashs().data() + bn);
-      size_t kh_tail_size = tail_len * sizeof(uint8_t);
-      size_t ko_head_size = bn * sizeof(key_offset);
-      memmove(kh_tail + move_size - sizeof(key_offset) - sizeof(value_branch), kh_tail,
-              kh_tail_size + ko_head_size);
+         char*  kh_tail      = (char*)(key_hashs().data() + bn);
+         size_t kh_tail_size = tail_len * sizeof(uint8_t);
+         size_t ko_head_size = bn * sizeof(key_offset);
+         memmove(kh_tail + move_size - sizeof(key_offset) - sizeof(value_branch), kh_tail,
+                 kh_tail_size + ko_head_size);
 
-      set_num_branches(num_branches() + 1);
+         set_num_branches(num_branches() + 1);
+      }
 
       key_offset ko = alloc_key(ins.key);
 

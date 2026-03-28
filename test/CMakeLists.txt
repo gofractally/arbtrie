@@ -105,6 +105,16 @@ endif()
 
 add_subdirectory(min_index)
 
+# leaf insert header manipulation benchmark (memmove vs vpexpand vs vpermt2b)
+add_executable(leaf-insert-benchmark leaf_insert_benchmark.cpp)
+set_target_properties(leaf-insert-benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_compile_options(leaf-insert-benchmark PRIVATE -O3 -march=native)
+
+# memcpy vs avx512 for 64-byte-aligned multiples
+add_executable(memcpy64-benchmark memcpy64_benchmark.cpp)
+set_target_properties(memcpy64-benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_compile_options(memcpy64-benchmark PRIVATE -O3 -march=native)
+
 # x86 SIMD correctness + performance benchmark
 add_executable(simd-x86-benchmark simd_x86_benchmark.cpp)
 target_link_libraries(simd-x86-benchmark PRIVATE psitri)
