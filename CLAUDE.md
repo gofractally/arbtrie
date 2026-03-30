@@ -11,7 +11,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Requires:** CMake 3.16+, Ninja (recommended), C++20 compiler (Clang 15+ preferred, GCC 12+ supported)
 
 ```bash
-# Release build (recommended)
+# Release build with clang (recommended)
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -B build/release
+ninja -C build/release -j$(nproc)
+
+# Release build with GCC (also works)
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -B build/release
 ninja -C build/release -j$(nproc)
 
@@ -19,6 +23,8 @@ ninja -C build/release -j$(nproc)
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -B build/debug
 ninja -C build/debug
 ```
+
+**Important:** Keep C and C++ compilers from the same toolchain. LLVM thin LTO (used in Release builds) requires all objects to use the same LTO format — mixing `clang++` for C++ with the default `cc` (GCC) for C sources causes link failures. Either specify both clang flags or omit both and let CMake default to GCC for everything.
 
 Key CMake options:
 - `ENABLE_SANITIZER` — Enable Thread Sanitizer

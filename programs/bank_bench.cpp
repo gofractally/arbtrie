@@ -349,6 +349,13 @@ class BankEngine
    /// Called once from the reader thread when reads are done.
    virtual void reader_thread_teardown() {}
 
+   /// Called at the start of each reader batch (reads_per_tx reads).
+   /// Engines can open a snapshot/cursor here to amortize that cost across the batch.
+   virtual void reader_batch_begin() {}
+
+   /// Called at the end of each reader batch.
+   virtual void reader_batch_end() {}
+
    virtual uint64_t scan_all(
        std::function<void(const std::string& key, uint64_t bal)> visitor) = 0;
 };
@@ -518,6 +525,7 @@ class PsiTriEngine : public BankEngine
 
    // Reader thread state — separate read_session per thread
    std::shared_ptr<psitri::read_session> _reader_rs;
+   std::optional<psitri::cursor>         _reader_cur;
 
    void reader_thread_init() override
    {
@@ -526,13 +534,17 @@ class PsiTriEngine : public BankEngine
 
    void reader_thread_teardown() override
    {
+      _reader_cur.reset();
       _reader_rs.reset();
    }
 
+   // Take one snapshot per batch (reads_per_tx reads share the same cursor).
+   void reader_batch_begin() override { _reader_cur.emplace(_reader_rs->create_cursor(0)); }
+   void reader_batch_end() override { _reader_cur.reset(); }
+
    bool read_account(const std::string& key, uint64_t& balance_out) override
    {
-      auto cur = _reader_rs->create_cursor(0);
-      auto val = cur.get<std::string>(psitri::to_key_view(key));
+      auto val = _reader_cur->get<std::string>(psitri::to_key_view(key));
       if (!val)
          return false;
       balance_out = decode_balance(*val);
@@ -1238,7 +1250,8 @@ int main(int argc, char** argv)
                 uint64_t local_count = 0;
                 while (!stop_reader.load(std::memory_order_relaxed) && !bench::interrupted())
                 {
-                   // Each "read transaction" does N point lookups
+                   // Each "read transaction" does N point lookups under one snapshot
+                   engine->reader_batch_begin();
                    for (uint64_t r = 0; r < cfg.reads_per_tx; ++r)
                    {
                       uint64_t idx = pick_account(read_rng, cfg.num_accounts);
@@ -1246,6 +1259,7 @@ int main(int argc, char** argv)
                       engine->read_account(accounts[idx], bal);
                       ++local_count;
                    }
+                   engine->reader_batch_end();
                 }
                 reader_count.store(local_count, std::memory_order_relaxed);
                 reader_end = Clock::now();
@@ -1321,6 +1335,13 @@ int main(int argc, char** argv)
 
       return {p_secs, successful, skipped, reader_count.load(), reader_secs};
    };
+
+   // ── Warm-up: small run to populate caches before measuring ──
+   {
+      uint64_t warmup_tx = std::min(cfg.num_transactions / 10, uint64_t(100'000));
+      printf("\nWarm-up: %s transactions (not measured)\n", format_comma(warmup_tx).c_str());
+      run_tx_phase("Warm-up", warmup_tx, cfg.seed ^ 0xDEAD, 0, false);
+   }
 
    // ── Phase 3a: Write-only transactions ──
    printf("\nPhase 3a: Transactions (write-only)\n");

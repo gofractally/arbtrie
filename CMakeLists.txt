@@ -302,6 +302,24 @@ option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
 # Psitri benchmark
 add_executable(psitri-benchmark programs/psitri_bench.cpp)
 target_link_libraries(psitri-benchmark PUBLIC Boost::program_options psitri)
+
+# COW amortization benchmark — fetches Abseil for btree_map comparison
+include(FetchContent)
+FetchContent_Declare(
+    abseil
+    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+    GIT_TAG        20240722.0
+    GIT_SHALLOW    TRUE
+)
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(abseil)
+
+add_executable(cow-amort-bench programs/cow_amort_bench.cpp)
+target_link_libraries(cow-amort-bench PRIVATE psitri absl::btree)
+target_compile_definitions(cow-amort-bench PRIVATE XXH_INLINE_ALL)
+set_target_properties(cow-amort-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(psitri-benchmark PUBLIC ${Boost_INCLUDE_DIRS})
 set_target_properties(psitri-benchmark
     PROPERTIES
