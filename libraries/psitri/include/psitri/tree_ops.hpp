@@ -1040,7 +1040,8 @@ namespace psitri
             {
                if constexpr (mode.is_shared())
                   return in.address();
-               throw std::runtime_error("update: key does not exist");
+               assert(!"insert/update precondition violated: key does not exist");
+               std::unreachable();
             }
 
             _delta_descendents = 1;  // inserting a new key via prefix mismatch
@@ -1597,13 +1598,13 @@ namespace psitri
          if (leaf->get_key(lb) != key) [[unlikely]]
             return leaf.address();
       }
-      // if we must remove, then if the key does not exist, throw an error
-      /// TODO: is this path even possible or does it abort in the caller,
-      /// if it aborts in the caller then this code is redundant bloat
       if constexpr (mode.must_remove())
       {
          if (leaf->get_key(lb) != key) [[unlikely]]
-            throw std::runtime_error("remove: key does not exist");
+         {
+            assert(!"must_remove precondition violated: key does not exist");
+            std::unreachable();
+         }
       }
       auto old_value = leaf->get_value(lb);
       if (old_value.is_value_node())
@@ -1896,7 +1897,8 @@ namespace psitri
             // Return the unchanged leaf address as a no-op signal instead.
             if constexpr (mode.is_shared())
                return leaf.address();
-            throw std::runtime_error("update: key does not exist");
+            assert(!"update precondition violated: key does not exist");
+            std::unreachable();
          }
          return update<mode>(parent_hint, leaf, key, br);
       }
@@ -1907,7 +1909,8 @@ namespace psitri
          {
             if constexpr (mode.is_shared())
                return leaf.address();
-            throw std::runtime_error("remove: key does not exist");
+            assert(!"must_remove precondition violated: key does not exist");
+            std::unreachable();
          }
          return remove<mode>(parent_hint, leaf, key, br);
       }
@@ -1927,7 +1930,8 @@ namespace psitri
             {
                if constexpr (mode.is_shared())
                   return leaf.address();
-               throw std::runtime_error("insert: key already exists");
+               assert(!"insert precondition violated: key already exists");
+               std::unreachable();
             }
             return insert<mode>(parent_hint, leaf, key, lb);
          }

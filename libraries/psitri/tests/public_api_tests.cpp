@@ -59,32 +59,18 @@ TEST_CASE("write_cursor basic CRUD", "[public-api][write-cursor]")
 
    SECTION("insert and get")
    {
-      REQUIRE(cur->insert(to_key("hello"), to_value("world")));
+      cur->insert(to_key("hello"), to_value("world"));
       auto val = cur->get<std::string>(to_key("hello"));
       REQUIRE(val.has_value());
       REQUIRE(*val == "world");
    }
 
-   SECTION("insert duplicate returns false")
-   {
-      REQUIRE(cur->insert(to_key("key"), to_value("v1")));
-      REQUIRE_FALSE(cur->insert(to_key("key"), to_value("v2")));
-      // original value preserved
-      auto val = cur->get<std::string>(to_key("key"));
-      REQUIRE(*val == "v1");
-   }
-
    SECTION("update existing key")
    {
       cur->insert(to_key("key"), to_value("v1"));
-      REQUIRE(cur->update(to_key("key"), to_value("v2")));
+      cur->update(to_key("key"), to_value("v2"));
       auto val = cur->get<std::string>(to_key("key"));
       REQUIRE(*val == "v2");
-   }
-
-   SECTION("update nonexistent returns false")
-   {
-      REQUIRE_FALSE(cur->update(to_key("missing"), to_value("v1")));
    }
 
    SECTION("upsert inserts new and updates existing")

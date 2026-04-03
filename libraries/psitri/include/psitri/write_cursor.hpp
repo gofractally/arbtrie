@@ -22,32 +22,18 @@ namespace psitri
 
       // -- Mutations --
 
-      /// Insert key/value pair. Returns true if inserted, false if key already exists.
-      bool insert(key_view key, value_view value)
+      /// Insert key/value pair. Caller must ensure key does not exist.
+      /// Precondition violation (duplicate key) asserts — it is not recoverable.
+      void insert(key_view key, value_view value)
       {
-         // Use get to check existence first, since tree_context::upsert
-         // with unique_insert corrupts root state on throw
-         std::string tmp;
-         if (get(key, &tmp) >= 0)
-            return false;  // key exists
          _ctx.upsert<upsert_mode::unique_insert>(key, value_type(value));
-         return true;
       }
 
-      /// Update existing key. Returns true if updated, false if key not found.
-      bool update(key_view key, value_view value)
+      /// Update existing key. Caller must ensure key exists.
+      /// Precondition violation (missing key) asserts — it is not recoverable.
+      void update(key_view key, value_view value)
       {
-         if (!_ctx.get_root())
-            return false;  // empty tree, nothing to update
-         try
-         {
-            auto result = _ctx.upsert<upsert_mode::unique_update>(key, value_type(value));
-            return result >= 0;  // -1 means key not found (shared-mode no-op)
-         }
-         catch (const std::runtime_error&)
-         {
-            return false;
-         }
+         _ctx.upsert<upsert_mode::unique_update>(key, value_type(value));
       }
 
       /// Insert or update. Always succeeds.

@@ -31,8 +31,8 @@ namespace psitri
 
       // -- Mutations --
 
-      bool insert(key_view key, value_view value) { return _cursor->insert(key, value); }
-      bool update(key_view key, value_view value) { return _cursor->update(key, value); }
+      void insert(key_view key, value_view value) { _cursor->insert(key, value); }
+      void update(key_view key, value_view value) { _cursor->update(key, value); }
       void upsert(key_view key, value_view value) { _cursor->upsert(key, value); }
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {

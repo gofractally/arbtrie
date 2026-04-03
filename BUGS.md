@@ -11,6 +11,11 @@
 
 ## Fixed (recent)
 
+### `insert()`/`update()` used throw for precondition violations — now assert/abort
+- `unique_insert`/`unique_update` threw on precondition violation, corrupting root state. Throw implied recoverability — callers caught it and returned false, masking the corruption.
+- `insert()` did a redundant `get()` traversal as a workaround. `update()` used try/catch for control flow.
+- Fix: replaced throw with `assert + unreachable` in tree_ops.hpp (5 sites). Changed `insert()`/`update()` to void, removed all guards. Single traversal, assert on the cold path.
+
 ### count_keys returns garbage values (split_merge forwarding bug)
 - **Repro**: `psitri-tests "fuzz long run balanced" -c "seed=314159"` — descendant count mismatch at depth 2.
 - **Symptom**: `count_keys()` returns wildly incorrect values because inner node `_descendents` fields accumulate errors over time.

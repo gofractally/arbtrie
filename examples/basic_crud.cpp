@@ -50,9 +50,8 @@ int main()
       tx.update("alice", "senior engineer");
       tx.remove("bob");
 
-      // insert returns false if key already exists
-      bool inserted = tx.insert("carol", "duplicate");
-      std::cout << "insert carol again: " << (inserted ? "yes" : "no") << "\n";
+      // upsert always succeeds (insert or update)
+      tx.upsert("carol", "updated value");
 
       tx.commit();
    }

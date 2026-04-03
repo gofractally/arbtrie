@@ -631,47 +631,16 @@ namespace
          auto value = _keygen.generate_value(_max_value_len);
          INFO("insert key=" << hex_encode(key) << " len=" << key.size());
 
-         bool psitri_result = _cur->insert(to_key_view(key), to_value_view(value));
-         bool oracle_result = _oracle.insert({key, value}).second;
-         REQUIRE(psitri_result == oracle_result);
+         // insert() requires key does not exist — check oracle first
+         if (_oracle.count(key))
+            return;  // key exists, skip (insert precondition would be violated)
 
-         // Verify all oracle keys are retrievable (the inserted key is now in oracle)
+         _cur->insert(to_key_view(key), to_value_view(value));
+         _oracle[key] = value;
+
+         // Verify the key is now retrievable
          std::string buf;
          int32_t     get_result = _cur->get(to_key_view(key), &buf);
-         if (get_result < 0) [[unlikely]]
-         {
-            // Key can't be found — is it because insert returned false (duplicate)?
-            if (!psitri_result)
-            {
-               // Duplicate key, verify it's still findable
-               std::string buf2;
-               int32_t r2 = _cur->get(to_key_view(key), &buf2);
-               std::cerr << "INSERT duplicate key not findable: op #" << _op_count
-                         << " key_len=" << key.size() << " get=" << r2 << std::endl;
-               std::cerr.flush();
-            }
-            else
-            {
-               // Key was newly inserted but can't be found — tree is corrupt
-               uint64_t iter_count = 0;
-               auto rc = _cur->read_cursor();
-               bool found_in_iter = false;
-               if (rc.seek_begin())
-               {
-                  do {
-                     ++iter_count;
-                     if (std::string(rc.key()) == key)
-                        found_in_iter = true;
-                  } while (rc.next());
-               }
-               std::cerr << "INSERT KEY LOST at op #" << _op_count
-                         << ": key_len=" << key.size()
-                         << " oracle_size=" << _oracle.size()
-                         << " iter_count=" << iter_count
-                         << " found_in_iter=" << found_in_iter
-                         << std::endl;
-            }
-         }
          REQUIRE(get_result >= 0);
       }
 
@@ -681,13 +650,13 @@ namespace
          auto value = _keygen.generate_value(_max_value_len);
          INFO("update key=" << hex_encode(key));
 
-         bool psitri_result = _cur->update(to_key_view(key), to_value_view(value));
+         // update() requires key exists — check oracle first
+         auto it = _oracle.find(key);
+         if (it == _oracle.end())
+            return;  // key doesn't exist, skip (update precondition would be violated)
 
-         auto it            = _oracle.find(key);
-         bool oracle_exists = (it != _oracle.end());
-         REQUIRE(psitri_result == oracle_exists);
-         if (oracle_exists)
-            it->second = value;
+         _cur->update(to_key_view(key), to_value_view(value));
+         it->second = value;
       }
 
       void do_upsert()
@@ -973,40 +942,24 @@ namespace
             {
                std::uniform_int_distribution<int> mut_dist(0, 3);
                int mut = mut_dist(_rng);
-               try
+               switch (mut)
                {
-                  switch (mut)
+                  case 0:
+                  case 1:
+                  case 2:
                   {
-                     case 0:
-                     {
-                        auto key   = txn_keygen.generate();
-                        auto value = txn_keygen.generate_value(txn_max_val);
-                        txn.insert(to_key_view(key), to_value_view(value));
-                        break;
-                     }
-                     case 1:
-                     {
-                        auto key   = txn_keygen.pick_or_generate();
-                        auto value = txn_keygen.generate_value(txn_max_val);
-                        txn.update(to_key_view(key), to_value_view(value));
-                        break;
-                     }
-                     case 2:
-                     {
-                        auto key   = txn_keygen.pick_or_generate();
-                        auto value = txn_keygen.generate_value(txn_max_val);
-                        txn.upsert(to_key_view(key), to_value_view(value));
-                        break;
-                     }
-                     case 3:
-                     {
-                        auto key = txn_keygen.pick_existing();
-                        txn.remove(to_key_view(key));
-                        break;
-                     }
+                     auto key   = txn_keygen.pick_or_generate();
+                     auto value = txn_keygen.generate_value(txn_max_val);
+                     txn.upsert(to_key_view(key), to_value_view(value));
+                     break;
+                  }
+                  case 3:
+                  {
+                     auto key = txn_keygen.pick_existing();
+                     txn.remove(to_key_view(key));
+                     break;
                   }
                }
-               catch (...) {}  // ignore errors in aborted mutations
             }
 
             txn.abort();
