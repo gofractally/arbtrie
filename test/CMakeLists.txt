@@ -34,6 +34,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/tree_ops_tests.cpp
     ../libraries/psitri/tests/truncate_tests.cpp
     ../libraries/psitri/tests/smart_ptr_tests.cpp
+    ../libraries/psitri/tests/dwal_tests.cpp
 )
 target_link_libraries(psitri-tests
     PRIVATE

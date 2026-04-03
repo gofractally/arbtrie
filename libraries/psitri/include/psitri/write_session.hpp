@@ -139,6 +139,13 @@ namespace psitri
                     sal::smart_ptr<sal::alloc_header> root,
                     sal::sync_type        sync = sal::sync_type::none);
 
+      /// Create a reference-counted smart_ptr from a raw ptr_address.
+      /// Used by the DWAL merge pool to transfer subtree references.
+      sal::smart_ptr<sal::alloc_header> make_ptr(sal::ptr_address addr, bool retain = false)
+      {
+         return sal::smart_ptr<sal::alloc_header>(_allocator_session, addr, retain);
+      }
+
       ///@}
 
       /** @name Durability */

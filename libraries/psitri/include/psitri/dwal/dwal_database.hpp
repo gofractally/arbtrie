@@ -1,0 +1,125 @@
+#pragma once
+#include <psitri/dwal/dwal_root.hpp>
+#include <psitri/dwal/dwal_transaction.hpp>
+#include <psitri/dwal/epoch_lock.hpp>
+#include <psitri/dwal/merge_pool.hpp>
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+
+namespace psitri
+{
+   class database;
+   class write_session;
+   class read_session;
+}  // namespace psitri
+
+namespace psitri::dwal
+{
+   /// Configuration for the DWAL layer.
+   struct dwal_config
+   {
+      /// Maximum RW btree size (entries) before triggering a swap.
+      uint32_t max_rw_entries = 100'000;
+
+      /// Maximum WAL file size (bytes) before triggering a swap.
+      uint64_t max_wal_bytes = 64 * 1024 * 1024;  // 64 MB
+
+      /// Idle flush interval — RW btrees untouched for this long are swapped.
+      /// Zero disables time-based flushing.
+      std::chrono::milliseconds idle_flush_interval{1000};
+
+      /// Number of merge threads in the pool.
+      uint32_t merge_threads = 2;
+   };
+
+   /// DWAL database — wraps a PsiTri database with buffered write-ahead logging.
+   ///
+   /// Provides the same logical API as psitri::database but routes writes through
+   /// a per-root RW btree backed by a WAL file. Under low write pressure, the
+   /// btree is small and drains quickly; under high pressure, it batches writes
+   /// for amortized COW cost.
+   ///
+   /// Each root (0-511) has independent state: its own btree, WAL file, undo log,
+   /// shared_mutex, and RO slot. Operations on different roots never contend.
+   class dwal_database
+   {
+     public:
+      /// Create a DWAL database wrapping an existing PsiTri database.
+      /// WAL files are stored in wal_dir (defaults to db_dir/wal/).
+      dwal_database(std::shared_ptr<psitri::database> db,
+                    std::filesystem::path              wal_dir,
+                    dwal_config                        cfg = {});
+
+      ~dwal_database();
+
+      dwal_database(const dwal_database&)            = delete;
+      dwal_database& operator=(const dwal_database&) = delete;
+
+      // ── Transactions ──────────────────────────────────────────────
+
+      /// Start a buffered write transaction on a root.
+      /// Acquires the per-root exclusive lock.
+      dwal_transaction start_write_transaction(uint32_t         root_index,
+                                               transaction_mode mode = transaction_mode::buffered);
+
+      // ── Read Access ───────────────────────────────────────────────
+
+      /// Get a value from a root using layered lookup.
+      /// For read_mode::persistent, this bypasses DWAL entirely.
+      /// For read_mode::latest, acquires shared lock on the root.
+      dwal_transaction::lookup_result get(uint32_t         root_index,
+                                          std::string_view key,
+                                          read_mode        mode = read_mode::persistent);
+
+      // ── Flush & Swap ──────────────────────────────────────────────
+
+      /// Force a swap of the RW btree for a specific root.
+      /// The caller must hold the exclusive lock (or call from within a tx).
+      void swap_rw_to_ro(uint32_t root_index);
+
+      /// Flush all dirty WAL files to disk (fsync).
+      void flush_wal();
+
+      /// Flush a specific root's WAL to disk.
+      void flush_wal(uint32_t root_index);
+
+      // ── Accessors ─────────────────────────────────────────────────
+
+      std::shared_ptr<psitri::database>& underlying_db() noexcept { return _db; }
+      const dwal_config&                 config() const noexcept { return _cfg; }
+      dwal_root&                         root(uint32_t index) { return *_roots[index]; }
+
+      /// Access the epoch registry (for session lock allocation).
+      epoch_registry& epochs() noexcept { return _epochs; }
+
+      /// Check if a swap should be triggered for a root after a commit.
+      bool should_swap(uint32_t root_index) const;
+
+     private:
+
+      /// Ensure WAL directory and files exist for a root.
+      void ensure_wal(uint32_t root_index);
+
+      std::shared_ptr<psitri::database> _db;
+      std::filesystem::path             _wal_dir;
+      dwal_config                       _cfg;
+
+      /// Per-root DWAL state. Only roots that are actively used get initialized.
+      /// Using unique_ptr to avoid huge array of dwal_root (which has mutex + atomics).
+      static constexpr uint32_t  max_roots = 512;
+      std::unique_ptr<dwal_root> _roots[max_roots];
+
+      /// Lazily initialize a root's DWAL state.
+      dwal_root& ensure_root(uint32_t index);
+
+      /// Epoch registry for RO pool reclamation.
+      epoch_registry _epochs;
+
+      /// Merge thread pool — drains RO btrees into PsiTri.
+      std::unique_ptr<merge_pool> _merge_pool;
+   };
+
+}  // namespace psitri::dwal

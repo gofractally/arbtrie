@@ -128,16 +128,6 @@ static const char* CF_NAME = "bench";
 /// the current txn and opens a new one when the op count reaches the limit.
 static constexpr uint32_t TDB_TXN_OP_LIMIT = 90000;  // leave headroom below 100K
 
-static void tdb_auto_commit(tdb_wrapper_txn_t*& txn, tdb_wrapper_t* db, uint32_t& op_count)
-{
-   if (op_count >= TDB_TXN_OP_LIMIT)
-   {
-      tdb_txn_commit(txn);
-      tdb_txn_free(txn);
-      txn = tdb_txn_begin(db);
-      op_count = 0;
-   }
-}
 
 struct tdb_guard
 {
@@ -185,31 +175,34 @@ static void insert_test(benchmark_config   cfg,
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
 
-      auto* txn = tdb_txn_begin(tdb.db);
-      if (!txn)
-      {
-         std::cerr << "txn_begin failed\n";
-         return;
-      }
-      uint32_t op_count = 0;
-
       while (inserted < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
-         for (uint32_t i = 0; i < batch; ++i)
+
+         // If batch exceeds TDB limit, split into sub-transactions.
+         uint32_t batch_done = 0;
+         while (batch_done < batch)
          {
-            make_key(seq, key);
-            auto* vp = random_value_ptr(seq, cfg.value_size);
-            tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
-            ++seq;
-            ++inserted;
-            ++op_count;
-            tdb_auto_commit(txn, tdb.db, op_count);
+            uint32_t chunk = std::min(batch - batch_done, TDB_TXN_OP_LIMIT);
+            auto*    txn   = tdb_txn_begin(tdb.db);
+            if (!txn)
+            {
+               std::cerr << "txn_begin failed\n";
+               return;
+            }
+            for (uint32_t i = 0; i < chunk; ++i)
+            {
+               make_key(seq, key);
+               auto* vp = random_value_ptr(seq, cfg.value_size);
+               tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
+               ++seq;
+               ++inserted;
+            }
+            tdb_txn_commit(txn);
+            tdb_txn_free(txn);
+            batch_done += chunk;
          }
       }
-
-      tdb_txn_commit(txn);
-      tdb_txn_free(txn);
 
       auto   end  = std::chrono::steady_clock::now();
       double secs = std::chrono::duration<double>(end - start).count();
@@ -236,28 +229,30 @@ static void upsert_test(benchmark_config   cfg,
       auto     start = std::chrono::steady_clock::now();
       uint32_t count = 0;
 
-      auto* txn = tdb_txn_begin(tdb.db);
-      if (!txn)
-         return;
-      uint32_t op_count = 0;
-
       while (count < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - count);
-         for (uint32_t i = 0; i < batch; ++i)
+
+         uint32_t batch_done = 0;
+         while (batch_done < batch)
          {
-            make_key(seq, key);
-            auto* vp = random_value_ptr(seq, cfg.value_size);
-            tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
-            ++seq;
-            ++count;
-            ++op_count;
-            tdb_auto_commit(txn, tdb.db, op_count);
+            uint32_t chunk = std::min(batch - batch_done, TDB_TXN_OP_LIMIT);
+            auto*    txn   = tdb_txn_begin(tdb.db);
+            if (!txn)
+               return;
+            for (uint32_t i = 0; i < chunk; ++i)
+            {
+               make_key(seq, key);
+               auto* vp = random_value_ptr(seq, cfg.value_size);
+               tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
+               ++seq;
+               ++count;
+            }
+            tdb_txn_commit(txn);
+            tdb_txn_free(txn);
+            batch_done += chunk;
          }
       }
-
-      tdb_txn_commit(txn);
-      tdb_txn_free(txn);
 
       auto   end  = std::chrono::steady_clock::now();
       double secs = std::chrono::duration<double>(end - start).count();
@@ -351,23 +346,28 @@ static void remove_test(benchmark_config   cfg,
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
 
-      auto* txn = tdb_txn_begin(tdb.db);
-      if (!txn)
-         return;
-
       while (removed < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - removed);
-         for (uint32_t i = 0; i < batch; ++i)
+
+         uint32_t batch_done = 0;
+         while (batch_done < batch)
          {
-            make_key(seq++, key);
-            tdb_delete(txn, CF_NAME, key.data(), key.size());
-            ++removed;
+            uint32_t chunk = std::min(batch - batch_done, TDB_TXN_OP_LIMIT);
+            auto*    txn   = tdb_txn_begin(tdb.db);
+            if (!txn)
+               return;
+            for (uint32_t i = 0; i < chunk; ++i)
+            {
+               make_key(seq++, key);
+               tdb_delete(txn, CF_NAME, key.data(), key.size());
+               ++removed;
+            }
+            tdb_txn_commit(txn);
+            tdb_txn_free(txn);
+            batch_done += chunk;
          }
       }
-
-      tdb_txn_commit(txn);
-      tdb_txn_free(txn);
 
       auto   end  = std::chrono::steady_clock::now();
       double secs = std::chrono::duration<double>(end - start).count();
@@ -403,23 +403,28 @@ static void remove_rand_test(benchmark_config   cfg,
       auto     start   = std::chrono::steady_clock::now();
       uint32_t removed = 0;
 
-      auto* txn = tdb_txn_begin(tdb.db);
-      if (!txn)
-         return;
-
       while (removed < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - removed);
-         for (uint32_t i = 0; i < batch; ++i)
+
+         uint32_t batch_done = 0;
+         while (batch_done < batch)
          {
-            make_key(indices[pos++], key);
-            tdb_delete(txn, CF_NAME, key.data(), key.size());
-            ++removed;
+            uint32_t chunk = std::min(batch - batch_done, TDB_TXN_OP_LIMIT);
+            auto*    txn   = tdb_txn_begin(tdb.db);
+            if (!txn)
+               return;
+            for (uint32_t i = 0; i < chunk; ++i)
+            {
+               make_key(indices[pos++], key);
+               tdb_delete(txn, CF_NAME, key.data(), key.size());
+               ++removed;
+            }
+            tdb_txn_commit(txn);
+            tdb_txn_free(txn);
+            batch_done += chunk;
          }
       }
-
-      tdb_txn_commit(txn);
-      tdb_txn_free(txn);
 
       auto   end  = std::chrono::steady_clock::now();
       double secs = std::chrono::duration<double>(end - start).count();
@@ -527,21 +532,24 @@ static void multithread_rw_test(benchmark_config   cfg,
 
    // Seed the database so readers start with data
    {
-      auto* txn = tdb_txn_begin(tdb.db);
-      if (!txn)
-         return;
-      uint32_t op_count = 0;
-      std::vector<uint8_t> key;
-      for (uint32_t i = 0; i < cfg.items; ++i)
+      std::vector<uint8_t> seed_key;
+      uint32_t seeded = 0;
+      while (seeded < cfg.items)
       {
-         make_key(i, key);
-         auto* vp = random_value_ptr(i, cfg.value_size);
-         tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
-         ++op_count;
-         tdb_auto_commit(txn, tdb.db, op_count);
+         uint32_t chunk = std::min(cfg.items - seeded, TDB_TXN_OP_LIMIT);
+         auto*    txn   = tdb_txn_begin(tdb.db);
+         if (!txn)
+            return;
+         for (uint32_t i = 0; i < chunk; ++i)
+         {
+            make_key(seeded, seed_key);
+            auto* vp = random_value_ptr(seeded, cfg.value_size);
+            tdb_put(txn, CF_NAME, seed_key.data(), seed_key.size(), vp, cfg.value_size);
+            ++seeded;
+         }
+         tdb_txn_commit(txn);
+         tdb_txn_free(txn);
       }
-      tdb_txn_commit(txn);
-      tdb_txn_free(txn);
    }
    std::cout << "seeded " << format_comma(cfg.items) << " keys" << std::endl;
 
@@ -657,29 +665,33 @@ static void multithread_rw_test(benchmark_config   cfg,
    for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
    {
       reshuffle_random_buf();
-      auto* txn = tdb_txn_begin(tdb.db);
-      if (!txn)
-         break;
-      uint32_t op_count = 0;
 
       auto     start    = std::chrono::steady_clock::now();
       uint32_t inserted = 0;
       while (inserted < cfg.items)
       {
          uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
-         for (uint32_t i = 0; i < batch; ++i)
+
+         uint32_t batch_done = 0;
+         while (batch_done < batch)
          {
-            make_key(seq, key);
-            auto* vp = random_value_ptr(seq, cfg.value_size);
-            tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
-            ++seq;
-            ++inserted;
-            ++op_count;
-            tdb_auto_commit(txn, tdb.db, op_count);
+            uint32_t chunk = std::min(batch - batch_done, TDB_TXN_OP_LIMIT);
+            auto*    txn   = tdb_txn_begin(tdb.db);
+            if (!txn)
+               break;
+            for (uint32_t i = 0; i < chunk; ++i)
+            {
+               make_key(seq, key);
+               auto* vp = random_value_ptr(seq, cfg.value_size);
+               tdb_put(txn, CF_NAME, key.data(), key.size(), vp, cfg.value_size);
+               ++seq;
+               ++inserted;
+            }
+            tdb_txn_commit(txn);
+            tdb_txn_free(txn);
+            batch_done += chunk;
          }
       }
-      tdb_txn_commit(txn);
-      tdb_txn_free(txn);
       committed_seq.store(seq, std::memory_order_relaxed);
 
       auto   end       = std::chrono::steady_clock::now();

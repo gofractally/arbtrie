@@ -148,6 +148,19 @@ if(BUILD_TESTS)
     enable_testing()
 endif()
 
+# Abseil (needed by psitri DWAL layer for absl::btree_map)
+include(FetchContent)
+FetchContent_Declare(
+    abseil
+    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+    GIT_TAG        20240722.0
+    GIT_SHALLOW    TRUE
+)
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(abseil)
+
 # SAL library setup
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
 option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
@@ -303,19 +316,7 @@ option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
 add_executable(psitri-benchmark programs/psitri_bench.cpp)
 target_link_libraries(psitri-benchmark PUBLIC Boost::program_options psitri)
 
-# COW amortization benchmark — fetches Abseil for btree_map comparison
-include(FetchContent)
-FetchContent_Declare(
-    abseil
-    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG        20240722.0
-    GIT_SHALLOW    TRUE
-)
-set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
-set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(abseil)
-
+# COW amortization benchmark
 add_executable(cow-amort-bench programs/cow_amort_bench.cpp)
 target_link_libraries(cow-amort-bench PRIVATE psitri absl::btree)
 target_compile_definitions(cow-amort-bench PRIVATE XXH_INLINE_ALL)
@@ -325,6 +326,12 @@ set_target_properties(psitri-benchmark
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+# DWAL benchmark (DWAL buffered vs direct COW)
+add_executable(dwal-bench programs/dwal_bench.cpp)
+target_link_libraries(dwal-bench PRIVATE psitri absl::btree)
+target_include_directories(dwal-bench PRIVATE ${CMAKE_SOURCE_DIR}/programs)
+set_target_properties(dwal-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # Psitri database inspection & defrag tool
 add_executable(psitri-tool programs/psitri_tool.cpp)
