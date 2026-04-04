@@ -986,3 +986,729 @@ TEST_CASE("coverage: shared-mode same-branch case empties single-branch node",
       REQUIRE(rc.count_keys() == 0);
    }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Range remove coverage expansion tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("coverage: unique same-branch empties and removes branch from inner node",
+          "[range_remove][coverage]")
+{
+   // Unique mode: range falls within a single branch, which becomes empty.
+   // The branch is removed from the inner node (lines 255-274).
+   test_db t("cov_unique_same_branch_empty");
+   auto    wc = t.ses->create_write_cursor();
+
+   // Build tree with multiple branches. Each prefix group → one branch.
+   insert_prefix_group(wc, "aaa_", 10);
+   insert_prefix_group(wc, "bbb_", 10);
+   insert_prefix_group(wc, "ccc_", 10);
+   REQUIRE(wc->count_keys() == 30);
+
+   // Remove all keys in the bbb group via range that stays within that branch.
+   uint64_t removed = wc->remove_range("bbb_", "bbb`");
+   REQUIRE(removed == 10);
+   REQUIRE(wc->count_keys() == 20);
+   wc->validate();
+}
+
+TEST_CASE("coverage: shared same-branch empties and removes branch from inner node",
+          "[range_remove][coverage][shared]")
+{
+   // Shared mode: same-branch case empties a branch in a multi-branch inner node.
+   // Covers inner_remove_branch shared alloc paths (lines 278-283).
+   test_db t("cov_shared_same_branch_rm");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "aaa_", 10);
+      insert_prefix_group(tx, "bbb_", 10);
+      insert_prefix_group(tx, "ccc_", 10);
+      tx.commit();
+   }
+
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("bbb_", "bbb`");
+      REQUIRE(removed == 10);
+      tx.commit();
+   }
+
+   auto tx = t.ses->start_transaction(0);
+   auto rc = tx.read_cursor();
+   REQUIRE(rc.count_keys() == 20);
+}
+
+TEST_CASE("coverage: unique multi-branch range with address changes",
+          "[range_remove][coverage]")
+{
+   // Unique mode: range spans multiple branches, partial overlap on start
+   // and boundary. The start and boundary branches change address after
+   // recursive removal, triggering merge_branches. (Lines 456-510)
+   test_db t("cov_unique_addr_change");
+   auto    wc = t.ses->create_write_cursor();
+
+   // Create many groups to force multi-branch inner node.
+   for (char c = 'a'; c <= 'h'; ++c)
+   {
+      std::string prefix = std::string(1, c) + "_";
+      insert_prefix_group(wc, prefix, 15);
+   }
+   REQUIRE(wc->count_keys() == 120);
+
+   // Range partially overlaps start (c) and boundary (f) branches.
+   uint64_t removed = wc->remove_range("c_007", "f_007");
+   REQUIRE(removed > 0);
+   REQUIRE(wc->count_keys() == 120 - removed);
+   wc->validate();
+
+   // Verify edge keys survived.
+   auto rc = wc->read_cursor();
+   std::string buf;
+   CHECK(rc.get("c_006", &buf) >= 0);
+   CHECK(rc.get("f_007", &buf) >= 0);
+   CHECK(rc.get("a_000", &buf) >= 0);
+   CHECK(rc.get("h_014", &buf) >= 0);
+}
+
+TEST_CASE("coverage: unique range removes all middle but start/boundary survive with changes",
+          "[range_remove][coverage]")
+{
+   // Unique mode: after removing middle branches and narrowing start/boundary,
+   // no branches from the inner node are actually removed (remove_lo >= remove_hi)
+   // but addresses changed. (Lines 524-545)
+   test_db t("cov_unique_no_remove_changed");
+   auto    wc = t.ses->create_write_cursor();
+
+   // Two prefix groups: start and boundary are the same branch or adjacent.
+   insert_prefix_group(wc, "mmm_", 20);
+   insert_prefix_group(wc, "nnn_", 20);
+   REQUIRE(wc->count_keys() == 40);
+
+   // Range that partially overlaps both groups but nothing in between.
+   uint64_t removed = wc->remove_range("mmm_010", "nnn_010");
+   REQUIRE(removed == 20);  // 10 from each group
+   REQUIRE(wc->count_keys() == 20);
+   wc->validate();
+}
+
+TEST_CASE("coverage: shared range on inner_prefix with no actual changes",
+          "[range_remove][coverage][shared]")
+{
+   // Shared mode: range narrowing produces no overlap after prefix stripping.
+   // Tests the visit_branches retain undo path (lines 614-616).
+   test_db t("cov_shared_prefix_no_change");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      // Keys all under "data_" prefix.
+      insert_prefix_group(tx, "data_", 30);
+      tx.commit();
+   }
+
+   // Range that's entirely outside the prefix range.
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("zzz", "zzzz");
+      REQUIRE(removed == 0);
+      tx.commit();
+   }
+
+   auto tx = t.ses->start_transaction(0);
+   auto rc = tx.read_cursor();
+   REQUIRE(rc.count_keys() == 30);
+}
+
+TEST_CASE("coverage: shared partial overlap on start and boundary with no middle removal",
+          "[range_remove][coverage][shared]")
+{
+   // Shared mode: range overlaps start and boundary in the same inner node but
+   // no full middle branches are removed. Start and boundary change addresses.
+   // (Lines 638-650)
+   test_db t("cov_shared_start_boundary_change");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "pp_", 20);
+      insert_prefix_group(tx, "qq_", 20);
+      tx.commit();
+   }
+
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("pp_010", "qq_010");
+      REQUIRE(removed == 20);
+      tx.commit();
+   }
+
+   auto tx = t.ses->start_transaction(0);
+   auto rc = tx.read_cursor();
+   REQUIRE(rc.count_keys() == 20);
+}
+
+TEST_CASE("coverage: shared survivors==1 from before-range branches",
+          "[range_remove][coverage][shared]")
+{
+   // Shared mode: range removes everything except a branch that's before the range.
+   // survivors == 1 and the surviving branch is from before_count. (Lines 666-669)
+   test_db t("cov_shared_survivor_before");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "aaa_", 10);
+      insert_prefix_group(tx, "bbb_", 10);
+      insert_prefix_group(tx, "ccc_", 10);
+      tx.commit();
+   }
+
+   // Remove bbb and ccc entirely — only aaa survives (before the range).
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("bbb_", max_key);
+      REQUIRE(removed == 20);
+      tx.commit();
+   }
+
+   auto tx = t.ses->start_transaction(0);
+   auto rc = tx.read_cursor();
+   REQUIRE(rc.count_keys() == 10);
+   auto keys = collect_keys(rc);
+   for (auto& k : keys)
+      CHECK(k.substr(0, 4) == "aaa_");
+}
+
+TEST_CASE("coverage: shared survivors==1 from after-range branches",
+          "[range_remove][coverage][shared]")
+{
+   // Shared mode: range removes everything except a branch after the range.
+   // survivors == 1 and surviving branch is from after_count. (Lines 668-669)
+   test_db t("cov_shared_survivor_after");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "aaa_", 10);
+      insert_prefix_group(tx, "bbb_", 10);
+      insert_prefix_group(tx, "ccc_", 10);
+      tx.commit();
+   }
+
+   // Remove aaa and bbb entirely — only ccc survives (after the range).
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("", "ccc_");
+      REQUIRE(removed == 20);
+      tx.commit();
+   }
+
+   auto tx = t.ses->start_transaction(0);
+   auto rc = tx.read_cursor();
+   REQUIRE(rc.count_keys() == 10);
+   auto keys = collect_keys(rc);
+   for (auto& k : keys)
+      CHECK(k.substr(0, 4) == "ccc_");
+}
+
+TEST_CASE("coverage: shared multi-branch removal with address changes",
+          "[range_remove][coverage][shared]")
+{
+   // Shared mode: range removes middle branches AND partially overlaps start/boundary.
+   // Both start and boundary change addresses. Branch removal + address replacement
+   // via merge_branches. (Lines 691-762)
+   test_db t("cov_shared_multi_addr_change");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (char c = 'a'; c <= 'f'; ++c)
+      {
+         std::string prefix = std::string(1, c) + "_";
+         insert_prefix_group(tx, prefix, 15);
+      }
+      tx.commit();
+   }
+
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("b_007", "e_007");
+      REQUIRE(removed > 0);
+      tx.commit();
+   }
+
+   // Verify surviving keys.
+   auto tx = t.ses->start_transaction(0);
+   auto rc = tx.read_cursor();
+   auto keys = collect_keys(rc);
+
+   // a_ group fully intact
+   int a_count = 0;
+   for (auto& k : keys)
+      if (k.substr(0, 2) == "a_") ++a_count;
+   CHECK(a_count == 15);
+
+   // f_ group fully intact
+   int f_count = 0;
+   for (auto& k : keys)
+      if (k.substr(0, 2) == "f_") ++f_count;
+   CHECK(f_count == 15);
+}
+
+TEST_CASE("coverage: shared simple remove range no address changes",
+          "[range_remove][coverage][shared]")
+{
+   // Shared mode: fully-contained branches are removed with no partial overlaps.
+   // This hits the simple alloc path (lines 755-762).
+   test_db t("cov_shared_simple_remove");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      insert_prefix_group(tx, "aa_", 10);
+      insert_prefix_group(tx, "bb_", 10);
+      insert_prefix_group(tx, "cc_", 10);
+      insert_prefix_group(tx, "dd_", 10);
+      tx.commit();
+   }
+
+   // Remove exactly bb and cc — full branches, no partial overlap.
+   {
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range("bb_", "dd_");
+      REQUIRE(removed == 20);
+      tx.commit();
+   }
+
+   auto tx = t.ses->start_transaction(0);
+   auto rc = tx.read_cursor();
+   REQUIRE(rc.count_keys() == 20);
+}
+
+TEST_CASE("range_remove snapshot oracle: shared-mode correctness", "[range_remove][oracle]")
+{
+   // Oracle test: snapshot before range_remove, verify both views are independently
+   // correct. This catches ref-counting bugs where range_remove corrupts the
+   // snapshot's view or leaks nodes.
+   test_db t("rr_oracle_shared");
+
+   std::mt19937 rng(99887);
+   const int    N = 200;
+
+   // Build a diverse tree with random-length keys and large values
+   std::vector<std::string> all_keys;
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         int         len = 2 + (rng() % 30);
+         std::string key;
+         for (int j = 0; j < len; ++j)
+            key.push_back('a' + (rng() % 26));
+         // Add index to ensure uniqueness
+         key += "_" + std::to_string(i);
+         all_keys.push_back(key);
+         // Mix of small and large values (large → value_nodes)
+         std::string val = (i % 5 == 0) ? std::string(200, 'V') : std::string(10, 'v');
+         tx.upsert(key, val);
+      }
+      tx.commit();
+   }
+
+   std::sort(all_keys.begin(), all_keys.end());
+
+   // Take snapshot
+   auto snapshot_root = t.ses->get_root(0);
+
+   // Perform several range removes, validating both views each time
+   std::vector<std::string> remaining = all_keys;
+   for (int trial = 0; trial < 8 && remaining.size() > 5; ++trial)
+   {
+      int a = rng() % remaining.size();
+      int b = rng() % remaining.size();
+      if (a > b) std::swap(a, b);
+      if (a == b) continue;
+
+      std::string lo = remaining[a];
+      std::string hi = remaining[b];
+
+      // Compute expected removals
+      std::vector<std::string> new_remaining;
+      uint64_t expected_removed = 0;
+      for (auto& k : remaining)
+      {
+         if (k >= lo && k < hi)
+            ++expected_removed;
+         else
+            new_remaining.push_back(k);
+      }
+
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range(lo, hi);
+      INFO("trial=" << trial << " lo=" << lo << " hi=" << hi);
+      REQUIRE(removed == expected_removed);
+      tx.commit();
+
+      remaining = new_remaining;
+
+      // Verify current view matches remaining
+      {
+         auto tx2 = t.ses->start_transaction(0);
+         auto rc  = tx2.read_cursor();
+         auto actual = collect_keys(rc);
+         REQUIRE(actual.size() == remaining.size());
+         for (size_t i = 0; i < actual.size(); ++i)
+            REQUIRE(actual[i] == remaining[i]);
+      }
+
+      // Verify snapshot still has ALL original keys
+      {
+         cursor c(snapshot_root);
+         std::string buf;
+         for (auto& k : all_keys)
+         {
+            INFO("snapshot check: " << k);
+            CHECK(c.get(k, &buf) >= 0);
+         }
+      }
+   }
+}
+
+TEST_CASE("range_remove prefix keys: keys that are prefixes of other keys", "[range_remove]")
+{
+   // Keys like "a", "ab", "abc", "abcd" create value_nodes at branch points.
+   // Range remove must correctly handle value_node ref counting.
+   test_db t("rr_prefix_keys");
+   auto    wc = t.ses->create_write_cursor();
+
+   // Build a tree with many prefix relationships
+   std::vector<std::string> keys = {
+      "a", "ab", "abc", "abcd", "abcde",
+      "b", "bc", "bcd",
+      "c", "ca", "cab", "cabd",
+      "d", "da", "dab", "dabc",
+   };
+   for (auto& k : keys)
+      wc->upsert(to_key_view(k), to_value_view("val_" + k));
+
+   REQUIRE(wc->count_keys() == keys.size());
+   wc->validate();
+
+   SECTION("remove range spanning prefix chain")
+   {
+      // Remove [ab, abd) — "ab","abc","abcd","abcde" are all in range (all < "abd")
+      uint64_t removed = wc->remove_range("ab", "abd");
+      CHECK(removed == 4);
+      REQUIRE(wc->count_keys() == keys.size() - 4);
+      wc->validate();
+
+      // "a" should survive, "ab" through "abcde" should be gone
+      auto rc = wc->read_cursor();
+      std::string buf;
+      CHECK(rc.get("a", &buf) >= 0);
+      CHECK(rc.get("ab", &buf) < 0);
+      CHECK(rc.get("abc", &buf) < 0);
+      CHECK(rc.get("abcde", &buf) < 0);
+   }
+
+   SECTION("remove range including root prefix key")
+   {
+      // Remove [a, ab) — should remove only "a"
+      uint64_t removed = wc->remove_range("a", "ab");
+      CHECK(removed == 1);
+      wc->validate();
+
+      auto rc = wc->read_cursor();
+      std::string buf;
+      CHECK(rc.get("a", &buf) < 0);
+      CHECK(rc.get("ab", &buf) >= 0);
+   }
+
+   SECTION("remove all keys via full range")
+   {
+      uint64_t removed = wc->remove_range("", max_key);
+      CHECK(removed == keys.size());
+      CHECK(wc->count_keys() == 0);
+   }
+}
+
+TEST_CASE("range_remove interleaved snapshots stress test", "[range_remove][stress]")
+{
+   // Take multiple snapshots between range removes. Each snapshot must remain
+   // independently valid. This catches ref-counting bugs that only manifest
+   // when multiple generations coexist.
+   test_db t("rr_interleaved_snap");
+
+   const int N = 100;
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char buf[32];
+         snprintf(buf, sizeof(buf), "key_%04d", i);
+         tx.upsert(buf, std::string(50, 'a' + (i % 26)));
+      }
+      tx.commit();
+   }
+
+   // Snapshot 0: all 100 keys
+   auto snap0 = t.ses->get_root(0);
+
+   // Remove [key_0020, key_0040)
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("key_0020", "key_0040");
+      tx.commit();
+   }
+
+   // Snapshot 1: 80 keys
+   auto snap1 = t.ses->get_root(0);
+
+   // Remove [key_0060, key_0080)
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("key_0060", "key_0080");
+      tx.commit();
+   }
+
+   // Snapshot 2: 60 keys
+   auto snap2 = t.ses->get_root(0);
+
+   // Remove [key_0000, key_0010)
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("key_0000", "key_0010");
+      tx.commit();
+   }
+
+   // Final: 50 keys
+   auto snap3 = t.ses->get_root(0);
+
+   // Verify each snapshot independently
+   auto verify_snap = [](sal::smart_ptr<sal::alloc_header>& root, int expected,
+                          const std::string& label)
+   {
+      cursor c(root);
+      std::vector<std::string> keys;
+      c.seek_begin();
+      while (!c.is_end())
+      {
+         keys.push_back(std::string(c.key()));
+         c.next();
+      }
+      INFO(label << ": expected=" << expected << " actual=" << keys.size());
+      REQUIRE(keys.size() == expected);
+      // Keys must be sorted
+      for (size_t i = 1; i < keys.size(); ++i)
+         REQUIRE(keys[i - 1] < keys[i]);
+   };
+
+   verify_snap(snap0, 100, "snap0");
+   verify_snap(snap1, 80, "snap1");
+   verify_snap(snap2, 60, "snap2");
+   verify_snap(snap3, 50, "snap3");
+
+   // Verify specific key presence/absence
+   {
+      cursor c0(snap0);
+      std::string buf;
+      CHECK(c0.get("key_0025", &buf) >= 0);  // exists in snap0
+      CHECK(c0.get("key_0065", &buf) >= 0);  // exists in snap0
+
+      cursor c1(snap1);
+      CHECK(c1.get("key_0025", &buf) < 0);   // removed in snap1
+      CHECK(c1.get("key_0065", &buf) >= 0);  // still in snap1
+
+      cursor c2(snap2);
+      CHECK(c2.get("key_0025", &buf) < 0);   // removed
+      CHECK(c2.get("key_0065", &buf) < 0);   // removed in snap2
+      CHECK(c2.get("key_0005", &buf) >= 0);  // still in snap2
+
+      cursor c3(snap3);
+      CHECK(c3.get("key_0005", &buf) < 0);   // removed in snap3
+      CHECK(c3.get("key_0050", &buf) >= 0);  // survived all removes
+   }
+}
+
+TEST_CASE("range_remove shared brute-force: random ranges with oracle", "[range_remove][oracle]")
+{
+   // Shared-mode brute-force: commit, snapshot, remove random ranges.
+   // Validates correctness against a std::set oracle.
+   test_db t("rr_shared_brute");
+
+   std::mt19937 rng(12345);
+   const int    N = 400;
+
+   std::set<std::string> oracle;
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char buf[32];
+         snprintf(buf, sizeof(buf), "%06d", i);
+         tx.upsert(buf, std::string(20, 'x'));
+         oracle.insert(buf);
+      }
+      tx.commit();
+   }
+
+   // 20 rounds of random range removes, each in a new transaction (shared mode)
+   for (int round = 0; round < 20 && oracle.size() > 10; ++round)
+   {
+      // Pick two random keys as bounds
+      auto it1 = oracle.begin();
+      std::advance(it1, rng() % oracle.size());
+      auto it2 = oracle.begin();
+      std::advance(it2, rng() % oracle.size());
+
+      std::string lo = *it1, hi = *it2;
+      if (lo > hi) std::swap(lo, hi);
+      if (lo == hi) continue;
+
+      // Oracle: remove [lo, hi)
+      uint64_t expected = 0;
+      for (auto it = oracle.lower_bound(lo); it != oracle.end() && *it < hi;)
+      {
+         it = oracle.erase(it);
+         ++expected;
+      }
+
+      // Database
+      auto     tx      = t.ses->start_transaction(0);
+      uint64_t removed = tx.remove_range(lo, hi);
+      INFO("round=" << round << " lo=" << lo << " hi=" << hi
+           << " expected=" << expected << " removed=" << removed);
+      REQUIRE(removed == expected);
+      tx.commit();
+
+      // Validate count
+      {
+         auto tx2 = t.ses->start_transaction(0);
+         auto rc  = tx2.read_cursor();
+         auto actual = collect_keys(rc);
+         REQUIRE(actual.size() == oracle.size());
+
+         // Spot-check a few keys
+         auto oracle_it = oracle.begin();
+         for (size_t i = 0; i < actual.size() && oracle_it != oracle.end(); ++i, ++oracle_it)
+            REQUIRE(actual[i] == *oracle_it);
+      }
+   }
+}
+
+TEST_CASE("range_remove with value_nodes: large value ref counting", "[range_remove]")
+{
+   // Insert keys with values > 64 bytes (creates value_nodes), then range_remove.
+   // If ref counting is broken, the database will crash or corrupt on subsequent access.
+   test_db t("rr_value_nodes");
+
+   const int N = 50;
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+      {
+         char buf[32];
+         snprintf(buf, sizeof(buf), "vn_%04d", i);
+         tx.upsert(buf, std::string(200, 'A' + (i % 26)));  // > 64 bytes → value_node
+      }
+      tx.commit();
+   }
+
+   // Snapshot — forces shared mode for subsequent removes
+   auto snap = t.ses->get_root(0);
+
+   // Remove a range from the middle
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("vn_0010", "vn_0030");
+      tx.commit();
+   }
+
+   // Verify current state: 30 keys remain, all with correct large values
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto rc = tx.read_cursor();
+      REQUIRE(rc.count_keys() == 30);
+      rc.seek_begin();
+      while (!rc.is_end())
+      {
+         auto val = rc.value<std::string>();
+         REQUIRE(val.has_value());
+         CHECK(val->size() == 200);
+         rc.next();
+      }
+   }
+
+   // Verify snapshot: all 50 keys with correct values
+   {
+      cursor c(snap);
+      std::string buf;
+      for (int i = 0; i < N; ++i)
+      {
+         char key[32];
+         snprintf(key, sizeof(key), "vn_%04d", i);
+         REQUIRE(c.get(key, &buf) >= 0);
+         CHECK(buf.size() == 200);
+      }
+   }
+
+   // Second range remove — exercises ref counting on already-shared nodes
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.remove_range("vn_0035", "vn_0050");
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto rc = tx.read_cursor();
+      REQUIRE(rc.count_keys() == 15);
+   }
+
+   // Snapshot must still be valid
+   {
+      cursor c(snap);
+      std::string buf;
+      CHECK(c.get("vn_0020", &buf) >= 0);  // removed from current, alive in snap
+   }
+}
+
+TEST_CASE("range_remove: boundary conditions on key space edges", "[range_remove]")
+{
+   // Test range_remove with keys at the extremes: empty key, single byte keys,
+   // max-length keys, keys with 0x00 and 0xFF bytes.
+   test_db t("rr_boundary");
+   auto    wc = t.ses->create_write_cursor();
+
+   // Keys spanning the byte space
+   std::string k1(1, '\x01'), k2(1, '\x7F'), k3(1, '\x80'), k4(1, '\xFE');
+   std::string k5("normal_key"), k6(200, 'x');
+   wc->upsert(to_key_view(k1), to_value("v1"));
+   wc->upsert(to_key_view(k2), to_value("v2"));
+   wc->upsert(to_key_view(k3), to_value("v3"));
+   wc->upsert(to_key_view(k4), to_value("v4"));
+   wc->upsert(to_key("normal_key"), to_value("v5"));
+   wc->upsert(to_key_view(k6), to_value("v6"));  // long key
+   REQUIRE(wc->count_keys() == 6);
+
+   SECTION("remove low byte range")
+   {
+      // [\x00, \x80) includes \x01, \x7F, "normal_key" (n=0x6E), and long 'x' key (0x78)
+      uint64_t removed = wc->remove_range(std::string(1, '\x00'), std::string(1, '\x80'));
+      CHECK(removed == 4);
+      wc->validate();
+      // \x80 and \xFE should survive
+      REQUIRE(wc->count_keys() == 2);
+   }
+
+   SECTION("remove high byte range")
+   {
+      // [\x80, max_key) includes \x80 and \xFE
+      uint64_t removed = wc->remove_range(std::string(1, '\x80'), max_key);
+      CHECK(removed == 2);
+      wc->validate();
+      REQUIRE(wc->count_keys() == 4);
+   }
+
+   SECTION("remove everything")
+   {
+      uint64_t removed = wc->remove_range("", max_key);
+      CHECK(removed == 6);
+      CHECK(wc->count_keys() == 0);
+   }
+}
