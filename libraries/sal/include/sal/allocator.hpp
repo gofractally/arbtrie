@@ -438,6 +438,17 @@ namespace sal
       //@}
 
       /**
+       * Release Thread Methods — dedicated thread for processing deferred object releases.
+       * Frees the compactor from release processing so it can focus on space reclamation.
+       * Uses fine-grained read locks to avoid blocking the compactor.
+       */
+      ///@{
+      void release_loop(segment_thread& thread);
+
+      std::optional<segment_thread> _release_thread;
+      ///@}
+
+      /**
        * Methods for the segment provider thread, this thread is responsible for ensuring
        * that session threads always have access to new segments without unexpected delays
        * caused by waiting on the operating system to grow files, or lock memory.

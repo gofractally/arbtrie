@@ -97,6 +97,7 @@ struct bench_config
    uint32_t readers        = 4;
    uint32_t merge_threads  = 2;
    uint32_t max_rw_entries = 100000;
+   uint32_t pause_ms       = 0;
    bool     use_dwal       = true;
 };
 
@@ -434,6 +435,9 @@ void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
                    << format_comma(ips) << "  writes/sec  " << std::setw(12) << std::right
                    << format_comma(rps) << "  " << phase_names[phase] << "/sec"
                    << "  db=" << format_size_mb(db_bytes) << std::endl;
+
+         if (cfg.pause_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(cfg.pause_ms));
       }
 
       done.store(true, std::memory_order_relaxed);
@@ -496,6 +500,7 @@ int main(int argc, char** argv)
       else if (arg == "--readers" || arg == "-t")    cfg.readers = std::stoi(next());
       else if (arg == "--merge-threads")             cfg.merge_threads = std::stoi(next());
       else if (arg == "--max-rw")                    cfg.max_rw_entries = std::stoi(next());
+      else if (arg == "--pause")                     cfg.pause_ms = std::stoi(next());
       else if (arg == "--db-dir" || arg == "-d")     db_base = next();
       else if (arg == "--help" || arg == "-h")
       {

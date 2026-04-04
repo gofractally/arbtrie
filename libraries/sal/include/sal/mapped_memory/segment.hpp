@@ -114,6 +114,7 @@ namespace sal
          bool     is_read_only() const { return flags.load(std::memory_order_relaxed) & read_only; }
          bool     is_pinned() const { return flags.load(std::memory_order_relaxed) & pinned; }
          uint32_t get_freed_space() const { return freed_space.load(std::memory_order_relaxed); }
+         uint32_t get_flags() const { return flags.load(std::memory_order_relaxed); }
          uint64_t get_vage() const { return vage.load(std::memory_order_relaxed); }
       };  // segment_meta
 
@@ -169,6 +170,7 @@ namespace sal
          bool is_read_only(segment_number segment) const { return meta[*segment].is_read_only(); }
          bool is_pinned(segment_number segment) const { return meta[*segment].is_pinned(); }
          void set_pinned(segment_number segment, bool pinned) { meta[*segment].set_pinned(pinned); }
+         uint32_t get_flags(segment_number segment) const { return meta[*segment].get_flags(); }
 
         private:
          segment_meta meta[max_segment_count];

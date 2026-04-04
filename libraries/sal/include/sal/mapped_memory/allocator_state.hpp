@@ -29,6 +29,9 @@ namespace sal
          segment_thread_state segment_provider_thread_state;
          segment_provider     _segment_provider;
 
+         // Thread state for the release thread (frees objects with fine-grained read locks)
+         segment_thread_state   release_thread_state;
+
          // Thread state for the compactor thread
          segment_thread_state   compact_thread_state;
          cache_difficulty_state _cache_difficulty_state;

@@ -14,6 +14,10 @@
 
 namespace sal
 {
+   /// Set to true to enable compactor timing and unpinned-segment diagnostics.
+   /// When false, all instrumentation is compiled out by the optimizer.
+   static constexpr bool debug_compactor = false;
+
    /**
        * These methods assign a unique number to each instance of allocator so
        * that the thread-local allocator_session can be associated with a specific
@@ -1010,57 +1014,56 @@ namespace sal
       sal::set_current_thread_name("compactor");
 
       auto ses = get_session();
-      // compact them in order into a new session
-
-      // TODO: move compaction of unpinned segments to a separate thread,
-      // and then use a mutex to synchronize access to the recycle queue.
-      //auto  unpinned_session  = create_session();
       auto& sesr = *ses;
-      //auto& unpinned_sessionr = *unpinned_session;
-      //unpinned_session->set_alloc_to_pinned(false);
 
       /**
        *  The compactor always prioritizes cache, then ram, then
        *  all other segments each loop. It needs to keep data of similar
        *  age together to minimize movement of virtual age of objects.
        */
-      using clock = std::chrono::steady_clock;
-      auto total_release_ns  = uint64_t(0);
-      auto total_promote_ns  = uint64_t(0);
-      auto total_pinned_ns   = uint64_t(0);
-      auto total_unpinned_ns = uint64_t(0);
-      auto last_report       = clock::now();
-      uint64_t iterations    = 0;
-
-      while (thread.yield())
+      if constexpr (debug_compactor)
       {
-         auto t0 = clock::now();
-         compactor_release_objects(sesr);
-         auto t1 = clock::now();
-         compactor_promote_rcache_data(sesr);
-         auto t2 = clock::now();
-         compact_pinned_segment(sesr);
-         auto t3 = clock::now();
-         compactor_promote_rcache_data(sesr);
-         compact_unpinned_segment(sesr);
-         auto t4 = clock::now();
+         using clock = std::chrono::steady_clock;
+         uint64_t total_promote_ns = 0, total_pinned_ns = 0, total_unpinned_ns = 0;
+         auto     last_report = clock::now();
+         uint64_t iterations  = 0;
 
-         total_release_ns  += (t1 - t0).count();
-         total_promote_ns  += (t2 - t1).count() + (t4 - t3).count();
-         total_pinned_ns   += (t3 - t2).count();
-         total_unpinned_ns += (t4 - t3).count();
-         ++iterations;
-
-         auto elapsed = clock::now() - last_report;
-         if (elapsed >= std::chrono::seconds(5))
+         while (thread.yield())
          {
-            auto to_ms = [](uint64_t ns) { return ns / 1'000'000; };
-            SAL_WARN("compactor: iters={} release={}ms promote={}ms pinned={}ms unpinned={}ms",
-                     iterations, to_ms(total_release_ns), to_ms(total_promote_ns),
-                     to_ms(total_pinned_ns), to_ms(total_unpinned_ns));
-            total_release_ns = total_promote_ns = total_pinned_ns = total_unpinned_ns = 0;
-            iterations = 0;
-            last_report = clock::now();
+            auto t0 = clock::now();
+            compactor_promote_rcache_data(sesr);
+            auto t1 = clock::now();
+            compact_pinned_segment(sesr);
+            auto t2 = clock::now();
+            compactor_promote_rcache_data(sesr);
+            compact_unpinned_segment(sesr);
+            auto t3 = clock::now();
+
+            total_promote_ns += (t1 - t0).count() + (t3 - t2).count();
+            total_pinned_ns += (t2 - t1).count();
+            total_unpinned_ns += (t3 - t2).count();
+            ++iterations;
+
+            auto elapsed = clock::now() - last_report;
+            if (elapsed >= std::chrono::seconds(5))
+            {
+               auto to_ms = [](uint64_t ns) { return ns / 1'000'000; };
+               SAL_WARN("compactor: iters={} promote={}ms pinned={}ms unpinned={}ms", iterations,
+                        to_ms(total_promote_ns), to_ms(total_pinned_ns), to_ms(total_unpinned_ns));
+               total_promote_ns = total_pinned_ns = total_unpinned_ns = 0;
+               iterations                                              = 0;
+               last_report                                             = clock::now();
+            }
+         }
+      }
+      else
+      {
+         while (thread.yield())
+         {
+            compactor_promote_rcache_data(sesr);
+            compact_pinned_segment(sesr);
+            compactor_promote_rcache_data(sesr);
+            compact_unpinned_segment(sesr);
          }
       }
    }
@@ -1082,6 +1085,44 @@ namespace sal
          }
       }
       return more_work;
+   }
+
+   /**
+    * Dedicated release thread loop — processes deferred object releases from all
+    * session release queues.  Uses fine-grained read locks so the compactor can
+    * continue recycling segments between individual releases.
+    *
+    * For each object: lock → dereference → vcall::destroy (cascades children
+    * back to queue or processes inline if full) → unlock → record_freed_space
+    * → free control block.
+    */
+   void allocator::release_loop(segment_thread& thread)
+   {
+      sal::set_current_thread_name("release");
+
+      auto  ses  = get_session();
+      auto& sesr = *ses;
+
+      ptr_address read_ids[1024];
+      while (thread.yield())
+      {
+         for (uint32_t snum = 0; snum < _mapped_state->_session_data.session_capacity(); ++snum)
+         {
+            auto& rqueue =
+                _mapped_state->_session_data.release_queue(allocator_session_number(snum));
+            auto num_loaded = rqueue.pop(read_ids, 1024);
+            for (uint32_t i = 0; i < num_loaded; ++i)
+            {
+               // Fine-grained read lock prevents the compactor from recycling
+               // the segment we're reading from during dereference + destroy.
+               // The lock is nested, so recursive final_release calls through
+               // vcall::destroy (when the queue is full) stay protected.
+               sesr.retain_read_lock();
+               sesr.final_release(read_ids[i]);
+               sesr.release_read_lock();
+            }
+         }
+      }
    }
 
    /**
@@ -1198,8 +1239,6 @@ namespace sal
          // higher than the lowest one we have)
          if (insert_sorted_pair(qualifying_segments, total_qualifying, {i, vage}))
             potential_free_space += freed_space;
-         //     ARBTRIE_INFO("compact_pinned_segment: ", i, " freed_space: ", freed_space,
-         //                  " potential_free_space: ", potential_free_space);
       }
       if (potential_free_space < segment_size)
       {
@@ -1223,16 +1262,41 @@ namespace sal
 
       uint32_t    potential_free_space = 0;
       const auto& seg_data             = _mapped_state->_segment_data;
+
+      // Debug counters — compiled out unless debug_compactor is set
+      uint32_t not_compactable = 0, pinned_count = 0, below_threshold = 0;
+      uint32_t nc_active = 0, nc_pending = 0, nc_free = 0, nc_queued = 0, nc_zero = 0;
+
       for (segment_number i{0}; i < total_segs; ++i)
       {
          const auto freed_space = seg_data.get_freed_space(i);
          if (not seg_data.may_compact(i))
+         {
+            if constexpr (debug_compactor)
+            {
+               ++not_compactable;
+               auto f = seg_data.get_flags(i);
+               if (f & 0x04) ++nc_active;
+               else if (f & 0x08) ++nc_pending;
+               else if (f & 0x10) ++nc_free;
+               else if (f & 0x20) ++nc_queued;
+               else if (f == 0) ++nc_zero;
+            }
             continue;
+         }
          if (seg_data.is_pinned(i))
+         {
+            if constexpr (debug_compactor)
+               ++pinned_count;
             continue;
+         }
          if (freed_space <
              _mapped_state->_config.compact_unpinned_unused_threshold_mb * 1024 * 1024)
+         {
+            if constexpr (debug_compactor)
+               ++below_threshold;
             continue;
+         }
 
          int64_t vage = seg_data.get_vage(i);
 
@@ -1240,16 +1304,22 @@ namespace sal
          // higher than the lowest one we have)
          if (insert_sorted_pair(qualifying_segments, total_qualifying, {i, vage}))
             potential_free_space += freed_space;
-         //     ARBTRIE_INFO("compact_unpinned_segment: ", i, " freed_space: ", freed_space,
-         //                  " potential_free_space: ", potential_free_space);
       }
-      /*
-      ARBTRIE_WARN("compact_unpinned_segment: ", potential_free_space,
-                   " total_qualifying: ", total_qualifying, " not_read_only: ", not_read_only,
-                   " pinned: ", pinned, " insufficient_space: ", insufficient_space);
-                   */
       if (potential_free_space < segment_size)
       {
+         if constexpr (debug_compactor)
+         {
+            static auto last_log = std::chrono::steady_clock::now();
+            auto        now      = std::chrono::steady_clock::now();
+            if (now - last_log >= std::chrono::seconds(5))
+            {
+               SAL_WARN(
+                   "compact_unpinned: no work — segs={} nc={} (active={} pending={} free={} queued={} zero={}) pinned={} below_thresh={} qualifying={} potential_free={}KB",
+                   total_segs, not_compactable, nc_active, nc_pending, nc_free, nc_queued, nc_zero,
+                   pinned_count, below_threshold, total_qualifying, potential_free_space / 1024);
+               last_log = now;
+            }
+         }
          usleep(1000);
          return false;
       }
@@ -1692,6 +1762,9 @@ namespace sal
       _compactor_thread.emplace(&_mapped_state->compact_thread_state, "compactor",
                                 [this](segment_thread& thread) { compactor_loop(thread); });
 
+      _release_thread.emplace(&_mapped_state->release_thread_state, "release",
+                              [this](segment_thread& thread) { release_loop(thread); });
+
       _read_bit_decay_thread.emplace(&_mapped_state->read_bit_decay_thread_state, "read_bit_decay",
                                      [this](segment_thread& thread)
                                      { clear_read_bits_loop(thread); });
@@ -1701,6 +1774,7 @@ namespace sal
                                        [this](segment_thread& thread) { provider_loop(thread); });
 
       _read_bit_decay_thread->start();
+      _release_thread->start();
       _compactor_thread->start();
       _segment_provider_thread->start();
    }
@@ -1712,6 +1786,13 @@ namespace sal
       {
          _read_bit_decay_thread->stop();
          _read_bit_decay_thread.reset();
+      }
+
+      // Stop release thread before compactor so pending releases drain first
+      if (_release_thread)
+      {
+         _release_thread->stop();
+         _release_thread.reset();
       }
 
       if (_compactor_thread)
