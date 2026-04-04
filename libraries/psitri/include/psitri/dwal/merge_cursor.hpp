@@ -21,7 +21,7 @@ namespace psitri::dwal
    class merge_cursor
    {
      public:
-      using btree_iter = btree_layer::map_type::const_iterator;
+      using btree_iter = btree_layer::iterator;
 
       /// Construct a merge cursor over up to three layers.
       /// Any layer pointer may be null to exclude that layer.

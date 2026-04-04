@@ -93,12 +93,12 @@ namespace psitri::dwal
       }
       if (ro)
       {
-         auto it = ro->map.find(key);
-         if (it != ro->map.end())
+         auto* v = ro->map.get(key);
+         if (v)
          {
-            if (it->second.is_tombstone())
+            if (v->is_tombstone())
                return {false, {}};
-            return {true, it->second};
+            return {true, *v};
          }
          if (ro->tombstones.is_deleted(key))
             return {false, {}};
@@ -200,12 +200,12 @@ namespace psitri::dwal
          // Layer 1: RW btree (uncommitted writes)
          if (root.rw_layer)
          {
-            auto it = root.rw_layer->map.find(key);
-            if (it != root.rw_layer->map.end())
+            auto* v = root.rw_layer->map.get(key);
+            if (v)
             {
-               if (it->second.is_tombstone())
+               if (v->is_tombstone())
                   return {false, {}};
-               return {true, it->second};
+               return {true, *v};
             }
             if (root.rw_layer->tombstones.is_deleted(key))
                return {false, {}};
@@ -220,12 +220,12 @@ namespace psitri::dwal
             }
             if (ro)
             {
-               auto it = ro->map.find(key);
-               if (it != ro->map.end())
+               auto* v = ro->map.get(key);
+               if (v)
                {
-                  if (it->second.is_tombstone())
+                  if (v->is_tombstone())
                      return {false, {}};
-                  return {true, it->second};
+                  return {true, *v};
                }
                if (ro->tombstones.is_deleted(key))
                   return {false, {}};

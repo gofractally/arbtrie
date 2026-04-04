@@ -68,4 +68,32 @@ namespace art::detail
       return node256_lower_bound(hdr, after_byte + 1);
    }
 
+   /// Find the last occupied child slot in a node256.
+   /// Returns the byte value [0-255], or 256 if empty.
+   inline uint16_t node256_last_child(const node_header* hdr) noexcept
+   {
+      node256_view nv{const_cast<node_header*>(hdr)};
+      for (int i = 255; i >= 0; --i)
+      {
+         if (nv.children()[i] != null_offset)
+            return static_cast<uint16_t>(i);
+      }
+      return 256;
+   }
+
+   /// Find the previous occupied child slot before the given byte.
+   /// Returns the byte value [0-255], or 256 if none found.
+   inline uint16_t node256_prev_child(const node_header* hdr, uint8_t before_byte) noexcept
+   {
+      if (before_byte == 0)
+         return 256;
+      node256_view nv{const_cast<node_header*>(hdr)};
+      for (int i = before_byte - 1; i >= 0; --i)
+      {
+         if (nv.children()[i] != null_offset)
+            return static_cast<uint16_t>(i);
+      }
+      return 256;
+   }
+
 }  // namespace art::detail

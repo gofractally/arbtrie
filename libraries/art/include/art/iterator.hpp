@@ -39,6 +39,19 @@ namespace art
          return copy;
       }
 
+      art_iterator& operator--() noexcept
+      {
+         retreat();
+         return *this;
+      }
+
+      art_iterator operator--(int) noexcept
+      {
+         auto copy = *this;
+         retreat();
+         return copy;
+      }
+
       bool operator==(const art_iterator& o) const noexcept
       {
          return _leaf_off == o._leaf_off;
@@ -53,6 +66,9 @@ namespace art
       friend art_iterator<V> make_begin(arena& a, offset_t root);
 
       template <typename V>
+      friend art_iterator<V> make_end(arena& a, offset_t root);
+
+      template <typename V>
       friend art_iterator<V> make_lower_bound(arena& a, offset_t root, std::string_view key);
 
       struct path_entry
@@ -62,6 +78,7 @@ namespace art
       };
 
       arena*   _arena    = nullptr;
+      offset_t _root     = null_offset;
       offset_t _leaf_off = null_offset;
       uint8_t  _depth    = 0;
 
@@ -104,6 +121,54 @@ namespace art
                push(off, first);
                node256_view nv{hdr};
                off = nv.children()[first];
+            }
+         }
+
+         _leaf_off = (off != null_offset && is_leaf(off)) ? off : null_offset;
+      }
+
+      /// Descend to the rightmost leaf from a given starting offset.
+      void descend_to_rightmost(offset_t off) noexcept
+      {
+         while (off != null_offset && !is_leaf(off))
+         {
+            auto* hdr = _arena->as<node_header>(off);
+
+            if (hdr->type == node_type::setlist)
+            {
+               setlist_view sv{hdr};
+               if (sv.num_children() > 0)
+               {
+                  uint16_t last = sv.num_children() - 1;
+                  push(off, last);
+                  off = sv.children()[last];
+               }
+               else if (hdr->value_off != null_offset)
+               {
+                  push(off, UINT16_MAX);
+                  _leaf_off = hdr->value_off;
+                  return;
+               }
+               else
+                  break;
+            }
+            else
+            {
+               uint16_t last = detail::node256_last_child(hdr);
+               if (last < 256)
+               {
+                  push(off, last);
+                  node256_view nv{hdr};
+                  off = nv.children()[last];
+               }
+               else if (hdr->value_off != null_offset)
+               {
+                  push(off, UINT16_MAX);
+                  _leaf_off = hdr->value_off;
+                  return;
+               }
+               else
+                  break;
             }
          }
 
@@ -178,6 +243,76 @@ namespace art
          // Exhausted — become end iterator
          _leaf_off = null_offset;
       }
+
+      void retreat() noexcept
+      {
+         // If at end(), go to the rightmost leaf.
+         if (_leaf_off == null_offset)
+         {
+            if (_arena && _root != null_offset)
+            {
+               _depth = 0;
+               descend_to_rightmost(_root);
+            }
+            return;
+         }
+
+         // Walk up the stack to find the previous entry
+         while (_depth > 0)
+         {
+            auto& top = _stack[_depth - 1];
+            auto* hdr = _arena->as<node_header>(top.node_off);
+
+            if (top.child_index == UINT16_MAX)
+            {
+               // We were at value_off. No previous entry in this node. Pop.
+               _depth--;
+               continue;
+            }
+
+            // Try to go to previous sibling
+            if (hdr->type == node_type::setlist)
+            {
+               if (top.child_index > 0)
+               {
+                  setlist_view sv{hdr};
+                  top.child_index--;
+                  descend_to_rightmost(sv.children()[top.child_index]);
+                  return;
+               }
+               // child_index == 0: check value_off
+               if (hdr->value_off != null_offset)
+               {
+                  top.child_index = UINT16_MAX;
+                  _leaf_off = hdr->value_off;
+                  return;
+               }
+            }
+            else
+            {
+               uint16_t prev = detail::node256_prev_child(
+                   hdr, static_cast<uint8_t>(top.child_index));
+               if (prev < 256)
+               {
+                  top.child_index = prev;
+                  node256_view nv{hdr};
+                  descend_to_rightmost(nv.children()[prev]);
+                  return;
+               }
+               if (hdr->value_off != null_offset)
+               {
+                  top.child_index = UINT16_MAX;
+                  _leaf_off = hdr->value_off;
+                  return;
+               }
+            }
+
+            _depth--;
+         }
+
+         // Exhausted backward — become end iterator
+         _leaf_off = null_offset;
+      }
    };
 
    /// Create a begin() iterator.
@@ -188,7 +323,18 @@ namespace art
       if (root == null_offset)
          return it;
       it._arena = &a;
+      it._root  = root;
       it.descend_to_leftmost(root);
+      return it;
+   }
+
+   /// Create an end() iterator that knows the root (for --).
+   template <typename Value>
+   art_iterator<Value> make_end(arena& a, offset_t root)
+   {
+      art_iterator<Value> it;
+      it._arena = &a;
+      it._root  = root;
       return it;
    }
 
@@ -200,6 +346,7 @@ namespace art
       if (root == null_offset)
          return it;
       it._arena = &a;
+      it._root  = root;
 
       offset_t cur   = root;
       uint32_t depth = 0;

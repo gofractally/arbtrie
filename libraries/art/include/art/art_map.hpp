@@ -34,6 +34,7 @@ namespace art
             ++_size;
          iterator it;
          it._arena    = &_arena;
+         it._root     = _root;
          it._leaf_off = null_offset;  // lightweight — not positioned
          return {it, inserted};
       }
@@ -78,16 +79,55 @@ namespace art
          return make_lower_bound<Value>(_arena, _root, key);
       }
 
+      iterator find(std::string_view key) const noexcept
+      {
+         const Value* v = get(key);
+         if (!v)
+            return end();
+         return make_lower_bound<Value>(const_cast<arena&>(_arena), _root, key);
+      }
+
       /// First entry with key >= given key.
       iterator lower_bound(std::string_view key) noexcept
       {
          return make_lower_bound<Value>(_arena, _root, key);
       }
 
+      iterator lower_bound(std::string_view key) const noexcept
+      {
+         return make_lower_bound<Value>(const_cast<arena&>(_arena), _root, key);
+      }
+
+      /// First entry with key > given key.
+      iterator upper_bound(std::string_view key) noexcept
+      {
+         auto it = lower_bound(key);
+         if (it != end() && it.key() == key)
+            ++it;
+         return it;
+      }
+
+      iterator upper_bound(std::string_view key) const noexcept
+      {
+         auto it = lower_bound(key);
+         if (it != end() && it.key() == key)
+            ++it;
+         return it;
+      }
+
       // ── Iteration ─────────────────────────────────────────────────────
 
       iterator begin() noexcept { return make_begin<Value>(_arena, _root); }
-      iterator end() noexcept { return iterator{}; }
+      iterator begin() const noexcept
+      {
+         return make_begin<Value>(const_cast<arena&>(_arena), _root);
+      }
+
+      iterator end() noexcept { return make_end<Value>(_arena, _root); }
+      iterator end() const noexcept
+      {
+         return make_end<Value>(const_cast<arena&>(_arena), _root);
+      }
 
       // ── Capacity ──────────────────────────────────────────────────────
 

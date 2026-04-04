@@ -171,28 +171,28 @@ TEST_CASE("btree_layer store and lookup", "[dwal]")
       layer.store_data("key2", "value2");
       CHECK(layer.size() == 2);
 
-      auto it = layer.map.find("key1");
-      REQUIRE(it != layer.map.end());
-      CHECK(it->second.is_data());
-      CHECK(it->second.data == "value1");
+      auto* v = layer.map.get("key1");
+      REQUIRE(v != nullptr);
+      CHECK(v->is_data());
+      CHECK(v->data == "value1");
    }
 
    SECTION("store_tombstone")
    {
       layer.store_data("key1", "value1");
       layer.store_tombstone("key1");
-      auto it = layer.map.find("key1");
-      REQUIRE(it != layer.map.end());
-      CHECK(it->second.is_tombstone());
+      auto* v = layer.map.get("key1");
+      REQUIRE(v != nullptr);
+      CHECK(v->is_tombstone());
    }
 
    SECTION("store_subtree")
    {
       layer.store_subtree("sub1", sal::ptr_address(100));
-      auto it = layer.map.find("sub1");
-      REQUIRE(it != layer.map.end());
-      CHECK(it->second.is_subtree());
-      CHECK(it->second.subtree_root == sal::ptr_address(100));
+      auto* v = layer.map.get("sub1");
+      REQUIRE(v != nullptr);
+      CHECK(v->is_subtree());
+      CHECK(v->subtree_root == sal::ptr_address(100));
    }
 
    SECTION("pool-backed strings survive original going out of scope")
@@ -203,9 +203,9 @@ TEST_CASE("btree_layer store and lookup", "[dwal]")
          layer.store_data(temp, temp_val);
       }
       // Originals are destroyed — pool copies must survive.
-      auto it = layer.map.find("ephemeral_key");
-      REQUIRE(it != layer.map.end());
-      CHECK(it->second.data == "ephemeral_val");
+      auto* v = layer.map.get("ephemeral_key");
+      REQUIRE(v != nullptr);
+      CHECK(v->data == "ephemeral_val");
    }
 }
 
@@ -650,9 +650,9 @@ TEST_CASE("dwal_transaction basic upsert and commit", "[dwal]")
       tx.upsert("key2", "val2");
 
       // Verify writes are in the RW btree.
-      auto it = root.rw_layer->map.find("key1");
-      REQUIRE(it != root.rw_layer->map.end());
-      CHECK(it->second.data == "val1");
+      auto* v = root.rw_layer->map.get("key1");
+      REQUIRE(v != nullptr);
+      CHECK(v->data == "val1");
 
       tx.commit();
    }
@@ -683,20 +683,20 @@ TEST_CASE("dwal_transaction abort restores btree", "[dwal]")
 
       // Overwrite existing key.
       tx.upsert("existing", "modified");
-      CHECK(root.rw_layer->map.find("existing")->second.data == "modified");
+      CHECK(root.rw_layer->map.get("existing")->data == "modified");
 
       // Insert new key.
       tx.upsert("new_key", "new_val");
-      CHECK(root.rw_layer->map.find("new_key") != root.rw_layer->map.end());
+      CHECK(root.rw_layer->map.get("new_key") != nullptr);
 
       tx.abort();
    }
 
    // After abort, existing key should be restored, new key should be gone.
-   auto it = root.rw_layer->map.find("existing");
-   REQUIRE(it != root.rw_layer->map.end());
-   CHECK(it->second.data == "original");
-   CHECK(root.rw_layer->map.find("new_key") == root.rw_layer->map.end());
+   auto* v = root.rw_layer->map.get("existing");
+   REQUIRE(v != nullptr);
+   CHECK(v->data == "original");
+   CHECK(root.rw_layer->map.get("new_key") == nullptr);
 }
 
 TEST_CASE("dwal_transaction remove and tombstone", "[dwal]")
@@ -715,14 +715,14 @@ TEST_CASE("dwal_transaction remove and tombstone", "[dwal]")
       tx.remove("k1");
 
       // Should be a tombstone now.
-      auto it = root.rw_layer->map.find("k1");
-      REQUIRE(it != root.rw_layer->map.end());
-      CHECK(it->second.is_tombstone());
+      auto* v = root.rw_layer->map.get("k1");
+      REQUIRE(v != nullptr);
+      CHECK(v->is_tombstone());
 
       tx.commit();
    }
 
-   CHECK(root.rw_layer->map.find("k1")->second.is_tombstone());
+   CHECK(root.rw_layer->map.get("k1")->is_tombstone());
 }
 
 TEST_CASE("dwal_transaction remove abort restores value", "[dwal]")
@@ -739,16 +739,16 @@ TEST_CASE("dwal_transaction remove abort restores value", "[dwal]")
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
       tx.remove("k1");
-      CHECK(root.rw_layer->map.find("k1")->second.is_tombstone());
+      CHECK(root.rw_layer->map.get("k1")->is_tombstone());
 
       tx.abort();
    }
 
    // Restored after abort.
-   auto it = root.rw_layer->map.find("k1");
-   REQUIRE(it != root.rw_layer->map.end());
-   CHECK(it->second.is_data());
-   CHECK(it->second.data == "v1");
+   auto* v = root.rw_layer->map.get("k1");
+   REQUIRE(v != nullptr);
+   CHECK(v->is_data());
+   CHECK(v->data == "v1");
 }
 
 TEST_CASE("dwal_transaction range remove", "[dwal]")
@@ -770,11 +770,11 @@ TEST_CASE("dwal_transaction range remove", "[dwal]")
       tx.remove_range("b", "d");  // removes b, c
 
       // b and c should be gone from map.
-      CHECK(root.rw_layer->map.find("b") == root.rw_layer->map.end());
-      CHECK(root.rw_layer->map.find("c") == root.rw_layer->map.end());
+      CHECK(root.rw_layer->map.get("b") == nullptr);
+      CHECK(root.rw_layer->map.get("c") == nullptr);
       // a and d should still be there.
-      CHECK(root.rw_layer->map.find("a") != root.rw_layer->map.end());
-      CHECK(root.rw_layer->map.find("d") != root.rw_layer->map.end());
+      CHECK(root.rw_layer->map.get("a") != nullptr);
+      CHECK(root.rw_layer->map.get("d") != nullptr);
 
       // Range tombstone should be active.
       CHECK(root.rw_layer->tombstones.is_deleted("b"));
@@ -811,9 +811,9 @@ TEST_CASE("dwal_transaction range remove abort restores", "[dwal]")
 
    // All entries restored.
    CHECK(root.rw_layer->size() == 3);
-   CHECK(root.rw_layer->map.find("a")->second.data == "1");
-   CHECK(root.rw_layer->map.find("b")->second.data == "2");
-   CHECK(root.rw_layer->map.find("c")->second.data == "3");
+   CHECK(root.rw_layer->map.get("a")->data == "1");
+   CHECK(root.rw_layer->map.get("b")->data == "2");
+   CHECK(root.rw_layer->map.get("c")->data == "3");
    CHECK(root.rw_layer->tombstones.empty());
 }
 
@@ -854,7 +854,7 @@ TEST_CASE("dwal_transaction destructor aborts uncommitted", "[dwal]")
       // Destructor fires — should abort.
    }
 
-   CHECK(root.rw_layer->map.find("k")->second.data == "original");
+   CHECK(root.rw_layer->map.get("k")->data == "original");
 }
 
 TEST_CASE("dwal_transaction subtree upsert", "[dwal]")
@@ -870,10 +870,10 @@ TEST_CASE("dwal_transaction subtree upsert", "[dwal]")
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
       tx.upsert_subtree("tree_key", sal::ptr_address(42));
 
-      auto it = root.rw_layer->map.find("tree_key");
-      REQUIRE(it != root.rw_layer->map.end());
-      CHECK(it->second.is_subtree());
-      CHECK(it->second.subtree_root == sal::ptr_address(42));
+      auto* v = root.rw_layer->map.get("tree_key");
+      REQUIRE(v != nullptr);
+      CHECK(v->is_subtree());
+      CHECK(v->subtree_root == sal::ptr_address(42));
 
       tx.commit();
    }
@@ -913,9 +913,9 @@ TEST_CASE("dwal_database basic transaction lifecycle", "[dwal]")
 
    // Verify the data is in the RW btree.
    auto& root = dwal_db.root(0);
-   auto  it   = root.rw_layer->map.find("hello");
-   REQUIRE(it != root.rw_layer->map.end());
-   CHECK(it->second.data == "world");
+   auto* v = root.rw_layer->map.get("hello");
+   REQUIRE(v != nullptr);
+   CHECK(v->data == "world");
 }
 
 TEST_CASE("dwal_database multiple transactions on same root", "[dwal]")
@@ -936,8 +936,8 @@ TEST_CASE("dwal_database multiple transactions on same root", "[dwal]")
    }
 
    auto& root = dwal_db.root(0);
-   CHECK(root.rw_layer->map.find("k1")->second.data == "v1");
-   CHECK(root.rw_layer->map.find("k2")->second.data == "v2");
+   CHECK(root.rw_layer->map.get("k1")->data == "v1");
+   CHECK(root.rw_layer->map.get("k2")->data == "v2");
 }
 
 TEST_CASE("dwal_database independent roots", "[dwal]")
@@ -957,16 +957,12 @@ TEST_CASE("dwal_database independent roots", "[dwal]")
       tx.commit();
    }
 
-   CHECK(dwal_db.root(0).rw_layer->map.find("root0_key") !=
-         dwal_db.root(0).rw_layer->map.end());
-   CHECK(dwal_db.root(1).rw_layer->map.find("root1_key") !=
-         dwal_db.root(1).rw_layer->map.end());
+   CHECK(dwal_db.root(0).rw_layer->map.get("root0_key") != nullptr);
+   CHECK(dwal_db.root(1).rw_layer->map.get("root1_key") != nullptr);
 
    // Root 0 shouldn't have root 1's key and vice versa.
-   CHECK(dwal_db.root(0).rw_layer->map.find("root1_key") ==
-         dwal_db.root(0).rw_layer->map.end());
-   CHECK(dwal_db.root(1).rw_layer->map.find("root0_key") ==
-         dwal_db.root(1).rw_layer->map.end());
+   CHECK(dwal_db.root(0).rw_layer->map.get("root1_key") == nullptr);
+   CHECK(dwal_db.root(1).rw_layer->map.get("root0_key") == nullptr);
 }
 
 TEST_CASE("dwal_database swap_rw_to_ro", "[dwal]")
@@ -985,7 +981,7 @@ TEST_CASE("dwal_database swap_rw_to_ro", "[dwal]")
    auto& root = dwal_db.root(0);
 
    // RW has the data, buffered is null.
-   CHECK(root.rw_layer->map.find("pre_swap") != root.rw_layer->map.end());
+   CHECK(root.rw_layer->map.get("pre_swap") != nullptr);
    CHECK(root.buffered_ptr == nullptr);
 
    // Perform swap.
@@ -995,8 +991,8 @@ TEST_CASE("dwal_database swap_rw_to_ro", "[dwal]")
    CHECK(root.rw_layer->map.empty());
    auto ro = root.buffered_ptr;
    REQUIRE(ro != nullptr);
-   CHECK(ro->map.find("pre_swap") != ro->map.end());
-   CHECK(ro->map.find("pre_swap")->second.data == "data");
+   CHECK(ro->map.get("pre_swap") != nullptr);
+   CHECK(ro->map.get("pre_swap")->data == "data");
 
    // Clean up: simulate merge complete by clearing the buffered ptr.
    {

@@ -82,12 +82,12 @@ namespace psitri::dwal
       // Latest/buffered: search cached DWAL snapshot first.
       if (cache.snapshot)
       {
-         auto it = cache.snapshot->map.find(key);
-         if (it != cache.snapshot->map.end())
+         auto* v = cache.snapshot->map.get(key);
+         if (v)
          {
-            if (it->second.is_tombstone())
+            if (v->is_tombstone())
                return {false, {}};
-            return {true, std::string(it->second.data)};
+            return {true, std::string(v->data)};
          }
          if (cache.snapshot->tombstones.is_deleted(key))
             return {false, {}};

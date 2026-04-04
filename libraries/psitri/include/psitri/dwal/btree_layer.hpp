@@ -1,5 +1,5 @@
 #pragma once
-#include <absl/container/btree_map.h>
+#include <art/art_map.hpp>
 #include <psitri/dwal/btree_value.hpp>
 #include <psitri/dwal/range_tombstone_list.hpp>
 
@@ -10,24 +10,22 @@
 
 namespace psitri::dwal
 {
-   /// A btree layer: map + range tombstones + bump allocator pool.
+   /// A btree layer: ART map + range tombstones + bump allocator pool.
    ///
-   /// Keys are std::pmr::string backed by the pool — short keys (≤22 bytes)
-   /// stay inline in the btree node via SSO, avoiding pointer chases during
-   /// comparisons. The btree's own node allocations also come from the pool.
-   /// The entire pool is freed as a unit when the layer is discarded.
+   /// Keys are stored in the ART arena. Value data (string_view payloads)
+   /// is stored in the PMR pool for stable pointers. The pool is freed
+   /// as a unit when the layer is discarded.
    struct btree_layer
    {
-      using pmr_alloc = std::pmr::polymorphic_allocator<
-          std::pair<const std::pmr::string, btree_value>>;
-      using map_type = absl::btree_map<std::pmr::string, btree_value, std::less<>, pmr_alloc>;
+      using map_type = art::art_map<btree_value>;
+      using iterator = map_type::iterator;
 
       std::pmr::monotonic_buffer_resource pool;
       map_type                            map;
       range_tombstone_list                tombstones;
       uint32_t                            generation = 0;
 
-      btree_layer() : map(pmr_alloc(&pool))
+      btree_layer() : map(1u << 20)
       {
          tombstones.set_copy_fn(
              [](void* ctx, std::string_view src) -> std::string_view
@@ -54,30 +52,24 @@ namespace psitri::dwal
          return {buf, src.size()};
       }
 
-      /// Create a pmr::string key backed by our pool.
-      std::pmr::string make_key(std::string_view src)
-      {
-         return std::pmr::string(src, &pool);
-      }
-
       /// Store a key/data-value pair into the map.
-      /// Key uses pmr::string (SSO for short keys), value data copied to pool.
+      /// Value data is copied to the pool for stable pointers.
       void store_data(std::string_view key, std::string_view value)
       {
          auto pool_val = store_string(value);
-         map.insert_or_assign(make_key(key), btree_value::make_data(pool_val));
+         map.upsert(key, btree_value::make_data(pool_val));
       }
 
       /// Store a key/subtree pair.
       void store_subtree(std::string_view key, sal::ptr_address addr)
       {
-         map.insert_or_assign(make_key(key), btree_value::make_subtree(addr));
+         map.upsert(key, btree_value::make_subtree(addr));
       }
 
       /// Store a tombstone for a key.
       void store_tombstone(std::string_view key)
       {
-         map.insert_or_assign(make_key(key), btree_value::make_tombstone());
+         map.upsert(key, btree_value::make_tombstone());
       }
 
       /// Number of entries (including tombstones).

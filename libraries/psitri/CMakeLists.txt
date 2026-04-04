@@ -20,5 +20,4 @@ target_include_directories( psitri
 # Define XXH_INLINE_ALL to use xxhash as header-only
 target_compile_definitions(psitri PUBLIC XXH_INLINE_ALL)
 
-target_link_libraries( psitri PUBLIC sal hash ucc
-    PRIVATE $<BUILD_INTERFACE:absl::btree>)
+target_link_libraries( psitri PUBLIC sal hash ucc art)

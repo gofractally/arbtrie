@@ -48,15 +48,15 @@ namespace psitri::dwal
       // Position all sources at their last element, then merge backward.
       if (_rw)
       {
-         _rw_it  = _rw->map.end();
          _rw_end = _rw->map.end();
+         _rw_it  = _rw_end;
          if (!_rw->map.empty())
             --_rw_it;  // point at last element
       }
       if (_ro)
       {
-         _ro_it  = _ro->map.end();
          _ro_end = _ro->map.end();
+         _ro_it  = _ro_end;
          if (!_ro->map.empty())
             --_ro_it;
       }
@@ -137,11 +137,11 @@ namespace psitri::dwal
       std::string_view cur = _current_key;
 
       // Advance RW past current key.
-      if (_rw && _rw_it != _rw_end && _rw_it->first == cur)
+      if (_rw && _rw_it != _rw_end && _rw_it.key() == cur)
          ++_rw_it;
 
       // Advance RO past current key.
-      if (_ro && _ro_it != _ro_end && _ro_it->first == cur)
+      if (_ro && _ro_it != _ro_end && _ro_it.key() == cur)
          ++_ro_it;
 
       // Advance Tri past current key.
@@ -162,26 +162,13 @@ namespace psitri::dwal
       // Retreat RW.
       if (_rw)
       {
-         if (_rw_it == _rw->map.begin())
-            _rw_it = _rw_end;  // signal: exhausted backward
-         else
+         if (_rw_it != _rw_end)
          {
-            // We need to go to the element before current.
-            // If _rw_it points at current key or beyond, back up.
-            if (_rw_it == _rw_end || _rw_it->first >= cur)
+            if (_rw_it.key() >= cur)
             {
-               if (_rw_it == _rw->map.begin())
-                  _rw_it = _rw_end;
-               else
+               --_rw_it;
+               if (_rw_it != _rw_end && _rw_it.key() == cur)
                   --_rw_it;
-               // If we're now AT cur, back up once more.
-               if (_rw_it != _rw_end && _rw_it->first == cur)
-               {
-                  if (_rw_it == _rw->map.begin())
-                     _rw_it = _rw_end;
-                  else
-                     --_rw_it;
-               }
             }
          }
       }
@@ -189,23 +176,13 @@ namespace psitri::dwal
       // Retreat RO (same logic).
       if (_ro)
       {
-         if (_ro_it == _ro->map.begin())
-            _ro_it = _ro_end;
-         else
+         if (_ro_it != _ro_end)
          {
-            if (_ro_it == _ro_end || _ro_it->first >= cur)
+            if (_ro_it.key() >= cur)
             {
-               if (_ro_it == _ro->map.begin())
-                  _ro_it = _ro_end;
-               else
+               --_ro_it;
+               if (_ro_it != _ro_end && _ro_it.key() == cur)
                   --_ro_it;
-               if (_ro_it != _ro_end && _ro_it->first == cur)
-               {
-                  if (_ro_it == _ro->map.begin())
-                     _ro_it = _ro_end;
-                  else
-                     --_ro_it;
-               }
             }
          }
       }
@@ -229,8 +206,8 @@ namespace psitri::dwal
       if (!_rw)
          return false;
       // Check point tombstone.
-      auto it = _rw->map.find(k);
-      if (it != _rw->map.end() && it->second.is_tombstone())
+      auto* v = _rw->map.get(k);
+      if (v && v->is_tombstone())
          return true;
       // Check range tombstone.
       return _rw->tombstones.is_deleted(k);
@@ -240,15 +217,15 @@ namespace psitri::dwal
    {
       if (!_ro)
          return false;
-      auto it = _ro->map.find(k);
-      if (it != _ro->map.end() && it->second.is_tombstone())
+      auto* v = _ro->map.get(k);
+      if (v && v->is_tombstone())
          return true;
       return _ro->tombstones.is_deleted(k);
    }
 
    void merge_cursor::skip_ro_past(std::string_view k)
    {
-      if (_ro && _ro_it != _ro_end && _ro_it->first == k)
+      if (_ro && _ro_it != _ro_end && _ro_it.key() == k)
          ++_ro_it;
    }
 
@@ -281,14 +258,14 @@ namespace psitri::dwal
 
          if (have_rw)
          {
-            min_key = _rw_it->first;
+            min_key = _rw_it.key();
             min_src = source::rw;
          }
          if (have_ro)
          {
-            if (min_src == source::none || _ro_it->first < min_key)
+            if (min_src == source::none || _ro_it.key() < min_key)
             {
-               min_key = _ro_it->first;
+               min_key = _ro_it.key();
                min_src = source::ro;
             }
          }
@@ -307,9 +284,9 @@ namespace psitri::dwal
          btree_value winner_val;
 
          // Check RW at this key.
-         if (have_rw && _rw_it->first == min_key)
+         if (have_rw && _rw_it.key() == min_key)
          {
-            if (_rw_it->second.is_tombstone())
+            if (_rw_it.value().is_tombstone())
             {
                // RW tombstone shadows everything — skip this key in all sources.
                ++_rw_it;
@@ -318,12 +295,12 @@ namespace psitri::dwal
                continue;
             }
             winner     = source::rw;
-            winner_val = _rw_it->second;
+            winner_val = _rw_it.value();
             // Skip duplicates in lower layers.
             skip_ro_past(min_key);
             skip_tri_past(min_key);
          }
-         else if (have_ro && _ro_it->first == min_key)
+         else if (have_ro && _ro_it.key() == min_key)
          {
             // Check if RW range-tombstones this key.
             if (_rw && _rw->tombstones.is_deleted(min_key))
@@ -332,7 +309,7 @@ namespace psitri::dwal
                skip_tri_past(min_key);
                continue;
             }
-            if (_ro_it->second.is_tombstone())
+            if (_ro_it.value().is_tombstone())
             {
                // RO tombstone shadows Tri.
                ++_ro_it;
@@ -340,7 +317,7 @@ namespace psitri::dwal
                continue;
             }
             winner     = source::ro;
-            winner_val = _ro_it->second;
+            winner_val = _ro_it.value();
             skip_tri_past(min_key);
          }
          else
@@ -387,14 +364,14 @@ namespace psitri::dwal
 
          if (have_rw)
          {
-            max_key = _rw_it->first;
+            max_key = _rw_it.key();
             max_src = source::rw;
          }
          if (have_ro)
          {
-            if (max_src == source::none || _ro_it->first > max_key)
+            if (max_src == source::none || _ro_it.key() > max_key)
             {
-               max_key = _ro_it->first;
+               max_key = _ro_it.key();
                max_src = source::ro;
             }
          }
@@ -412,65 +389,46 @@ namespace psitri::dwal
          btree_value winner_val;
 
          // Check if RW has this key.
-         if (have_rw && _rw_it->first == max_key)
+         if (have_rw && _rw_it.key() == max_key)
          {
-            if (_rw_it->second.is_tombstone())
+            if (_rw_it.value().is_tombstone())
             {
                // Skip — move all sources past this key backward.
-               if (_rw_it == _rw->map.begin())
-                  _rw_it = _rw_end;
-               else
-                  --_rw_it;
+               --_rw_it;
                // Move RO backward past this key.
-               if (have_ro && _ro_it->first == max_key)
-               {
-                  if (_ro_it == _ro->map.begin())
-                     _ro_it = _ro_end;
-                  else
-                     --_ro_it;
-               }
+               if (have_ro && _ro_it.key() == max_key)
+                  --_ro_it;
                // Move Tri backward past this key.
                if (have_tri && _tri->key() == max_key)
                   _tri->prev();
                continue;
             }
             winner     = source::rw;
-            winner_val = _rw_it->second;
+            winner_val = _rw_it.value();
             // Skip duplicates in lower layers backward.
-            if (have_ro && _ro_it->first == max_key)
-            {
-               if (_ro_it == _ro->map.begin())
-                  _ro_it = _ro_end;
-               else
-                  --_ro_it;
-            }
+            if (have_ro && _ro_it.key() == max_key)
+               --_ro_it;
             if (have_tri && _tri->key() == max_key)
                _tri->prev();
          }
-         else if (have_ro && _ro_it->first == max_key)
+         else if (have_ro && _ro_it.key() == max_key)
          {
             if (_rw && _rw->tombstones.is_deleted(max_key))
             {
-               if (_ro_it == _ro->map.begin())
-                  _ro_it = _ro_end;
-               else
-                  --_ro_it;
+               --_ro_it;
                if (have_tri && _tri->key() == max_key)
                   _tri->prev();
                continue;
             }
-            if (_ro_it->second.is_tombstone())
+            if (_ro_it.value().is_tombstone())
             {
-               if (_ro_it == _ro->map.begin())
-                  _ro_it = _ro_end;
-               else
-                  --_ro_it;
+               --_ro_it;
                if (have_tri && _tri->key() == max_key)
                   _tri->prev();
                continue;
             }
             winner     = source::ro;
-            winner_val = _ro_it->second;
+            winner_val = _ro_it.value();
             if (have_tri && _tri->key() == max_key)
                _tri->prev();
          }

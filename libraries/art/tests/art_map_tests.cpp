@@ -644,3 +644,196 @@ TEST_CASE("art_map insert-erase-reinsert same key", "[art_map]")
    REQUIRE(*m.get("key") == 999);
    REQUIRE(m.size() == 1);
 }
+
+TEST_CASE("art_map backward iteration (operator--)", "[art_map]")
+{
+   art_map<uint64_t> m;
+   m.upsert("apple", 1);
+   m.upsert("banana", 2);
+   m.upsert("cherry", 3);
+   m.upsert("date", 4);
+   m.upsert("elderberry", 5);
+
+   // -- from end() should reach last element
+   auto it = m.end();
+   --it;
+   REQUIRE(it != m.end());
+   REQUIRE(it.key() == "elderberry");
+
+   --it;
+   REQUIRE(it.key() == "date");
+   --it;
+   REQUIRE(it.key() == "cherry");
+   --it;
+   REQUIRE(it.key() == "banana");
+   --it;
+   REQUIRE(it.key() == "apple");
+
+   // -- from first element should become end()
+   --it;
+   REQUIRE(it == m.end());
+}
+
+TEST_CASE("art_map backward iteration with prefix keys", "[art_map]")
+{
+   art_map<uint64_t> m;
+   m.upsert("a", 1);
+   m.upsert("ab", 2);
+   m.upsert("abc", 3);
+   m.upsert("b", 4);
+
+   auto it = m.end();
+   --it;
+   REQUIRE(it.key() == "b");
+   --it;
+   REQUIRE(it.key() == "abc");
+   --it;
+   REQUIRE(it.key() == "ab");
+   --it;
+   REQUIRE(it.key() == "a");
+   --it;
+   REQUIRE(it == m.end());
+}
+
+TEST_CASE("art_map backward iteration large", "[art_map]")
+{
+   art_map<uint64_t>              m;
+   std::map<std::string, uint64_t> reference;
+
+   std::mt19937 rng(77);
+   for (int i = 0; i < 1000; ++i)
+   {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "/path/%08x", (unsigned)rng());
+      std::string key(buf);
+      m.upsert(key, i);
+      reference[key] = i;
+   }
+
+   // Forward then backward should yield same keys in reverse
+   auto rit = reference.end();
+   auto ait = m.end();
+   while (rit != reference.begin())
+   {
+      --rit;
+      --ait;
+      REQUIRE(ait != m.end());
+      REQUIRE(ait.key() == rit->first);
+   }
+   // ait should now be at begin
+   --ait;
+   REQUIRE(ait == m.end());
+}
+
+TEST_CASE("art_map -- from lower_bound position", "[art_map]")
+{
+   art_map<uint64_t> m;
+   m.upsert("apple", 1);
+   m.upsert("banana", 2);
+   m.upsert("cherry", 3);
+   m.upsert("date", 4);
+
+   auto it = m.lower_bound("cherry");
+   REQUIRE(it.key() == "cherry");
+   --it;
+   REQUIRE(it.key() == "banana");
+   --it;
+   REQUIRE(it.key() == "apple");
+   --it;
+   REQUIRE(it == m.end());
+}
+
+TEST_CASE("art_map upper_bound", "[art_map]")
+{
+   art_map<uint64_t> m;
+   m.upsert("apple", 1);
+   m.upsert("banana", 2);
+   m.upsert("cherry", 3);
+   m.upsert("date", 4);
+
+   // Exact match — should return next key
+   auto it = m.upper_bound("banana");
+   REQUIRE(it != m.end());
+   REQUIRE(it.key() == "cherry");
+
+   // No exact match — same as lower_bound
+   it = m.upper_bound("blueberry");
+   REQUIRE(it != m.end());
+   REQUIRE(it.key() == "cherry");
+
+   // Upper bound of last key — end
+   it = m.upper_bound("date");
+   REQUIRE(it == m.end());
+
+   // Upper bound past all keys — end
+   it = m.upper_bound("zebra");
+   REQUIRE(it == m.end());
+
+   // Upper bound before all keys — first key
+   it = m.upper_bound("aaa");
+   REQUIRE(it != m.end());
+   REQUIRE(it.key() == "apple");
+}
+
+TEST_CASE("art_map const access", "[art_map]")
+{
+   art_map<uint64_t> m;
+   m.upsert("a", 1);
+   m.upsert("b", 2);
+   m.upsert("c", 3);
+
+   const auto& cm = m;
+
+   // const get
+   REQUIRE(cm.get("a") != nullptr);
+   REQUIRE(*cm.get("a") == 1);
+   REQUIRE(cm.get("z") == nullptr);
+
+   // const find
+   auto it = cm.find("b");
+   REQUIRE(it != cm.end());
+   REQUIRE(it.key() == "b");
+   REQUIRE(it.value() == 2);
+
+   // const lower_bound
+   it = cm.lower_bound("b");
+   REQUIRE(it.key() == "b");
+
+   // const upper_bound
+   it = cm.upper_bound("b");
+   REQUIRE(it.key() == "c");
+
+   // const begin/end iteration
+   it = cm.begin();
+   REQUIRE(it.key() == "a");
+   ++it;
+   REQUIRE(it.key() == "b");
+
+   // const size/empty
+   REQUIRE(cm.size() == 3);
+   REQUIRE(!cm.empty());
+}
+
+TEST_CASE("art_map backward iteration with node256", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Insert enough single-byte keys to force node256
+   for (int i = 0; i < 100; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(std::string_view(&c, 1), i);
+   }
+
+   // Backward iteration should yield keys in reverse order
+   auto it = m.end();
+   for (int i = 99; i >= 0; --i)
+   {
+      --it;
+      REQUIRE(it != m.end());
+      char c = static_cast<char>(i);
+      REQUIRE(it.key() == std::string_view(&c, 1));
+   }
+   --it;
+   REQUIRE(it == m.end());
+}

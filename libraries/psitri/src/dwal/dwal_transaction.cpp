@@ -3,7 +3,9 @@
 #include <psitri/dwal/dwal_database.hpp>
 
 #include <cassert>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace psitri::dwal
 {
@@ -78,10 +80,6 @@ namespace psitri::dwal
 
       record_undo_for_remove(key);
 
-      // Split any range tombstone covering this key (if we're re-inserting
-      // a tombstone for a specific key, the range must be split).
-      // Actually for remove, we ADD a tombstone, so no split needed.
-
       _root->rw_layer->store_tombstone(key);
 
       if (!_nested && _wal)
@@ -99,20 +97,22 @@ namespace psitri::dwal
       // Collect buffered entries in [low, high) for undo.
       std::vector<undo_entry::range_data::buffered_entry> buffered;
       {
-         auto it  = layer.map.lower_bound(low);
-         auto end = layer.map.lower_bound(high);
-         for (; it != end; ++it)
+         auto it = layer.map.lower_bound(low);
+         for (; it != layer.map.end() && it.key() < high; ++it)
          {
-            if (!it->second.is_tombstone())
-               buffered.push_back({it->first, it->second});
+            if (!it.value().is_tombstone())
+               buffered.push_back({std::string_view(it.key()), it.value()});
          }
       }
 
-      // Erase buffered entries in range from the map.
+      // Collect keys to erase, then erase them (can't erase while iterating).
       {
-         auto it  = layer.map.lower_bound(low);
-         auto end = layer.map.lower_bound(high);
-         layer.map.erase(it, end);
+         std::vector<std::string> keys_to_erase;
+         auto it = layer.map.lower_bound(low);
+         for (; it != layer.map.end() && it.key() < high; ++it)
+            keys_to_erase.emplace_back(it.key());
+         for (auto& k : keys_to_erase)
+            layer.map.erase(k);
       }
 
       // Add range tombstone.
@@ -133,12 +133,12 @@ namespace psitri::dwal
 
       // Layer 1: RW btree
       {
-         auto it = _root->rw_layer->map.find(key);
-         if (it != _root->rw_layer->map.end())
+         auto* v = _root->rw_layer->map.get(key);
+         if (v)
          {
-            if (it->second.is_tombstone())
+            if (v->is_tombstone())
                return {false, {}};
-            return {true, it->second};
+            return {true, *v};
          }
          if (_root->rw_layer->tombstones.is_deleted(key))
             return {false, {}};
@@ -168,12 +168,12 @@ namespace psitri::dwal
       if (!ro)
          return {false, {}};
 
-      auto it = ro->map.find(key);
-      if (it != ro->map.end())
+      auto* v = ro->map.get(key);
+      if (v)
       {
-         if (it->second.is_tombstone())
+         if (v->is_tombstone())
             return {false, btree_value::make_tombstone()};
-         return {true, it->second};
+         return {true, *v};
       }
       if (ro->tombstones.is_deleted(key))
          return {false, btree_value::make_tombstone()};
@@ -193,11 +193,6 @@ namespace psitri::dwal
          // Write WAL entry for the outermost transaction.
          if (_wal)
             _wal->commit_entry();
-
-         // Release old subtree refs from overwritten/erased entries.
-         // (In a real implementation, these would call allocator::release.)
-         // For now, collect them for the caller to handle.
-         // _undo.release_old_subtrees([](sal::ptr_address addr) { ... });
 
          _undo.discard();
 
@@ -239,8 +234,7 @@ namespace psitri::dwal
 
                    case undo_entry::kind::overwrite_buffered:
                    case undo_entry::kind::erase_buffered:
-                      layer.map.insert_or_assign(
-                          layer.store_string(entry.key), entry.old_value);
+                      layer.map.upsert(entry.key, entry.old_value);
                       break;
 
                    case undo_entry::kind::erase_range:
@@ -249,8 +243,7 @@ namespace psitri::dwal
                          layer.tombstones.remove(entry.range->low, entry.range->high);
                          for (const auto& be : entry.range->buffered_keys)
                          {
-                            layer.map.insert_or_assign(
-                                layer.store_string(be.key), be.old_value);
+                            layer.map.upsert(be.key, be.old_value);
                          }
                       }
                       break;
@@ -274,8 +267,7 @@ namespace psitri::dwal
 
                    case undo_entry::kind::overwrite_buffered:
                    case undo_entry::kind::erase_buffered:
-                      layer.map.insert_or_assign(
-                          layer.store_string(entry.key), entry.old_value);
+                      layer.map.upsert(entry.key, entry.old_value);
                       break;
 
                    case undo_entry::kind::erase_range:
@@ -284,8 +276,7 @@ namespace psitri::dwal
                          layer.tombstones.remove(entry.range->low, entry.range->high);
                          for (const auto& be : entry.range->buffered_keys)
                          {
-                            layer.map.insert_or_assign(
-                                layer.store_string(be.key), be.old_value);
+                            layer.map.upsert(be.key, be.old_value);
                          }
                       }
                       break;
@@ -305,12 +296,12 @@ namespace psitri::dwal
    void dwal_transaction::record_undo_for_upsert(std::string_view key)
    {
       auto& layer = *_root->rw_layer;
-      auto  it    = layer.map.find(key);
+      auto* v     = layer.map.get(key);
 
-      if (it != layer.map.end())
+      if (v)
       {
          // Key exists in RW btree — overwrite_buffered.
-         _undo.record_overwrite_buffered(key, it->second);
+         _undo.record_overwrite_buffered(key, *v);
       }
       else
       {
@@ -323,9 +314,6 @@ namespace psitri::dwal
          }
          else
          {
-            // Key doesn't exist anywhere (or we assume it doesn't
-            // without checking PsiTri — conservative: treat as insert).
-            // TODO: Check PsiTri for exact classification.
             _undo.record_insert(key);
          }
       }
@@ -334,12 +322,12 @@ namespace psitri::dwal
    void dwal_transaction::record_undo_for_remove(std::string_view key)
    {
       auto& layer = *_root->rw_layer;
-      auto  it    = layer.map.find(key);
+      auto* v     = layer.map.get(key);
 
-      if (it != layer.map.end() && !it->second.is_tombstone())
+      if (v && !v->is_tombstone())
       {
          // Key exists in RW btree — erase_buffered.
-         _undo.record_erase_buffered(key, it->second);
+         _undo.record_erase_buffered(key, *v);
       }
       else
       {

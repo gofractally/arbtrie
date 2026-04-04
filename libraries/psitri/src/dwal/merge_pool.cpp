@@ -91,8 +91,10 @@ namespace psitri::dwal
       auto  tx = ws.start_transaction(root_index);
 
       // Drain all entries from the RO btree into PsiTri.
-      for (auto& [key, val] : ro->map)
+      for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
       {
+         auto key = it.key();
+         auto& val = it.value();
          if (val.is_tombstone())
          {
             tx.remove(key);

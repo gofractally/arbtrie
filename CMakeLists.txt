@@ -148,7 +148,7 @@ if(BUILD_TESTS)
     enable_testing()
 endif()
 
-# Abseil (needed by psitri DWAL layer for absl::btree_map)
+# Abseil (needed by cow-amort-bench for btree_map comparison)
 include(FetchContent)
 FetchContent_Declare(
     abseil
@@ -331,7 +331,7 @@ set_target_properties(psitri-benchmark
 
 # DWAL benchmark (DWAL buffered vs direct COW)
 add_executable(dwal-bench programs/dwal_bench.cpp)
-target_link_libraries(dwal-bench PRIVATE psitri absl::btree)
+target_link_libraries(dwal-bench PRIVATE psitri)
 target_include_directories(dwal-bench PRIVATE ${CMAKE_SOURCE_DIR}/programs)
 set_target_properties(dwal-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -598,7 +598,7 @@ set_target_properties(bank-bench-psitri PROPERTIES
 # PsiTri DWAL bank bench (always available)
 add_executable(bank-bench-dwal programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-dwal PRIVATE BANK_ENGINE_DWAL=1)
-target_link_libraries(bank-bench-dwal PRIVATE psitri absl::btree Boost::program_options)
+target_link_libraries(bank-bench-dwal PRIVATE psitri Boost::program_options)
 set_target_properties(bank-bench-dwal PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -663,7 +663,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 # Install psitri and all dependencies as a single package
-install(TARGETS psitri psitrirocks sal hash ucc
+install(TARGETS psitri psitrirocks sal hash ucc art
     EXPORT psitri-targets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
