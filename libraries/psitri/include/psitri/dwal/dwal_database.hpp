@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/dwal/dwal_read_session.hpp>
 #include <psitri/dwal/dwal_root.hpp>
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/epoch_lock.hpp>
@@ -43,7 +44,7 @@ namespace psitri::dwal
    /// for amortized COW cost.
    ///
    /// Each root (0-511) has independent state: its own btree, WAL file, undo log,
-   /// shared_mutex, and RO slot. Operations on different roots never contend.
+   /// mutex, and RO slot. Operations on different roots never contend.
    class dwal_database
    {
      public:
@@ -67,17 +68,25 @@ namespace psitri::dwal
 
       // ── Read Access ───────────────────────────────────────────────
 
-      /// Get a value from a root using layered lookup.
-      /// For read_mode::persistent, this bypasses DWAL entirely.
-      /// For read_mode::latest, acquires shared lock on the root.
+      /// Create a read session with cached snapshots.
+      /// One per reader thread. The session caches DWAL snapshots and PsiTri
+      /// cursors, refreshing only when the generation changes (after a swap).
+      dwal_read_session start_read_session() { return dwal_read_session(*this); }
+
+      /// Single-shot layered lookup (no caching — acquires mutex per call).
+      /// Prefer start_read_session() for repeated reads.
       dwal_transaction::lookup_result get(uint32_t         root_index,
                                           std::string_view key,
                                           read_mode        mode = read_mode::persistent);
 
       // ── Flush & Swap ──────────────────────────────────────────────
 
-      /// Force a swap of the RW btree for a specific root.
-      /// The caller must hold the exclusive lock (or call from within a tx).
+      /// Try to swap the RW btree to RO for a specific root.
+      /// Only succeeds if the merge thread has completed (merge_complete == true).
+      /// The caller must hold the exclusive rw_mutex lock.
+      void try_swap_rw_to_ro(uint32_t root_index);
+
+      /// Legacy entry point — delegates to try_swap_rw_to_ro.
       void swap_rw_to_ro(uint32_t root_index);
 
       /// Flush all dirty WAL files to disk (fsync).

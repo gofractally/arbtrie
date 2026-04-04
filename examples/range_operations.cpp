@@ -48,7 +48,7 @@ int main()
    }
 
    // Verify the count dropped
-   cursor = rs->create_cursor(0);
+   cursor.refresh(0);
    std::cout << "Total after removal:     " << cursor.count_keys() << "\n";
 
    std::filesystem::remove_all(dir);

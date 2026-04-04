@@ -17,7 +17,7 @@ namespace psitri::dwal
          _db(db),
          _root_index(root_index),
          _nested(nested),
-         _owns_lock(!nested)  // outer tx owns the lock
+         _owns_lock(false)  // no longer used — single writer, no mutex
    {
       _undo.push_frame();
 
@@ -159,7 +159,11 @@ namespace psitri::dwal
 
    dwal_transaction::lookup_result dwal_transaction::ro_get(std::string_view key) const
    {
-      auto* ro = _root->ro_ptr.load(std::memory_order_acquire);
+      std::shared_ptr<btree_layer> ro;
+      {
+         std::shared_lock lk(_root->buffered_mutex);
+         ro = _root->buffered_ptr;
+      }
       if (!ro)
          return {false, {}};
 
@@ -196,14 +200,10 @@ namespace psitri::dwal
 
          _undo.discard();
 
-         // Auto-swap: if the RW btree is full, freeze it to RO and signal merge.
-         // We still hold the exclusive lock, so swap is safe.
-         if (_db && _db->should_swap(_root_index))
-            _db->swap_rw_to_ro(_root_index);
-
-         // Release the exclusive lock.
-         if (_owns_lock)
-            _root->rw_mutex.unlock();
+         // If the merge thread has finished and the RW btree is large enough, swap.
+         if (_db && _root->merge_complete.load(std::memory_order_acquire)
+             && _db->should_swap(_root_index))
+            _db->try_swap_rw_to_ro(_root_index);
       }
       else
       {
@@ -233,13 +233,11 @@ namespace psitri::dwal
                    case undo_entry::kind::insert:
                    case undo_entry::kind::overwrite_cow:
                    case undo_entry::kind::erase_cow:
-                      // Erase the entry — reads fall through to lower layers.
                       layer.map.erase(entry.key);
                       break;
 
                    case undo_entry::kind::overwrite_buffered:
                    case undo_entry::kind::erase_buffered:
-                      // Restore the old value.
                       layer.map.insert_or_assign(
                           layer.store_string(entry.key), entry.old_value);
                       break;
@@ -247,10 +245,7 @@ namespace psitri::dwal
                    case undo_entry::kind::erase_range:
                       if (entry.range)
                       {
-                         // Remove the range tombstone.
                          layer.tombstones.remove(entry.range->low, entry.range->high);
-
-                         // Restore buffered entries.
                          for (const auto& be : entry.range->buffered_keys)
                          {
                             layer.map.insert_or_assign(
@@ -260,10 +255,6 @@ namespace psitri::dwal
                       break;
                 }
              });
-
-         // Release the exclusive lock.
-         if (_owns_lock)
-            _root->rw_mutex.unlock();
       }
       else
       {

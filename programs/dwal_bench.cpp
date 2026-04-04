@@ -18,6 +18,27 @@
 
 using namespace psitri;
 
+/// Sum the size of all files in a directory (non-recursive for speed).
+static uint64_t dir_size_bytes(const std::filesystem::path& dir)
+{
+   uint64_t total = 0;
+   std::error_code ec;
+   for (auto& entry : std::filesystem::recursive_directory_iterator(dir, ec))
+   {
+      if (entry.is_regular_file(ec))
+         total += entry.file_size(ec);
+   }
+   return total;
+}
+
+static std::string format_size_mb(uint64_t bytes)
+{
+   double mb = bytes / (1024.0 * 1024.0);
+   char buf[32];
+   snprintf(buf, sizeof(buf), "%.1fMB", mb);
+   return buf;
+}
+
 int64_t rand_from_seq(uint64_t seq)
 {
    return XXH3_64bits((char*)&seq, sizeof(seq));
@@ -164,9 +185,13 @@ void write_only_bench(bench_config cfg, const std::filesystem::path& db_dir)
       auto   end  = std::chrono::steady_clock::now();
       double secs = std::chrono::duration<double>(end - start).count();
       auto   ips  = uint64_t(inserted / secs);
+      auto db_bytes = dir_size_bytes(db_dir);
       std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
                 << format_comma(seq) << "  " << std::setw(12) << std::right << format_comma(ips)
-                << "  upserts/sec" << std::endl;
+                << "  upserts/sec  db=" << format_size_mb(db_bytes)
+                << "  alloc=" << format_comma(ws->get_total_allocated_objects())
+                << "  pending=" << format_comma(ws->get_pending_release_count())
+                << std::endl;
    }
 
    auto   overall_end  = std::chrono::steady_clock::now();
@@ -179,12 +204,11 @@ void write_only_bench(bench_config cfg, const std::filesystem::path& db_dir)
 
 // ── Write + Concurrent Read benchmark ───────────────────────────
 //
-// For DWAL mode, launches 3 groups of reader threads:
-//   - persistent: read from PsiTri only (merged data)
-//   - buffered:   read from RO + PsiTri
-//   - latest:     read from RW + RO + PsiTri
+// Runs each read mode as a separate sequential phase so they don't
+// interfere with each other. Each phase: writer + N readers of one mode.
 //
-// For direct COW mode, all readers use PsiTri cursors (persistent).
+// For DWAL: 3 phases (persistent, buffered, latest).
+// For direct COW: 1 phase (persistent via PsiTri cursor).
 
 void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
 {
@@ -192,13 +216,13 @@ void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
 
    std::string mode_label = cfg.use_dwal ? "DWAL buffered" : "direct COW";
    std::cout << "═══════════════════════════════════════════════════════════════\n";
-   std::cout << "  " << mode_label << " write + concurrent reads\n";
+   std::cout << "  " << mode_label << " write + concurrent reads (sequential phases)\n";
    std::cout << "  rounds=" << cfg.rounds << " items=" << format_comma(cfg.items)
              << " batch=" << cfg.batch_size << " val_size=" << cfg.value_size << "\n";
    if (cfg.use_dwal)
       std::cout << "  merge_threads=" << cfg.merge_threads
                 << " max_rw_entries=" << format_comma(cfg.max_rw_entries) << "\n";
-   std::cout << "  readers per mode: " << cfg.readers << "\n";
+   std::cout << "  readers per phase: " << cfg.readers << "\n";
    std::cout << "═══════════════════════════════════════════════════════════════\n";
 
    std::unique_ptr<dwal::dwal_database> dwal_db;
@@ -213,12 +237,12 @@ void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
    auto ws = db->start_write_session();
 
    // Seed with initial data so readers have something to hit immediately.
+   auto rand_key = [](uint64_t s, std::vector<char>& v) { to_key(rand_from_seq(s), v); };
+   uint64_t seq = 0;
    {
-      auto     rand_key = [](uint64_t s, std::vector<char>& v) { to_key(rand_from_seq(s), v); };
       std::vector<char> key;
       uint32_t seeded = 0;
-      uint64_t seq    = 0;
-      uint32_t seed_count = std::min(cfg.items, uint32_t(100000));  // seed 100K keys
+      uint32_t seed_count = std::min(cfg.items, uint32_t(100000));
       if (cfg.use_dwal)
       {
          while (seeded < seed_count)
@@ -236,7 +260,6 @@ void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
             }
             tx.commit();
          }
-         // Force a swap so data reaches RO/PsiTri for buffered/persistent readers.
          dwal_db->swap_rw_to_ro(0);
       }
       else
@@ -255,194 +278,187 @@ void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
             tx.commit();
          }
       }
-      std::cout << "seeded " << format_comma(seed_count) << " keys\n";
+      std::cout << "seeded " << format_comma(seq) << " keys\n";
    }
 
-   std::atomic<uint64_t> committed_seq{100000};
-   std::atomic<bool>     done{false};
+   // Read modes to test sequentially.
+   uint32_t    num_phases = cfg.use_dwal ? 3 : 1;
+   const char* phase_names[] = {"persistent", "buffered", "latest"};
+   dwal::read_mode phase_modes[] = {
+       dwal::read_mode::persistent, dwal::read_mode::buffered, dwal::read_mode::latest};
 
-   // For DWAL: 3 reader groups (persistent, buffered, latest).
-   // For direct: 1 group (persistent).
-   uint32_t num_groups = cfg.use_dwal ? 3 : 1;
-   const char* group_names[] = {"persistent", "buffered", "latest"};
-
-   // counters[group][thread]
-   std::vector<std::vector<std::unique_ptr<padded_counters>>> counters(num_groups);
-   for (uint32_t g = 0; g < num_groups; ++g)
+   for (uint32_t phase = 0; phase < num_phases && !bench::interrupted(); ++phase)
    {
-      counters[g].reserve(cfg.readers);
+      std::cout << "\n── " << phase_names[phase] << " readers ──\n";
+
+      std::atomic<uint64_t> committed_seq{seq};
+      std::atomic<bool>     done{false};
+
+      // Per-thread counters.
+      std::vector<std::unique_ptr<padded_counters>> counters;
+      counters.reserve(cfg.readers);
       for (uint32_t t = 0; t < cfg.readers; ++t)
-         counters[g].push_back(std::make_unique<padded_counters>());
-   }
+         counters.push_back(std::make_unique<padded_counters>());
 
-   std::vector<std::thread> readers;
-
-   for (uint32_t g = 0; g < num_groups; ++g)
-   {
+      // Launch reader threads.
+      std::vector<std::thread> readers;
       for (uint32_t t = 0; t < cfg.readers; ++t)
       {
          readers.emplace_back(
-             [&, g, t]()
+             [&, t, phase]()
              {
                 sal::set_current_thread_name("reader");
                 std::vector<char> key;
                 int64_t           local_ops   = 0;
                 int64_t           local_found = 0;
-                const uint64_t    salt = rand_from_seq(t * 999983ULL + g * 777773ULL + 1);
+                const uint64_t    salt = rand_from_seq(t * 999983ULL + phase * 777773ULL + 1);
 
-                // All readers need a PsiTri cursor for fallback / persistent reads.
-                auto                       rs  = db->start_read_session();
-                auto                       cur = rs->create_cursor(0);
-                uint32_t refresh = 0;
+                std::optional<dwal::dwal_read_session> dwal_reader;
+                std::shared_ptr<read_session>          tri_rs;
+                psitri::cursor                         tri_cur{sal::smart_ptr<sal::alloc_header>{}};
+
+                if (dwal_db)
+                {
+                   dwal_reader.emplace(*dwal_db);
+                }
+                else
+                {
+                   tri_rs  = db->start_read_session();
+                   tri_cur = tri_rs->create_cursor(0);
+                }
+
+                auto mode = phase_modes[phase];
 
                 while (!done.load(std::memory_order_relaxed) && !bench::interrupted())
                 {
-                   // Refresh PsiTri cursor periodically to pick up new snapshots.
-                   if (++refresh >= 10)
-                   {
-                      cur = rs->create_cursor(0);
-                      refresh = 0;
-                   }
+                   if (!dwal_db && (local_ops % 10000) == 0 && tri_rs)
+                      tri_cur.refresh(0);
 
                    uint64_t max_seq = committed_seq.load(std::memory_order_relaxed);
                    for (uint32_t i = 0; i < 1000; ++i)
                    {
-                      uint64_t seq = rand_from_seq(local_ops + salt) % max_seq;
-                      to_key(rand_from_seq(seq), key);
+                      uint64_t s = rand_from_seq(local_ops + salt) % max_seq;
+                      to_key(rand_from_seq(s), key);
 
                       bool found = false;
-                      if (g == 0)
+                      if (dwal_reader)
                       {
-                         // Persistent: PsiTri cursor only
-                         std::string buf;
-                         found = cur.get(key_view(key.data(), key.size()), &buf) >= 0;
+                         auto result = dwal_reader->get(
+                             0, std::string_view(key.data(), key.size()), mode);
+                         found = result.found;
                       }
                       else
                       {
-                         // Buffered (g==1) or Latest (g==2): DWAL layered read
-                         auto mode = (g == 1) ? dwal::read_mode::buffered
-                                              : dwal::read_mode::latest;
-                         auto result = dwal_db->get(0, std::string_view(key.data(), key.size()),
-                                                    mode);
-                         if (result.found)
-                            found = true;
-                         else
-                         {
-                            // Fall through to PsiTri for keys not in DWAL layers.
-                            std::string buf;
-                            found = cur.get(key_view(key.data(), key.size()), &buf) >= 0;
-                         }
+                         std::string buf;
+                         found = tri_cur.get(key_view(key.data(), key.size()), &buf) >= 0;
                       }
 
                       if (found)
                          ++local_found;
                       ++local_ops;
                    }
-                   counters[g][t]->ops.store(local_ops, std::memory_order_relaxed);
-                   counters[g][t]->found.store(local_found, std::memory_order_relaxed);
+                   counters[t]->ops.store(local_ops, std::memory_order_relaxed);
+                   counters[t]->found.store(local_found, std::memory_order_relaxed);
                 }
              });
       }
-   }
 
-   auto sum_group_ops = [&](uint32_t g) -> int64_t
-   {
-      int64_t total = 0;
-      for (uint32_t i = 0; i < cfg.readers; ++i)
-         total += counters[g][i]->ops.load(std::memory_order_relaxed);
-      return total;
-   };
-
-   auto overall_start = std::chrono::steady_clock::now();
-   auto rand_key = [](uint64_t s, std::vector<char>& v) { to_key(rand_from_seq(s), v); };
-
-   std::vector<char> key;
-   uint64_t          seq = 100000;  // continue after seed
-   std::vector<int64_t> prev_ops(num_groups, 0);
-
-   for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
-   {
-      reshuffle_random_buf();
-      auto     start    = std::chrono::steady_clock::now();
-      uint32_t inserted = 0;
-
-      if (cfg.use_dwal)
+      auto sum_reader_ops = [&]() -> int64_t
       {
-         while (inserted < cfg.items && !bench::interrupted())
+         int64_t total = 0;
+         for (uint32_t i = 0; i < cfg.readers; ++i)
+            total += counters[i]->ops.load(std::memory_order_relaxed);
+         return total;
+      };
+
+      // Writer loop for this phase.
+      std::vector<char> key;
+      uint64_t          phase_start_seq = seq;
+      int64_t           prev_ops        = 0;
+      auto              phase_start     = std::chrono::steady_clock::now();
+
+      for (uint32_t r = 0; r < cfg.rounds && !bench::interrupted(); ++r)
+      {
+         reshuffle_random_buf();
+         auto     start    = std::chrono::steady_clock::now();
+         uint32_t inserted = 0;
+
+         if (cfg.use_dwal)
          {
-            auto     tx    = dwal_db->start_write_transaction(0);
-            uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
-            for (uint32_t i = 0; i < batch; ++i)
+            while (inserted < cfg.items && !bench::interrupted())
             {
-               rand_key(seq, key);
-               tx.upsert(std::string_view(key.data(), key.size()),
-                         std::string_view(random_value(seq, cfg.value_size).data(),
-                                          cfg.value_size));
-               ++seq;
-               ++inserted;
+               auto     tx    = dwal_db->start_write_transaction(0);
+               uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
+               for (uint32_t i = 0; i < batch; ++i)
+               {
+                  rand_key(seq, key);
+                  tx.upsert(std::string_view(key.data(), key.size()),
+                            std::string_view(random_value(seq, cfg.value_size).data(),
+                                             cfg.value_size));
+                  ++seq;
+                  ++inserted;
+               }
+               tx.commit();
+               committed_seq.store(seq, std::memory_order_relaxed);
             }
-            tx.commit();
-            // Update committed_seq after each batch so readers see data immediately.
-            committed_seq.store(seq, std::memory_order_relaxed);
          }
-      }
-      else
-      {
-         while (inserted < cfg.items && !bench::interrupted())
+         else
          {
-            auto     tx    = ws->start_transaction(0);
-            uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
-            for (uint32_t i = 0; i < batch; ++i)
+            while (inserted < cfg.items && !bench::interrupted())
             {
-               rand_key(seq, key);
-               tx.upsert(key_view(key.data(), key.size()), random_value(seq, cfg.value_size));
-               ++seq;
-               ++inserted;
+               auto     tx    = ws->start_transaction(0);
+               uint32_t batch = std::min(cfg.batch_size, cfg.items - inserted);
+               for (uint32_t i = 0; i < batch; ++i)
+               {
+                  rand_key(seq, key);
+                  tx.upsert(key_view(key.data(), key.size()), random_value(seq, cfg.value_size));
+                  ++seq;
+                  ++inserted;
+               }
+               tx.commit();
+               committed_seq.store(seq, std::memory_order_relaxed);
             }
-            tx.commit();
-            committed_seq.store(seq, std::memory_order_relaxed);
          }
-      }
 
-      auto   end  = std::chrono::steady_clock::now();
-      double secs = std::chrono::duration<double>(end - start).count();
-      auto   ips  = uint64_t(inserted / secs);
+         auto   end  = std::chrono::steady_clock::now();
+         double secs = std::chrono::duration<double>(end - start).count();
+         auto   ips  = uint64_t(inserted / secs);
 
-      std::cout << std::setw(4) << std::left << r
-                << " " << std::setw(12) << std::right << format_comma(ips) << "  writes/sec";
-      for (uint32_t g = 0; g < num_groups; ++g)
-      {
-         auto cur      = sum_group_ops(g);
-         auto delta    = cur - prev_ops[g];
+         auto cur_ops  = sum_reader_ops();
+         auto delta    = cur_ops - prev_ops;
          auto rps      = uint64_t(delta / secs);
-         prev_ops[g]   = cur;
-         std::cout << "  " << std::setw(12) << std::right << format_comma(rps)
-                   << "  " << group_names[g] << "/sec";
+         prev_ops      = cur_ops;
+
+         auto db_bytes = dir_size_bytes(db_dir);
+         std::cout << std::setw(4) << std::left << r << " " << std::setw(12) << std::right
+                   << format_comma(ips) << "  writes/sec  " << std::setw(12) << std::right
+                   << format_comma(rps) << "  " << phase_names[phase] << "/sec"
+                   << "  db=" << format_size_mb(db_bytes) << std::endl;
       }
-      std::cout << std::endl;
-   }
 
-   done.store(true, std::memory_order_relaxed);
-   for (auto& t : readers)
-      t.join();
+      done.store(true, std::memory_order_relaxed);
+      for (auto& t : readers)
+         t.join();
 
-   auto   overall_end  = std::chrono::steady_clock::now();
-   double overall_secs = std::chrono::duration<double>(overall_end - overall_start).count();
-   uint64_t written = seq - 100000;
-   std::cout << "───────────────────────────────────────────────────────────────\n";
-   std::cout << "total: " << format_comma(written) << " writes in " << std::fixed
-             << std::setprecision(3) << overall_secs << " sec  ("
-             << format_comma(uint64_t(written / overall_secs)) << " writes/sec)\n";
-   for (uint32_t g = 0; g < num_groups; ++g)
-   {
-      int64_t total_ops   = sum_group_ops(g);
+      auto     phase_end  = std::chrono::steady_clock::now();
+      double   phase_secs = std::chrono::duration<double>(phase_end - phase_start).count();
+      uint64_t written    = seq - phase_start_seq;
+
+      int64_t total_ops   = sum_reader_ops();
       int64_t total_found = 0;
       for (uint32_t i = 0; i < cfg.readers; ++i)
-         total_found += counters[g][i]->found.load(std::memory_order_relaxed);
-      std::cout << "  " << group_names[g] << ": "
-                << format_comma(uint64_t(total_ops / overall_secs)) << " reads/sec  ("
+         total_found += counters[i]->found.load(std::memory_order_relaxed);
+
+      std::cout << "  " << phase_names[phase] << " summary: "
+                << format_comma(uint64_t(written / phase_secs)) << " writes/sec, "
+                << format_comma(uint64_t(total_ops / phase_secs)) << " reads/sec  ("
                 << format_comma(total_found) << " found / " << format_comma(total_ops) << " ops)\n";
    }
+
+   auto db_bytes = dir_size_bytes(db_dir);
+   std::cout << "───────────────────────────────────────────────────────────────\n";
+   std::cout << "total keys written: " << format_comma(seq)
+             << "  db=" << format_size_mb(db_bytes) << "\n";
 }
 
 // ── Crash handler ───────────────────────────────────────────────

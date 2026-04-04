@@ -139,6 +139,10 @@ namespace sal
          {
             meta[*segment].add_freed_space(obj->size());
          }
+         void add_freed_space(segment_number segment, uint32_t size)
+         {
+            meta[*segment].add_freed_space(size);
+         }
 
          // initial condition of a new segment, given a starting age
          void added_to_read_lock_queue(segment_number segment)

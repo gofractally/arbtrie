@@ -1,4 +1,5 @@
 #pragma once
+#include <cstring>
 #include <psitri/count_keys.hpp>
 #include <psitri/node/inner.hpp>
 #include <psitri/node/leaf.hpp>
@@ -63,6 +64,61 @@ namespace psitri
    {
      public:
       cursor(sal::smart_ptr<sal::alloc_header> n);
+
+      cursor(const cursor& other) noexcept
+          : _node(other._node),
+            _key_len(other._key_len),
+            _root_end_branch(other._root_end_branch)
+      {
+         auto d = other._path_back - other._path.data();
+         std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+         std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+         _path_back = _path.data() + d;
+      }
+
+      cursor& operator=(const cursor& other) noexcept
+      {
+         if (this != &other)
+         {
+            _node            = other._node;
+            _key_len         = other._key_len;
+            _root_end_branch = other._root_end_branch;
+            auto d = other._path_back - other._path.data();
+            std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+            std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+            _path_back = _path.data() + d;
+         }
+         return *this;
+      }
+
+      cursor(cursor&& other) noexcept
+          : _node(std::move(other._node)),
+            _key_len(other._key_len),
+            _root_end_branch(other._root_end_branch)
+      {
+         auto d = other._path_back - other._path.data();
+         std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+         std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+         _path_back       = _path.data() + d;
+         other._path_back = other._path.data();
+      }
+
+      cursor& operator=(cursor&& other) noexcept
+      {
+         if (this != &other)
+         {
+            _node            = std::move(other._node);
+            _key_len         = other._key_len;
+            _root_end_branch = other._root_end_branch;
+            auto d = other._path_back - other._path.data();
+            std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+            std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+            _path_back       = _path.data() + d;
+            other._path_back = other._path.data();
+         }
+         return *this;
+      }
+
       static constexpr int32_t value_not_found = -1;
       static constexpr int32_t value_subtree   = -2;
 
@@ -148,6 +204,13 @@ namespace psitri
          _node = std::move(r);
          seek_rend();
          _path_back->adr = _node.address();
+      }
+
+      /// Re-fetch the root from the allocator session and reset cursor state.
+      /// Picks up any new COW root committed since this cursor was created.
+      void refresh(uint32_t root_index = 0) noexcept
+      {
+         set_root(_node.session()->get_root(sal::root_object_number(root_index)));
       }
 
      private:
@@ -298,7 +361,6 @@ namespace psitri
    template <ConstructibleBuffer ConstructibleBufferType>
    std::optional<ConstructibleBufferType> cursor::get(key_view key) const
    {
-      // Create a mutable copy to perform the seek
       cursor tmp(*this);
       ConstructibleBufferType buf;
       if (tmp.get(key, &buf) >= 0)

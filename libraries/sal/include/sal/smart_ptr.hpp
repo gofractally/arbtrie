@@ -154,6 +154,11 @@ namespace sal
       smart_ptr(const smart_ptr& other) noexcept : smart_ptr_base(other) {}
       smart_ptr() noexcept : smart_ptr_base() {}
       smart_ptr(smart_ptr&& other) noexcept : smart_ptr_base(std::move(other)) {}
+      smart_ptr& operator=(const smart_ptr& other) noexcept
+      {
+         smart_ptr_base::operator=(other);
+         return *this;
+      }
       smart_ptr& operator=(smart_ptr&& other) noexcept
       {
          smart_ptr_base::operator=(std::move(other));

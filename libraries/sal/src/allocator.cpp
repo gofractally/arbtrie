@@ -1019,18 +1019,49 @@ namespace sal
       //auto& unpinned_sessionr = *unpinned_session;
       //unpinned_session->set_alloc_to_pinned(false);
 
-      /** 
+      /**
        *  The compactor always prioritizes cache, then ram, then
        *  all other segments each loop. It needs to keep data of similar
        *  age together to minimize movement of virtual age of objects.
        */
+      using clock = std::chrono::steady_clock;
+      auto total_release_ns  = uint64_t(0);
+      auto total_promote_ns  = uint64_t(0);
+      auto total_pinned_ns   = uint64_t(0);
+      auto total_unpinned_ns = uint64_t(0);
+      auto last_report       = clock::now();
+      uint64_t iterations    = 0;
+
       while (thread.yield())
       {
+         auto t0 = clock::now();
          compactor_release_objects(sesr);
+         auto t1 = clock::now();
          compactor_promote_rcache_data(sesr);
+         auto t2 = clock::now();
          compact_pinned_segment(sesr);
+         auto t3 = clock::now();
          compactor_promote_rcache_data(sesr);
          compact_unpinned_segment(sesr);
+         auto t4 = clock::now();
+
+         total_release_ns  += (t1 - t0).count();
+         total_promote_ns  += (t2 - t1).count() + (t4 - t3).count();
+         total_pinned_ns   += (t3 - t2).count();
+         total_unpinned_ns += (t4 - t3).count();
+         ++iterations;
+
+         auto elapsed = clock::now() - last_report;
+         if (elapsed >= std::chrono::seconds(5))
+         {
+            auto to_ms = [](uint64_t ns) { return ns / 1'000'000; };
+            SAL_WARN("compactor: iters={} release={}ms promote={}ms pinned={}ms unpinned={}ms",
+                     iterations, to_ms(total_release_ns), to_ms(total_promote_ns),
+                     to_ms(total_pinned_ns), to_ms(total_unpinned_ns));
+            total_release_ns = total_promote_ns = total_pinned_ns = total_unpinned_ns = 0;
+            iterations = 0;
+            last_report = clock::now();
+         }
       }
    }
    bool allocator::compactor_release_objects(allocator_session& ses)

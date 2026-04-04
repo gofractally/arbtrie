@@ -6,6 +6,7 @@ add_library( psitri
              src/dwal/wal_reader.cpp
              src/dwal/dwal_transaction.cpp
              src/dwal/dwal_database.cpp
+             src/dwal/dwal_read_session.cpp
              src/dwal/merge_cursor.cpp
              src/dwal/merge_pool.cpp
          )

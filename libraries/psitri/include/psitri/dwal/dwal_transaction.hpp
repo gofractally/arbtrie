@@ -16,10 +16,9 @@ namespace psitri::dwal
 
    /// A buffered write transaction on a single DWAL root.
    ///
-   /// Holds the exclusive lock on the root's shared_mutex for its entire
-   /// lifetime. Mutations go to the RW btree + undo log. On commit, a WAL
-   /// entry is written. On abort (or destruction), the undo log is replayed
-   /// to restore the btree.
+   /// Single writer per root — no lock held. Mutations go to the RW btree +
+   /// undo log. On commit, a WAL entry is written. On abort (or destruction),
+   /// the undo log is replayed to restore the btree.
    ///
    /// For direct-mode transactions (large tx fallback), the caller uses
    /// the underlying PsiTri transaction directly — this class is not used.

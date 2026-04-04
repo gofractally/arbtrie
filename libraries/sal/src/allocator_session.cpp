@@ -40,9 +40,10 @@ namespace sal
 
    void allocator_session::finalize_active_segment()
    {
-      if (_alloc_seg_ptr and not _alloc_seg_ptr->is_finalized())
+      if (_alloc_seg_ptr)
       {
-         _alloc_seg_ptr->finalize();
+         if (not _alloc_seg_ptr->is_finalized())
+            _alloc_seg_ptr->finalize();
          _dirty_segments.push(_alloc_seg_num);
       }
       _alloc_seg_ptr = nullptr;
@@ -94,8 +95,13 @@ namespace sal
       if (_alloc_seg_ptr and not _alloc_seg_ptr->is_finalized() and
           _alloc_seg_ptr->get_alloc_pos() > _alloc_seg_ptr->get_first_write_pos())
       {
+         auto pos_before = _alloc_seg_ptr->get_alloc_pos();
          _sega.record_session_write(_session_num,
                                     _alloc_seg_ptr->sync(st, cfg, user_data));
+         // Count sync header padding as reclaimable space so the compactor
+         // knows segments filled with many small commits are mostly free.
+         auto sync_hdr_size = _alloc_seg_ptr->get_alloc_pos() - pos_before;
+         _sega._mapped_state->_segment_data.add_freed_space(_alloc_seg_num, sync_hdr_size);
       }
 
       // Process finalized dirty segments

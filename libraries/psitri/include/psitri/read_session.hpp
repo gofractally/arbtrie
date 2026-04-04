@@ -74,6 +74,11 @@ namespace psitri
        */
       cursor create_cursor(uint32_t root_index);
 
+      /// @brief Access the underlying allocator session.
+      ///
+      /// Used by DWAL read sessions to construct cursors with a valid session.
+      sal::allocator_session_ptr allocator_session() const { return _allocator_session; }
+
       ///@}
 
      protected:

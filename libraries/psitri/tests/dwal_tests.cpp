@@ -17,9 +17,12 @@
 #include <psitri/dwal/wal_reader.hpp>
 #include <psitri/dwal/wal_writer.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -638,8 +641,7 @@ TEST_CASE("dwal_transaction basic upsert and commit", "[dwal]")
    psitri::dwal::dwal_root root;
    psitri::dwal::wal_writer wal(wal_path, 0, 0);
 
-   // Acquire exclusive lock (normally done by dwal_database).
-   root.rw_mutex.lock();
+   // Single writer — no lock needed.
 
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
@@ -675,7 +677,7 @@ TEST_CASE("dwal_transaction abort restores btree", "[dwal]")
    // Pre-populate the btree.
    root.rw_layer->store_data("existing", "original");
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
 
@@ -707,7 +709,7 @@ TEST_CASE("dwal_transaction remove and tombstone", "[dwal]")
 
    root.rw_layer->store_data("k1", "v1");
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
       tx.remove("k1");
@@ -733,7 +735,7 @@ TEST_CASE("dwal_transaction remove abort restores value", "[dwal]")
 
    root.rw_layer->store_data("k1", "v1");
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
       tx.remove("k1");
@@ -762,7 +764,7 @@ TEST_CASE("dwal_transaction range remove", "[dwal]")
    root.rw_layer->store_data("c", "3");
    root.rw_layer->store_data("d", "4");
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
       tx.remove_range("b", "d");  // removes b, c
@@ -796,7 +798,7 @@ TEST_CASE("dwal_transaction range remove abort restores", "[dwal]")
    root.rw_layer->store_data("b", "2");
    root.rw_layer->store_data("c", "3");
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
       tx.remove_range("a", "d");
@@ -822,7 +824,7 @@ TEST_CASE("dwal_transaction get reads from RW layer", "[dwal]")
    root.rw_layer->store_data("k1", "v1");
    root.rw_layer->store_tombstone("dead");
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, nullptr, 0);
 
@@ -845,7 +847,7 @@ TEST_CASE("dwal_transaction destructor aborts uncommitted", "[dwal]")
    psitri::dwal::dwal_root root;
    root.rw_layer->store_data("k", "original");
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, nullptr, 0);
       tx.upsert("k", "changed");
@@ -863,7 +865,7 @@ TEST_CASE("dwal_transaction subtree upsert", "[dwal]")
    psitri::dwal::dwal_root root;
    psitri::dwal::wal_writer wal(wal_path, 0, 0);
 
-   root.rw_mutex.lock();
+
    {
       psitri::dwal::dwal_transaction tx(root, &wal, 0);
       tx.upsert_subtree("tree_key", sal::ptr_address(42));
@@ -982,22 +984,26 @@ TEST_CASE("dwal_database swap_rw_to_ro", "[dwal]")
 
    auto& root = dwal_db.root(0);
 
-   // RW has the data, RO is null.
+   // RW has the data, buffered is null.
    CHECK(root.rw_layer->map.find("pre_swap") != root.rw_layer->map.end());
-   CHECK(root.ro_ptr.load() == nullptr);
+   CHECK(root.buffered_ptr == nullptr);
 
    // Perform swap.
    dwal_db.swap_rw_to_ro(0);
 
-   // Now: RW is fresh (empty), RO has the old data.
+   // Now: RW is fresh (empty), buffered has the old data.
    CHECK(root.rw_layer->map.empty());
-   auto* ro = root.ro_ptr.load();
+   auto ro = root.buffered_ptr;
    REQUIRE(ro != nullptr);
    CHECK(ro->map.find("pre_swap") != ro->map.end());
    CHECK(ro->map.find("pre_swap")->second.data == "data");
 
-   // Clean up: simulate merge complete by freeing the RO.
-   delete root.ro_ptr.exchange(nullptr);
+   // Clean up: simulate merge complete by clearing the buffered ptr.
+   {
+      std::unique_lock lk(root.buffered_mutex);
+      root.buffered_ptr.reset();
+   }
+   root.merge_complete.store(true, std::memory_order_release);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1334,28 +1340,30 @@ TEST_CASE("merge_pool drains RO btree into PsiTri", "[dwal]")
    psitri::dwal::dwal_root root;
 
    // Create an RO btree layer with entries.
-   auto ro = std::make_unique<psitri::dwal::btree_layer>();
+   auto ro = std::make_shared<psitri::dwal::btree_layer>();
    ro->store_data("key1", "val1");
    ro->store_data("key2", "val2");
    ro->store_data("key3", "val3");
    ro->generation = 1;
 
-   // Set it as the RO layer (raw pointer — merge_pool takes ownership).
-   root.ro_ptr.store(ro.release(), std::memory_order_release);
-   root.merge_active.store(true, std::memory_order_relaxed);
+   // Set it as the buffered RO layer.
+   {
+      std::unique_lock lk(root.buffered_mutex);
+      root.buffered_ptr = ro;
+   }
+   root.merge_complete.store(false, std::memory_order_release);
 
    // Signal the merge pool.
    pool.signal(0, root);
 
-   // Wait for merge to complete (RO ptr becomes null).
-   {
-      std::unique_lock lk(root.merge_mutex);
-      root.merge_cv.wait_for(lk, std::chrono::seconds(5),
-                              [&] { return root.ro_ptr.load(std::memory_order_relaxed) == nullptr; });
-   }
+   // Wait for merge to complete.
+   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+   while (!root.merge_complete.load(std::memory_order_acquire)
+          && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-   CHECK(root.ro_ptr.load() == nullptr);
-   CHECK_FALSE(root.merge_active.load());
+   CHECK(root.merge_complete.load());
+   CHECK(root.buffered_ptr == nullptr);
 
    // Verify data was merged into PsiTri.
    auto rs  = db->start_read_session();
@@ -1410,24 +1418,27 @@ TEST_CASE("merge_pool handles tombstones during drain", "[dwal]")
    }
 
    // Create RO btree: overwrite "aaa", tombstone "bbb", new "ddd".
-   auto ro = std::make_unique<psitri::dwal::btree_layer>();
+   auto ro = std::make_shared<psitri::dwal::btree_layer>();
    ro->store_data("aaa", "new_a");
    ro->store_tombstone("bbb");
    ro->store_data("ddd", "val_d");
    ro->generation = 1;
 
-   root.ro_ptr.store(ro.release(), std::memory_order_release);
-   root.merge_active.store(true, std::memory_order_relaxed);
+   {
+      std::unique_lock lk(root.buffered_mutex);
+      root.buffered_ptr = ro;
+   }
+   root.merge_complete.store(false, std::memory_order_release);
 
    pool.signal(0, root);
 
-   {
-      std::unique_lock lk(root.merge_mutex);
-      root.merge_cv.wait_for(lk, std::chrono::seconds(5),
-                              [&] { return root.ro_ptr.load(std::memory_order_relaxed) == nullptr; });
-   }
+   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+   while (!root.merge_complete.load(std::memory_order_acquire)
+          && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-   CHECK(root.ro_ptr.load() == nullptr);
+   CHECK(root.merge_complete.load());
+   CHECK(root.buffered_ptr == nullptr);
 
    // Verify merged state.
    auto rs  = db->start_read_session();
@@ -1472,4 +1483,277 @@ TEST_CASE("epoch reclamation defers pool free until readers release", "[dwal]")
    CHECK(epochs.min_pinned() > 1);
 
    epochs.release(s0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Allocation leak tests — verify COW trees are released after cursor refresh
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("direct COW cursor refresh releases old tree", "[dwal][leak]")
+{
+   temp_dir td;
+   auto     db  = psitri::database::create(td.path);
+   auto     ws  = db->start_write_session();
+   auto     rs  = db->start_read_session();
+
+   // Seed initial data.
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 1000; ++i)
+      {
+         auto key = std::to_string(i);
+         auto val = std::string(100, 'a' + (i % 26));
+         tx.upsert(psitri::key_view(key.data(), key.size()),
+                    psitri::value_view(val.data(), val.size()));
+      }
+      tx.commit();
+   }
+   db->wait_for_compactor();
+
+   uint64_t baseline = ws->get_total_allocated_objects();
+   INFO("baseline allocated objects: " << baseline);
+   REQUIRE(baseline > 0);
+
+   // Create a cursor (holds a root ref).
+   auto cur = rs->create_cursor(0);
+
+   // Do several rounds of writes + cursor refresh.
+   for (int round = 0; round < 10; ++round)
+   {
+      // Write a batch (creates new COW root).
+      {
+         auto tx = ws->start_transaction(0);
+         for (int i = 0; i < 100; ++i)
+         {
+            auto key = std::to_string(round * 100 + 1000 + i);
+            auto val = std::string(100, 'x');
+            tx.upsert(psitri::key_view(key.data(), key.size()),
+                       psitri::value_view(val.data(), val.size()));
+         }
+         tx.commit();
+      }
+
+      // Refresh cursor — should release old root.
+      cur.refresh(0);
+   }
+
+   // Let compactor drain.
+   db->wait_for_compactor();
+
+   uint64_t after = ws->get_total_allocated_objects();
+   uint64_t pending = ws->get_pending_release_count();
+   INFO("after 10 rounds: allocated=" << after << " pending=" << pending
+        << " baseline=" << baseline);
+
+   // Allocated objects should grow roughly proportional to data, not 10x from
+   // leaked roots. Allow 3x growth for the 1000 extra keys we added.
+   REQUIRE(after < baseline * 4);
+}
+
+TEST_CASE("direct COW concurrent read+write doesn't leak", "[dwal][leak]")
+{
+   temp_dir td;
+   auto     db  = psitri::database::create(td.path);
+   auto     ws  = db->start_write_session();
+
+   // Seed.
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 1000; ++i)
+      {
+         auto key = std::to_string(i);
+         auto val = std::string(100, 'v');
+         tx.upsert(psitri::key_view(key.data(), key.size()),
+                    psitri::value_view(val.data(), val.size()));
+      }
+      tx.commit();
+   }
+   db->wait_for_compactor();
+   uint64_t baseline = ws->get_total_allocated_objects();
+
+   std::atomic<bool> done{false};
+   std::atomic<int>  read_ops{0};
+
+   // Reader thread — mimics benchmark pattern.
+   auto reader = std::thread([&]()
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      int ops = 0;
+      while (!done.load(std::memory_order_relaxed))
+      {
+         // Periodic refresh to pick up new root.
+         if ((ops % 100) == 0)
+            cur.refresh(0);
+
+         auto key = std::to_string(ops % 1000);
+         std::string buf;
+         cur.get(psitri::key_view(key.data(), key.size()), &buf);
+         ++ops;
+      }
+      read_ops.store(ops);
+   });
+
+   // Writer — batch=1 mimicking the benchmark.
+   for (int round = 0; round < 5; ++round)
+   {
+      for (int i = 0; i < 500; ++i)
+      {
+         auto tx = ws->start_transaction(0);
+         auto key = std::to_string(round * 500 + 1000 + i);
+         auto val = std::string(100, 'w');
+         tx.upsert(psitri::key_view(key.data(), key.size()),
+                    psitri::value_view(val.data(), val.size()));
+         tx.commit();
+      }
+   }
+
+   done.store(true);
+   reader.join();
+
+   db->wait_for_compactor();
+
+   uint64_t after = ws->get_total_allocated_objects();
+   uint64_t pending = ws->get_pending_release_count();
+   INFO("concurrent: allocated=" << after << " pending=" << pending
+        << " baseline=" << baseline << " read_ops=" << read_ops.load());
+
+   // Should not have unbounded growth — allow 4x for the 2500 extra keys.
+   REQUIRE(after < baseline * 5);
+}
+
+TEST_CASE("DWAL cursor refresh releases old tree", "[dwal][leak]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path);
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 500;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   auto ws = db->start_write_session();
+
+   // Seed via DWAL.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         auto key = std::to_string(i);
+         auto val = std::string(100, 'd');
+         tx.upsert(std::string_view(key), std::string_view(val));
+      }
+      tx.commit();
+   }
+   // Force swap + merge.
+   dwal_db.swap_rw_to_ro(0);
+
+   // Wait for merge to complete.
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   REQUIRE(root.merge_complete.load());
+
+   db->wait_for_compactor();
+   uint64_t baseline = ws->get_total_allocated_objects();
+   INFO("DWAL baseline: " << baseline);
+
+   // Create a dwal_read_session.
+   auto reader = dwal_db.start_read_session();
+
+   // Do several rounds of DWAL writes that trigger swaps.
+   for (int round = 0; round < 10; ++round)
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 0; i < 200; ++i)
+      {
+         auto key = std::to_string(round * 200 + 500 + i);
+         auto val = std::string(100, 'e');
+         tx.upsert(std::string_view(key), std::string_view(val));
+      }
+      tx.commit();
+
+      // Read through the session — triggers refresh on gen change.
+      auto key = std::to_string(round);
+      reader.get(0, key, psitri::dwal::read_mode::buffered);
+   }
+
+   // Force final swap + wait for merge.
+   dwal_db.swap_rw_to_ro(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+   db->wait_for_compactor();
+
+   uint64_t after = ws->get_total_allocated_objects();
+   uint64_t pending = ws->get_pending_release_count();
+   INFO("DWAL after 10 rounds: allocated=" << after << " pending=" << pending
+        << " baseline=" << baseline);
+
+   // Should not have unbounded growth.
+   REQUIRE(after < baseline * 5);
+}
+
+TEST_CASE("write-only batch=1 doesn't leak", "[dwal][leak]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path);
+   auto     ws = db->start_write_session();
+
+   // Seed 10K keys in one transaction.
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 10000; ++i)
+      {
+         auto key = std::to_string(i);
+         auto val = std::string(100, 'a' + (i % 26));
+         tx.upsert(psitri::key_view(key.data(), key.size()),
+                    psitri::value_view(val.data(), val.size()));
+      }
+      tx.commit();
+   }
+   db->wait_for_compactor();
+
+   uint64_t baseline = ws->get_total_allocated_objects();
+   auto db_size = [&]() {
+      uint64_t total = 0;
+      std::error_code ec;
+      for (auto& e : std::filesystem::recursive_directory_iterator(td.path, ec))
+         if (e.is_regular_file(ec)) total += e.file_size(ec);
+      return total;
+   };
+   uint64_t baseline_bytes = db_size();
+   std::cout << "batch=1 baseline: alloc=" << baseline
+             << " db=" << (baseline_bytes / (1024*1024)) << "MB" << std::endl;
+   REQUIRE(baseline > 0);
+
+   // 5 rounds of 10K single-key transactions (batch=1).
+   for (int round = 0; round < 5; ++round)
+   {
+      for (int i = 0; i < 10000; ++i)
+      {
+         auto tx  = ws->start_transaction(0);
+         auto key = std::to_string(round * 10000 + 10000 + i);
+         auto val = std::string(100, 'x');
+         tx.upsert(psitri::key_view(key.data(), key.size()),
+                    psitri::value_view(val.data(), val.size()));
+         tx.commit();
+      }
+      db->wait_for_compactor();
+   }
+
+   db->wait_for_compactor();
+   uint64_t after      = ws->get_total_allocated_objects();
+   uint64_t final_bytes = db_size();
+
+   INFO("batch=1: alloc=" << after << " baseline=" << baseline
+        << " db=" << (final_bytes / (1024*1024)) << "MB"
+        << " baseline_db=" << (baseline_bytes / (1024*1024)) << "MB");
+
+   // Object count should be proportional to key count (no object leaks).
+   REQUIRE(after < baseline * 8);
+
+   // DB size should be bounded — compactor reclaims sync header padding.
+   // Without the fix, this grew to 1177MB. With it, should stay under 3x baseline.
+   REQUIRE(final_bytes < baseline_bytes * 3);
 }
