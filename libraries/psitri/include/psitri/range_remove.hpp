@@ -25,7 +25,12 @@ namespace psitri
       branch_set result = range_remove<upsert_mode::unique>({}, rref, range);
 
       if (result.count() == 0)
-         ;  // tree is now empty
+      {
+         // Do not release old_addr here. The old root address remains in _root_objects until
+         // commit calls set_root(null), which extracts it and releases it via the returned
+         // smart_ptr. Releasing here AND in set_root causes a double-free.
+         (void)old_addr;
+      }
       else if (result.count() == 1)
          _root.give(result.get_first_branch());
       else
@@ -75,13 +80,15 @@ namespace psitri
             std::unreachable();
       }
 
-      if constexpr (mode.is_unique())
+      if constexpr (!mode.is_unique())
       {
-         if (result.count() == 0)
-            _session.release(ref.address());
+         if (!result.contains(ref.address())) [[likely]]
+            ref.release();
       }
-      else if (!result.contains(ref.address())) [[likely]]
-         ref.release();
+      // Unique mode: caller is responsible for releasing ref when result is empty.
+      // We do NOT release here to avoid a use-after-free race: if the release queue is
+      // full, _session.release() calls final_release() synchronously (freeing the node),
+      // and the caller's subsequent _session.retain() would then access freed memory.
 
       return result;
    }
@@ -247,13 +254,17 @@ namespace psitri
             // This branch became empty — treat like single-branch remove
             if (node->num_branches() == 1)
             {
-               if constexpr (mode.is_unique())
-                  _session.retain(badr);
+               // Unique: badr is still in the node; return {} so the caller's dispatch
+               // releases this inner node, whose destroy() cascade releases badr.
+               // No retain needed (dispatch no longer pre-releases recursed nodes).
                return {};
             }
 
             if constexpr (mode.is_unique())
             {
+               // badr is no longer in the node after remove_branch; release it explicitly
+               // (dispatch no longer does this for unique mode).
+               _session.release(badr);
                node.modify(
                    [&](auto* n)
                    {
@@ -387,22 +398,15 @@ namespace psitri
       {
          if constexpr (mode.is_unique())
          {
-            // The caller will release this node, and its destroy() cascade releases
-            // ALL children.  We must NOT double-release branches that the recursive
-            // range_remove already released.  Instead, retain those branches so the
-            // destroy cascade can properly release them (same pattern as the
-            // same-branch num_branches==1 case).
+            // The caller releases this node via the dispatch; its destroy() cascade
+            // releases ALL remaining children in the node's branch table.
             //
-            // Middle branches and fully-contained start were NOT recursed into,
-            // so they haven't been released — no action needed for them (the
-            // destroy cascade handles them).
+            // Middle branches and untouched start/boundary were NOT recursed into,
+            // so they still live in the node — destroy handles them correctly.
             //
-            // Branches that WERE recursed into and came back empty were already
-            // released by range_remove.  Retain them to counterbalance.
-            if (start_empty && !range.lower_bound.empty())
-               _session.retain(start_addr);
-            if (boundary_empty && has_boundary)
-               _session.retain(boundary_addr);
+            // Recursed-into branches (start if lower non-empty, boundary if has_boundary)
+            // are also still in the node because the dispatch no longer pre-releases them.
+            // Destroy will release them exactly once.  No retain or explicit release needed.
          }
          else
          {
@@ -428,9 +432,14 @@ namespace psitri
          for (uint16_t i = *start + 1; i < *end; ++i)
             _session.release(node->get_branch(branch_number(i)));
 
-         // Release fully-contained start if lower was unbounded
-         if (start_empty && range.lower_bound.empty())
+         // Release start if it was completely removed (unbounded lower or recursed+empty).
+         // Dispatch no longer releases recursed nodes, so we handle both cases here.
+         if (start_empty)
             _session.release(start_addr);
+
+         // Release boundary if it was completely removed by recursion.
+         if (boundary_empty && has_boundary)
+            _session.release(boundary_addr);
 
          // Now we need to remove branches from the inner node.
          // Determine the contiguous range to remove from [start..end+has_boundary-1]:

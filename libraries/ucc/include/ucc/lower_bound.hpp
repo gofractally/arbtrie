@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <limits>
 #include <string_view>
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
