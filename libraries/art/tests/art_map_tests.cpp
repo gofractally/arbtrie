@@ -837,3 +837,521 @@ TEST_CASE("art_map backward iteration with node256", "[art_map]")
    --it;
    REQUIRE(it == m.end());
 }
+
+// ── Coverage expansion tests ────────────────────────────────────────────────
+
+TEST_CASE("art_map arena grow on large insert volume", "[art_map]")
+{
+   // Start with a tiny arena to force grow() path
+   art_map<uint64_t> m(256);  // 256 bytes — will need many reallocs
+
+   for (int i = 0; i < 500; ++i)
+   {
+      auto key = "key_" + std::to_string(i);
+      m.upsert(key, i);
+   }
+   REQUIRE(m.size() == 500);
+   REQUIRE(m.arena_bytes_used() > 256);  // grew
+
+   for (int i = 0; i < 500; ++i)
+   {
+      auto  key = "key_" + std::to_string(i);
+      auto* v   = m.get(key);
+      REQUIRE(v != nullptr);
+      REQUIRE(*v == (uint64_t)i);
+   }
+}
+
+TEST_CASE("art_map node256 with subtree children — forward iteration", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Create a node256 at depth 1 by inserting >48 keys sharing prefix "P"
+   // Each child of the node256 itself has sub-children (not just leaves).
+   for (int i = 0; i < 60; ++i)
+   {
+      char c = static_cast<char>(i);
+      // "P" + byte(i) + "suffix" → forces inner node under each node256 child
+      std::string k1 = std::string("P") + c + "alpha";
+      std::string k2 = std::string("P") + c + "beta";
+      m.upsert(k1, i * 2);
+      m.upsert(k2, i * 2 + 1);
+   }
+   REQUIRE(m.size() == 120);
+
+   // Forward iteration must visit all 120 keys in sorted order
+   std::vector<std::string> keys;
+   for (auto it = m.begin(); it != m.end(); ++it)
+      keys.push_back(std::string(it.key()));
+
+   REQUIRE(keys.size() == 120);
+   for (size_t i = 1; i < keys.size(); ++i)
+      REQUIRE(keys[i - 1] < keys[i]);
+}
+
+TEST_CASE("art_map node256 with subtree children — backward iteration", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Create node256 at root with subtree children
+   for (int i = 0; i < 60; ++i)
+   {
+      char c = static_cast<char>(i);
+      std::string k1 = std::string(1, c) + "aaa";
+      std::string k2 = std::string(1, c) + "zzz";
+      m.upsert(k1, i * 2);
+      m.upsert(k2, i * 2 + 1);
+   }
+   REQUIRE(m.size() == 120);
+
+   // Backward iteration
+   std::vector<std::string> fwd_keys, bwd_keys;
+   for (auto it = m.begin(); it != m.end(); ++it)
+      fwd_keys.push_back(std::string(it.key()));
+
+   auto it = m.end();
+   while (it != m.begin())
+   {
+      --it;
+      bwd_keys.push_back(std::string(it.key()));
+   }
+
+   REQUIRE(fwd_keys.size() == bwd_keys.size());
+   for (size_t i = 0; i < fwd_keys.size(); ++i)
+      REQUIRE(fwd_keys[i] == bwd_keys[fwd_keys.size() - 1 - i]);
+}
+
+TEST_CASE("art_map node256 lower_bound and upper_bound", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Force node256 with subtrees
+   for (int i = 0; i < 60; ++i)
+   {
+      char        c  = static_cast<char>(i * 4);  // sparse byte values
+      std::string k1 = std::string(1, c) + "lo";
+      std::string k2 = std::string(1, c) + "hi";
+      m.upsert(k1, i * 2);
+      m.upsert(k2, i * 2 + 1);
+   }
+
+   // lower_bound for a byte between occupied slots → should find next occupied
+   {
+      char        target_byte = static_cast<char>(2);  // between 0 and 4
+      std::string search      = std::string(1, target_byte);
+      auto        it          = m.lower_bound(search);
+      REQUIRE(it != m.end());
+      // Should land on key starting with byte 4 (next occupied slot)
+      REQUIRE(static_cast<uint8_t>(it.key()[0]) == 4);
+   }
+
+   // lower_bound past all keys
+   {
+      char        last_byte = static_cast<char>(59 * 4);
+      std::string search    = std::string(1, static_cast<char>(last_byte + 1)) + "zzz";
+      auto        it        = m.lower_bound(search);
+      REQUIRE(it == m.end());
+   }
+
+   // upper_bound on exact match
+   {
+      char        c  = static_cast<char>(8);
+      std::string k  = std::string(1, c) + "hi";
+      auto        it = m.upper_bound(k);
+      REQUIRE(it != m.end());
+      REQUIRE(it.key() > k);
+   }
+}
+
+TEST_CASE("art_map erase through node256 — leaf children", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Force node256 with leaf children
+   for (int i = 0; i < 60; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(std::string_view(&c, 1), i);
+   }
+   REQUIRE(m.size() == 60);
+
+   // Erase all — exercises node256_remove_child and empty node256 cleanup
+   for (int i = 0; i < 60; ++i)
+   {
+      char c = static_cast<char>(i);
+      REQUIRE(m.erase(std::string_view(&c, 1)));
+   }
+   REQUIRE(m.size() == 0);
+   REQUIRE(m.empty());
+}
+
+TEST_CASE("art_map erase through node256 — subtree children", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Force node256 at root, each child is an inner node
+   for (int i = 0; i < 55; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(std::string(1, c) + "x", i);
+      m.upsert(std::string(1, c) + "y", i + 100);
+   }
+   REQUIRE(m.size() == 110);
+
+   // Erase one key per subtree — exercises node256 child → setlist collapse
+   for (int i = 0; i < 55; ++i)
+   {
+      char c = static_cast<char>(i);
+      REQUIRE(m.erase(std::string(1, c) + "x"));
+   }
+   REQUIRE(m.size() == 55);
+
+   // Verify remaining
+   for (int i = 0; i < 55; ++i)
+   {
+      char  c = static_cast<char>(i);
+      auto* v = m.get(std::string(1, c) + "y");
+      REQUIRE(v != nullptr);
+      REQUIRE(*v == (uint64_t)(i + 100));
+   }
+}
+
+TEST_CASE("art_map prefix mismatch split on node256", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Create a deep node256 with a prefix, then insert a key that mismatches the prefix.
+   // First, build structure: "ABCD" + 50 single-byte children
+   for (int i = 0; i < 50; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(std::string("ABCD") + c, i);
+   }
+   // Now the node256 under "ABCD" prefix exists.
+   // Insert "ABXY" which mismatches at position 2 of prefix "CD"
+   // This triggers clone_with_prefix for node256.
+   m.upsert("ABXY", 999);
+
+   REQUIRE(*m.get("ABXY") == 999);
+   // All old keys still accessible
+   for (int i = 0; i < 50; ++i)
+   {
+      char  c = static_cast<char>(i);
+      auto* v = m.get(std::string("ABCD") + c);
+      REQUIRE(v != nullptr);
+      REQUIRE(*v == (uint64_t)i);
+   }
+}
+
+TEST_CASE("art_map setlist capacity realloc path", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Insert keys that share a long prefix + different last bytes.
+   // The long prefix means each setlist alloc has less capacity for children,
+   // forcing reallocation sooner.
+   std::string prefix(200, 'Z');  // very long prefix → small initial capacity
+   for (int i = 0; i < 40; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(prefix + c, i);
+   }
+   REQUIRE(m.size() == 40);
+
+   for (int i = 0; i < 40; ++i)
+   {
+      char  c = static_cast<char>(i);
+      auto* v = m.get(prefix + c);
+      REQUIRE(v != nullptr);
+      REQUIRE(*v == (uint64_t)i);
+   }
+}
+
+TEST_CASE("art_map erase prefix key with collapse", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Create: "ab" as prefix key, "abc" and "abd" as children
+   m.upsert("abc", 1);
+   m.upsert("abd", 2);
+   m.upsert("ab", 3);  // prefix-key stored in inner node's value_off
+
+   REQUIRE(m.size() == 3);
+   REQUIRE(*m.get("ab") == 3);
+
+   // Erase "ab" → clears value_off. With 2 children, no collapse needed.
+   REQUIRE(m.erase("ab"));
+   REQUIRE(m.get("ab") == nullptr);
+   REQUIRE(*m.get("abc") == 1);
+   REQUIRE(*m.get("abd") == 2);
+   REQUIRE(m.size() == 2);
+
+   // Now erase "abd" → inner node has 1 child "abc", triggers collapse
+   REQUIRE(m.erase("abd"));
+   REQUIRE(m.size() == 1);
+   REQUIRE(*m.get("abc") == 1);
+}
+
+TEST_CASE("art_map erase prefix key leaves childless inner node", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // "a" is a prefix-key, "ab" is the only child
+   m.upsert("ab", 1);
+   m.upsert("a", 2);  // stored as value_off on inner node
+
+   REQUIRE(m.size() == 2);
+
+   // Erase "ab" → inner node has 0 children but value_off is still set
+   REQUIRE(m.erase("ab"));
+   REQUIRE(m.size() == 1);
+   REQUIRE(*m.get("a") == 2);
+
+   // Erase "a" → clears value_off, 0 children → node becomes null
+   REQUIRE(m.erase("a"));
+   REQUIRE(m.size() == 0);
+   REQUIRE(m.empty());
+}
+
+TEST_CASE("art_map node256 advance visits value_off then children", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Create node256 where the node itself has a value_off (prefix key)
+   // and >48 children. This tests advance() through value_off → first child
+   // in the node256 path.
+   std::string prefix = "X";
+   m.upsert(prefix, 0);  // prefix-key
+   for (int i = 0; i < 50; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(prefix + std::string(1, c), i + 1);
+   }
+   REQUIRE(m.size() == 51);
+
+   // Iteration: should start with "X" (prefix key), then "X\x00", "X\x01", ...
+   auto it = m.begin();
+   REQUIRE(it.key() == "X");
+   ++it;  // advance from value_off → first child of node256
+   REQUIRE(it != m.end());
+   char expected = 0;
+   REQUIRE(it.key() == prefix + std::string(1, expected));
+}
+
+TEST_CASE("art_map node256 retreat visits value_off", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Same structure as above: prefix key "X" + 50 byte children
+   std::string prefix = "X";
+   m.upsert(prefix, 0);
+   for (int i = 0; i < 50; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(prefix + std::string(1, c), i + 1);
+   }
+
+   // Forward to second element (first child), then retreat should give prefix key
+   auto it = m.begin();
+   REQUIRE(it.key() == "X");
+   ++it;
+   REQUIRE(it.key()[0] == 'X');
+   REQUIRE(it.key().size() == 2);
+   --it;  // should retreat to value_off
+   REQUIRE(it.key() == "X");
+}
+
+TEST_CASE("art_map lower_bound prefix comparison — prefix > search key", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Build structure where prefix comparison > search key
+   m.upsert("MMMM_a", 1);
+   m.upsert("MMMM_b", 2);
+
+   // Search for "MMMM" — prefix matches fully, key terminates at inner node
+   auto it = m.lower_bound("MMMM");
+   REQUIRE(it != m.end());
+   // Should descend to leftmost: "MMMM_a"
+   REQUIRE(it.key() == "MMMM_a");
+
+   // Search for "MMM" — prefix "MMM" matches, but partial has more chars
+   // plen > remaining → descend to leftmost
+   it = m.lower_bound("MMM");
+   REQUIRE(it != m.end());
+   REQUIRE(it.key() == "MMMM_a");
+}
+
+TEST_CASE("art_map lower_bound prefix comparison — prefix < search key", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   m.upsert("AAA_x", 1);
+   m.upsert("CCC_x", 2);
+
+   // Search for "BBB" — first node prefix "AAA" < "BBB", should advance to "CCC_x"
+   auto it = m.lower_bound("BBB");
+   REQUIRE(it != m.end());
+   REQUIRE(it.key() == "CCC_x");
+
+   // Search past all keys
+   it = m.lower_bound("DDD");
+   REQUIRE(it == m.end());
+}
+
+TEST_CASE("art_map lower_bound node256 slot > search byte", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Force node256 with sparse children
+   for (int i = 0; i < 50; ++i)
+   {
+      char c = static_cast<char>(i * 5);  // 0, 5, 10, 15, ...
+      m.upsert(std::string(1, c) + "v", i);
+   }
+
+   // lower_bound for byte 7 → should find slot 10 (next occupied)
+   {
+      char        search_byte = static_cast<char>(7);
+      std::string search      = std::string(1, search_byte) + "v";
+      auto        it          = m.lower_bound(search);
+      REQUIRE(it != m.end());
+      REQUIRE(static_cast<uint8_t>(it.key()[0]) == 10);
+   }
+
+   // lower_bound for byte 3 (between 0 and 5) without suffix
+   {
+      char        search_byte = static_cast<char>(3);
+      std::string search      = std::string(1, search_byte);
+      auto        it          = m.lower_bound(search);
+      REQUIRE(it != m.end());
+      REQUIRE(static_cast<uint8_t>(it.key()[0]) == 5);
+   }
+}
+
+TEST_CASE("art_map erase prefix key with single child triggers collapse", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Build: "abc" (prefix key) with exactly one child "abcdef"
+   m.upsert("abcdef", 1);
+   m.upsert("abc", 2);
+
+   REQUIRE(m.size() == 2);
+
+   // Erase prefix key "abc" → inner node has 1 child, triggers try_collapse
+   // which merges prefixes: parent_prefix + child_byte + child_prefix
+   REQUIRE(m.erase("abc"));
+   REQUIRE(m.size() == 1);
+   REQUIRE(*m.get("abcdef") == 1);
+
+   // Verify iteration still works
+   auto it = m.begin();
+   REQUIRE(it.key() == "abcdef");
+   ++it;
+   REQUIRE(it == m.end());
+}
+
+TEST_CASE("art_map post-increment and post-decrement", "[art_map]")
+{
+   art_map<uint64_t> m;
+   m.upsert("a", 1);
+   m.upsert("b", 2);
+   m.upsert("c", 3);
+
+   auto it = m.begin();
+   auto prev = it++;  // post-increment
+   REQUIRE(prev.key() == "a");
+   REQUIRE(it.key() == "b");
+
+   auto cur = it--;  // post-decrement
+   REQUIRE(cur.key() == "b");
+   REQUIRE(it.key() == "a");
+}
+
+TEST_CASE("art_map get and upsert through node256 child", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Force node256 at root
+   for (int i = 0; i < 50; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(std::string(1, c) + "data", i);
+   }
+
+   // get() through node256 child lookup
+   for (int i = 0; i < 50; ++i)
+   {
+      char  c = static_cast<char>(i);
+      auto* v = m.get(std::string(1, c) + "data");
+      REQUIRE(v != nullptr);
+      REQUIRE(*v == (uint64_t)i);
+   }
+
+   // get() miss through node256 — byte not present
+   {
+      char c = static_cast<char>(200);  // not in [0,49]
+      REQUIRE(m.get(std::string(1, c) + "data") == nullptr);
+   }
+
+   // upsert new child into node256
+   {
+      char c = static_cast<char>(200);
+      m.upsert(std::string(1, c) + "data", 999);
+      REQUIRE(*m.get(std::string(1, c) + "data") == 999);
+   }
+}
+
+TEST_CASE("art_map node256 backward iteration with prefix keys", "[art_map]")
+{
+   art_map<uint64_t> m;
+
+   // Node256 at root where some children also have prefix-key values
+   for (int i = 0; i < 50; ++i)
+   {
+      char c = static_cast<char>(i);
+      m.upsert(std::string(1, c), i);            // prefix key at inner node
+      m.upsert(std::string(1, c) + "child", i + 100);  // child
+   }
+   REQUIRE(m.size() == 100);
+
+   // Collect forward
+   std::vector<std::string> fwd;
+   for (auto it = m.begin(); it != m.end(); ++it)
+      fwd.push_back(std::string(it.key()));
+
+   // Collect backward
+   std::vector<std::string> bwd;
+   auto it = m.end();
+   while (it != m.begin())
+   {
+      --it;
+      bwd.push_back(std::string(it.key()));
+   }
+
+   REQUIRE(fwd.size() == bwd.size());
+   for (size_t i = 0; i < fwd.size(); ++i)
+      REQUIRE(fwd[i] == bwd[fwd.size() - 1 - i]);
+}
+
+TEST_CASE("art_map const upper_bound", "[art_map]")
+{
+   art_map<uint64_t> m;
+   m.upsert("a", 1);
+   m.upsert("b", 2);
+   m.upsert("c", 3);
+
+   const auto& cm = m;
+   auto        it = cm.upper_bound("a");
+   REQUIRE(it != cm.end());
+   REQUIRE(it.key() == "b");
+}
+
+TEST_CASE("art_map const empty and begin/end", "[art_map]")
+{
+   art_map<uint64_t> m;
+   const auto&       cm = m;
+   REQUIRE(cm.empty());
+   REQUIRE(cm.begin() == cm.end());
+}

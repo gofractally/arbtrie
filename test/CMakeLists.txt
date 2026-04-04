@@ -83,6 +83,9 @@ if(ENABLE_COVERAGE)
 
     target_compile_options(sim-db-test PUBLIC --coverage)
     target_link_options(sim-db-test PUBLIC --coverage)
+
+    target_compile_options(art-tests PUBLIC --coverage)
+    target_link_options(art-tests PUBLIC --coverage)
 endif()
 
 # Benchmarks
