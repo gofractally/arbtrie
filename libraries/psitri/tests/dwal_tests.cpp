@@ -3359,3 +3359,442 @@ TEST_CASE("DWAL recovery: aborted transaction not in WAL", "[dwal][recovery]")
       CHECK_FALSE(dwal_db.get_latest(0, "aborted").found);
    }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// merge_cursor coverage expansion tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("merge_cursor lower_bound with RO layer", "[dwal]")
+{
+   psitri::dwal::btree_layer rw;
+   rw.store_data("c", "RW_C");
+
+   psitri::dwal::btree_layer ro;
+   ro.store_data("a", "RO_A");
+   ro.store_data("b", "RO_B");
+   ro.store_data("d", "RO_D");
+
+   psitri::dwal::merge_cursor cur(&rw, &ro, std::nullopt);
+
+   cur.lower_bound("b");
+   CHECK(cur.key() == "b");
+   CHECK(cur.current_source() == psitri::dwal::merge_cursor::source::ro);
+
+   cur.lower_bound("c");
+   CHECK(cur.key() == "c");
+   CHECK(cur.current_source() == psitri::dwal::merge_cursor::source::rw);
+
+   cur.lower_bound("e");
+   CHECK(cur.is_end());
+}
+
+TEST_CASE("merge_cursor upper_bound with RO and Tri layers", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "tri_a");
+      tx.upsert("c", "tri_c");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_data("b", "RO_B");
+
+   psitri::dwal::merge_cursor mc(nullptr, &ro, std::move(cur));
+
+   // upper_bound("a") — should skip past "a" in Tri.
+   mc.upper_bound("a");
+   CHECK(mc.key() == "b");
+
+   // upper_bound("b") — should skip past "b" in RO.
+   mc.upper_bound("b");
+   CHECK(mc.key() == "c");
+
+   // upper_bound("c") — past everything.
+   mc.upper_bound("c");
+   CHECK(mc.is_end());
+}
+
+TEST_CASE("merge_cursor next when already at end", "[dwal]")
+{
+   psitri::dwal::btree_layer rw;
+   rw.store_data("a", "A");
+
+   psitri::dwal::merge_cursor cur(&rw, nullptr, std::nullopt);
+   cur.seek_begin();
+   cur.next();
+   CHECK(cur.is_end());
+
+   // Calling next() again should return false and stay at end.
+   CHECK_FALSE(cur.next());
+   CHECK(cur.is_end());
+}
+
+TEST_CASE("merge_cursor prev when already at rend", "[dwal]")
+{
+   psitri::dwal::btree_layer rw;
+   rw.store_data("a", "A");
+
+   psitri::dwal::merge_cursor cur(&rw, nullptr, std::nullopt);
+   cur.seek_last();
+   cur.prev();
+   CHECK(cur.is_rend());
+
+   // Calling prev() again should return false and stay at rend.
+   CHECK_FALSE(cur.prev());
+   CHECK(cur.is_rend());
+}
+
+TEST_CASE("merge_cursor seek not found", "[dwal]")
+{
+   psitri::dwal::btree_layer rw;
+   rw.store_data("a", "A");
+   rw.store_data("c", "C");
+
+   psitri::dwal::merge_cursor cur(&rw, nullptr, std::nullopt);
+
+   // Seek for a key that doesn't exist (between a and c).
+   CHECK_FALSE(cur.seek("b"));
+   CHECK(cur.is_end());
+
+   // Seek beyond all keys.
+   CHECK_FALSE(cur.seek("z"));
+   CHECK(cur.is_end());
+}
+
+TEST_CASE("merge_cursor RO tombstone shadows Tri in forward scan", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_tombstone("b");  // RO tombstone shadows Tri's "b"
+
+   psitri::dwal::merge_cursor mc(nullptr, &ro, std::move(cur));
+   mc.seek_begin();
+
+   CHECK(mc.key() == "a");
+   mc.next();
+   CHECK(mc.key() == "c");  // b is tombstoned by RO
+   mc.next();
+   CHECK(mc.is_end());
+}
+
+TEST_CASE("merge_cursor RO range tombstone shadows Tri in forward scan", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.upsert("d", "4");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.tombstones.add("b", "d");  // [b,d) tombstoned
+
+   psitri::dwal::merge_cursor mc(nullptr, &ro, std::move(cur));
+   mc.seek_begin();
+
+   CHECK(mc.key() == "a");
+   mc.next();
+   CHECK(mc.key() == "d");  // b,c tombstoned by RO
+   mc.next();
+   CHECK(mc.is_end());
+}
+
+TEST_CASE("merge_cursor backward with RW tombstone + RO + Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_data("b", "RO_B");  // shadows Tri b
+
+   psitri::dwal::btree_layer rw;
+   rw.store_tombstone("b");  // RW tombstone shadows both RO and Tri b
+   rw.store_data("d", "RW_D");
+
+   psitri::dwal::merge_cursor mc(&rw, &ro, std::move(cur));
+   mc.seek_last();
+
+   CHECK(mc.key() == "d");
+   mc.prev();
+   CHECK(mc.key() == "c");
+   mc.prev();
+   // "b" should be skipped (tombstoned by RW)
+   CHECK(mc.key() == "a");
+   mc.prev();
+   CHECK(mc.is_rend());
+}
+
+TEST_CASE("merge_cursor backward with RW range tombstone shadows RO", "[dwal]")
+{
+   psitri::dwal::btree_layer ro;
+   ro.store_data("a", "1");
+   ro.store_data("b", "2");
+   ro.store_data("c", "3");
+   ro.store_data("d", "4");
+
+   psitri::dwal::btree_layer rw;
+   rw.tombstones.add("b", "d");  // [b,d) tombstoned
+
+   psitri::dwal::merge_cursor cur(&rw, &ro, std::nullopt);
+   cur.seek_last();
+
+   CHECK(cur.key() == "d");
+   cur.prev();
+   // b and c are tombstoned by RW range tombstone
+   CHECK(cur.key() == "a");
+   cur.prev();
+   CHECK(cur.is_rend());
+}
+
+TEST_CASE("merge_cursor backward with RO tombstone shadows Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_tombstone("b");
+
+   psitri::dwal::merge_cursor mc(nullptr, &ro, std::move(cur));
+   mc.seek_last();
+
+   CHECK(mc.key() == "c");
+   mc.prev();
+   // "b" tombstoned by RO
+   CHECK(mc.key() == "a");
+   mc.prev();
+   CHECK(mc.is_rend());
+}
+
+TEST_CASE("merge_cursor backward RW shadows duplicate in RO and Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("shared", "tri");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_data("shared", "ro");
+
+   psitri::dwal::btree_layer rw;
+   rw.store_data("shared", "rw");
+
+   psitri::dwal::merge_cursor mc(&rw, &ro, std::move(cur));
+   mc.seek_last();
+
+   // "shared" should appear once, from RW (highest priority).
+   CHECK(mc.key() == "shared");
+   CHECK(mc.current_source() == psitri::dwal::merge_cursor::source::rw);
+   CHECK(mc.current_value().data == "rw");
+
+   mc.prev();
+   CHECK(mc.is_rend());
+}
+
+TEST_CASE("merge_cursor backward RO shadows duplicate in Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("shared", "tri");
+      tx.upsert("zzz", "end");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_data("shared", "ro");
+
+   psitri::dwal::merge_cursor mc(nullptr, &ro, std::move(cur));
+   mc.seek_last();
+
+   CHECK(mc.key() == "zzz");
+   mc.prev();
+   CHECK(mc.key() == "shared");
+   CHECK(mc.current_source() == psitri::dwal::merge_cursor::source::ro);
+   CHECK(mc.current_value().data == "ro");
+   mc.prev();
+   CHECK(mc.is_rend());
+}
+
+TEST_CASE("owned_merge_cursor construction and usage", "[dwal]")
+{
+   auto rw = std::make_shared<psitri::dwal::btree_layer>();
+   rw->store_data("a", "1");
+   rw->store_data("c", "3");
+
+   auto ro = std::make_shared<psitri::dwal::btree_layer>();
+   ro->store_data("b", "2");
+
+   psitri::dwal::owned_merge_cursor omc(rw, ro, std::nullopt);
+
+   omc->seek_begin();
+   CHECK_FALSE(omc->is_end());
+   CHECK(omc->key() == "a");
+
+   omc->next();
+   CHECK(omc->key() == "b");
+
+   omc->next();
+   CHECK(omc->key() == "c");
+
+   omc->next();
+   CHECK(omc->is_end());
+
+   // Test count_keys via cursor() accessor.
+   CHECK(omc.cursor().count_keys() == 3);
+}
+
+TEST_CASE("owned_merge_cursor via dwal_database::create_cursor", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 0;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("k1", "v1");
+      tx.upsert("k2", "v2");
+      tx.upsert("k3", "v3");
+      tx.commit();
+   }
+
+   // latest mode — sees RW data.
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+   cursor->seek_begin();
+
+   std::vector<std::string> keys;
+   while (!cursor->is_end())
+   {
+      keys.emplace_back(cursor->key());
+      cursor->next();
+   }
+
+   CHECK(keys.size() == 3);
+   CHECK(keys[0] == "k1");
+   CHECK(keys[1] == "k2");
+   CHECK(keys[2] == "k3");
+}
+
+TEST_CASE("merge_cursor lower_bound with Tri layer only", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("c", "3");
+      tx.upsert("e", "5");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::merge_cursor mc(nullptr, nullptr, std::move(cur));
+
+   mc.lower_bound("b");
+   CHECK(mc.key() == "c");
+   CHECK(mc.current_source() == psitri::dwal::merge_cursor::source::tri);
+
+   mc.lower_bound("f");
+   CHECK(mc.is_end());
+}
+
+TEST_CASE("merge_cursor is_subtree from Tri layer", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Write a data key (not subtree).
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("data_key", "val");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::merge_cursor mc(nullptr, nullptr, std::move(cur));
+   mc.seek_begin();
+
+   CHECK_FALSE(mc.is_end());
+   CHECK(mc.key() == "data_key");
+   CHECK(mc.current_source() == psitri::dwal::merge_cursor::source::tri);
+   CHECK_FALSE(mc.is_subtree());
+}
