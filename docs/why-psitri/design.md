@@ -202,7 +202,10 @@ Root tree
 
 ## 6. Crash Recovery Without a Write-Ahead Log
 
-PsiTri has no WAL. Recovery is built into the data layout:
+PsiTri's core engine has no WAL. The optional DWAL wrapper adds an adaptive
+write buffer with WAL durability for higher throughput (see
+[DWAL architecture](../architecture/dwal.md)), but the base recovery model
+is built into the data layout:
 
 - **Append-only writes** guarantee committed data is never overwritten
 - **Hardware write protection** (when enabled): Committed data can be marked read-only via `mprotect(PROT_READ)` -- stray writes cause an immediate SIGSEGV, not silent corruption. This is configurable via sync mode; the default (`sync_type::none`) does not call mprotect.

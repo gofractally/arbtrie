@@ -3,8 +3,8 @@
 `dwal_database` is an opt-in wrapper around `database` that adds an adaptive
 write buffer with WAL durability. Under low write pressure it passes through
 directly to the COW tree. Under high write pressure it batches writes in an
-`absl::btree_map` backed by a WAL file, then drains to the COW tree when
-pressure drops.
+in-memory ART (adaptive radix trie) map backed by a WAL file, then drains to
+the COW tree when pressure drops.
 
 ## Three-Layer Architecture
 
@@ -12,11 +12,11 @@ Reads and writes flow through three layers:
 
 ```
 ┌─────────────────────────────────────┐
-│  Read-Write btree  (hot head)       │  ← active writes land here
-│  absl::btree_map, single-writer     │
+│  Read-Write ART map (hot head)      │  ← active writes land here
+│  art::art_map, writer-private       │
 ├─────────────────────────────────────┤
-│  Read-Only btree   (frozen)         │  ← background thread merges to PsiTri
-│  absl::btree_map, immutable         │     no contention with writers
+│  Read-Only ART map (frozen)         │  ← background thread merges to PsiTri
+│  art::art_map, immutable            │     no contention with writers
 ├─────────────────────────────────────┤
 │  PsiTri COW tree   (persistent)     │  ← on-disk, segment-allocated
 │  concurrent readers via sessions    │
@@ -25,21 +25,30 @@ Reads and writes flow through three layers:
 
 | Layer | Mutability | Who writes | Who reads | Synchronization |
 |-------|-----------|------------|-----------|-----------------|
-| **RW btree** | read-write | writer threads (exclusive lock) | writer + reader threads (shared lock) | `std::shared_mutex` |
-| **RO btree** | immutable | nobody (frozen) | merge thread, readers | none (immutable) |
+| **RW map** | read-write | single writer thread | writer thread only | none (writer-private) |
+| **RO map** | immutable | nobody (frozen) | merge thread, readers | `shared_mutex` on `buffered_ptr` (copy shared_ptr, then release) |
 | **PsiTri tree** | COW | merge thread | everyone | none (COW isolation) |
 
-### Memory Management: Bump Allocator Pools
+The RW map is **writer-private** — external readers never access it. This
+eliminates the need for a shared_mutex on the hot write path. Readers see
+committed data through the frozen RO map (up to one swap behind) or
+PsiTri (up to one merge behind). The `buffered_mutex` is only held
+briefly to copy the `shared_ptr<btree_layer>`, not during iteration.
 
-The `absl::btree_map` stores `std::string_view` keys and values that point
-into an external **bump allocator pool**. The pool is a linked list of
-fixed-size blocks. Allocation is a pointer bump. There is no per-entry
-deallocation — the entire pool is released as a unit when its btree layer
-is discarded.
+### Memory Management: Dual Arena Design
 
-The pool is a `std::pmr::monotonic_buffer_resource` — a standard bump
-allocator with no per-entry deallocation. `release()` frees all memory at
-once.
+The ART map and bump allocator pool work together to provide cache-friendly,
+zero-fragmentation storage:
+
+- **ART arena** — keys are stored in the ART's internal arena (cacheline-aligned
+  bump allocator with 32-bit offset addressing). Key bytes live alongside trie
+  nodes for spatial locality during lookups.
+- **PMR pool** — value data (`string_view` payloads) is copied into a
+  `std::pmr::monotonic_buffer_resource` for stable pointers. The pool is freed
+  as a unit when the layer is discarded.
+
+There is no per-entry deallocation in either allocator. Both are bump allocators
+freed as a unit when the btree layer is discarded.
 
 ```cpp
 /// Compare string_views using unsigned byte ordering to match PsiTri's
@@ -56,7 +65,7 @@ struct ucc_less
 
 /// Btree values can be live data, a subtree reference, or a tombstone.
 /// Tombstones shadow lower layers — a key with a tombstone value is
-/// treated as deleted even if it exists in the RO btree or PsiTri.
+/// treated as deleted even if it exists in the RO map or PsiTri.
 struct btree_value
 {
    enum class kind : uint8_t { data, subtree, tombstone };
@@ -68,45 +77,41 @@ struct btree_value
 
 struct btree_layer
 {
-   std::pmr::monotonic_buffer_resource                    pool;
-   absl::btree_map<std::string_view, btree_value, ucc_less> map;
-   range_tombstone_list                                   tombstones;
-   uint32_t                                               generation = 0;
+   using map_type = art::art_map<btree_value>;
 
-   /// Copy key/value into the pool, return stable views.
-   std::pair<std::string_view, std::string_view>
-   store(std::string_view key, std::string_view value)
+   std::pmr::monotonic_buffer_resource pool;
+   map_type                            map;
+   range_tombstone_list                tombstones;
+   uint32_t                            generation = 0;
+
+   /// Copy value data into the pool, insert key/value into ART map.
+   void store_data(std::string_view key, std::string_view value)
    {
-      auto* kbuf = static_cast<char*>(pool.allocate(key.size()));
-      std::memcpy(kbuf, key.data(), key.size());
-      auto* vbuf = static_cast<char*>(pool.allocate(value.size()));
-      std::memcpy(vbuf, value.data(), value.size());
-      return {{kbuf, key.size()}, {vbuf, value.size()}};
+      auto pool_val = store_string(value);
+      map.upsert(key, btree_value::make_data(pool_val));
    }
 
-   /// Copy key into the pool, insert as tombstone.
-   std::string_view store_tombstone(std::string_view key)
+   /// Insert a tombstone for a key.
+   void store_tombstone(std::string_view key)
    {
-      auto* kbuf = static_cast<char*>(pool.allocate(key.size()));
-      std::memcpy(kbuf, key.data(), key.size());
-      return {kbuf, key.size()};
+      map.upsert(key, btree_value::make_tombstone());
    }
 };
 ```
 
-Keys and values in the btree_map are `std::string_view` pointing into the pool.
-On swap, the entire layer is frozen and handed to the merge thread. On
-release, `pool.release()` frees key/value data in one pass. Subtree refs
-require a walk — see "Subtree Reference Counting" below.
+Keys are stored in the ART map's internal arena. Value data points into
+the PMR pool. On swap, the entire layer is frozen and handed to the merge
+thread. On release, both the ART arena and `pool.release()` free memory
+in one pass. Subtree refs require a walk — see "Subtree Reference
+Counting" below.
 
 ```
 ┌──────────────────────────────────────┐
 │  btree_layer                         │
 │                                      │
-│  btree_map<string_view,              │── keys/values point into ──┐
-│            string_view>              │                             │
-│  range_tombstone_list                │                             │
-│  pmr::monotonic_buffer_resource pool │◄────────────────────────────┘
+│  art::art_map<btree_value>           │── keys in ART arena         │
+│  range_tombstone_list                │── values point into ──┐     │
+│  pmr::monotonic_buffer_resource pool │◄───────────────────────┘
 │  uint32_t generation                 │   pool.release() frees all
 └──────────────────────────────────────┘   memory — no per-entry cost
 ```
@@ -131,7 +136,7 @@ struct ro_slot
 };
 ```
 
-On swap, the writer moves the RW btree_layer into the root's RO slot
+On swap, the writer moves the RW map_layer into the root's RO slot
 (must be free — writer blocks otherwise). On merge completion, the slot
 transitions to `draining` until all readers release the generation, then
 the layer is destroyed (subtree refs released, pool freed) and the slot
@@ -147,14 +152,14 @@ Subtree ref counting follows the same pattern as direct COW: one ref,
 one owner at a time, transferred (not copied) at each stage.
 
 ```
-app.take() → btree_map → merge transfers to PsiTri → PsiTri owns it
+app.take() → ART map → merge transfers to PsiTri → PsiTri owns it
 ```
 
 The merge thread creates `smart_ptr(session, addr, inc_ref=false)` —
 claiming the existing ref, not adding one — and passes it to PsiTri's
 `upsert`, which takes it via `.take()`. No `inc_ref` at any point.
 
-After merge, readers who encounter subtrees in the RO btree_map are
+After merge, readers who encounter subtrees in the RO map are
 safe because their read transaction holds a `smart_ptr` to the PsiTri
 root. PsiTri's COW semantics keep the old root (and transitively all
 its subtrees) alive via the reader's snapshot ref.
@@ -163,36 +168,36 @@ its subtrees) alive via the reader's snapshot ref.
 
 | When | What to release |
 |------|----------------|
-| **Abort** (undo replay) | New subtree displaced from btree_map |
+| **Abort** (undo replay) | New subtree displaced from ART map |
 | **Commit** (undo discard) | Old subtree saved in undo entry |
-| **RW layer destruction** (unmerged, e.g. shutdown) | Walk btree_map, release `kind::subtree` entries |
+| **RW layer destruction** (unmerged, e.g. shutdown) | Walk ART map, release `kind::subtree` entries |
 | **RO layer destruction** (fully merged) | Nothing — all refs were transferred to PsiTri |
 
-**Example** — upsert subtree_B overwriting subtree_A in btree_map:
+**Example** — upsert subtree_B overwriting subtree_A in ART map:
 ```
-upsert:  btree_map[key] = B, save A in undo      [btree:B] [undo:A]
-abort:   restore A to btree_map, B displaced      → release(B)
+upsert:  map[key] = B, save A in undo             [map:B] [undo:A]
+abort:   restore A to map, B displaced             → release(B)
 commit:  undo discarded                           → release(A)
 merge:   transfer B to PsiTri (no inc_ref)        [psitri:B]
 destroy: nothing to release (RO, fully merged)    [psitri:B] ✓
 ```
 
 **COW-sourced subtrees** (key exists only in PsiTri): no ref management
-in the DWAL layer. PsiTri owns the ref. On overwrite, the btree_map
-shadows it; on abort, the btree_map entry is erased and reads fall
+in the DWAL layer. PsiTri owns the ref. On overwrite, the ART map
+shadows it; on abort, the map entry is erased and reads fall
 through to PsiTri. On merge, PsiTri's COW handles releasing the old
 subtree when the new value replaces it.
 
 ### Large Transaction Fallback
 
-The RW btree has a size cap (pool memory or key count) that determines
+The RW map has a size cap (pool memory or key count) that determines
 when swaps occur. This cap also imposes a **maximum buffered transaction
-size**. A transaction that exceeds the cap cannot fit in the RW btree.
+size**. A transaction that exceeds the cap cannot fit in the RW map.
 
 Large transactions **fall back to direct COW writes** against PsiTri:
 
 1. **Before the transaction begins**, the writer flushes: triggers a
-   swap of the current RW btree (if non-empty), then **blocks until
+   swap of the current RW map (if non-empty), then **blocks until
    the merge completes** — the RO slot must be free and PsiTri must
    be fully up to date. Everything prior to this transaction is now
    in the COW tree. The flush cannot happen mid-transaction — that
@@ -208,116 +213,112 @@ Large transactions **fall back to direct COW writes** against PsiTri:
 enum class transaction_mode { buffered, direct };
 
 auto tx = dwal.start_write_transaction(transaction_mode::direct);
-// Flushes RW btree, waits for merge, then writes directly to PsiTri.
+// Flushes RW map, waits for merge, then writes directly to PsiTri.
 // No size limit — bounded only by disk space.
 ```
 
-The writer still holds the exclusive lock for the duration, so the RW
-btree is quiescent during a direct transaction. After the direct
-transaction commits, normal buffered writes resume.
+The writer thread is single-threaded per root, so the RW map is
+quiescent during a direct transaction. After the direct transaction
+commits, normal buffered writes resume.
 
 This means the DWAL is an optimization for the common case (many small
 transactions), not a constraint. Bulk loads, migrations, and large
 batch operations use `direct` mode and get PsiTri's full COW semantics
 with no artificial size limit.
 
-### Concurrency: Per-Root Reader/Writer Lock
+### Concurrency: Writer-Private RW, Lock-Free Reads
 
-Each root has its own `std::shared_mutex` protecting its RW btree.
-Writers on independent roots never contend — they acquire different
-locks and touch completely independent data structures (btree_map,
-pool, WAL file, RO slot).
+The RW map is **writer-private** — only the single writer thread accesses
+it. There is no shared_mutex on the RW map. This eliminates lock
+contention on the hot write path entirely.
 
-- **Write transactions** acquire the root's exclusive lock for the
-  duration of the transaction. Multiple writers to the *same root*
-  serialize. Writers to *different roots* run fully in parallel.
-- **Read transactions** (`latest` mode) acquire the root's shared lock.
-  Multiple readers hold the shared lock concurrently without blocking
-  each other. Readers on different roots never contend.
-- **The transaction API is the same** for read and write — a read
-  transaction simply doesn't expose mutation methods.
+Writers on independent roots never contend — they touch completely
+independent data structures (ART map, pool, WAL file, RO slot).
+
+- **Write transactions** are single-writer-per-root. The writer thread
+  owns the RW map exclusively. Multiple writers to the *same root*
+  must serialize externally (one `dwal_transaction` at a time per root).
+  Writers to *different roots* run fully in parallel.
+- **Readers** never access the RW map. They read from the frozen RO
+  map (via `buffered_mutex`, held only to copy a `shared_ptr`) and/or
+  PsiTri (via COW sessions). No reader ever blocks a writer.
+- **The `create_cursor` API** encapsulates all locking. The caller passes
+  a `read_mode` and receives an `owned_merge_cursor` that holds shared_ptr
+  copies of the relevant layers. No application code touches mutexes directly.
 
 ```cpp
-class dwal_transaction
-{
-   std::shared_mutex&  _root_lock;  // per-root lock
-   // Writer holds unique_lock for entire transaction lifetime.
-   // Reader holds shared_lock for entire transaction lifetime.
-   std::variant<std::unique_lock<std::shared_mutex>,
-                std::shared_lock<std::shared_mutex>> _lock;
+// Writer: single-threaded access, no locks on RW map
+auto tx = dwal.start_write_transaction(root_index);
+tx.upsert(key, value);   // writes to RW map + WAL
+auto result = tx.get(key); // reads RW → RO → Tri
+tx.commit();
 
-   // Writer: lock already held, no per-mutation locking
-   void upsert(key, value) {
-      _rw_btree->insert_or_assign(key, value);
-      _undo_log.record(...);
-   }
-
-   // Reader: lock already held
-   std::optional<value> get(key) {
-      if (auto it = _rw_btree->find(key); it != _rw_btree->end())
-         return it->second;
-      // Fall through to RO btree, then PsiTri
-      ...
-   }
-
-   // Returns a merge cursor over all three layers
-   dwal_cursor cursor() const;
-};
+// Reader: create_cursor handles all locking internally
+auto mc = dwal.create_cursor(root_index, read_mode::buffered);
+mc->seek_begin();
+while (!mc->is_end()) {
+   // iterate over RO + Tri layers
+   mc->next();
+}
 ```
 
 ### Merge Cursor
 
 The DWAL exposes a **merge cursor** that presents a unified sorted view
 across all three layers. It mirrors the PsiTri `cursor` API: positioned
-iteration, seeking, counting — but merges results from the RW btree,
-RO btree, and PsiTri cursor, filtering through tombstones and range
+iteration, seeking, counting — but merges results from the RW map,
+RO map, and PsiTri cursor, filtering through tombstones and range
 tombstones.
 
 ```cpp
-class dwal_cursor
+class merge_cursor
 {
    // Three source iterators, each positioned at their current key
-   using btree_iter = absl::btree_map<std::string_view, std::string_view>::const_iterator;
+   using btree_iter = btree_layer::iterator;  // art::art_map iterator
 
-   btree_iter                rw_it, rw_end;       // RW btree (if lock held)
-   btree_iter                ro_it, ro_end;        // RO btree (if not stale)
-   psitri::cursor            tri_cursor;           // PsiTri COW tree
-   const range_tombstone_list* rw_tombstones;
-   const range_tombstone_list* ro_tombstones;
+   const btree_layer* _rw;                    // RW map (null if excluded)
+   const btree_layer* _ro;                    // RO map (null if excluded)
+   btree_iter         _rw_it, _rw_end;        // RW map iterators
+   btree_iter         _ro_it, _ro_end;        // RO map iterators
+   std::optional<psitri::cursor> _tri;        // PsiTri COW cursor
 
-   // Which source(s) produced the current position
-   enum class source { rw, ro, tri, end };
-   source _current_source;
+   enum class source { rw, ro, tri, none };
+   source _source;
 
 public:
    // -- Positioning --
-   bool seek_begin();         // position at first live key
-   bool seek_last();          // position at last live key
-   bool seek_end();           // position past last key
-   bool seek_rend();          // position before first key
-
-   bool lower_bound(key_view key);   // first key >= key
-   bool upper_bound(key_view key);   // first key > key
-   bool seek(key_view key);          // exact match
+   bool seek_begin();                         // first live key
+   bool seek_last();                          // last live key
+   bool lower_bound(std::string_view key);    // first key >= key
+   bool upper_bound(std::string_view key);    // first key > key
+   bool seek(std::string_view key);           // exact match
 
    // -- Navigation --
-   bool next();               // advance to next live key
-   bool prev();               // retreat to previous live key
+   bool next();
+   bool prev();
 
    // -- Access --
-   bool       is_end() const;
-   bool       is_rend() const;
-   key_view   key() const;           // current key
-   template <ConstructibleBuffer T>
-   std::optional<T> value() const;   // current value
-   int32_t    value_size() const;
+   bool             is_end() const;
+   bool             is_rend() const;
+   std::string_view key() const;              // current key
+   const btree_value& current_value() const;  // RW/RO layer value
+   source           current_source() const;
+   bool             is_subtree() const;
+   psitri::cursor*  tri_cursor();             // for Tri-layer value reads
 
    // -- Counting --
-   uint64_t count_keys(key_view lower = {}, key_view upper = {}) const;
+   uint64_t count_keys(std::string_view lower = {}, std::string_view upper = {});
+};
 
-   // -- Subtree support --
-   bool is_subtree() const;
-   sal::smart_ptr<sal::alloc_header> subtree() const;
+/// Owns layer snapshots + cursor. Returned by dwal_database::create_cursor().
+/// Application code uses this instead of accessing dwal_root internals.
+class owned_merge_cursor
+{
+   std::shared_ptr<btree_layer> _rw, _ro;
+   merge_cursor                 _cursor;
+public:
+   merge_cursor*       operator->()       { return &_cursor; }
+   const merge_cursor* operator->() const { return &_cursor; }
 };
 ```
 
@@ -370,25 +371,23 @@ sources due to overlap and tombstones. Two strategies:
 
 The **writer** decides when to swap — it pushes work to the merge stage:
 
-1. Writes go to the **RW btree** (the hot head), backed by the WAL for
-   durability. Keys and values are bump-allocated from the RW pool.
-   Writers hold the exclusive lock for the full transaction.
+1. Writes go to the **RW ART map** (the hot head), backed by the WAL for
+   durability. Keys are stored in the ART arena, value data in the PMR pool.
+   The writer thread owns the RW map exclusively (no lock needed).
 
 2. A swap is triggered by either condition:
-   - **Btree size:** the writer determines the RW btree is full (pool
-     memory or entry count) — checked inline during the write transaction,
-     under the exclusive lock it already holds.
+   - **Map size:** the writer determines the RW map is full (entry count)
+     — checked inline during commit.
    - **WAL size:** the WAL file exceeds a threshold. Handles the case
-     where the btree stays small (repeated overwrites) but the WAL grows
+     where the map stays small (repeated overwrites) but the WAL grows
      large (every overwrite is a new entry). Checked at commit time.
-   - **Time-based:** a background timer detects an RW btree that hasn't
-     been touched for longer than `idle_flush_interval`. The timer
-     thread acquires the exclusive lock and performs the swap. This
-     ensures idle roots drain to PsiTri promptly — without it, a burst
-     of writes followed by silence would leave data stranded in the RW
-     btree, invisible to `persistent`-mode readers.
+   - **Time-based:** a background timer detects an RW map that hasn't
+     been touched for longer than `idle_flush_interval`. This ensures
+     idle roots drain to PsiTri promptly — without it, a burst of
+     writes followed by silence would leave data stranded in the RW
+     map, invisible to `persistent`-mode readers.
 
-   The swap procedure (under exclusive lock):
+   The swap procedure (writer thread only):
    - Check that this root's RO slot is free (previous merge completed
      and readers drained). If not, the writer **blocks** until the
      merge finishes. This is the correct backpressure: the WAL exists
@@ -397,19 +396,19 @@ The **writer** decides when to swap — it pushes work to the merge stage:
      RO slots, unbounded RW growth) just defers the stall while
      consuming the same memory and adding read cursor complexity.
    - Note the current PsiTri root — this is the **base root** of the new
-     RO btree. All keys in the RO btree are relative to this snapshot.
-   - The RW btree becomes the new **RO btree**, tagged with the base root.
-     Its pool is assigned a slot and a generation number.
-   - A fresh empty btree with a new pool becomes the new RW btree.
-   - The WAL is rotated — old WAL file covers the now-frozen RO btree.
-   - Publish the new RO btree pointer (atomic store, release).
+     RO map. All keys in the RO map are relative to this snapshot.
+   - The RW map (shared_ptr) is moved to `buffered_ptr` under an exclusive
+     `buffered_mutex` lock — this is the only write to `buffered_ptr`.
+   - A fresh empty ART map becomes the new RW map (allocated outside the lock).
+   - The WAL is rotated — old WAL file covers the now-frozen RO map.
+   - Increment the generation counter (atomic store, release).
    - Signal the merge pool (condition variable).
 
 3. A merge pool thread wakes, picks up the root, and drains the RO
    btree into PsiTri. When complete, it publishes a **new PsiTri root**
    via atomic store (release).
 
-4. The RO btree pool **cannot be freed yet** — readers may still hold
+4. The RO map pool **cannot be freed yet** — readers may still hold
    pointers into it. The pool waits for all readers to release
    (epoch-based reclamation).
 
@@ -417,12 +416,12 @@ The **writer** decides when to swap — it pushes work to the merge stage:
 
 ### Merge Thread Pool
 
-Merging RO btrees into PsiTri is the throughput bottleneck — every
+Merging RO maps into PsiTri is the throughput bottleneck — every
 write ultimately flows through this path. A single merge thread would
 serialize all roots, capping global write throughput regardless of how
 many roots are active.
 
-Instead, a **bounded thread pool** drains RO btrees. Each drain runs
+Instead, a **bounded thread pool** drains RO maps. Each drain runs
 one root to completion on one thread (no interleaving — cache-friendly).
 Multiple roots drain concurrently on different threads.
 
@@ -457,15 +456,14 @@ count while keeping per-root drains sequential and cache-friendly.
 PsiTri root swap happens once at the end — partial drains don't produce
 a publishable result, and switching mid-drain thrashes cache.
 
-**Writer-driven push:** The writer decides when the RW btree is full
-(by size, entry count, or pool memory pressure) and performs the swap
-under the exclusive lock it already holds. It freezes the RW btree into
-the root's RO slot and signals the merge pool (condition variable).
-A pool thread wakes, picks up the root, and drains it.
+**Writer-driven push:** The writer decides when the RW map is full
+(by entry count or WAL size) and performs the swap. It moves the RW map
+to `buffered_ptr` (brief exclusive lock on `buffered_mutex`), allocates a
+fresh RW map, and signals the merge pool. A pool thread wakes, picks up
+the root, and drains it.
 
-The writer already holds the exclusive lock at swap time — no extra
-synchronization needed. The merge pool threads don't scan or poll;
-they block on a condition variable and are woken by the writer's signal.
+The merge pool threads don't scan or poll; they block on a condition
+variable and are woken by the writer's signal.
 
 **No deconfliction needed between pool threads.** Each root is an
 independent PsiTri tree with its own root pointer. Two threads draining
@@ -473,21 +471,18 @@ different roots operate on completely separate COW trees — different
 root pointers, different COW paths. They share only the SAL allocator,
 which is already designed for concurrent sessions (per-session
 allocation, lock-free release queues). Each root has at most one
-pending RO btree, so at most one merge thread works on a given root.
+pending RO map, so at most one merge thread works on a given root.
 
 ### RO Btree Staleness Detection
 
-Each RO btree carries the **PsiTri root it was built from** (the base root).
+Each RO map carries the **PsiTri root it was built from** (the base root).
 Readers use this to detect whether the merge has completed:
 
 ```cpp
-struct ro_btree_snapshot
-{
-   absl::btree_map<...>*   map;
-   range_tombstone_list*    tombstones;
-   sal::ptr_address         base_root;   // PsiTri root at swap time
-   uint32_t                 generation;  // for epoch-based pool reclamation
-};
+// Per-root state in dwal_root:
+std::shared_ptr<btree_layer> buffered_ptr;     // frozen RO layer (or null)
+std::atomic<uint32_t>        ro_base_root;     // PsiTri root at swap time
+std::atomic<uint32_t>        generation;       // epoch for pool reclamation
 ```
 
 #### The Ordering Problem
@@ -498,8 +493,8 @@ Two independent threads write to two atomic variables:
 - **Writer thread** stores `ro_ptr` (when swap occurs)
 
 A reader must load both and compare. A **false skip** (concluding the
-RO btree is merged when it hasn't been) causes data loss. A **false
-include** (redundantly reading a merged RO btree) is harmless — the
+RO map is merged when it hasn't been) causes data loss. A **false
+include** (redundantly reading a merged RO map) is harmless — the
 merge cursor deduplicates.
 
 #### Why Load Order Matters
@@ -541,13 +536,13 @@ No lock, no CAS — just ordered atomic loads.
 #### Protocol
 
 ```
-// === Writer thread (swap, under exclusive lock) ===
+// === Writer thread (swap) ===
 writer_swap():
    snapshot = tri_root.load(acquire)       // (1) syncs with merge thread
-   new_ro = freeze current RW btree
+   new_ro = freeze current RW map
    new_ro.base_root = snapshot
    ro_ptr.store(new_ro, release)           // (2) carries chain to readers
-   allocate fresh RW btree
+   allocate fresh RW map
 
 // === Merge thread (merge complete) ===
 merge_complete():
@@ -568,16 +563,16 @@ start_read_transaction():
 ```
 
 This is the **common steady-state path**: the merge finishes, readers see
-`base_root != root`, and skip the RO btree. They read PsiTri directly
+`base_root != root`, and skip the RO map. They read PsiTri directly
 with zero overhead from the DWAL layer.
 
-The RO btree is only consulted during the window between a swap and the
+The RO map is only consulted during the window between a swap and the
 completion of the subsequent merge — a transient state under write pressure.
 
 ### Range Tombstones
 
 Range deletes cannot be efficiently represented as per-key tombstones in the
-btree_map (the range may cover millions of keys in PsiTri). Instead, each
+ART map (the range may cover millions of keys in PsiTri). Instead, each
 layer maintains a **separate sorted list of deleted ranges**.
 
 ```cpp
@@ -604,12 +599,12 @@ small (range deletes are rare) and non-overlapping (ranges are merged on
 insert), so binary search is fast.
 
 **On upsert within a deleted range:** the range is split around the inserted
-key. The key becomes live in the btree_map, and the two remaining sub-ranges
+key. The key becomes live in the ART map, and the two remaining sub-ranges
 stay as tombstones.
 
 **On merge to PsiTri:** range tombstones are applied directly as
 `remove_range` calls on the COW tree. After merge, the range tombstone list
-is discarded with the RO btree.
+is discarded with the RO map.
 
 ### Read Path
 
@@ -620,26 +615,26 @@ layered find — check each layer in priority order, short-circuit on
 first hit or tombstone:
 
 ```
-get(key):
-   // Layer 1: RW btree (lock already held by transaction)
-   if auto it = rw_map.find(key):
-      if it->is_tombstone: return not_found
-      return it->value
+get(key):  // writer thread: get_latest() reads all 3 layers
+   // Layer 1: RW map (writer-private, no lock)
+   if auto* v = rw_map.get(key):
+      if v->is_tombstone: return not_found
+      return v->value
    if rw_tombstones.is_deleted(key): return not_found
 
-   // Layer 2: RO btree (if active, immutable)
+   // Layer 2: RO map (copy shared_ptr under buffered_mutex, then release)
    if ro:
-      if auto it = ro->map.find(key):
-         if it->is_tombstone: return not_found
-         return it->value
+      if auto* v = ro->map.get(key):
+         if v->is_tombstone: return not_found
+         return v->value
       if ro->tombstones.is_deleted(key): return not_found
 
    // Layer 3: PsiTri
    return tri_cursor.get(key)
 ```
 
-In the common case (RW btree small/empty, RO null), this is one
-btree miss + one PsiTri lookup. No iterator state, no merge overhead.
+In the common case (RW map small/empty, RO null), this is one ART lookup
+miss + one PsiTri lookup. No iterator state, no merge overhead.
 
 #### Range Scans (merge cursor)
 
@@ -647,7 +642,7 @@ Range operations (`lower_bound`, `next`, `prev`, `count_keys`) use
 the **merge cursor** which maintains positioned iterators across all
 active layers. See "Merge Cursor" section below.
 
-The merge cursor checks layers in priority order: RW btree > RO btree
+The merge cursor checks layers in priority order: RW map > RO map
 > PsiTri. Tombstones and range tombstones in higher layers shadow lower
 layers.
 
@@ -658,43 +653,47 @@ transaction, trading freshness for latency:
 
 | Mode | Layers | Lock | Staleness | Use case |
 |------|--------|------|-----------|----------|
-| **latest** | RW + RO + Tri | shared lock on RW | none — sees all committed writes | interactive queries needing freshest state |
-| **buffered** | RO + Tri | none | up to one swap behind | bulk reads, avoids writer contention |
+| **latest** | RW + RO + Tri | `buffered_mutex` (shared, brief) | none — sees all committed writes | writer thread reading its own writes |
+| **buffered** | RO + Tri | `buffered_mutex` (shared, brief) | up to one swap behind | external readers, low contention |
 | **persistent** | Tri only | none | up to one merge behind | cheapest read, no DWAL overhead |
 
 ```cpp
 enum class read_mode { latest, buffered, persistent };
 
-auto txn = dwal.start_read_transaction(read_mode::buffered);
-auto cur = txn.cursor();  // merge cursor over RO + Tri only, no lock
+// create_cursor handles all locking internally
+auto mc = dwal.create_cursor(root_index, read_mode::buffered);
+mc->seek_begin();  // iterate over RO + Tri, no locks held during iteration
 ```
 
-All three modes see only committed data — the exclusive lock held by
-writers for the full transaction duration guarantees readers never see
-partial writes. The difference is recency: `latest` includes the most
-recent commits to the RW btree, `buffered` lags by at most one swap
+All three modes see only committed data. The difference is recency:
+`latest` includes the RW map (writer-thread only — the RW map is not
+thread-safe for concurrent access), `buffered` lags by at most one swap
 interval, and `persistent` lags by at most one merge cycle.
+
+**`latest` is writer-thread only.** The RW map has no lock — it is
+writer-private. Only the single writer thread may use `latest` mode.
+External reader threads must use `buffered` or `persistent`.
 
 The `persistent` mode is equivalent to reading PsiTri directly — the
 DWAL layer is invisible and there is zero DWAL overhead. This is the
 **default** — most reads don't need sub-swap-interval freshness. The
-`buffered` mode avoids the `shared_mutex` entirely, which matters under
-heavy write contention. The `latest` mode is for the rare case where
-the caller needs the absolute freshest committed state.
+`buffered` mode acquires `buffered_mutex` only briefly to copy a
+`shared_ptr`, then iterates lock-free over the frozen snapshot.
 
 ### Why Three Layers
 
-- The **RW btree** is guarded by `shared_mutex`. Writers serialize
-  (exclusive lock for full transaction), readers share (shared lock
-  for full transaction).
-- The **RO btree is immutable**. Any thread reads it without locks.
+- The **RW map** is writer-private — no lock, no contention. The single
+  writer thread reads and writes it freely. External readers never see it.
+- The **RO map is immutable**. Readers copy the `shared_ptr` under a brief
+  `shared_lock`, then iterate lock-free. The `buffered_mutex` protects only
+  the pointer swap, not iteration.
 - The **PsiTri tree** uses COW isolation — concurrent readers via sessions.
-- The **merge thread** only touches the RO btree (reading) and PsiTri
-  (writing via COW). It never touches the RW btree.
+- The **merge thread** only touches the RO map (reading) and PsiTri
+  (writing via COW). It never touches the RW map.
 
 ### Epoch-Based Pool Reclamation
 
-The RO btree pool must outlive all readers that hold pointers into it. PsiTri's
+The RO map pool must outlive all readers that hold pointers into it. PsiTri's
 SAL layer already solves an analogous problem for segment reclamation using an
 epoch-based read-lock mechanism. We adapt the same pattern for pool lifetime.
 
@@ -717,7 +716,7 @@ No CAS loops, no contention, no cache-line bouncing between readers.
 
 #### Adapting for Pool Reclamation
 
-Each RO btree pool is assigned a monotonically increasing **generation number**
+Each RO map pool is assigned a monotonically increasing **generation number**
 at swap time. The DWAL layer maintains a parallel set of per-session generation
 atomics, identical in structure to SAL's `session_rlock`:
 
@@ -797,7 +796,7 @@ class dwal_read_session
 
 | Structure | Purpose | Storage | Lifetime |
 |-----------|---------|---------|----------|
-| **WAL file** | Durability of *committed* transactions | Disk (append-only) | Until checkpoint (RO btree fully merged) |
+| **WAL file** | Durability of *committed* transactions | Disk (append-only) | Until checkpoint (RO map fully merged) |
 | **Undo log** | Rollback of *in-flight* transactions | Memory only | Single transaction |
 
 These are completely independent. The WAL records what happened *after* commit.
@@ -908,19 +907,19 @@ to PsiTri (no `inc_ref`) via `smart_ptr(session, addr, false)`.
 ### WAL Lifecycle
 
 Each WAL file is tied to a **btree_layer**. The file is created when
-the layer is created (fresh RW btree after swap) and deleted when the
+the layer is created (fresh RW map after swap) and deleted when the
 layer is discarded (merge complete + readers drained). At most **two
 WAL files exist per root** at any time:
 
 ```
-root-003/wal-rw.dwal    ← current RW btree's WAL (being appended to)
-root-003/wal-ro.dwal    ← RO btree's WAL (frozen, needed for crash recovery)
+root-003/wal-rw.dwal    ← current RW map's WAL (being appended to)
+root-003/wal-ro.dwal    ← RO map's WAL (frozen, needed for crash recovery)
 ```
 
 **On swap:**
-1. Close the current WAL file (it now covers the frozen RO btree)
+1. Close the current WAL file (it now covers the frozen RO map)
 2. Rename it to `wal-ro.dwal`
-3. Open a fresh `wal-rw.dwal` for the new RW btree
+3. Open a fresh `wal-rw.dwal` for the new RW map
 
 **On merge complete + readers drained:**
 1. Delete `wal-ro.dwal` — all its entries are now in PsiTri
@@ -944,10 +943,10 @@ The WAL size trigger handles the case where the btree stays small
 
 On startup, for each root:
 
-1. If `wal-ro.dwal` exists: the previous RO btree was not fully merged
-   before crash. Replay it into a btree_map, then drain to PsiTri
+1. If `wal-ro.dwal` exists: the previous RO map was not fully merged
+   before crash. Replay it into an ART map, then drain to PsiTri
    before accepting new writes.
-2. If `wal-rw.dwal` exists: replay valid entries into the RW btree_map.
+2. If `wal-rw.dwal` exists: replay valid entries into the RW ART map.
    Entry with bad XXH3 or truncated size = crash boundary, stop replay.
 3. Resume normal operation.
 
@@ -960,7 +959,7 @@ recovery(root):
 
    if exists wal-rw.dwal:
       rw_map = replay(wal-rw.dwal)    // stop at first bad entry
-      // rw_map becomes the live RW btree
+      // rw_map becomes the live RW map
 
    // ready for new transactions
 ```
@@ -972,9 +971,9 @@ in `wal-rw.dwal` is post-swap.
 ### Durability Model
 
 The WAL `write()` is a buffered append — no fsync per transaction.
-The exclusive lock covers only the btree mutation + buffered WAL write,
-no I/O. This keeps the lock hold time minimal and eliminates the
-group commit problem entirely (no fsync to batch).
+The writer thread performs the ART map mutation + buffered WAL write
+with no I/O. Since the RW map is writer-private (no lock), the entire
+write path is lock-free, eliminating the group commit problem entirely.
 
 **`fdatasync` is periodic and application-driven.** The app calls
 `flush()` when it needs a durability boundary (e.g. every N seconds,
@@ -983,9 +982,8 @@ Each root's WAL fsyncs independently.
 
 ```
 commit():
-   mutate btree_map         // under exclusive lock
+   mutate ART map           // writer-private, no lock needed
    append WAL entry         // buffered write, no I/O
-   release exclusive lock   // fast — no fsync in critical path
 
 flush():                    // app calls periodically, or never
    for each dirty root WAL:
@@ -993,7 +991,7 @@ flush():                    // app calls periodically, or never
 ```
 
 **Crash semantics:** Unflushed WAL entries are lost on crash. The
-btree_map is rebuilt from the durable portion of the WAL. This is the
+ART map is rebuilt from the durable portion of the WAL. This is the
 standard WAL tradeoff — applications that need per-transaction
 durability call `flush()` after commit. Applications that tolerate
 losing the last few seconds of writes (the common case) flush
@@ -1004,16 +1002,16 @@ periodically or not at all.
 ## Undo Log (In-Memory Only)
 
 The undo log enables transaction rollback *before* the WAL entry is written.
-As a transaction mutates the `absl::btree_map`, the undo log records how to
-reverse each mutation. On abort, the undo log is replayed in reverse. On
-commit, it is discarded.
+As a transaction mutates the ART map, the undo log records how to reverse
+each mutation. On abort, the undo log is replayed in reverse. On commit,
+it is discarded.
 
 ### Why It Can Be Memory-Only
 
 The undo log never needs disk persistence because:
 
 - If the process crashes mid-transaction, the transaction was never committed
-  to the WAL, so there is nothing to undo — the btree_map is rebuilt from
+  to the WAL, so there is nothing to undo — the ART map is rebuilt from
   the WAL on recovery.
 - The undo log exists only for explicit `abort()` calls during normal operation.
 
@@ -1021,26 +1019,24 @@ The undo log never needs disk persistence because:
 
 When a transaction modifies a key, the old value is in one of two places:
 
-1. **In the btree_map** — a prior buffered write that hasn't drained yet.
+1. **In the ART map** — a prior buffered write that hasn't drained yet.
    The old `btree_value` is saved in the undo entry (data values are
    copied into the undo arena since btree rebalancing invalidates pointers;
    subtree values just copy the `ptr_address`).
 2. **In the PsiTri COW tree** — the key was never buffered. The undo entry
-   needs **only the key** — on abort, erasing the btree_map entry causes
-   reads to fall through to PsiTri (or RO btree + PsiTri), which still has
+   needs **only the key** — on abort, erasing the map entry causes
+   reads to fall through to PsiTri (or RO map + PsiTri), which still has
    the original value. No coordinates, no data copy, no read lock.
 
-This works because the RO btree + PsiTri together always represent the
+This works because the RO map + PsiTri together always represent the
 pre-write-transaction state, even if the merge thread modifies PsiTri
 concurrently (the staleness detection ensures readers see the correct
 merged view).
 
 ### Arena-Backed Value Storage
 
-Values in `absl::btree_map` can be invalidated by node splits/merges during
-subsequent mutations in the same transaction. So old values must be copied
-into an arena owned by the undo log — a bump allocator that is freed as a
-unit when the undo log is discarded.
+Old values must be copied into an arena owned by the undo log — a bump
+allocator that is freed as a unit when the undo log is discarded.
 
 ```cpp
 /// Bump allocator for undo value storage.
@@ -1062,24 +1058,24 @@ struct undo_entry
 {
    enum class kind : uint8_t
    {
-      /// Key was inserted into btree_map (didn't exist anywhere before).
-      /// Undo: erase from btree_map.
+      /// Key was inserted into map (didn't exist anywhere before).
+      /// Undo: erase from map.
       insert,
 
-      /// Key existed in btree_map, value was overwritten.
+      /// Key existed in map, value was overwritten.
       /// Undo: restore old btree_value.
       overwrite_buffered,
 
-      /// Key existed only in PsiTri/RO, was shadowed by btree_map entry.
-      /// Undo: erase from btree_map (reads fall through to lower layers).
+      /// Key existed only in PsiTri/RO, was shadowed by map entry.
+      /// Undo: erase from map (reads fall through to lower layers).
       overwrite_cow,
 
-      /// Key existed in btree_map, was removed/tombstoned.
+      /// Key existed in map, was removed/tombstoned.
       /// Undo: re-insert old btree_value.
       erase_buffered,
 
-      /// Key existed only in PsiTri/RO, tombstone added to btree_map.
-      /// Undo: erase tombstone from btree_map.
+      /// Key existed only in PsiTri/RO, tombstone added to map.
+      /// Undo: erase tombstone from map.
       erase_cow,
 
       /// Range was erased.
@@ -1093,7 +1089,7 @@ struct undo_entry
    /// For data values: old_value.data is arena-backed.
    /// For subtree values: old_value.subtree_root is the ptr_address.
    /// COW types (overwrite_cow, erase_cow) don't need old values —
-   /// erasing from btree_map restores visibility to lower layers.
+   /// erasing from map restores visibility to lower layers.
    btree_value      old_value;
 
    // For erase_range only:
@@ -1102,7 +1098,7 @@ struct undo_entry
       std::string_view low;   // arena-backed
       std::string_view high;  // arena-backed
 
-      // Only btree_map keys need per-key undo entries.
+      // Only ART map keys need per-key undo entries.
       // PsiTri keys are undone by removing the range tombstone —
       // reads fall through to the original values in lower layers.
       struct buffered_entry
@@ -1110,7 +1106,7 @@ struct undo_entry
          std::string_view key;        // arena-backed
          btree_value      old_value;
       };
-      std::vector<buffered_entry> buffered_keys;  // btree_map keys only
+      std::vector<buffered_entry> buffered_keys;  // ART map keys only
    };
    std::unique_ptr<range_data> range;  // erase_range only, null otherwise
 };
@@ -1159,7 +1155,7 @@ begin_transaction()          (depth 0 → 1)
 
    upsert(key, value)
       → record undo entry in current frame
-      → apply mutation to btree_map
+      → apply mutation to ART map
 
    begin_transaction()       (depth 1 → 2, nested)
       → push_frame()
@@ -1171,7 +1167,7 @@ begin_transaction()          (depth 0 → 1)
          → replay entries [frame_start..end) in reverse
          → truncate entries to frame_start
          → pop_frame()
-         — btree_map is restored to state before inner transaction
+         — ART map is restored to state before inner transaction
 
    begin_transaction()       (depth 1 → 2, retry)
       → push_frame()
@@ -1182,7 +1178,7 @@ begin_transaction()          (depth 0 → 1)
       commit()               (depth 2 → 1, inner commit)
          → pop_frame()
          — entries merge into parent frame
-         — btree_map retains inner transaction's mutations
+         — ART map retains inner transaction's mutations
 
 commit()                     (depth 1 → 0, outermost)
    → serialize all operations to WAL entry
@@ -1200,33 +1196,33 @@ abort()                      (depth 1 → 0, outermost)
 
 ```
 upsert(key, value)
-   → if key doesn't exist (not in btree_map, not in lower layers):
+   → if key doesn't exist (not in map, not in lower layers):
         push {kind::insert, arena.copy(key)}
-   → if key exists in btree_map:
+   → if key exists in map:
         push {kind::overwrite_buffered, arena.copy(key), old_btree_value}
         // data values: arena.copy(old_value.data)
         // subtree values: copy ptr_address (8 bytes, no arena needed)
    → if key exists only in lower layers (RO/PsiTri):
         push {kind::overwrite_cow, arena.copy(key)}
-        // no old value needed — erase from btree_map restores visibility
-   → apply mutation to btree_map
+        // no old value needed — erase from map restores visibility
+   → apply mutation to map
 
 remove(key)
-   → if key exists in btree_map:
+   → if key exists in map:
         push {kind::erase_buffered, arena.copy(key), old_btree_value}
    → if key exists only in lower layers:
         push {kind::erase_cow, arena.copy(key)}
    → if key doesn't exist anywhere: no-op
-   → insert tombstone into btree_map
+   → insert tombstone into map
 
 remove_range(low, high)
-   → collect btree_map keys in [low, high): copy key+value to arena
+   → collect map keys in [low, high): copy key+value to arena
    → push {kind::erase_range, range={low, high, buffered_keys}}
-   → erase btree_map keys in range
+   → erase map keys in range
    → add range tombstone to range_tombstone_list
    // PsiTri keys in the range are NOT enumerated — the range
    // tombstone shadows them. On abort, removing the tombstone
-   // restores visibility. O(btree_map keys in range), not
+   // restores visibility. O(map keys in range), not
    // O(PsiTri keys in range).
 ```
 
@@ -1237,27 +1233,27 @@ write path. COW entries require a brief SAL read lock to dereference.
 
 ```
 insert:
-   → erase key from btree_map
+   → erase key from map
 
 overwrite_buffered:
-   → restore old btree_value in btree_map
+   → restore old btree_value in map
      (data: arena-backed string_view; subtree: ptr_address)
 
 overwrite_cow:
-   → erase key from btree_map
+   → erase key from map
    // reads fall through to lower layers which have the original
 
 erase_buffered:
-   → re-insert key with old btree_value into btree_map
+   → re-insert key with old btree_value into map
 
 erase_cow:
-   → erase tombstone from btree_map
+   → erase tombstone from map
    // reads fall through to lower layers which have the original
 
 erase_range:
    → remove range tombstone [low, high) from range_tombstone_list
    → for each buffered_key in reverse:
-        re-insert key with old btree_value into btree_map
+        re-insert key with old btree_value into map
    // Lower-layer keys are automatically visible again once the
    // range tombstone is removed — no per-key work needed.
 ```
@@ -1265,14 +1261,14 @@ erase_range:
 ### Memory Safety
 
 All string_views in undo entries point into the `undo_arena`, not into the
-btree_map. The arena is a bump allocator — allocation is a pointer bump,
+ART map. The arena is a bump allocator — allocation is a pointer bump,
 and the entire arena is freed as a unit on commit or after abort replay.
 
 **Arena string_views** (keys and buffered data values) are stable for the
 undo log's lifetime — the arena is freed as a unit on commit or after abort.
 
 **COW-type undo entries** (overwrite_cow, erase_cow) store only the key.
-No PsiTri pointers or coordinates are held. On abort, the btree_map entry
+No PsiTri pointers or coordinates are held. On abort, the map entry
 is erased and reads fall through to lower layers which have the original
 value. This avoids any lifetime issues with PsiTri node addresses.
 
