@@ -169,6 +169,7 @@ add_subdirectory(libraries/sal)
 add_subdirectory(libraries/psitri)
 add_subdirectory(libraries/hash)
 add_subdirectory(libraries/ucc)
+add_subdirectory(libraries/art)
 
 # PsiTriRocks: RocksDB-compatible wrapper around psitri
 add_subdirectory(libraries/psitrirocks)
@@ -317,8 +318,9 @@ add_executable(psitri-benchmark programs/psitri_bench.cpp)
 target_link_libraries(psitri-benchmark PUBLIC Boost::program_options psitri)
 
 # COW amortization benchmark
-add_executable(cow-amort-bench programs/cow_amort_bench.cpp)
-target_link_libraries(cow-amort-bench PRIVATE psitri absl::btree)
+add_executable(cow-amort-bench programs/cow_amort_bench.cpp third_party/libart/art.c)
+target_link_libraries(cow-amort-bench PRIVATE psitri absl::btree art)
+target_include_directories(cow-amort-bench PRIVATE ${CMAKE_SOURCE_DIR}/third_party/libart)
 target_compile_definitions(cow-amort-bench PRIVATE XXH_INLINE_ALL)
 set_target_properties(cow-amort-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(psitri-benchmark PUBLIC ${Boost_INCLUDE_DIRS})

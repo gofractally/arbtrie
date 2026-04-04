@@ -1,0 +1,162 @@
+#pragma once
+#include <art/node.hpp>
+#include <ucc/lower_bound.hpp>
+#include <cstring>
+#include <string>
+
+namespace art::detail
+{
+   /// Find child in a setlist node. Returns pointer to the child offset_t slot,
+   /// or nullptr if the byte is not present.
+   inline offset_t* setlist_find_child(node_header* hdr, uint8_t byte) noexcept
+   {
+      setlist_view sv{hdr};
+      uint16_t     pos = ucc::lower_bound_padded(sv.keys(), sv.num_children(), byte);
+      if (pos < sv.num_children() && sv.keys()[pos] == byte)
+         return &sv.children()[pos];
+      return nullptr;
+   }
+
+   inline const offset_t* setlist_find_child(const node_header* hdr, uint8_t byte) noexcept
+   {
+      return setlist_find_child(const_cast<node_header*>(hdr), byte);
+   }
+
+   /// Find the lower_bound position in a setlist: first child with key >= byte.
+   /// Returns the index [0, num_children]. If == num_children, all keys < byte.
+   inline uint16_t setlist_lower_bound(const node_header* hdr, uint8_t byte) noexcept
+   {
+      setlist_view sv{const_cast<node_header*>(hdr)};
+      return ucc::lower_bound_padded(sv.keys(), sv.num_children(), byte);
+   }
+
+   /// Insert a child into a setlist node. The node must not be full (num_children < 48).
+   /// Mutates in-place when capacity allows; reallocates to a larger cacheline-rounded
+   /// block when capacity is exhausted. Returns the node offset (same if in-place,
+   /// new if reallocated). The caller must update its parent pointer if it changed.
+   inline offset_t setlist_add_child(arena&   a,
+                                     offset_t node_off,
+                                     uint8_t  byte,
+                                     offset_t child_off) noexcept
+   {
+      auto*        hdr = a.as<node_header>(node_off);
+      setlist_view sv{hdr};
+
+      uint8_t n = sv.num_children();
+      assert(n < setlist_max_children);
+
+      // Find insertion position
+      uint16_t pos = ucc::lower_bound_padded(sv.keys(), n, byte);
+      assert(pos >= n || sv.keys()[pos] != byte);  // no duplicate
+
+      if (n < sv.capacity())
+      {
+         // ── In-place: memmove to make room ──────────────────────────────
+         uint8_t*  keys     = sv.keys();
+         offset_t* children = sv.children();
+
+         std::memmove(keys + pos + 1, keys + pos, n - pos);
+         keys[pos] = byte;
+
+         std::memmove(children + pos + 1, children + pos, (n - pos) * sizeof(offset_t));
+         children[pos] = child_off;
+
+         hdr->num_children = n + 1;
+         return node_off;
+      }
+
+      // ── Capacity exhausted: reallocate to larger cacheline-rounded block ──
+      uint8_t new_n = n + 1;
+
+      // Save prefix before arena realloc may invalidate it
+      std::string saved_prefix(sv.prefix());
+
+      offset_t new_off = make_setlist(a, new_n, saved_prefix);
+      auto*    new_hdr = a.as<node_header>(new_off);
+
+      // Re-read old pointers (arena may have reallocated)
+      hdr = a.as<node_header>(node_off);
+      sv  = setlist_view{hdr};
+
+      new_hdr->value_off = hdr->value_off;
+
+      setlist_view new_sv{new_hdr};
+
+      // Copy keys with insertion
+      uint8_t*       new_keys = new_sv.keys();
+      const uint8_t* old_keys = sv.keys();
+      std::memcpy(new_keys, old_keys, pos);
+      new_keys[pos] = byte;
+      std::memcpy(new_keys + pos + 1, old_keys + pos, n - pos);
+
+      // Copy children with insertion
+      offset_t*       new_children = new_sv.children();
+      const offset_t* old_children = sv.children();
+      std::memcpy(new_children, old_children, pos * sizeof(offset_t));
+      new_children[pos] = child_off;
+      std::memcpy(new_children + pos + 1, old_children + pos, (n - pos) * sizeof(offset_t));
+
+      return new_off;
+   }
+
+   /// Remove a child from a setlist node at the given position.
+   /// Mutates in-place (memmove to close gap). Returns node_off, or null_offset
+   /// if the node becomes empty (caller handles that case).
+   inline offset_t setlist_remove_child(arena& a, offset_t node_off, uint16_t pos) noexcept
+   {
+      auto*        hdr = a.as<node_header>(node_off);
+      setlist_view sv{hdr};
+
+      uint8_t n = sv.num_children();
+      assert(pos < n);
+      assert(n > 0);
+
+      if (n == 1)
+         return null_offset;  // caller handles empty case
+
+      // In-place: memmove to close gap
+      uint8_t*  keys     = sv.keys();
+      offset_t* children = sv.children();
+
+      std::memmove(keys + pos, keys + pos + 1, n - pos - 1);
+      std::memmove(children + pos, children + pos + 1, (n - pos - 1) * sizeof(offset_t));
+
+      hdr->num_children = n - 1;
+      return node_off;
+   }
+
+   /// Grow a full setlist (48 children) into a node256.
+   /// Returns the new node256 offset. The byte/child_off is the new child to add.
+   inline offset_t setlist_grow_to_256(arena&   a,
+                                       offset_t node_off,
+                                       uint8_t  byte,
+                                       offset_t child_off) noexcept
+   {
+      auto*        old_hdr = a.as<node_header>(node_off);
+      setlist_view old_sv{old_hdr};
+
+      offset_t new_off = make_node256(a, old_sv.prefix());
+      auto*    new_hdr = a.as<node_header>(new_off);
+
+      // Re-read old pointers (arena may have reallocated)
+      old_hdr = a.as<node_header>(node_off);
+      old_sv  = setlist_view{old_hdr};
+
+      new_hdr->value_off = old_hdr->value_off;
+
+      node256_view new_nv{new_hdr};
+
+      // Scatter existing children
+      uint8_t n = old_sv.num_children();
+      for (uint8_t i = 0; i < n; ++i)
+         new_nv.children()[old_sv.keys()[i]] = old_sv.children()[i];
+      new_hdr->num_children = n;
+
+      // Add the new child
+      new_nv.children()[byte] = child_off;
+      new_hdr->num_children++;
+
+      return new_off;
+   }
+
+}  // namespace art::detail

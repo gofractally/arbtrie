@@ -50,6 +50,14 @@ target_compile_definitions(psitri-tests PUBLIC XXH_INLINE_ALL)
 set_target_properties(psitri-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_test(NAME psitri-tests COMMAND psitri-tests)
 
+# ART map tests
+add_executable(art-tests
+    ../libraries/art/tests/art_map_tests.cpp
+)
+target_link_libraries(art-tests PRIVATE art Catch2::Catch2WithMain)
+set_target_properties(art-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_test(NAME art-tests COMMAND art-tests)
+
 # init_replace_branch crash dump replay test
 add_executable(init-replace-branch-test init_replace_branch_test.cpp)
 target_link_libraries(init-replace-branch-test PRIVATE psitri)
