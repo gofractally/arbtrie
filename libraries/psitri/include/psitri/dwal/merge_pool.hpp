@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -35,7 +36,8 @@ namespace psitri::dwal
      public:
       merge_pool(std::shared_ptr<psitri::database> db,
                  uint32_t                           num_threads,
-                 epoch_registry&                    epochs);
+                 epoch_registry&                    epochs,
+                 std::filesystem::path              wal_dir = {});
 
       ~merge_pool();
 
@@ -63,6 +65,7 @@ namespace psitri::dwal
 
       std::shared_ptr<psitri::database> _db;
       epoch_registry&                   _epochs;
+      std::filesystem::path             _wal_dir;
 
       // Worker threads and their write sessions.
       std::vector<std::thread>                            _threads;

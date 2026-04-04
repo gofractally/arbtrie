@@ -127,7 +127,18 @@ namespace psitri::dwal
       /// Thread-safe: uses a thread-local read session internally.
       dwal_transaction::lookup_result tri_get(uint32_t root_index, std::string_view key);
 
+      /// Replay any WAL files found on disk to recover from a crash.
+      /// Called automatically by the constructor. Safe to call on clean startup
+      /// (no WAL files = no-op).
+      void recover();
+
      private:
+
+      /// Replay a single WAL file's entries into the PsiTri COW tree.
+      void replay_wal_to_tri(uint32_t root_index, const std::filesystem::path& wal_path);
+
+      /// Replay a single WAL file's entries into a root's RW btree layer.
+      void replay_wal_to_rw(uint32_t root_index, const std::filesystem::path& wal_path);
 
       /// Ensure WAL directory and files exist for a root.
       void ensure_wal(uint32_t root_index);

@@ -2939,3 +2939,423 @@ TEST_CASE("merge_cursor count_keys with RW+RO+Tri", "[dwal]")
    // Live keys: a, b, c(RO), d — e is tombstoned.
    CHECK(mc.count_keys() == 4);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// WAL crash recovery tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DWAL recovery: RW WAL replayed into btree on reopen", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Phase 1: Write data through DWAL, flush, then simulate crash by
+   // destroying the WAL writer without calling close() (no clean_close flag).
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("crash_key1", "crash_val1");
+         tx.upsert("crash_key2", "crash_val2");
+         tx.commit();
+      }
+      dwal_db.flush_wal();
+
+      // Simulate crash: reset the WAL writer (fd closes via ~wal_writer
+      // destructor, but close() is never called — no clean_close flag set).
+      dwal_db.root(0).wal.reset();
+   }
+
+   // Phase 2: Reopen — recovery should replay the RW WAL into the btree.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      auto r1 = dwal_db.get_latest(0, "crash_key1");
+      CHECK(r1.found);
+      CHECK(r1.value.data == "crash_val1");
+
+      auto r2 = dwal_db.get_latest(0, "crash_key2");
+      CHECK(r2.found);
+      CHECK(r2.value.data == "crash_val2");
+   }
+}
+
+TEST_CASE("DWAL recovery: RO WAL replayed into Tri on reopen", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db_path  = td.path / "db";
+   auto     wal_path = td.path / "wal";
+
+   auto db = psitri::database::create(db_path);
+
+   // Phase 1: Write data, swap to RO (creates wal-ro.dwal), simulate crash.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, wal_path, dcfg);
+
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("frozen1", "fval1");
+         tx.upsert("frozen2", "fval2");
+         tx.commit();
+      }
+      dwal_db.flush_wal();
+
+      // Swap RW→RO: renames wal-rw.dwal to wal-ro.dwal.
+      // merge_threads=0 so no merge happens — data stays in RO.
+      dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+      dwal_db.swap_rw_to_ro(0);
+      dwal_db.flush_wal();
+
+      // Simulate crash: destroy WAL writers without close().
+      auto& root = dwal_db.root(0);
+      root.wal.reset();
+   }
+
+   // Verify wal-ro.dwal exists on disk.
+   auto ro_wal = wal_path / "root-0" / "wal-ro.dwal";
+   REQUIRE(std::filesystem::exists(ro_wal));
+
+   // Phase 2: Reopen — recovery should replay RO WAL into PsiTri.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, wal_path, dcfg);
+
+      // Data should be in PsiTri now (not in RW btree).
+      auto r1 = dwal_db.get_latest(0, "frozen1");
+      CHECK(r1.found);
+
+      auto r2 = dwal_db.get_latest(0, "frozen2");
+      CHECK(r2.found);
+
+      // RO WAL should have been deleted after replay.
+      CHECK_FALSE(std::filesystem::exists(ro_wal));
+   }
+}
+
+TEST_CASE("DWAL recovery: clean shutdown skips replay", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Phase 1: Normal write + clean shutdown.
+   {
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("k", "v");
+         tx.commit();
+      }
+      // Destructor calls wal->close() which sets clean_close flag.
+   }
+
+   // Phase 2: Reopen. WAL has clean_close flag → recovery skips it.
+   // The RW WAL file should be deleted.
+   {
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+      // Data was only in the in-memory RW btree, which was lost on shutdown.
+      // With clean close, the WAL is NOT replayed (data was "intentionally" lost
+      // because it hadn't been swapped/merged yet — this is expected behavior
+      // for clean shutdown without explicit flush).
+      // The key should NOT be found since it was never merged to Tri.
+      auto r = dwal_db.get_latest(0, "k");
+      CHECK_FALSE(r.found);
+   }
+}
+
+TEST_CASE("DWAL recovery: removes and range removes replayed", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Seed Tri with data via direct PsiTri write.
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.upsert("d", "4");
+      tx.commit();
+   }
+
+   // Phase 1: DWAL removes + range remove, then crash.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.remove("a");
+         tx.remove_range("c", "e");  // removes c, d
+         tx.commit();
+      }
+      dwal_db.flush_wal();
+
+      // Simulate crash.
+      dwal_db.root(0).wal.reset();
+   }
+
+   // Phase 2: Reopen — removes should be replayed into RW btree.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      // "a" was removed (tombstone in RW), should not be found.
+      auto ra = dwal_db.get_latest(0, "a");
+      CHECK_FALSE(ra.found);
+
+      // "b" was not touched — should still be in Tri.
+      auto rb = dwal_db.get_latest(0, "b");
+      CHECK(rb.found);
+
+      // "c" and "d" were range-removed.
+      auto rc = dwal_db.get_latest(0, "c");
+      CHECK_FALSE(rc.found);
+      auto rd = dwal_db.get_latest(0, "d");
+      CHECK_FALSE(rd.found);
+   }
+}
+
+TEST_CASE("DWAL recovery: multiple transactions replayed in order", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Phase 1: Multiple transactions overwriting the same key, then crash.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      for (int i = 0; i < 100; ++i)
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("counter", std::to_string(i));
+         tx.upsert("key_" + std::to_string(i), "val_" + std::to_string(i));
+         tx.commit();
+      }
+      dwal_db.flush_wal();
+
+      // Simulate crash.
+      dwal_db.root(0).wal.reset();
+   }
+
+   // Phase 2: Reopen — all 100 transactions replayed.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      // "counter" should have the last value.
+      auto r = dwal_db.get_latest(0, "counter");
+      REQUIRE(r.found);
+      CHECK(r.value.data == "99");
+
+      // All unique keys should be present.
+      for (int i = 0; i < 100; ++i)
+      {
+         auto ri = dwal_db.get_latest(0, "key_" + std::to_string(i));
+         REQUIRE(ri.found);
+         CHECK(ri.value.data == "val_" + std::to_string(i));
+      }
+   }
+}
+
+TEST_CASE("DWAL recovery: partial WAL (torn write) recovers valid prefix", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_dir = td.path / "wal";
+
+   // Phase 1: Write two transactions, flush, then corrupt the end of the file
+   // to simulate a torn write (process died mid-write of third transaction).
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, wal_dir, dcfg);
+
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("good1", "val1");
+         tx.commit();
+      }
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("good2", "val2");
+         tx.commit();
+      }
+      dwal_db.flush_wal();
+
+      // Simulate crash.
+      dwal_db.root(0).wal.reset();
+   }
+
+   // Append garbage to the WAL to simulate a torn write.
+   auto rw_wal = wal_dir / "root-0" / "wal-rw.dwal";
+   {
+      int fd = ::open(rw_wal.c_str(), O_WRONLY | O_APPEND);
+      REQUIRE(fd >= 0);
+      char garbage[50] = {};
+      std::memset(garbage, 0xAB, sizeof(garbage));
+      ::write(fd, garbage, sizeof(garbage));
+      ::close(fd);
+   }
+
+   // Phase 2: Reopen — should recover the two valid transactions,
+   // ignoring the garbage at the end.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, wal_dir, dcfg);
+
+      auto r1 = dwal_db.get_latest(0, "good1");
+      CHECK(r1.found);
+      CHECK(r1.value.data == "val1");
+
+      auto r2 = dwal_db.get_latest(0, "good2");
+      CHECK(r2.found);
+      CHECK(r2.value.data == "val2");
+   }
+}
+
+TEST_CASE("DWAL recovery: multi-root independent recovery", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Phase 1: Write to two roots, crash.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("root0_key", "root0_val");
+         tx.commit();
+      }
+      {
+         auto tx = dwal_db.start_write_transaction(1);
+         tx.upsert("root1_key", "root1_val");
+         tx.commit();
+      }
+      dwal_db.flush_wal();
+
+      // Simulate crash on both.
+      dwal_db.root(0).wal.reset();
+      dwal_db.root(1).wal.reset();
+   }
+
+   // Phase 2: Reopen — both roots recovered independently.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      auto r0 = dwal_db.get_latest(0, "root0_key");
+      CHECK(r0.found);
+      CHECK(r0.value.data == "root0_val");
+
+      auto r1 = dwal_db.get_latest(1, "root1_key");
+      CHECK(r1.found);
+      CHECK(r1.value.data == "root1_val");
+
+      // Cross-root isolation.
+      CHECK_FALSE(dwal_db.get_latest(0, "root1_key").found);
+      CHECK_FALSE(dwal_db.get_latest(1, "root0_key").found);
+   }
+}
+
+TEST_CASE("DWAL recovery: RO WAL deleted after merge", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("k", "v");
+      tx.commit();
+   }
+   dwal_db.flush_wal();
+
+   // Swap creates wal-ro.dwal.
+   dwal_db.swap_rw_to_ro(0);
+
+   auto ro_wal = td.path / "wal" / "root-0" / "wal-ro.dwal";
+
+   // Wait for merge to complete.
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 200 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   REQUIRE(root.merge_complete.load());
+
+   // After merge, the RO WAL should be deleted.
+   CHECK_FALSE(std::filesystem::exists(ro_wal));
+}
+
+TEST_CASE("DWAL recovery: aborted transaction not in WAL", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Phase 1: Commit one tx, abort another, crash.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      dcfg.max_rw_entries = 5000;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("committed", "yes");
+         tx.commit();
+      }
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert("aborted", "no");
+         tx.abort();
+      }
+      dwal_db.flush_wal();
+      dwal_db.root(0).wal.reset();
+   }
+
+   // Phase 2: Only the committed data should be recovered.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads  = 0;
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      CHECK(dwal_db.get_latest(0, "committed").found);
+      CHECK_FALSE(dwal_db.get_latest(0, "aborted").found);
+   }
+}

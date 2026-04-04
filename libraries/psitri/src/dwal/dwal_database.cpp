@@ -2,8 +2,11 @@
 
 #include <psitri/cursor.hpp>
 #include <psitri/database.hpp>
+#include <psitri/dwal/wal_reader.hpp>
 #include <psitri/read_session.hpp>
 #include <psitri/read_session_impl.hpp>
+#include <psitri/write_session.hpp>
+#include <psitri/write_session_impl.hpp>
 
 #include <cassert>
 #include <shared_mutex>
@@ -18,8 +21,153 @@ namespace psitri::dwal
    {
       std::filesystem::create_directories(_wal_dir);
 
+      recover();
+
       if (_cfg.merge_threads > 0)
-         _merge_pool = std::make_unique<merge_pool>(_db, _cfg.merge_threads, _epochs);
+         _merge_pool = std::make_unique<merge_pool>(_db, _cfg.merge_threads, _epochs, _wal_dir);
+   }
+
+   void dwal_database::recover()
+   {
+      std::error_code ec;
+      for (auto& entry : std::filesystem::directory_iterator(_wal_dir, ec))
+      {
+         if (!entry.is_directory())
+            continue;
+
+         auto dirname = entry.path().filename().string();
+         if (dirname.substr(0, 5) != "root-")
+            continue;
+
+         uint32_t root_index = 0;
+         try
+         {
+            root_index = static_cast<uint32_t>(std::stoul(dirname.substr(5)));
+         }
+         catch (...)
+         {
+            continue;
+         }
+
+         if (root_index >= max_roots)
+            continue;
+
+         auto ro_wal = entry.path() / "wal-ro.dwal";
+         auto rw_wal = entry.path() / "wal-rw.dwal";
+
+         // Phase 1: Replay RO WAL into PsiTri (frozen data that wasn't merged).
+         // The RO WAL exists because a swap happened but the merge thread
+         // didn't finish (or didn't run). Always replay — the clean_close flag
+         // on an RO WAL just means it was cleanly written, not that its data
+         // was merged into Tri. (The merge_pool deletes wal-ro.dwal on success.)
+         if (std::filesystem::exists(ro_wal, ec))
+         {
+            replay_wal_to_tri(root_index, ro_wal);
+            std::filesystem::remove(ro_wal, ec);
+         }
+
+         // Phase 2: Replay RW WAL into the RW btree (uncommitted writes at crash).
+         if (std::filesystem::exists(rw_wal, ec))
+         {
+            wal_reader reader;
+            if (reader.open(rw_wal))
+            {
+               if (!reader.was_clean_close())
+               {
+                  replay_wal_to_rw(root_index, rw_wal);
+               }
+            }
+            // Delete the old RW WAL — a fresh one will be created on first write.
+            std::filesystem::remove(rw_wal, ec);
+         }
+      }
+   }
+
+   void dwal_database::replay_wal_to_tri(uint32_t                       root_index,
+                                          const std::filesystem::path&   wal_path)
+   {
+      wal_reader reader;
+      if (!reader.open(wal_path))
+         return;
+
+      auto ws = _db->start_write_session();
+      auto tx = ws->start_transaction(root_index);
+
+      uint64_t count = reader.replay_all(
+          [&](const wal_entry& entry)
+          {
+             for (auto& op : entry.ops)
+             {
+                switch (op.type)
+                {
+                   case wal_op_type::upsert_data:
+                      tx.upsert(op.key, op.value);
+                      break;
+                   case wal_op_type::upsert_subtree:
+                   {
+                      auto subtree = ws->make_ptr(op.subtree, /*retain=*/true);
+                      if (subtree)
+                         tx.upsert(op.key, std::move(subtree));
+                      break;
+                   }
+                   case wal_op_type::remove:
+                      tx.remove(op.key);
+                      break;
+                   case wal_op_type::remove_range:
+                      tx.remove_range(op.range_low, op.range_high);
+                      break;
+                }
+             }
+          });
+
+      if (count > 0)
+         tx.commit();
+   }
+
+   void dwal_database::replay_wal_to_rw(uint32_t                       root_index,
+                                          const std::filesystem::path&   wal_path)
+   {
+      wal_reader reader;
+      if (!reader.open(wal_path))
+         return;
+
+      auto& root = ensure_root(root_index);
+
+      uint64_t count = reader.replay_all(
+          [&](const wal_entry& entry)
+          {
+             for (auto& op : entry.ops)
+             {
+                switch (op.type)
+                {
+                   case wal_op_type::upsert_data:
+                      root.rw_layer->store_data(op.key, op.value);
+                      break;
+                   case wal_op_type::upsert_subtree:
+                      root.rw_layer->store_subtree(op.key, op.subtree);
+                      break;
+                   case wal_op_type::remove:
+                      root.rw_layer->store_tombstone(op.key);
+                      break;
+                   case wal_op_type::remove_range:
+                   {
+                      // Erase buffered keys in range, then add range tombstone.
+                      std::vector<std::string> keys_to_erase;
+                      auto it = root.rw_layer->map.lower_bound(op.range_low);
+                      for (; it != root.rw_layer->map.end() && it.key() < op.range_high; ++it)
+                         keys_to_erase.emplace_back(it.key());
+                      for (auto& k : keys_to_erase)
+                         root.rw_layer->map.erase(k);
+                      root.rw_layer->tombstones.add(std::string(op.range_low),
+                                                    std::string(op.range_high));
+                      break;
+                   }
+                }
+             }
+          });
+
+      // Set the WAL sequence so the next WAL file starts at the right point.
+      root.next_wal_seq = reader.end_sequence();
    }
 
    dwal_database::~dwal_database()

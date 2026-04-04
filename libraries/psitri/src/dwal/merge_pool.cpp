@@ -9,8 +9,9 @@ namespace psitri::dwal
 {
    merge_pool::merge_pool(std::shared_ptr<psitri::database> db,
                           uint32_t                           num_threads,
-                          epoch_registry&                    epochs)
-       : _db(std::move(db)), _epochs(epochs)
+                          epoch_registry&                    epochs,
+                          std::filesystem::path              wal_dir)
+       : _db(std::move(db)), _epochs(epochs), _wal_dir(std::move(wal_dir))
    {
       // Sessions are created lazily on each worker thread (not here) because
       // allocator_sessions are thread-local — a session created on the main
@@ -135,6 +136,14 @@ namespace psitri::dwal
       // Queue for epoch-based reclamation (in case readers still hold copies).
       // Note: with shared_ptr this is handled automatically, but we keep the
       // epoch tracking for generation ordering.
+
+      // Delete the RO WAL file — its data is now in PsiTri.
+      if (!_wal_dir.empty())
+      {
+         auto ro_wal = _wal_dir / ("root-" + std::to_string(root_index)) / "wal-ro.dwal";
+         std::error_code ec;
+         std::filesystem::remove(ro_wal, ec);
+      }
 
       // Signal the writer that it can swap again.
       root.merge_complete.store(true, std::memory_order_release);
