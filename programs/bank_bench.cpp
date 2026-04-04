@@ -47,7 +47,6 @@
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/dwal_read_session.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
-#include <shared_mutex>
 #endif
 
 #if defined(BANK_ENGINE_ROCKSDB)
@@ -775,42 +774,28 @@ class DwalEngine : public BankEngine
 
    uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
    {
-      // Merge cursor across RW → RO → Tri (sees all uncommitted DWAL data)
-      auto& dwal_root = _dwal_db->root(0);
-      auto  rw = dwal_root.rw_layer;  // writer-private snapshot
-      std::shared_ptr<psitri::dwal::btree_layer> ro;
-      {
-         std::shared_lock lk(dwal_root.buffered_mutex);
-         ro = dwal_root.buffered_ptr;
-      }
-
-      auto rs = _db->start_read_session();
-      auto tri_root = rs->get_root(0);
-      std::optional<psitri::cursor> tri_cursor;
-      if (tri_root)
-         tri_cursor.emplace(std::move(tri_root));
-
-      psitri::dwal::merge_cursor mc(rw.get(), ro.get(), std::move(tri_cursor));
+      // Use DWAL API — locking handled internally based on read_mode
+      auto mc = _dwal_db->create_cursor(0, psitri::dwal::read_mode::latest);
       uint64_t count = 0;
-      mc.seek_begin();
-      while (!mc.is_end())
+      mc->seek_begin();
+      while (!mc->is_end())
       {
          std::string val_buf;
-         if (mc.current_source() == psitri::dwal::merge_cursor::source::tri)
+         if (mc->current_source() == psitri::dwal::merge_cursor::source::tri)
          {
-            mc.tri_cursor()->get_value([&](psitri::value_view vv) {
+            mc->tri_cursor()->get_value([&](psitri::value_view vv) {
                val_buf.assign(vv.data(), vv.size());
             });
          }
          else
          {
-            auto& bv = mc.current_value();
+            auto& bv = mc->current_value();
             val_buf.assign(bv.data.data(), bv.data.size());
          }
-         auto k = mc.key();
+         auto k = mc->key();
          visitor(std::string(k.data(), k.size()), decode_balance(val_buf));
          ++count;
-         mc.next();
+         mc->next();
       }
       return count;
    }

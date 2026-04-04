@@ -3,6 +3,7 @@
 #include <psitri/dwal/dwal_root.hpp>
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/epoch_lock.hpp>
+#include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/merge_pool.hpp>
 
 #include <chrono>
@@ -83,6 +84,15 @@ namespace psitri::dwal
       /// Sees uncommitted writes in the RW btree. Intended for same-thread
       /// read-after-write (e.g. RocksDB Get() after Put()).
       dwal_transaction::lookup_result get_latest(uint32_t root_index, std::string_view key);
+
+      /// Create a merge cursor over the DWAL layers for iteration.
+      /// Locking is handled internally based on the read mode:
+      ///   - latest:    RW + RO + Tri (writer-thread only — RW is not locked)
+      ///   - buffered:  RO + Tri (acquires buffered_mutex internally)
+      ///   - persistent: Tri only (no DWAL locks)
+      /// The returned cursor owns shared_ptr copies of the layer snapshots,
+      /// so callers do not need to hold any locks during iteration.
+      owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode);
 
       // ── Flush & Swap ──────────────────────────────────────────────
 

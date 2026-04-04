@@ -126,62 +126,56 @@ namespace rocksdb
       class DwalMergeIterator : public Iterator
       {
         public:
-         DwalMergeIterator(std::shared_ptr<psitri::dwal::btree_layer> rw,
-                           std::shared_ptr<psitri::dwal::btree_layer> ro,
-                           std::optional<psitri::cursor>               tri)
-             : rw_(std::move(rw)),
-               ro_(std::move(ro)),
-               cursor_(rw_.get(), ro_.get(), std::move(tri))
+         DwalMergeIterator(psitri::dwal::owned_merge_cursor mc)
+             : mc_(std::move(mc))
          {
          }
 
-         bool Valid() const override { return !cursor_.is_end() && !cursor_.is_rend(); }
+         bool Valid() const override { return !mc_->is_end() && !mc_->is_rend(); }
 
-         void SeekToFirst() override { cursor_.seek_begin(); }
-         void SeekToLast() override { cursor_.seek_last(); }
+         void SeekToFirst() override { mc_->seek_begin(); }
+         void SeekToLast() override { mc_->seek_last(); }
 
          void Seek(const Slice& target) override
          {
-            cursor_.lower_bound(std::string_view(target.data(), target.size()));
+            mc_->lower_bound(std::string_view(target.data(), target.size()));
          }
 
          void SeekForPrev(const Slice& target) override
          {
             std::string_view sv(target.data(), target.size());
-            if (cursor_.lower_bound(sv))
+            if (mc_->lower_bound(sv))
             {
-               if (cursor_.key() != sv)
-                  cursor_.prev();
+               if (mc_->key() != sv)
+                  mc_->prev();
             }
             else
             {
-               cursor_.seek_last();
+               mc_->seek_last();
             }
          }
 
-         void Next() override { cursor_.next(); }
-         void Prev() override { cursor_.prev(); }
+         void Next() override { mc_->next(); }
+         void Prev() override { mc_->prev(); }
 
          Slice key() const override
          {
-            auto k = cursor_.key();
+            auto k = mc_->key();
             return Slice(k.data(), k.size());
          }
 
          Slice value() const override
          {
-            if (cursor_.current_source() == psitri::dwal::merge_cursor::source::tri)
+            if (mc_->current_source() == psitri::dwal::merge_cursor::source::tri)
             {
-               // Tri-layer: read value from the PsiTri cursor
-               auto* tc = cursor_.tri_cursor();
+               auto* tc = mc_->tri_cursor();
                tc->get_value([this](psitri::value_view vv) {
                   cached_value_.assign(vv.data(), vv.size());
                });
             }
             else
             {
-               // RW/RO layer: value is in the btree_value
-               auto& bv = cursor_.current_value();
+               auto& bv = mc_->current_value();
                cached_value_.assign(bv.data.data(), bv.data.size());
             }
             return Slice(cached_value_);
@@ -190,10 +184,8 @@ namespace rocksdb
          Status status() const override { return Status::OK(); }
 
         private:
-         std::shared_ptr<psitri::dwal::btree_layer> rw_;
-         std::shared_ptr<psitri::dwal::btree_layer> ro_;
-         mutable psitri::dwal::merge_cursor         cursor_;
-         mutable std::string                        cached_value_;
+         mutable psitri::dwal::owned_merge_cursor mc_;
+         mutable std::string                      cached_value_;
       };
 
    }  // anonymous namespace
@@ -567,30 +559,15 @@ namespace rocksdb
             return new PsiTriIterator(std::move(root));
          }
 
-         // Non-snapshot: merge iterator across RW → RO → Tri
-         // so writers see their own uncommitted writes
-         std::shared_ptr<psitri::dwal::btree_layer> rw, ro;
+         // Non-snapshot: merge iterator via DWAL API (locking handled internally)
          if (dwal_db_ && root_idx < 512)
          {
-            auto& dwal_root = dwal_db_->root(root_idx);
-            rw = dwal_root.rw_layer;  // writer-private snapshot
-            {
-               std::shared_lock lk(dwal_root.buffered_mutex);
-               ro = dwal_root.buffered_ptr;
-            }
+            auto mc = dwal_db_->create_cursor(root_idx, psitri::dwal::read_mode::latest);
+            return new DwalMergeIterator(std::move(mc));
          }
 
-         // PsiTri cursor for the Tri layer
-         auto tri_root = get_read_session()->get_root(root_idx);
-         std::optional<psitri::cursor> tri_cursor;
-         if (tri_root)
-            tri_cursor.emplace(std::move(tri_root));
-
-         // If no DWAL layers active, use the simpler PsiTri-only iterator
-         if (!rw && !ro)
-            return new PsiTriIterator(get_read_session()->get_root(root_idx));
-
-         return new DwalMergeIterator(std::move(rw), std::move(ro), std::move(tri_cursor));
+         // No DWAL layer — use PsiTri-only iterator
+         return new PsiTriIterator(get_read_session()->get_root(root_idx));
       }
 
       // Thread-local psitri read session (for snapshots/iterators)

@@ -237,6 +237,44 @@ namespace psitri::dwal
       return tri_get(root_index, key);
    }
 
+   owned_merge_cursor dwal_database::create_cursor(uint32_t root_index, read_mode mode)
+   {
+      assert(root_index < max_roots);
+
+      std::shared_ptr<btree_layer> rw, ro;
+
+      if (_roots[root_index])
+      {
+         auto& root = *_roots[root_index];
+
+         // RW layer: only included for latest mode (writer-thread only, no lock needed)
+         if (mode == read_mode::latest)
+            rw = root.rw_layer;
+
+         // RO layer: included for latest and buffered modes
+         if (mode != read_mode::persistent)
+         {
+            std::shared_lock lk(root.buffered_mutex);
+            ro = root.buffered_ptr;
+         }
+      }
+
+      // Tri layer: always included
+      thread_local std::shared_ptr<psitri::read_session> tl_session;
+      thread_local psitri::database*                     tl_db = nullptr;
+
+      if (tl_db != _db.get())
+      {
+         tl_session = _db->start_read_session();
+         tl_db      = _db.get();
+      }
+
+      std::optional<psitri::cursor> tri_cursor;
+      tri_cursor.emplace(tl_session->create_cursor(root_index));
+
+      return owned_merge_cursor(std::move(rw), std::move(ro), std::move(tri_cursor));
+   }
+
    dwal_transaction::lookup_result dwal_database::tri_get(uint32_t         root_index,
                                                          std::string_view key)
    {

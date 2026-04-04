@@ -112,4 +112,36 @@ namespace psitri::dwal
       bool         _at_rend = true;
    };
 
+   /// A merge cursor that owns its layer snapshots.
+   ///
+   /// Returned by dwal_database::create_cursor(). Holds shared_ptr copies
+   /// of the RW/RO btree layers so the caller does not need to manage
+   /// layer lifetimes or hold any DWAL locks during iteration.
+   class owned_merge_cursor
+   {
+     public:
+      owned_merge_cursor(std::shared_ptr<btree_layer>    rw,
+                         std::shared_ptr<btree_layer>    ro,
+                         std::optional<psitri::cursor>   tri)
+          : _rw(std::move(rw)),
+            _ro(std::move(ro)),
+            _cursor(_rw.get(), _ro.get(), std::move(tri))
+      {
+      }
+
+      merge_cursor&       cursor() noexcept { return _cursor; }
+      const merge_cursor& cursor() const noexcept { return _cursor; }
+
+      merge_cursor*       operator->() noexcept { return &_cursor; }
+      const merge_cursor* operator->() const noexcept { return &_cursor; }
+
+      merge_cursor&       operator*() noexcept { return _cursor; }
+      const merge_cursor& operator*() const noexcept { return _cursor; }
+
+     private:
+      std::shared_ptr<btree_layer>  _rw;
+      std::shared_ptr<btree_layer>  _ro;
+      merge_cursor                  _cursor;
+   };
+
 }  // namespace psitri::dwal
