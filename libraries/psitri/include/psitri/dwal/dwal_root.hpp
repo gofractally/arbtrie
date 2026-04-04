@@ -39,9 +39,10 @@ namespace psitri::dwal
    {
       // ── Writer-private section (only writer touches these) ─────────
 
-      /// The hot RW btree — private to the single writer.
+      /// The hot RW btree — private to the single writer thread.
       /// Created via make_shared so the control block is co-allocated;
       /// on swap it moves directly to buffered_ptr with no extra allocation.
+      /// External readers must NOT access this — use buffered_ptr (RO) + Tri.
       std::shared_ptr<btree_layer> rw_layer;
 
       /// WAL writer for the current RW btree.

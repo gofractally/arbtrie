@@ -197,7 +197,7 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // Layer 1: RW btree (uncommitted writes)
+         // Layer 1: RW btree (writer-private — only safe from writer thread)
          if (root.rw_layer)
          {
             auto* v = root.rw_layer->map.get(key);

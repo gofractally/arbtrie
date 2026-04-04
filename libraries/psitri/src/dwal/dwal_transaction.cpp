@@ -19,7 +19,7 @@ namespace psitri::dwal
          _db(db),
          _root_index(root_index),
          _nested(nested),
-         _owns_lock(false)  // no longer used — single writer, no mutex
+         _owns_lock(false)
    {
       _undo.push_frame();
 
@@ -249,6 +249,7 @@ namespace psitri::dwal
                       break;
                 }
              });
+
       }
       else
       {

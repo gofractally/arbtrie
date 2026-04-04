@@ -573,7 +573,7 @@ namespace rocksdb
          if (dwal_db_ && root_idx < 512)
          {
             auto& dwal_root = dwal_db_->root(root_idx);
-            rw = dwal_root.rw_layer;  // shared_ptr copy — keeps layer alive
+            rw = dwal_root.rw_layer;  // writer-private snapshot
             {
                std::shared_lock lk(dwal_root.buffered_mutex);
                ro = dwal_root.buffered_ptr;

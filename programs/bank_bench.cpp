@@ -777,7 +777,7 @@ class DwalEngine : public BankEngine
    {
       // Merge cursor across RW → RO → Tri (sees all uncommitted DWAL data)
       auto& dwal_root = _dwal_db->root(0);
-      auto  rw = dwal_root.rw_layer;
+      auto  rw = dwal_root.rw_layer;  // writer-private snapshot
       std::shared_ptr<psitri::dwal::btree_layer> ro;
       {
          std::shared_lock lk(dwal_root.buffered_mutex);
@@ -945,10 +945,36 @@ class RocksDbEngine : public BankEngine
       return r;
    }
 
+   // Reader thread state — snapshot-based reads (RO + Tri, no RW contention)
+   const rocksdb::Snapshot* _reader_snap = nullptr;
+   rocksdb::ReadOptions     _snap_ro;
+
+   void reader_thread_init() override {}
+   void reader_thread_teardown() override {}
+
+   void reader_batch_begin() override
+   {
+      _reader_snap    = _db->GetSnapshot();
+      _snap_ro.snapshot = _reader_snap;
+   }
+
+   void reader_batch_end() override
+   {
+      if (_reader_snap)
+      {
+         _db->ReleaseSnapshot(_reader_snap);
+         _reader_snap    = nullptr;
+         _snap_ro.snapshot = nullptr;
+      }
+   }
+
    bool read_account(const std::string& key, uint64_t& balance_out) override
    {
       std::string val;
-      if (!_db->Get(_ro, key, &val).ok())
+      // Use snapshot reads for reader thread (routes through COW cursor,
+      // no contention with writer's RW btree).
+      auto& opts = _reader_snap ? _snap_ro : _ro;
+      if (!_db->Get(opts, key, &val).ok())
          return false;
       balance_out = decode_balance(val);
       return true;
