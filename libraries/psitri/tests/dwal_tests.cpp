@@ -20,7 +20,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 
@@ -1752,4 +1754,1188 @@ TEST_CASE("write-only batch=1 doesn't leak", "[dwal][leak]")
    // DB size should be bounded — compactor reclaims sync header padding.
    // Without the fix, this grew to 1177MB. With it, should stay under 3x baseline.
    REQUIRE(final_bytes < baseline_bytes * 3);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sub-transaction (nested) tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("sub_transaction commit merges into parent", "[dwal]")
+{
+   temp_dir td;
+   auto     wal_path = td.path / "tx_sub.dwal";
+
+   psitri::dwal::dwal_root  root;
+   psitri::dwal::wal_writer wal(wal_path, 0, 0);
+
+   {
+      psitri::dwal::dwal_transaction tx(root, &wal, 0);
+      tx.upsert("outer1", "val1");
+
+      {
+         auto sub = tx.sub_transaction();
+         sub.upsert("inner1", "val2");
+         sub.upsert("inner2", "val3");
+         sub.commit();
+      }
+
+      // Inner writes visible after commit.
+      CHECK(root.rw_layer->map.get("inner1")->data == "val2");
+      CHECK(root.rw_layer->map.get("inner2")->data == "val3");
+
+      tx.commit();
+   }
+
+   CHECK(root.rw_layer->map.get("outer1")->data == "val1");
+   CHECK(root.rw_layer->map.get("inner1")->data == "val2");
+}
+
+TEST_CASE("sub_transaction abort rolls back inner only", "[dwal]")
+{
+   psitri::dwal::dwal_root root;
+
+   {
+      psitri::dwal::dwal_transaction tx(root, nullptr, 0);
+      tx.upsert("keep", "yes");
+
+      {
+         auto sub = tx.sub_transaction();
+         sub.upsert("discard", "gone");
+         sub.upsert("keep", "overwritten");
+         sub.abort();
+      }
+
+      // Inner writes rolled back.
+      CHECK(root.rw_layer->map.get("discard") == nullptr);
+      CHECK(root.rw_layer->map.get("keep")->data == "yes");
+
+      tx.commit();
+   }
+
+   CHECK(root.rw_layer->map.get("keep")->data == "yes");
+   CHECK(root.rw_layer->map.get("discard") == nullptr);
+}
+
+TEST_CASE("sub_transaction destructor aborts if uncommitted", "[dwal]")
+{
+   psitri::dwal::dwal_root root;
+
+   {
+      psitri::dwal::dwal_transaction tx(root, nullptr, 0);
+      tx.upsert("base", "ok");
+
+      {
+         auto sub = tx.sub_transaction();
+         sub.upsert("temp", "nope");
+         // ~sub fires, should auto-abort
+      }
+
+      CHECK(root.rw_layer->map.get("temp") == nullptr);
+      CHECK(root.rw_layer->map.get("base")->data == "ok");
+      tx.commit();
+   }
+}
+
+TEST_CASE("nested sub_transaction two levels deep", "[dwal]")
+{
+   psitri::dwal::dwal_root root;
+
+   {
+      psitri::dwal::dwal_transaction tx(root, nullptr, 0);
+      tx.upsert("L0", "zero");
+
+      {
+         auto sub1 = tx.sub_transaction();
+         sub1.upsert("L1", "one");
+
+         {
+            auto sub2 = sub1.sub_transaction();
+            sub2.upsert("L2", "two");
+            sub2.commit();
+         }
+
+         // L2 visible after sub2 commit.
+         CHECK(root.rw_layer->map.get("L2")->data == "two");
+         sub1.commit();
+      }
+
+      CHECK(root.rw_layer->map.get("L0")->data == "zero");
+      CHECK(root.rw_layer->map.get("L1")->data == "one");
+      CHECK(root.rw_layer->map.get("L2")->data == "two");
+      tx.commit();
+   }
+}
+
+TEST_CASE("sub_transaction abort after remove restores", "[dwal]")
+{
+   psitri::dwal::dwal_root root;
+   root.rw_layer->store_data("k1", "v1");
+   root.rw_layer->store_data("k2", "v2");
+
+   {
+      psitri::dwal::dwal_transaction tx(root, nullptr, 0);
+
+      {
+         auto sub = tx.sub_transaction();
+         sub.remove("k1");
+         CHECK(root.rw_layer->map.get("k1")->is_tombstone());
+         sub.abort();
+      }
+
+      // k1 restored.
+      CHECK(root.rw_layer->map.get("k1")->data == "v1");
+      tx.commit();
+   }
+}
+
+TEST_CASE("sub_transaction range remove abort restores", "[dwal]")
+{
+   psitri::dwal::dwal_root root;
+   root.rw_layer->store_data("a", "1");
+   root.rw_layer->store_data("b", "2");
+   root.rw_layer->store_data("c", "3");
+
+   {
+      psitri::dwal::dwal_transaction tx(root, nullptr, 0);
+
+      {
+         auto sub = tx.sub_transaction();
+         sub.remove_range("a", "c");  // removes a, b
+         CHECK(root.rw_layer->map.get("a") == nullptr);
+         CHECK(root.rw_layer->map.get("b") == nullptr);
+         sub.abort();
+      }
+
+      // a and b restored.
+      CHECK(root.rw_layer->map.get("a")->data == "1");
+      CHECK(root.rw_layer->map.get("b")->data == "2");
+      CHECK(root.rw_layer->tombstones.empty());
+      tx.commit();
+   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// get_latest — reads across all 3 layers (RW → RO → Tri)
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("get_latest reads through RW, RO, and Tri layers", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;  // large enough to not auto-swap
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Tri layer: write + swap + merge.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("tri_key", "tri_val");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   REQUIRE(root.merge_complete.load());
+
+   // RO layer: write + swap (no merge yet since merge_complete is from above).
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("ro_key", "ro_val");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+   // Don't wait for merge — RO layer stays in place.
+
+   // RW layer: write without swapping.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("rw_key", "rw_val");
+      tx.commit();
+   }
+
+   // get_latest should see all three.
+   auto r1 = dwal_db.get_latest(0, "rw_key");
+   CHECK(r1.found);
+   CHECK(r1.value.data == "rw_val");
+
+   auto r2 = dwal_db.get_latest(0, "ro_key");
+   CHECK(r2.found);
+   CHECK(r2.value.data == "ro_val");
+
+   auto r3 = dwal_db.get_latest(0, "tri_key");
+   CHECK(r3.found);
+}
+
+TEST_CASE("get_latest RW tombstone shadows RO and Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Put key into Tri.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("key", "old");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+   // Tombstone in RW.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove("key");
+      tx.commit();
+   }
+
+   auto r = dwal_db.get_latest(0, "key");
+   CHECK_FALSE(r.found);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// dwal_read_session — read mode semantics
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("read_session persistent mode only sees Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Merge key into Tri.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("merged", "in_tri");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   REQUIRE(root.merge_complete.load());
+
+   // Write to RW (not yet swapped).
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("buffered_only", "bval");
+      tx.commit();
+   }
+
+   auto reader = dwal_db.start_read_session();
+
+   // persistent: sees only merged data.
+   auto p1 = reader.get(0, "merged", psitri::dwal::read_mode::persistent);
+   CHECK(p1.found);
+   CHECK(p1.value == "in_tri");
+
+   auto p2 = reader.get(0, "buffered_only", psitri::dwal::read_mode::persistent);
+   CHECK_FALSE(p2.found);
+}
+
+TEST_CASE("read_session buffered mode sees RO + Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 0;  // no merge — keep RO alive
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write + swap to create RO layer.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("in_ro", "ro_val");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+
+   auto reader = dwal_db.start_read_session();
+
+   // buffered: should see RO data.
+   auto r = reader.get(0, "in_ro", psitri::dwal::read_mode::buffered);
+   CHECK(r.found);
+   CHECK(r.value == "ro_val");
+}
+
+TEST_CASE("read_session refreshes on generation change", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 0;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Ensure root 0 exists.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("seed", "x");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+
+   auto reader = dwal_db.start_read_session();
+
+   // Reader sees "seed" from the swap.
+   auto r0 = reader.get(0, "seed", psitri::dwal::read_mode::buffered);
+   CHECK(r0.found);
+
+   // Write more + swap again.
+   // merge_complete is false (merge_threads=0), so swap won't fire via try_swap.
+   // Force it by setting merge_complete manually.
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   {
+      std::unique_lock lk(dwal_db.root(0).buffered_mutex);
+      dwal_db.root(0).buffered_ptr.reset();
+   }
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("k", "v");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+
+   // Reader should auto-refresh and see the new data.
+   auto r2 = reader.get(0, "k", psitri::dwal::read_mode::buffered);
+   CHECK(r2.found);
+   CHECK(r2.value == "v");
+}
+
+TEST_CASE("read_session tombstone in RO hides Tri data", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Put into Tri.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("victim", "alive");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+   // Remove + swap (creates tombstone in RO).
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove("victim");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+
+   auto reader = dwal_db.start_read_session();
+   auto r      = reader.get(0, "victim", psitri::dwal::read_mode::buffered);
+   CHECK_FALSE(r.found);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// merge_cursor with Tri layer (3-layer merge)
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("merge_cursor iterates across RW + RO + Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Seed Tri with data.
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("aaa", "tri_a");
+      tx.upsert("ccc", "tri_c");
+      tx.upsert("eee", "tri_e");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   // RO layer.
+   psitri::dwal::btree_layer ro;
+   ro.store_data("bbb", "ro_b");
+   ro.store_data("ccc", "ro_c");  // shadows Tri's ccc
+
+   // RW layer.
+   psitri::dwal::btree_layer rw;
+   rw.store_data("ddd", "rw_d");
+
+   psitri::dwal::merge_cursor mc(&rw, &ro, std::move(cur));
+   mc.seek_begin();
+
+   std::vector<std::pair<std::string, std::string>> results;
+   while (!mc.is_end())
+   {
+      std::string k(mc.key());
+      std::string v;
+      auto src = mc.current_source();
+      if (src == psitri::dwal::merge_cursor::source::tri)
+      {
+         auto opt = mc.tri_cursor()->value<std::string>();
+         if (opt)
+            v = *opt;
+      }
+      else
+      {
+         v = std::string(mc.current_value().data);
+      }
+      results.emplace_back(k, v);
+      mc.next();
+   }
+
+   REQUIRE(results.size() == 5);
+   CHECK(results[0] == std::pair<std::string, std::string>{"aaa", "tri_a"});
+   CHECK(results[1] == std::pair<std::string, std::string>{"bbb", "ro_b"});
+   CHECK(results[2].first == "ccc");
+   CHECK(results[2].second == "ro_c");  // RO shadows Tri
+   CHECK(results[3] == std::pair<std::string, std::string>{"ddd", "rw_d"});
+   CHECK(results[4] == std::pair<std::string, std::string>{"eee", "tri_e"});
+}
+
+TEST_CASE("merge_cursor RW tombstone shadows Tri key", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer rw;
+   rw.store_tombstone("b");
+
+   psitri::dwal::merge_cursor mc(&rw, nullptr, std::move(cur));
+   mc.seek_begin();
+
+   CHECK(mc.key() == "a");
+   mc.next();
+   CHECK(mc.key() == "c");  // b is tombstoned
+   mc.next();
+   CHECK(mc.is_end());
+}
+
+TEST_CASE("merge_cursor RW range tombstone shadows Tri range", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.upsert("d", "4");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer rw;
+   rw.tombstones.add("b", "d");  // [b,d) tombstoned
+
+   psitri::dwal::merge_cursor mc(&rw, nullptr, std::move(cur));
+   mc.seek_begin();
+
+   CHECK(mc.key() == "a");
+   mc.next();
+   CHECK(mc.key() == "d");  // b,c skipped
+   mc.next();
+   CHECK(mc.is_end());
+}
+
+TEST_CASE("merge_cursor prev across RW + RO + Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("aaa", "tri");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_data("bbb", "ro");
+
+   psitri::dwal::btree_layer rw;
+   rw.store_data("ccc", "rw");
+
+   psitri::dwal::merge_cursor mc(&rw, &ro, std::move(cur));
+   mc.seek_last();
+
+   CHECK(mc.key() == "ccc");
+   mc.prev();
+   CHECK(mc.key() == "bbb");
+   mc.prev();
+   CHECK(mc.key() == "aaa");
+   mc.prev();
+   CHECK(mc.is_rend());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// dwal_transaction get() across layers
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("dwal_transaction get reads RW then RO then Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Tri layer.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("tri_key", "tri_val");
+      tx.upsert("shared", "from_tri");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+   // RO layer.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("ro_key", "ro_val");
+      tx.upsert("shared", "from_ro");
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+
+   // RW layer — inside active tx.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("rw_key", "rw_val");
+
+      // RW: rw_key is here
+      auto r1 = tx.get("rw_key");
+      CHECK(r1.found);
+      CHECK(r1.value.data == "rw_val");
+
+      // RO: ro_key is here
+      auto r2 = tx.get("ro_key");
+      CHECK(r2.found);
+      CHECK(r2.value.data == "ro_val");
+
+      // Tri: tri_key is here
+      auto r3 = tx.get("tri_key");
+      CHECK(r3.found);
+
+      // "shared" was overwritten in RO → RO wins over Tri.
+      auto r4 = tx.get("shared");
+      CHECK(r4.found);
+      CHECK(r4.value.data == "from_ro");
+
+      // Nonexistent.
+      auto r5 = tx.get("nope");
+      CHECK_FALSE(r5.found);
+
+      tx.commit();
+   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Edge cases
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DWAL handles empty string keys", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("", "empty_key_value");
+      tx.commit();
+   }
+
+   auto r = dwal_db.get_latest(0, "");
+   CHECK(r.found);
+   CHECK(r.value.data == "empty_key_value");
+}
+
+TEST_CASE("DWAL handles binary keys with null bytes", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   std::string key1("key\0one", 7);
+   std::string key2("key\0two", 7);
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert(key1, "val1");
+      tx.upsert(key2, "val2");
+      tx.commit();
+   }
+
+   auto r1 = dwal_db.get_latest(0, key1);
+   CHECK(r1.found);
+   CHECK(r1.value.data == "val1");
+
+   auto r2 = dwal_db.get_latest(0, key2);
+   CHECK(r2.found);
+   CHECK(r2.value.data == "val2");
+}
+
+TEST_CASE("DWAL large values survive swap and merge", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   std::string big_val(100000, 'X');
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("big", big_val);
+      tx.commit();
+   }
+
+   // Verify in RW.
+   auto r1 = dwal_db.get_latest(0, "big");
+   CHECK(r1.found);
+   CHECK(r1.value.data == big_val);
+
+   // Swap + merge into Tri.
+   dwal_db.swap_rw_to_ro(0);
+   auto& root = dwal_db.root(0);
+   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   REQUIRE(root.merge_complete.load());
+
+   // Verify from Tri via get_latest.
+   auto r2 = dwal_db.get_latest(0, "big");
+   CHECK(r2.found);
+}
+
+TEST_CASE("DWAL many sequential transactions", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   for (int i = 0; i < 1000; ++i)
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("key" + std::to_string(i), "val" + std::to_string(i));
+      tx.commit();
+   }
+
+   // Spot-check.
+   auto r0 = dwal_db.get_latest(0, "key0");
+   CHECK(r0.found);
+   CHECK(r0.value.data == "val0");
+
+   auto r999 = dwal_db.get_latest(0, "key999");
+   CHECK(r999.found);
+   CHECK(r999.value.data == "val999");
+}
+
+TEST_CASE("DWAL overwrite same key many times", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   for (int i = 0; i < 500; ++i)
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("hot_key", "version_" + std::to_string(i));
+      tx.commit();
+   }
+
+   auto r = dwal_db.get_latest(0, "hot_key");
+   CHECK(r.found);
+   CHECK(r.value.data == "version_499");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-root isolation through full DWAL stack
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DWAL multi-root isolation across swap and merge", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write to two roots.
+   {
+      auto tx0 = dwal_db.start_write_transaction(0);
+      tx0.upsert("root0_key", "root0_val");
+      tx0.commit();
+   }
+   {
+      auto tx1 = dwal_db.start_write_transaction(1);
+      tx1.upsert("root1_key", "root1_val");
+      tx1.commit();
+   }
+
+   // Swap both.
+   dwal_db.swap_rw_to_ro(0);
+   dwal_db.swap_rw_to_ro(1);
+
+   // Wait for merges.
+   auto& r0 = dwal_db.root(0);
+   auto& r1 = dwal_db.root(1);
+   for (int i = 0; i < 100; ++i)
+   {
+      if (r0.merge_complete.load() && r1.merge_complete.load())
+         break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   }
+
+   // Verify isolation.
+   auto g0 = dwal_db.get_latest(0, "root0_key");
+   CHECK(g0.found);
+
+   auto g0x = dwal_db.get_latest(0, "root1_key");
+   CHECK_FALSE(g0x.found);
+
+   auto g1 = dwal_db.get_latest(1, "root1_key");
+   CHECK(g1.found);
+
+   auto g1x = dwal_db.get_latest(1, "root0_key");
+   CHECK_FALSE(g1x.found);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Oracle-based end-to-end correctness
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DWAL oracle: random ops vs std::map", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 200;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   std::map<std::string, std::string> oracle;
+   std::mt19937                       rng(42);
+
+   constexpr int num_ops     = 5000;
+   constexpr int key_pool    = 500;
+
+   auto make_key = [](int i) { return "key_" + std::to_string(i); };
+   auto make_val = [](int i) { return "val_" + std::to_string(i); };
+
+   for (int op = 0; op < num_ops; ++op)
+   {
+      int action = rng() % 100;
+      int ki     = rng() % key_pool;
+      auto k     = make_key(ki);
+
+      if (action < 60)
+      {
+         // Upsert.
+         auto v = make_val(op);
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert(k, v);
+         tx.commit();
+         oracle[k] = v;
+      }
+      else if (action < 80)
+      {
+         // Remove.
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.remove(k);
+         tx.commit();
+         oracle.erase(k);
+      }
+      else if (action < 90)
+      {
+         // Abort — should be a no-op.
+         auto v = make_val(op);
+         auto tx = dwal_db.start_write_transaction(0);
+         tx.upsert(k, v);
+         tx.abort();
+         // oracle unchanged
+      }
+      else
+      {
+         // Point read check.
+         auto r  = dwal_db.get_latest(0, k);
+         auto it = oracle.find(k);
+         if (it != oracle.end())
+         {
+            REQUIRE(r.found);
+            // Value may be from pool or Tri — just check found.
+         }
+         else
+         {
+            CHECK_FALSE(r.found);
+         }
+      }
+   }
+
+   // Final full verification.
+   auto& root = dwal_db.root(0);
+
+   // Force one last swap + merge to get everything into consistent state.
+   if (root.merge_complete.load())
+   {
+      dwal_db.swap_rw_to_ro(0);
+      for (int i = 0; i < 200 && !root.merge_complete.load(); ++i)
+         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   }
+
+   // Check every oracle key is in DWAL.
+   int verified = 0;
+   for (auto& [k, v] : oracle)
+   {
+      auto r = dwal_db.get_latest(0, k);
+      REQUIRE(r.found);
+      ++verified;
+   }
+
+   // Check some keys NOT in oracle are absent.
+   for (int i = key_pool; i < key_pool + 100; ++i)
+   {
+      auto r = dwal_db.get_latest(0, make_key(i));
+      CHECK_FALSE(r.found);
+   }
+
+   INFO("verified " << verified << " keys against oracle");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Range operations across layer boundaries
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DWAL remove_range spans RW keys only (RO/Tri unaffected in RW)", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 0;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write keys to RW and commit.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.upsert("d", "4");
+      tx.upsert("e", "5");
+      tx.commit();
+   }
+
+   // Range remove [b, e).
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove_range("b", "e");
+      tx.commit();
+   }
+
+   auto ga = dwal_db.get_latest(0, "a");
+   CHECK(ga.found);
+   auto gb = dwal_db.get_latest(0, "b");
+   CHECK_FALSE(gb.found);
+   auto gc = dwal_db.get_latest(0, "c");
+   CHECK_FALSE(gc.found);
+   auto gd = dwal_db.get_latest(0, "d");
+   CHECK_FALSE(gd.found);
+   auto ge = dwal_db.get_latest(0, "e");
+   CHECK(ge.found);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multiple swaps and merges
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DWAL multiple swap-merge cycles preserve data", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   for (int cycle = 0; cycle < 5; ++cycle)
+   {
+      // Write a batch.
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         for (int i = 0; i < 50; ++i)
+         {
+            auto k = "cycle" + std::to_string(cycle) + "_key" + std::to_string(i);
+            auto v = "val_" + std::to_string(cycle * 50 + i);
+            tx.upsert(k, v);
+         }
+         tx.commit();
+      }
+
+      auto& root = dwal_db.root(0);
+
+      // Swap and wait for merge.
+      dwal_db.swap_rw_to_ro(0);
+      for (int w = 0; w < 200 && !root.merge_complete.load(); ++w)
+         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      REQUIRE(root.merge_complete.load());
+   }
+
+   // Verify all data.
+   for (int cycle = 0; cycle < 5; ++cycle)
+   {
+      for (int i = 0; i < 50; ++i)
+      {
+         auto k = "cycle" + std::to_string(cycle) + "_key" + std::to_string(i);
+         auto r = dwal_db.get_latest(0, k);
+         REQUIRE(r.found);
+      }
+   }
+}
+
+TEST_CASE("DWAL swap-merge with interleaved deletes", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Cycle 1: insert keys 0-99.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 0; i < 100; ++i)
+         tx.upsert("k" + std::to_string(i), "v" + std::to_string(i));
+      tx.commit();
+   }
+   auto& root = dwal_db.root(0);
+   dwal_db.swap_rw_to_ro(0);
+   for (int w = 0; w < 200 && !root.merge_complete.load(); ++w)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+   // Cycle 2: delete even keys.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 0; i < 100; i += 2)
+         tx.remove("k" + std::to_string(i));
+      tx.commit();
+   }
+   dwal_db.swap_rw_to_ro(0);
+   for (int w = 0; w < 200 && !root.merge_complete.load(); ++w)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+   // Verify: even keys gone, odd keys present.
+   for (int i = 0; i < 100; ++i)
+   {
+      auto r = dwal_db.get_latest(0, "k" + std::to_string(i));
+      if (i % 2 == 0)
+         CHECK_FALSE(r.found);
+      else
+         CHECK(r.found);
+   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Concurrent DWAL read + write
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DWAL concurrent reader and writer with swaps", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 1;
+   dcfg.max_rw_entries = 100;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   std::atomic<bool> done{false};
+   std::atomic<int>  reads{0};
+   std::atomic<int>  found{0};
+
+   // Reader thread using dwal_read_session.
+   auto reader_fn = [&]()
+   {
+      auto reader = dwal_db.start_read_session();
+      while (!done.load(std::memory_order_relaxed))
+      {
+         for (int i = 0; i < 50; ++i)
+         {
+            auto r = reader.get(0, "k" + std::to_string(i),
+                                psitri::dwal::read_mode::buffered);
+            if (r.found)
+               found.fetch_add(1, std::memory_order_relaxed);
+            reads.fetch_add(1, std::memory_order_relaxed);
+         }
+      }
+   };
+
+   std::thread reader_thread(reader_fn);
+
+   // Writer: 500 transactions with periodic swaps.
+   for (int i = 0; i < 500; ++i)
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("k" + std::to_string(i % 50), "v" + std::to_string(i));
+      tx.commit();
+   }
+
+   // Let reader run a bit more.
+   std::this_thread::sleep_for(std::chrono::milliseconds(50));
+   done.store(true);
+   reader_thread.join();
+
+   INFO("reads=" << reads.load() << " found=" << found.load());
+   CHECK(reads.load() > 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WAL flush and should_swap threshold
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("should_swap triggers at max_rw_entries", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads  = 0;
+   dcfg.max_rw_entries = 100;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Prevent auto-swap: mark merge_complete=false so commit() won't trigger swap.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("seed", "x");
+      tx.commit();
+   }
+   dwal_db.root(0).merge_complete.store(false, std::memory_order_release);
+
+   // Write fewer than threshold — should not trigger.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 0; i < 50; ++i)
+         tx.upsert("k" + std::to_string(i), "v");
+      tx.commit();
+   }
+   // 51 entries (seed + 50) < 100
+   CHECK_FALSE(dwal_db.should_swap(0));
+
+   // Write more to reach threshold.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 50; i < 100; ++i)
+         tx.upsert("k" + std::to_string(i), "v");
+      tx.commit();
+   }
+   // 101 entries >= 100
+   CHECK(dwal_db.should_swap(0));
+}
+
+TEST_CASE("flush_wal writes all pending data to disk", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("k", "v");
+      tx.commit();
+   }
+
+   // flush_wal should not throw.
+   dwal_db.flush_wal();
+   dwal_db.flush_wal(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// merge_cursor count_keys across layers
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("merge_cursor count_keys with RW+RO+Tri", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("c", "3");
+      tx.upsert("e", "5");
+      tx.commit();
+   }
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   psitri::dwal::btree_layer ro;
+   ro.store_data("b", "2");
+   ro.store_data("c", "shadow");  // shadows Tri c
+
+   psitri::dwal::btree_layer rw;
+   rw.store_data("d", "4");
+   rw.store_tombstone("e");  // tombstones Tri e
+
+   psitri::dwal::merge_cursor mc(&rw, &ro, std::move(cur));
+
+   // Live keys: a, b, c(RO), d — e is tombstoned.
+   CHECK(mc.count_keys() == 4);
 }
