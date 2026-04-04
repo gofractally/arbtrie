@@ -3798,3 +3798,524 @@ TEST_CASE("merge_cursor is_subtree from Tri layer", "[dwal]")
    CHECK(mc.current_source() == psitri::dwal::merge_cursor::source::tri);
    CHECK_FALSE(mc.is_subtree());
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// DWAL recovery & swap coverage tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("dwal recover RO WAL replays all op types into tri", "[dwal][recovery]")
+{
+   // Write a WAL file with upsert_data, remove, and remove_range ops,
+   // place it as wal-ro.dwal, and verify recovery replays it into PsiTri.
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_dir  = td.path / "wal";
+   auto root_dir = wal_dir / "root-0";
+   std::filesystem::create_directories(root_dir);
+
+   // Phase 1: Seed PsiTri with keys that recovery will remove.
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("del_me", "gone");
+      tx.upsert("range_a", "a");
+      tx.upsert("range_b", "b");
+      tx.upsert("range_c", "c");
+      tx.commit();
+   }
+
+   // Phase 2: Write an RO WAL with all op types (no clean close → simulates crash).
+   {
+      psitri::dwal::wal_writer w(root_dir / "wal-ro.dwal", 0, 0);
+      w.begin_entry();
+      w.add_upsert_data("key1", "val1");
+      w.add_remove("del_me");
+      w.add_remove_range("range_a", "range_d");  // removes range_a..range_c
+      w.commit_entry();
+      w.flush();
+      // Don't call close() — simulates crash (no clean_close flag).
+   }
+
+   // Phase 3: Construct dwal_database — recovery should replay RO WAL into Tri.
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, wal_dir, dcfg);
+
+   // Verify key1 was upserted into PsiTri.
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      std::string buf;
+      CHECK(cur.get(psitri::key_view("key1", 4), &buf) >= 0);
+      CHECK(buf == "val1");
+
+      // del_me should be gone.
+      CHECK(cur.get(psitri::key_view("del_me", 6), &buf) < 0);
+
+      // range_a..range_c should be removed.
+      CHECK(cur.get(psitri::key_view("range_a", 7), &buf) < 0);
+      CHECK(cur.get(psitri::key_view("range_b", 7), &buf) < 0);
+      CHECK(cur.get(psitri::key_view("range_c", 7), &buf) < 0);
+   }
+
+   // wal-ro.dwal should have been deleted after replay.
+   CHECK_FALSE(std::filesystem::exists(root_dir / "wal-ro.dwal"));
+}
+
+TEST_CASE("dwal recover RW WAL (unclean close) replays into RW layer", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_dir  = td.path / "wal";
+   auto root_dir = wal_dir / "root-0";
+   std::filesystem::create_directories(root_dir);
+
+   // Write an RW WAL with upsert_data, upsert_subtree, remove, and remove_range.
+   // Don't close() — simulates crash.
+   {
+      psitri::dwal::wal_writer w(root_dir / "wal-rw.dwal", 0, 0);
+      w.begin_entry();
+      w.add_upsert_data("rw_key1", "rw_val1");
+      w.add_upsert_data("rw_key2", "rw_val2");
+      w.add_upsert_subtree("subtree_key", sal::ptr_address(12345));
+      w.add_remove("rw_key2");
+      w.commit_entry();
+
+      // Second entry: remove_range to cover that path in replay_wal_to_rw
+      w.begin_entry();
+      w.add_upsert_data("zap_a", "a");
+      w.add_upsert_data("zap_b", "b");
+      w.add_remove_range("zap_a", "zap_c");
+      w.commit_entry();
+      w.flush();
+      // No close() — unclean
+   }
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, wal_dir, dcfg);
+
+   // Verify via get_latest (reads RW layer).
+   auto r1 = dwal_db.get_latest(0, "rw_key1");
+   CHECK(r1.found);
+   CHECK(r1.value.is_data());
+   CHECK(r1.value.data == "rw_val1");
+
+   // rw_key2 was removed (tombstone).
+   auto r2 = dwal_db.get_latest(0, "rw_key2");
+   CHECK_FALSE(r2.found);
+
+   // subtree_key was upserted as subtree.
+   auto r3 = dwal_db.get_latest(0, "subtree_key");
+   CHECK(r3.found);
+   CHECK(r3.value.is_subtree());
+   CHECK(r3.value.subtree_root == sal::ptr_address(12345));
+
+   // zap_a and zap_b should have been removed by range tombstone.
+   auto r4 = dwal_db.get_latest(0, "zap_a");
+   CHECK_FALSE(r4.found);
+   auto r5 = dwal_db.get_latest(0, "zap_b");
+   CHECK_FALSE(r5.found);
+
+   // wal-rw.dwal should have been deleted after replay.
+   CHECK_FALSE(std::filesystem::exists(root_dir / "wal-rw.dwal"));
+}
+
+TEST_CASE("dwal recover skips cleanly-closed RW WAL", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_dir  = td.path / "wal";
+   auto root_dir = wal_dir / "root-0";
+   std::filesystem::create_directories(root_dir);
+
+   // Write a WAL and close it cleanly.
+   {
+      psitri::dwal::wal_writer w(root_dir / "wal-rw.dwal", 0, 0);
+      w.begin_entry();
+      w.add_upsert_data("should_skip", "nope");
+      w.commit_entry();
+      w.close();  // clean close
+   }
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, wal_dir, dcfg);
+
+   // Key should NOT be in the RW layer — clean close means data was already flushed.
+   auto r = dwal_db.get_latest(0, "should_skip");
+   CHECK_FALSE(r.found);
+}
+
+TEST_CASE("dwal recover ignores non-root dirs and invalid root indices", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_dir = td.path / "wal";
+   std::filesystem::create_directories(wal_dir);
+
+   // Create decoy directories that should be ignored.
+   std::filesystem::create_directories(wal_dir / "not-a-root");
+   std::filesystem::create_directories(wal_dir / "root-abc");   // invalid number
+   std::filesystem::create_directories(wal_dir / "root-99999"); // >= max_roots (512)
+
+   // Create a regular file (not a directory) to cover the is_directory() check.
+   std::ofstream(wal_dir / "somefile.txt") << "junk";
+
+   // Should not crash or throw.
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   CHECK_NOTHROW(psitri::dwal::dwal_database(db, wal_dir, dcfg));
+}
+
+TEST_CASE("dwal get() with buffered mode reads RO layer after swap", "[dwal][get]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write some data.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("buf_key", "buf_val");
+      tx.upsert("tomb_key", "alive");
+      tx.commit();
+   }
+
+   // Force swap so data moves to RO (buffered) layer.
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   dwal_db.try_swap_rw_to_ro(0);
+
+   // Now add a tombstone in the new RW layer that will show in latest but not RO.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove("tomb_key");
+      tx.commit();
+   }
+
+   // get() with buffered mode should see the RO layer.
+   auto r1 = dwal_db.get(0, "buf_key", psitri::dwal::read_mode::buffered);
+   CHECK(r1.found);
+   CHECK(r1.value.data == "buf_val");
+
+   // get() with persistent mode should return not-found (no PsiTri data).
+   auto r2 = dwal_db.get(0, "buf_key", psitri::dwal::read_mode::persistent);
+   CHECK_FALSE(r2.found);
+
+   // get() on non-existent root should return not-found.
+   auto r3 = dwal_db.get(5, "buf_key", psitri::dwal::read_mode::buffered);
+   CHECK_FALSE(r3.found);
+}
+
+TEST_CASE("dwal get() sees tombstones in RO layer", "[dwal][get]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Seed PsiTri with a key.
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("exists", "in_tri");
+      tx.commit();
+   }
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Delete the key via DWAL.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove("exists");
+      tx.commit();
+   }
+
+   // Swap to RO.
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   dwal_db.try_swap_rw_to_ro(0);
+
+   // get() with buffered mode should see tombstone → not found.
+   auto r = dwal_db.get(0, "exists", psitri::dwal::read_mode::buffered);
+   CHECK_FALSE(r.found);
+}
+
+TEST_CASE("dwal get() sees range tombstones in RO layer", "[dwal][get]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write a key + range delete covering it.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("rkey", "rval");
+      tx.commit();
+   }
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove_range("r", "s");
+      tx.commit();
+   }
+
+   // Swap to RO.
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   dwal_db.try_swap_rw_to_ro(0);
+
+   // get() with buffered should see range tombstone → not found.
+   auto r = dwal_db.get(0, "rkey", psitri::dwal::read_mode::buffered);
+   CHECK_FALSE(r.found);
+}
+
+TEST_CASE("dwal should_swap triggers on WAL file size", "[dwal][swap]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads   = 0;
+   dcfg.max_rw_entries  = 1'000'000;   // very high
+   dcfg.max_wal_bytes   = 200;         // very low — will trigger on WAL size
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write enough data to push WAL past 200 bytes.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("aaaa", std::string(100, 'x'));
+      tx.upsert("bbbb", std::string(100, 'y'));
+      tx.commit();
+   }
+
+   dwal_db.flush_wal(0);
+   CHECK(dwal_db.should_swap(0));
+}
+
+TEST_CASE("dwal direct transaction mode throws", "[dwal]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   CHECK_THROWS_AS(dwal_db.start_write_transaction(0, psitri::dwal::transaction_mode::direct),
+                   std::runtime_error);
+}
+
+TEST_CASE("wal_writer reopen existing WAL file", "[dwal][wal]")
+{
+   temp_dir td;
+   auto     wal_path = td.path / "test.dwal";
+
+   // Create and write an entry, then close cleanly.
+   {
+      psitri::dwal::wal_writer w(wal_path, 0, 100);
+      w.begin_entry();
+      w.add_upsert_data("k1", "v1");
+      w.commit_entry();
+      w.flush();
+      w.close();
+   }
+
+   // Reopen — should detect existing valid header and append.
+   {
+      psitri::dwal::wal_writer w2(wal_path, 0, 200);
+      // sequence should have advanced past the original base
+      CHECK(w2.next_sequence() >= 200);
+      CHECK(w2.file_size() > sizeof(psitri::dwal::wal_header));
+
+      w2.begin_entry();
+      w2.add_upsert_data("k2", "v2");
+      w2.commit_entry();
+      w2.flush();
+      w2.close();
+   }
+
+   // Read back — both entries should be present.
+   psitri::dwal::wal_reader reader;
+   REQUIRE(reader.open(wal_path));
+
+   psitri::dwal::wal_entry entry;
+   REQUIRE(reader.next(entry));
+   CHECK(entry.ops.size() == 1);
+   CHECK(entry.ops[0].key == "k1");
+
+   REQUIRE(reader.next(entry));
+   CHECK(entry.ops.size() == 1);
+   CHECK(entry.ops[0].key == "k2");
+}
+
+TEST_CASE("wal_writer move constructor and assignment", "[dwal][wal]")
+{
+   temp_dir td;
+   auto     wal_path = td.path / "move_test.dwal";
+
+   // Move constructor.
+   psitri::dwal::wal_writer w1(wal_path, 0, 0);
+   w1.begin_entry();
+   w1.add_upsert_data("mk", "mv");
+   w1.commit_entry();
+
+   psitri::dwal::wal_writer w2(std::move(w1));
+   CHECK(w2.next_sequence() == 1);
+   w2.flush();
+
+   // Move assignment.
+   auto wal_path2 = td.path / "move_test2.dwal";
+   psitri::dwal::wal_writer w3(wal_path2, 1, 50);
+   w3 = std::move(w2);
+   CHECK(w3.next_sequence() == 1);
+   w3.close();
+
+   // Verify data survived the moves.
+   psitri::dwal::wal_reader reader;
+   REQUIRE(reader.open(wal_path));
+   psitri::dwal::wal_entry entry;
+   REQUIRE(reader.next(entry));
+   CHECK(entry.ops[0].key == "mk");
+}
+
+TEST_CASE("wal_writer discard_entry and write_u64 via subtree ops", "[dwal][wal]")
+{
+   temp_dir td;
+   auto     wal_path = td.path / "discard_test.dwal";
+
+   psitri::dwal::wal_writer w(wal_path, 0, 0);
+
+   // Begin an entry, add ops, then discard.
+   w.begin_entry();
+   w.add_upsert_data("discard_me", "gone");
+   w.discard_entry();
+   CHECK_FALSE(w.entry_in_progress());
+
+   // Write a real entry with a subtree op (exercises add_upsert_subtree).
+   w.begin_entry();
+   w.add_upsert_subtree("st_key", sal::ptr_address(0xDEADBEEF));
+   w.add_remove("rm_key");
+   w.add_remove_range("lo", "hi");
+   auto seq = w.commit_entry();
+   CHECK(seq == 0);
+
+   w.flush();
+   w.close();
+
+   // Read back and verify.
+   psitri::dwal::wal_reader reader;
+   REQUIRE(reader.open(wal_path));
+   psitri::dwal::wal_entry entry;
+
+   // Only one entry (the discarded one should not appear).
+   REQUIRE(reader.next(entry));
+   REQUIRE(entry.ops.size() == 3);
+   CHECK(entry.ops[0].type == psitri::dwal::wal_op_type::upsert_subtree);
+   CHECK(entry.ops[0].key == "st_key");
+   CHECK(entry.ops[1].type == psitri::dwal::wal_op_type::remove);
+   CHECK(entry.ops[1].key == "rm_key");
+   CHECK(entry.ops[2].type == psitri::dwal::wal_op_type::remove_range);
+   CHECK(entry.ops[2].range_low == "lo");
+   CHECK(entry.ops[2].range_high == "hi");
+
+   CHECK_FALSE(reader.next(entry));  // no more entries
+}
+
+TEST_CASE("dwal recover with both RO and RW WALs for same root", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_dir  = td.path / "wal";
+   auto root_dir = wal_dir / "root-0";
+   std::filesystem::create_directories(root_dir);
+
+   // RO WAL: data that should go into PsiTri.
+   {
+      psitri::dwal::wal_writer w(root_dir / "wal-ro.dwal", 0, 0);
+      w.begin_entry();
+      w.add_upsert_data("ro_key", "ro_val");
+      w.commit_entry();
+      w.flush();
+   }
+
+   // RW WAL: data that should go into the RW layer (unclean close).
+   {
+      psitri::dwal::wal_writer w(root_dir / "wal-rw.dwal", 0, 10);
+      w.begin_entry();
+      w.add_upsert_data("rw_key", "rw_val");
+      w.commit_entry();
+      w.flush();
+      // No close() — unclean
+   }
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, wal_dir, dcfg);
+
+   // RO WAL data should be in PsiTri.
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      std::string buf;
+      CHECK(cur.get(psitri::key_view("ro_key", 6), &buf) >= 0);
+      CHECK(buf == "ro_val");
+   }
+
+   // RW WAL data should be in the RW layer.
+   auto r = dwal_db.get_latest(0, "rw_key");
+   CHECK(r.found);
+   CHECK(r.value.data == "rw_val");
+}
+
+TEST_CASE("dwal recover with multiple roots", "[dwal][recovery]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_dir = td.path / "wal";
+   std::filesystem::create_directories(wal_dir / "root-0");
+   std::filesystem::create_directories(wal_dir / "root-3");
+
+   // Root 0: RO WAL
+   {
+      psitri::dwal::wal_writer w(wal_dir / "root-0" / "wal-ro.dwal", 0, 0);
+      w.begin_entry();
+      w.add_upsert_data("r0_key", "r0_val");
+      w.commit_entry();
+      w.flush();
+   }
+
+   // Root 3: RW WAL (unclean)
+   {
+      psitri::dwal::wal_writer w(wal_dir / "root-3" / "wal-rw.dwal", 3, 0);
+      w.begin_entry();
+      w.add_upsert_data("r3_key", "r3_val");
+      w.commit_entry();
+      w.flush();
+   }
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, wal_dir, dcfg);
+
+   // Root 0 data in PsiTri.
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      std::string buf;
+      CHECK(cur.get(psitri::key_view("r0_key", 6), &buf) >= 0);
+   }
+
+   // Root 3 data in RW layer.
+   auto r = dwal_db.get_latest(3, "r3_key");
+   CHECK(r.found);
+}
