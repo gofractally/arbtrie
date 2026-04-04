@@ -1,14 +1,18 @@
 #include <rocksdb/db.h>
 
 #include <psitri/database.hpp>
-#include <sal/read_lock.hpp>
+#include <psitri/dwal/dwal_database.hpp>
+#include <psitri/dwal/dwal_transaction.hpp>
+#include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/read_session_impl.hpp>
 #include <psitri/write_session_impl.hpp>
 #include <psitri/transaction.hpp>
+#include <sal/read_lock.hpp>
 
 #include <filesystem>
 #include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace rocksdb
 {
@@ -118,6 +122,80 @@ namespace rocksdb
          mutable std::string    cached_value_;
       };
 
+      // Iterator backed by DWAL merge_cursor (RW → RO → Tri)
+      class DwalMergeIterator : public Iterator
+      {
+        public:
+         DwalMergeIterator(std::shared_ptr<psitri::dwal::btree_layer> rw,
+                           std::shared_ptr<psitri::dwal::btree_layer> ro,
+                           std::optional<psitri::cursor>               tri)
+             : rw_(std::move(rw)),
+               ro_(std::move(ro)),
+               cursor_(rw_.get(), ro_.get(), std::move(tri))
+         {
+         }
+
+         bool Valid() const override { return !cursor_.is_end() && !cursor_.is_rend(); }
+
+         void SeekToFirst() override { cursor_.seek_begin(); }
+         void SeekToLast() override { cursor_.seek_last(); }
+
+         void Seek(const Slice& target) override
+         {
+            cursor_.lower_bound(std::string_view(target.data(), target.size()));
+         }
+
+         void SeekForPrev(const Slice& target) override
+         {
+            std::string_view sv(target.data(), target.size());
+            if (cursor_.lower_bound(sv))
+            {
+               if (cursor_.key() != sv)
+                  cursor_.prev();
+            }
+            else
+            {
+               cursor_.seek_last();
+            }
+         }
+
+         void Next() override { cursor_.next(); }
+         void Prev() override { cursor_.prev(); }
+
+         Slice key() const override
+         {
+            auto k = cursor_.key();
+            return Slice(k.data(), k.size());
+         }
+
+         Slice value() const override
+         {
+            if (cursor_.current_source() == psitri::dwal::merge_cursor::source::tri)
+            {
+               // Tri-layer: read value from the PsiTri cursor
+               auto* tc = cursor_.tri_cursor();
+               tc->get_value([this](psitri::value_view vv) {
+                  cached_value_.assign(vv.data(), vv.size());
+               });
+            }
+            else
+            {
+               // RW/RO layer: value is in the btree_value
+               auto& bv = cursor_.current_value();
+               cached_value_.assign(bv.data.data(), bv.data.size());
+            }
+            return Slice(cached_value_);
+         }
+
+         Status status() const override { return Status::OK(); }
+
+        private:
+         std::shared_ptr<psitri::dwal::btree_layer> rw_;
+         std::shared_ptr<psitri::dwal::btree_layer> ro_;
+         mutable psitri::dwal::merge_cursor         cursor_;
+         mutable std::string                        cached_value_;
+      };
+
    }  // anonymous namespace
 
    // ── DB implementation ───────────────────────────────────────────────────
@@ -125,8 +203,11 @@ namespace rocksdb
    class PsiTriDB : public DB
    {
      public:
-      PsiTriDB(std::shared_ptr<psitri::database> db, const Options& opts)
+      PsiTriDB(std::shared_ptr<psitri::database> db,
+               std::unique_ptr<psitri::dwal::dwal_database> dwal_db,
+               const Options& opts)
           : db_(std::move(db)),
+            dwal_db_(std::move(dwal_db)),
             default_cf_(std::make_unique<PsiTriCFHandle>(0, "default")),
             sync_(opts.use_fsync ? sal::sync_type::fsync : sal::sync_type::none)
       {
@@ -134,46 +215,11 @@ namespace rocksdb
 
       ~PsiTriDB() override { Close(); }
 
-      // ── Thread-local session management ──
-      //
-      // psitri sessions are per-thread: each thread gets its own segment for
-      // allocation and its own read lock slot.  No external mutex needed —
-      // psitri's per-root modify_lock serializes writers internally.
-
-      struct ThreadState
-      {
-         std::shared_ptr<psitri::write_session> ws;
-         std::shared_ptr<psitri::read_session>  rs;
-      };
-
-      ThreadState& get_thread_state()
-      {
-         thread_local std::unordered_map<PsiTriDB*, ThreadState> states;
-         auto& s = states[this];
-         if (!s.ws)
-         {
-            s.ws = db_->start_write_session();
-            s.ws->set_sync(sync_);
-         }
-         return s;
-      }
-
-      std::shared_ptr<psitri::read_session>& get_read_session()
-      {
-         auto& ts = get_thread_state();
-         if (!ts.rs)
-            ts.rs = db_->start_read_session();
-         return ts.rs;
-      }
-
-      // ── Write path ──
-      // Each Put/Delete starts a transaction and commits immediately, matching
-      // RocksDB semantics where each write is durable and visible on return.
+      // ── Write path (via DWAL) ──
 
       Status Put(const WriteOptions&, const Slice& key, const Slice& value) override
       {
-         auto& ts = get_thread_state();
-         auto  tx = ts.ws->start_transaction(0);
+         auto tx = dwal_db_->start_write_transaction(0);
          tx.upsert(std::string_view(key.data(), key.size()),
                    std::string_view(value.data(), value.size()));
          tx.commit();
@@ -183,8 +229,7 @@ namespace rocksdb
       Status Put(const WriteOptions&, ColumnFamilyHandle* cf,
                  const Slice& key, const Slice& value) override
       {
-         auto& ts = get_thread_state();
-         auto  tx = ts.ws->start_transaction(cf ? cf->GetID() : 0);
+         auto tx = dwal_db_->start_write_transaction(cf ? cf->GetID() : 0);
          tx.upsert(std::string_view(key.data(), key.size()),
                    std::string_view(value.data(), value.size()));
          tx.commit();
@@ -193,8 +238,7 @@ namespace rocksdb
 
       Status Delete(const WriteOptions&, const Slice& key) override
       {
-         auto& ts = get_thread_state();
-         auto  tx = ts.ws->start_transaction(0);
+         auto tx = dwal_db_->start_write_transaction(0);
          tx.remove(std::string_view(key.data(), key.size()));
          tx.commit();
          return Status::OK();
@@ -202,8 +246,7 @@ namespace rocksdb
 
       Status Delete(const WriteOptions&, ColumnFamilyHandle* cf, const Slice& key) override
       {
-         auto& ts = get_thread_state();
-         auto  tx = ts.ws->start_transaction(cf ? cf->GetID() : 0);
+         auto tx = dwal_db_->start_write_transaction(cf ? cf->GetID() : 0);
          tx.remove(std::string_view(key.data(), key.size()));
          tx.commit();
          return Status::OK();
@@ -212,8 +255,7 @@ namespace rocksdb
       Status DeleteRange(const WriteOptions&, ColumnFamilyHandle* cf,
                          const Slice& begin_key, const Slice& end_key) override
       {
-         auto& ts = get_thread_state();
-         auto  tx = ts.ws->start_transaction(cf ? cf->GetID() : 0);
+         auto tx = dwal_db_->start_write_transaction(cf ? cf->GetID() : 0);
          tx.remove_range(std::string_view(begin_key.data(), begin_key.size()),
                          std::string_view(end_key.data(), end_key.size()));
          tx.commit();
@@ -225,8 +267,7 @@ namespace rocksdb
          if (!batch || batch->Count() == 0)
             return Status::OK();
 
-         auto& ts = get_thread_state();
-         auto  tx = ts.ws->start_transaction(0);
+         auto tx = dwal_db_->start_write_transaction(0);
 
          for (auto& entry : batch->GetEntries())
          {
@@ -248,7 +289,7 @@ namespace rocksdb
          return Status::OK();
       }
 
-      // ── Read path ──
+      // ── Read path (via DWAL read session) ──
 
       Status Get(const ReadOptions& options, const Slice& key, std::string* value) override
       {
@@ -283,7 +324,7 @@ namespace rocksdb
          return statuses;
       }
 
-      // ── Iterator ──
+      // ── Iterator (uses COW snapshot for ordered traversal) ──
 
       Iterator* NewIterator(const ReadOptions& options) override
       {
@@ -322,9 +363,16 @@ namespace rocksdb
 
       // ── Maintenance ──
 
-      Status Flush(const FlushOptions&) override { return Status::OK(); }
+      Status Flush(const FlushOptions&) override
+      {
+         dwal_db_->flush_wal();
+         return Status::OK();
+      }
 
-      Status Flush(const FlushOptions&, ColumnFamilyHandle*) override { return Status::OK(); }
+      Status Flush(const FlushOptions& fo, ColumnFamilyHandle*) override
+      {
+         return Flush(fo);
+      }
 
       Status CompactRange(const CompactRangeOptions&, const Slice*, const Slice*) override
       {
@@ -469,56 +517,97 @@ namespace rocksdb
          return GetProperty(property, value);
       }
 
-      Status Close() override { return Status::OK(); }
+      Status Close() override
+      {
+         dwal_db_.reset();
+         return Status::OK();
+      }
 
      private:
       Status GetImpl(const ReadOptions& options, uint32_t root_idx,
                      const Slice& key, std::string* value)
       {
-         sal::smart_ptr<sal::alloc_header> root;
+         // Snapshot reads still go through COW cursor for consistency
          if (options.snapshot)
          {
             auto* snap = static_cast<const PsiTriSnapshot*>(options.snapshot);
-            root       = snap->root();
+            auto  root = snap->root();
+            if (!root)
+               return Status::NotFound();
+            psitri::cursor c(std::move(root));
+            auto           result = c.get(std::string_view(key.data(), key.size()), value);
+            if (result < 0)
+               return Status::NotFound();
+            return Status::OK();
          }
-         else
+
+         // Normal reads go through DWAL get_latest for full RW → RO → Tri visibility
+         auto result = dwal_db_->get_latest(root_idx, std::string_view(key.data(), key.size()));
+         if (!result.found)
+            return Status::NotFound();
+         if (value)
          {
-            root = get_read_session()->get_root(root_idx);
+            if (!result.owned_data.empty())
+               *value = std::move(result.owned_data);
+            else
+               value->assign(result.value.data.data(), result.value.data.size());
          }
-
-         if (!root)
-            return Status::NotFound();
-
-         psitri::cursor c(std::move(root));
-         auto           result = c.get(std::string_view(key.data(), key.size()), value);
-         if (result < 0)
-            return Status::NotFound();
          return Status::OK();
       }
 
       Iterator* NewIteratorImpl(const ReadOptions& options, uint32_t root_idx)
       {
-         sal::smart_ptr<sal::alloc_header> root;
+         // Snapshot reads: COW cursor only (consistent point-in-time view)
          if (options.snapshot)
          {
             auto* snap = static_cast<const PsiTriSnapshot*>(options.snapshot);
-            root       = snap->root();
+            auto  root = snap->root();
+            if (!root)
+               root = get_read_session()->get_root(root_idx);
+            return new PsiTriIterator(std::move(root));
          }
-         else
+
+         // Non-snapshot: merge iterator across RW → RO → Tri
+         // so writers see their own uncommitted writes
+         std::shared_ptr<psitri::dwal::btree_layer> rw, ro;
+         if (dwal_db_ && root_idx < 512)
          {
-            root = get_read_session()->get_root(root_idx);
+            auto& dwal_root = dwal_db_->root(root_idx);
+            rw = dwal_root.rw_layer;  // shared_ptr copy — keeps layer alive
+            {
+               std::shared_lock lk(dwal_root.buffered_mutex);
+               ro = dwal_root.buffered_ptr;
+            }
          }
 
-         if (!root)
-            root = get_read_session()->get_root(root_idx);
+         // PsiTri cursor for the Tri layer
+         auto tri_root = get_read_session()->get_root(root_idx);
+         std::optional<psitri::cursor> tri_cursor;
+         if (tri_root)
+            tri_cursor.emplace(std::move(tri_root));
 
-         return new PsiTriIterator(std::move(root));
+         // If no DWAL layers active, use the simpler PsiTri-only iterator
+         if (!rw && !ro)
+            return new PsiTriIterator(get_read_session()->get_root(root_idx));
+
+         return new DwalMergeIterator(std::move(rw), std::move(ro), std::move(tri_cursor));
       }
 
-      std::shared_ptr<psitri::database> db_;
-      std::unique_ptr<PsiTriCFHandle>   default_cf_;
-      sal::sync_type                    sync_;
-      std::atomic<uint32_t>             next_cf_id_{1};
+      // Thread-local psitri read session (for snapshots/iterators)
+      std::shared_ptr<psitri::read_session>& get_read_session()
+      {
+         thread_local std::unordered_map<PsiTriDB*, std::shared_ptr<psitri::read_session>> sessions;
+         auto& rs = sessions[this];
+         if (!rs)
+            rs = db_->start_read_session();
+         return rs;
+      }
+
+      std::shared_ptr<psitri::database>    db_;
+      std::unique_ptr<psitri::dwal::dwal_database> dwal_db_;
+      std::unique_ptr<PsiTriCFHandle>      default_cf_;
+      sal::sync_type                       sync_;
+      std::atomic<uint32_t>                next_cf_id_{1};
    };
 
    // ── Static methods ──────────────────────────────────────────────────────
@@ -544,7 +633,10 @@ namespace rocksdb
          }
 
          auto db = psitri::database::create(path);
-         *dbptr  = new PsiTriDB(std::move(db), options);
+         auto wal_dir = path / "wal";
+         std::filesystem::create_directories(wal_dir);
+         auto dwal = std::make_unique<psitri::dwal::dwal_database>(db, wal_dir);
+         *dbptr = new PsiTriDB(std::move(db), std::move(dwal), options);
          return Status::OK();
       }
       catch (const std::exception& e)

@@ -1,5 +1,10 @@
 #include <psitri/dwal/dwal_database.hpp>
 
+#include <psitri/cursor.hpp>
+#include <psitri/database.hpp>
+#include <psitri/read_session.hpp>
+#include <psitri/read_session_impl.hpp>
+
 #include <cassert>
 #include <shared_mutex>
 #include <stdexcept>
@@ -181,6 +186,90 @@ namespace psitri::dwal
       assert(root_index < max_roots);
       if (_roots[root_index] && _roots[root_index]->wal)
          _roots[root_index]->wal->flush();
+   }
+
+   dwal_transaction::lookup_result dwal_database::get_latest(uint32_t         root_index,
+                                                              std::string_view key)
+   {
+      assert(root_index < max_roots);
+
+      if (_roots[root_index])
+      {
+         auto& root = *_roots[root_index];
+
+         // Layer 1: RW btree (uncommitted writes)
+         if (root.rw_layer)
+         {
+            auto it = root.rw_layer->map.find(key);
+            if (it != root.rw_layer->map.end())
+            {
+               if (it->second.is_tombstone())
+                  return {false, {}};
+               return {true, it->second};
+            }
+            if (root.rw_layer->tombstones.is_deleted(key))
+               return {false, {}};
+         }
+
+         // Layer 2: RO btree (frozen snapshot)
+         {
+            std::shared_ptr<btree_layer> ro;
+            {
+               std::shared_lock lk(root.buffered_mutex);
+               ro = root.buffered_ptr;
+            }
+            if (ro)
+            {
+               auto it = ro->map.find(key);
+               if (it != ro->map.end())
+               {
+                  if (it->second.is_tombstone())
+                     return {false, {}};
+                  return {true, it->second};
+               }
+               if (ro->tombstones.is_deleted(key))
+                  return {false, {}};
+            }
+         }
+      }
+
+      // Layer 3: PsiTri COW tree
+      return tri_get(root_index, key);
+   }
+
+   dwal_transaction::lookup_result dwal_database::tri_get(uint32_t         root_index,
+                                                         std::string_view key)
+   {
+      // Thread-local read session + cursor for Tri-layer lookups.
+      // Each calling thread gets its own session (safe for concurrent readers/writers).
+      thread_local std::shared_ptr<psitri::read_session> tl_session;
+      thread_local psitri::cursor*                       tl_cursor = nullptr;
+      thread_local psitri::database*                     tl_db     = nullptr;
+
+      // Re-create session if the database changed (shouldn't happen, but safe).
+      if (tl_db != _db.get())
+      {
+         delete tl_cursor;
+         tl_cursor = nullptr;
+         tl_session = _db->start_read_session();
+         tl_db      = _db.get();
+      }
+
+      if (!tl_cursor)
+      {
+         auto root = tl_session->create_cursor(root_index);
+         tl_cursor = new psitri::cursor(std::move(root));
+      }
+      else
+      {
+         tl_cursor->refresh(root_index);
+      }
+
+      std::string buf;
+      if (tl_cursor->get(key_view(key.data(), key.size()), &buf) >= 0)
+         return dwal_transaction::lookup_result::make_owned(std::move(buf));
+
+      return {false, {}};
    }
 
 }  // namespace psitri::dwal

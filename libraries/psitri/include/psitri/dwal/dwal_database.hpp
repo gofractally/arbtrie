@@ -73,11 +73,16 @@ namespace psitri::dwal
       /// cursors, refreshing only when the generation changes (after a swap).
       dwal_read_session start_read_session() { return dwal_read_session(*this); }
 
-      /// Single-shot layered lookup (no caching — acquires mutex per call).
-      /// Prefer start_read_session() for repeated reads.
+      /// Single-shot layered lookup of RO + Tri only (no caching — acquires mutex per call).
+      /// Does NOT see uncommitted RW data. Prefer start_read_session() for repeated reads.
       dwal_transaction::lookup_result get(uint32_t         root_index,
                                           std::string_view key,
                                           read_mode        mode = read_mode::persistent);
+
+      /// Full layered lookup: RW → RO → Tri.
+      /// Sees uncommitted writes in the RW btree. Intended for same-thread
+      /// read-after-write (e.g. RocksDB Get() after Put()).
+      dwal_transaction::lookup_result get_latest(uint32_t root_index, std::string_view key);
 
       // ── Flush & Swap ──────────────────────────────────────────────
 
@@ -106,6 +111,11 @@ namespace psitri::dwal
 
       /// Check if a swap should be triggered for a root after a commit.
       bool should_swap(uint32_t root_index) const;
+
+      /// Tri-layer point lookup — reads directly from the PsiTri COW tree.
+      /// Used by dwal_transaction::get() as the final fallback layer.
+      /// Thread-safe: uses a thread-local read session internally.
+      dwal_transaction::lookup_result tri_get(uint32_t root_index, std::string_view key);
 
      private:
 

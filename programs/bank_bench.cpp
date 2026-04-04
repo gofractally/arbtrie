@@ -5,7 +5,7 @@
  * Compares PsiTri, RocksDB (real + PsiTriRocks shim), MDBX, and TidesDB.
  *
  * Compiled into separate binaries per engine via #ifdef:
- *   BANK_ENGINE_PSITRI, BANK_ENGINE_ROCKSDB, BANK_ENGINE_MDBX, BANK_ENGINE_TIDESDB
+ *   BANK_ENGINE_PSITRI, BANK_ENGINE_DWAL, BANK_ENGINE_ROCKSDB, BANK_ENGINE_MDBX, BANK_ENGINE_TIDESDB
  */
 
 #include <algorithm>
@@ -31,7 +31,7 @@
 #include <boost/program_options/parsers.hpp>
 #include <boost/program_options/variables_map.hpp>
 
-#if defined(BANK_ENGINE_PSITRI)
+#if defined(BANK_ENGINE_PSITRI) || defined(BANK_ENGINE_DWAL)
 #include <psitri/cursor.hpp>
 #include <psitri/database.hpp>
 #include <psitri/read_session.hpp>
@@ -40,6 +40,14 @@
 #include <psitri/tree_ops.hpp>
 #include <psitri/value_type.hpp>
 #include <psitri/write_session_impl.hpp>
+#endif
+
+#if defined(BANK_ENGINE_DWAL)
+#include <psitri/dwal/dwal_database.hpp>
+#include <psitri/dwal/dwal_transaction.hpp>
+#include <psitri/dwal/dwal_read_session.hpp>
+#include <psitri/dwal/merge_cursor.hpp>
+#include <shared_mutex>
 #endif
 
 #if defined(BANK_ENGINE_ROCKSDB)
@@ -567,6 +575,242 @@ class PsiTriEngine : public BankEngine
             ++count;
          }
          cur.next();
+      }
+      return count;
+   }
+};
+#endif
+
+// ============================================================
+// DWAL Engine (PsiTri + write-ahead log buffering layer)
+// ============================================================
+
+#if defined(BANK_ENGINE_DWAL)
+class DwalEngine : public BankEngine
+{
+   std::shared_ptr<psitri::database>              _db;
+   std::unique_ptr<psitri::dwal::dwal_database>   _dwal_db;
+   std::shared_ptr<psitri::write_session>          _ws;
+   std::optional<psitri::dwal::dwal_transaction>   _tx;
+   std::string                                     _path;
+
+  public:
+   const char* name() const override { return "PsiTri-DWAL"; }
+
+   void open(const std::string& path, const std::string& sync_mode) override
+   {
+      std::filesystem::remove_all(path);
+      _path = path;
+      psitri::runtime_config cfg;
+      if (sync_mode == "async")
+         cfg.sync_mode = sal::sync_type::msync_async;
+      else if (sync_mode == "sync")
+         cfg.sync_mode = sal::sync_type::msync_sync;
+      else
+         cfg.sync_mode = sal::sync_type::none;
+      _db = psitri::database::create(path, cfg);
+      _ws = _db->start_write_session();
+
+      auto wal_dir = std::filesystem::path(path) / "wal";
+      psitri::dwal::dwal_config dwal_cfg;
+      _dwal_db = std::make_unique<psitri::dwal::dwal_database>(_db, wal_dir, dwal_cfg);
+   }
+
+   void close() override
+   {
+      _tx.reset();
+      _dwal_db.reset();
+      _ws.reset();
+      _db->compact_and_truncate();
+      _db.reset();
+   }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      // Bulk load goes directly through PsiTri for speed
+      auto bal = encode_balance(balance);
+      auto tx  = _ws->start_transaction(0);
+      for (auto& acct : accounts)
+         tx.upsert(psitri::to_key_view(acct), psitri::to_value_view(bal));
+      tx.commit();
+   }
+
+   void begin_batch() override
+   {
+      _tx.emplace(_dwal_db->start_write_transaction(0));
+   }
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      // get() now searches RW → RO → Tri transparently
+      auto src_res = _tx->get(std::string_view(src));
+      if (!src_res.found)
+         return false;
+      uint64_t src_bal = decode_balance(src_res.value.data.data(), src_res.value.data.size());
+      if (src_bal < amount)
+         return false;
+
+      auto dst_res = _tx->get(std::string_view(dst));
+      if (!dst_res.found)
+         return false;
+      uint64_t dst_bal = decode_balance(dst_res.value.data.data(), dst_res.value.data.size());
+
+      auto new_src = encode_balance(src_bal - amount);
+      auto new_dst = encode_balance(dst_bal + amount);
+      _tx->upsert(std::string_view(src), std::string_view(new_src));
+      _tx->upsert(std::string_view(dst), std::string_view(new_dst));
+
+      // Transaction log entry
+      auto log_key = encode_log_key(seq);
+      auto log_val = encode_log_value(src, dst, amount);
+      _tx->upsert(std::string_view(log_key), std::string_view(log_val));
+      return true;
+   }
+
+   void commit_batch() override
+   {
+      _tx->commit();
+      _tx.reset();
+   }
+
+   void sync() override { _dwal_db->flush_wal(); }
+
+   SizeReport report_size(const std::string&) override
+   {
+      auto d = _db->dump();
+      SizeReport r;
+      r.file_size = d.total_segments * sal::segment_size;
+      uint64_t live = 0;
+      for (auto& seg : d.segments)
+         if (!seg.is_free && seg.alloc_pos > 0)
+            live += seg.alloc_pos - seg.freed_bytes;
+      r.live_size = live;
+      r.free_size = r.file_size - live;
+      r.reachable_size = _db->reachable_size();
+      return r;
+   }
+
+   void dump_segments(const char* label) override
+   {
+      auto     d     = _db->dump();
+      uint32_t free_segs = 0, meta_ro = 0, hdr_ro = 0, finalized = 0, writing = 0, empty = 0;
+      uint64_t total_freed = 0, total_alloc = 0;
+      for (auto& seg : d.segments)
+      {
+         if (seg.is_free) { ++free_segs; continue; }
+         if (seg.is_read_only) ++meta_ro;
+         if (seg.hdr_read_only) ++hdr_ro;
+         if (seg.is_finalized) ++finalized;
+         if (!seg.is_free && !seg.is_finalized && seg.alloc_pos > 0) ++writing;
+         if (!seg.is_free && !seg.is_finalized && seg.alloc_pos == 0) ++empty;
+         total_freed += seg.freed_bytes;
+         total_alloc += seg.alloc_pos > 0 ? seg.alloc_pos : 0;
+      }
+      uint64_t total_segs = d.segments.size();
+      printf("    [%s] segs: %llu total  free=%u  meta_ro=%u  hdr_ro=%u  "
+             "finalized=%u  writing=%u  empty=%u  "
+             "alloc=%.0f MB  freed=%.0f MB\n",
+             label, (unsigned long long)total_segs, free_segs, meta_ro, hdr_ro,
+             finalized, writing, empty,
+             total_alloc / (1024.0 * 1024.0),
+             total_freed / (1024.0 * 1024.0));
+   }
+
+   void audit_freed() override
+   {
+      auto audit = _db->audit_freed_space();
+      uint64_t total_estimated = 0, total_actual_dead = 0, total_actual_live = 0;
+      uint64_t total_sync = 0, total_objects = 0;
+      for (auto& a : audit)
+      {
+         total_estimated   += a.estimated_freed;
+         total_actual_dead += a.actual_dead;
+         total_actual_live += a.actual_live;
+         total_sync        += a.sync_headers;
+         total_objects     += a.total_objects;
+      }
+      double est_mb  = total_estimated / (1024.0 * 1024.0);
+      double dead_mb = total_actual_dead / (1024.0 * 1024.0);
+      double live_mb = total_actual_live / (1024.0 * 1024.0);
+      printf("    [freed audit] %zu ro segments, %llu objects\n"
+             "      estimated freed: %.1f MB\n"
+             "      actual dead:     %.1f MB\n"
+             "      actual live:     %.1f MB\n"
+             "      gap (dead - estimated): %.1f MB\n",
+             audit.size(), (unsigned long long)total_objects,
+             est_mb, dead_mb, live_mb, dead_mb - est_mb);
+   }
+
+   void wait_compactor() override { _db->wait_for_compactor(); }
+
+   // Reader thread state — PsiTri read session + cursor per thread
+   std::shared_ptr<psitri::read_session> _reader_rs;
+   std::optional<psitri::cursor>         _reader_cur;
+
+   void reader_thread_init() override
+   {
+      _reader_rs = _db->start_read_session();
+   }
+
+   void reader_thread_teardown() override
+   {
+      _reader_cur.reset();
+      _reader_rs.reset();
+   }
+
+   void reader_batch_begin() override { _reader_cur.emplace(_reader_rs->create_cursor(0)); }
+   void reader_batch_end() override { _reader_cur.reset(); }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto val = _reader_cur->get<std::string>(psitri::to_key_view(key));
+      if (!val)
+         return false;
+      balance_out = decode_balance(*val);
+      return true;
+   }
+
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      // Merge cursor across RW → RO → Tri (sees all uncommitted DWAL data)
+      auto& dwal_root = _dwal_db->root(0);
+      auto  rw = dwal_root.rw_layer;
+      std::shared_ptr<psitri::dwal::btree_layer> ro;
+      {
+         std::shared_lock lk(dwal_root.buffered_mutex);
+         ro = dwal_root.buffered_ptr;
+      }
+
+      auto rs = _db->start_read_session();
+      auto tri_root = rs->get_root(0);
+      std::optional<psitri::cursor> tri_cursor;
+      if (tri_root)
+         tri_cursor.emplace(std::move(tri_root));
+
+      psitri::dwal::merge_cursor mc(rw.get(), ro.get(), std::move(tri_cursor));
+      uint64_t count = 0;
+      mc.seek_begin();
+      while (!mc.is_end())
+      {
+         std::string val_buf;
+         if (mc.current_source() == psitri::dwal::merge_cursor::source::tri)
+         {
+            mc.tri_cursor()->get_value([&](psitri::value_view vv) {
+               val_buf.assign(vv.data(), vv.size());
+            });
+         }
+         else
+         {
+            auto& bv = mc.current_value();
+            val_buf.assign(bv.data.data(), bv.data.size());
+         }
+         auto k = mc.key();
+         visitor(std::string(k.data(), k.size()), decode_balance(val_buf));
+         ++count;
+         mc.next();
       }
       return count;
    }
@@ -1168,6 +1412,8 @@ int main(int argc, char** argv)
    std::unique_ptr<BankEngine> engine;
 #if defined(BANK_ENGINE_PSITRI)
    engine = std::make_unique<PsiTriEngine>();
+#elif defined(BANK_ENGINE_DWAL)
+   engine = std::make_unique<DwalEngine>();
 #elif defined(BANK_ENGINE_ROCKSDB)
    engine = std::make_unique<RocksDbEngine>();
 #elif defined(BANK_ENGINE_MDBX)

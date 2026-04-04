@@ -151,9 +151,10 @@ namespace psitri::dwal
             return result;
       }
 
-      // Layer 3: PsiTri — the caller must handle this externally,
-      // since we don't have direct access to the PsiTri cursor here.
-      // Return not-found to indicate "check PsiTri".
+      // Layer 3: PsiTri COW tree (via dwal_database)
+      if (_db)
+         return _db->tri_get(_root_index, key);
+
       return {false, {}};
    }
 

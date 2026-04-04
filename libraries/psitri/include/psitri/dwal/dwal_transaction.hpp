@@ -57,11 +57,24 @@ namespace psitri::dwal
 
       /// Look up a key across all active layers (RW → RO → Tri).
       /// Returns the btree_value if found, or nullopt if not found or tombstoned.
-      /// For Tri-layer lookups, the caller must provide a tri_get callback.
       struct lookup_result
       {
          bool        found = false;
          btree_value value;
+
+         /// Backing storage for Tri-layer results where the data is copied
+         /// rather than referenced from pool-backed memory.
+         std::string owned_data;
+
+         /// Create a result that owns its data (for Tri-layer lookups).
+         static lookup_result make_owned(std::string data)
+         {
+            lookup_result r;
+            r.found      = true;
+            r.owned_data = std::move(data);
+            r.value      = btree_value::make_data(r.owned_data);
+            return r;
+         }
       };
 
       lookup_result get(std::string_view key) const;

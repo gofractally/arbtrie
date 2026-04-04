@@ -593,6 +593,13 @@ target_link_libraries(bank-bench-psitri PRIVATE psitri Boost::program_options)
 set_target_properties(bank-bench-psitri PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# PsiTri DWAL bank bench (always available)
+add_executable(bank-bench-dwal programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-dwal PRIVATE BANK_ENGINE_DWAL=1)
+target_link_libraries(bank-bench-dwal PRIVATE psitri absl::btree Boost::program_options)
+set_target_properties(bank-bench-dwal PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 if(BUILD_ROCKSDB_BENCH)
     # PsiTriRocks bank bench
     add_executable(bank-bench-psitrirocks programs/bank_bench.cpp)

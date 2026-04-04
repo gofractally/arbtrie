@@ -12,9 +12,10 @@ namespace psitri::dwal
                           epoch_registry&                    epochs)
        : _db(std::move(db)), _epochs(epochs)
    {
+      // Sessions are created lazily on each worker thread (not here) because
+      // allocator_sessions are thread-local — a session created on the main
+      // thread cannot be used on a worker thread.
       _sessions.resize(num_threads);
-      for (uint32_t i = 0; i < num_threads; ++i)
-         _sessions[i] = _db->start_write_session();
 
       _threads.reserve(num_threads);
       for (uint32_t i = 0; i < num_threads; ++i)
@@ -49,6 +50,11 @@ namespace psitri::dwal
 
    void merge_pool::worker_loop(uint32_t thread_index)
    {
+      // Create the write session on this worker thread so the allocator_session
+      // is bound to the correct thread-local storage.  The session must also be
+      // destroyed on this thread (allocator_session has thread affinity).
+      _sessions[thread_index] = _db->start_write_session();
+
       while (!_shutdown.load(std::memory_order_relaxed))
       {
          merge_request req;
@@ -57,7 +63,7 @@ namespace psitri::dwal
             _queue_cv.wait(lk, [this]
                            { return !_queue.empty() || _shutdown.load(std::memory_order_relaxed); });
             if (_shutdown.load(std::memory_order_relaxed) && _queue.empty())
-               return;
+               break;
             req = _queue.front();
             _queue.pop();
          }
@@ -65,6 +71,9 @@ namespace psitri::dwal
          drain_ro_btree(thread_index, req.root_index, *req.root);
          try_reclaim();
       }
+
+      // Destroy session on this thread to respect allocator_session thread affinity.
+      _sessions[thread_index].reset();
    }
 
    void merge_pool::drain_ro_btree(uint32_t thread_index, uint32_t root_index, dwal_root& root)
