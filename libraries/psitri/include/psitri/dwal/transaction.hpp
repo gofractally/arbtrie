@@ -84,6 +84,7 @@ namespace psitri::dwal
 
       void upsert(uint32_t root_index, std::string_view key, std::string_view value);
       remove_result remove(uint32_t root_index, std::string_view key);
+      void remove_range(uint32_t root_index, std::string_view low, std::string_view high);
       dwal_transaction::lookup_result get(uint32_t root_index, std::string_view key);
 
       // ── Transaction control ───────────────────────────────────────

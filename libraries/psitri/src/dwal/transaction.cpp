@@ -152,6 +152,11 @@ namespace psitri::dwal
       return root(root_index).remove(key);
    }
 
+   void transaction::remove_range(uint32_t root_index, std::string_view low, std::string_view high)
+   {
+      root(root_index).remove_range(low, high);
+   }
+
    dwal_transaction::lookup_result transaction::get(uint32_t root_index, std::string_view key)
    {
       return root(root_index).get(key);

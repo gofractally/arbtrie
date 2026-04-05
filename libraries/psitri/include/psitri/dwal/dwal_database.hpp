@@ -104,7 +104,8 @@ namespace psitri::dwal
       ///   - persistent: Tri only (no DWAL locks)
       /// The returned cursor owns shared_ptr copies of the layer snapshots,
       /// so callers do not need to hold any locks during iteration.
-      owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode);
+      owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode,
+                                      bool skip_rw_lock = false);
 
       // ── Flush & Swap ──────────────────────────────────────────────
 

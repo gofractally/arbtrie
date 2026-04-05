@@ -511,6 +511,308 @@ TEST_CASE("C++ API: multiple maps isolation", "[mdbx][cpp-api]")
       REQUIRE(txn.get(m1, mdbx::slice("shared_key")).string_view() == "from_map1");
       REQUIRE(txn.get(m2, mdbx::slice("shared_key")).string_view() == "from_map2");
    }
+}
 
-   // Cleanup handled by make_temp_dir() at start of next run
+// ════════════════════════════════════════════════════════════════════
+// DUPSORT tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: DUPSORT basic put/get/del", "[mdbx][dupsort]")
+{
+   auto dir = make_temp_dir("c_dupsort");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi;
+   REQUIRE(mdbx_dbi_open(txn, "dupsort_db",
+           static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT), &dbi) == MDBX_SUCCESS);
+
+   // Insert multiple values for same key
+   auto put = [&](const char* k, const char* v) {
+      MDBX_val key{const_cast<char*>(k), strlen(k)};
+      MDBX_val val{const_cast<char*>(v), strlen(v)};
+      REQUIRE(mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT) == MDBX_SUCCESS);
+   };
+
+   put("fruit", "apple");
+   put("fruit", "banana");
+   put("fruit", "cherry");
+   put("veggie", "carrot");
+   put("veggie", "potato");
+
+   // Get returns first value for key (sorted)
+   {
+      MDBX_val key{const_cast<char*>("fruit"), 5};
+      MDBX_val val;
+      REQUIRE(mdbx_get(txn, dbi, &key, &val) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "apple");
+   }
+
+   // Delete specific dup
+   {
+      MDBX_val key{const_cast<char*>("fruit"), 5};
+      MDBX_val val{const_cast<char*>("banana"), 6};
+      REQUIRE(mdbx_del(txn, dbi, &key, &val) == MDBX_SUCCESS);
+   }
+
+   // Verify banana is gone, apple and cherry remain
+   {
+      MDBX_cursor* cur = nullptr;
+      REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>("fruit"), 5};
+      MDBX_val data;
+      REQUIRE(mdbx_cursor_get(cur, &key, &data, MDBX_SET) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(data.iov_base), data.iov_len) == "apple");
+
+      REQUIRE(mdbx_cursor_get(cur, &key, &data, MDBX_NEXT_DUP) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(data.iov_base), data.iov_len) == "cherry");
+
+      REQUIRE(mdbx_cursor_get(cur, &key, &data, MDBX_NEXT_DUP) == MDBX_NOTFOUND);
+
+      mdbx_cursor_close(cur);
+   }
+
+   // Count dups
+   {
+      MDBX_cursor* cur = nullptr;
+      REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>("veggie"), 6};
+      MDBX_val data;
+      REQUIRE(mdbx_cursor_get(cur, &key, &data, MDBX_SET) == MDBX_SUCCESS);
+
+      size_t count = 0;
+      REQUIRE(mdbx_cursor_count(cur, &count) == MDBX_SUCCESS);
+      REQUIRE(count == 2);
+
+      mdbx_cursor_close(cur);
+   }
+
+   mdbx_txn_commit(txn);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: DUPSORT cursor navigation", "[mdbx][dupsort]")
+{
+   auto dir = make_temp_dir("c_dupsort_nav");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 16);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+
+   MDBX_dbi dbi;
+   mdbx_dbi_open(txn, "nav",
+                  static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT), &dbi);
+
+   auto put = [&](const char* k, const char* v) {
+      MDBX_val key{const_cast<char*>(k), strlen(k)};
+      MDBX_val val{const_cast<char*>(v), strlen(v)};
+      mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT);
+   };
+
+   put("a", "1");
+   put("a", "2");
+   put("a", "3");
+   put("b", "10");
+   put("b", "20");
+   put("c", "100");
+
+   MDBX_cursor* cur = nullptr;
+   mdbx_cursor_open(txn, dbi, &cur);
+
+   auto get_kv = [&](MDBX_cursor_op op) -> std::pair<std::string, std::string> {
+      MDBX_val key, data;
+      int rc = mdbx_cursor_get(cur, &key, &data, op);
+      if (rc != MDBX_SUCCESS)
+         return {"", ""};
+      return {
+         std::string(static_cast<char*>(key.iov_base), key.iov_len),
+         std::string(static_cast<char*>(data.iov_base), data.iov_len)
+      };
+   };
+
+   // FIRST → a:1
+   auto [k1, v1] = get_kv(MDBX_FIRST);
+   REQUIRE(k1 == "a");
+   REQUIRE(v1 == "1");
+
+   // NEXT_DUP → a:2
+   auto [k2, v2] = get_kv(MDBX_NEXT_DUP);
+   REQUIRE(k2 == "a");
+   REQUIRE(v2 == "2");
+
+   // NEXT_NODUP → b:10
+   auto [k3, v3] = get_kv(MDBX_NEXT_NODUP);
+   REQUIRE(k3 == "b");
+   REQUIRE(v3 == "10");
+
+   // LAST_DUP → b:20
+   auto [k4, v4] = get_kv(MDBX_LAST_DUP);
+   REQUIRE(k4 == "b");
+   REQUIRE(v4 == "20");
+
+   // PREV_DUP → b:10
+   auto [k5, v5] = get_kv(MDBX_PREV_DUP);
+   REQUIRE(k5 == "b");
+   REQUIRE(v5 == "10");
+
+   // FIRST_DUP → b:10 (already at first)
+   auto [k6, v6] = get_kv(MDBX_FIRST_DUP);
+   REQUIRE(k6 == "b");
+   REQUIRE(v6 == "10");
+
+   // LAST → c:100
+   auto [k7, v7] = get_kv(MDBX_LAST);
+   REQUIRE(k7 == "c");
+   REQUIRE(v7 == "100");
+
+   // PREV_NODUP → b:20 (last dup of previous key)
+   auto [k8, v8] = get_kv(MDBX_PREV_NODUP);
+   REQUIRE(k8 == "b");
+   // PREV_NODUP lands on last dup of prev key
+   REQUIRE(v8 == "20");
+
+   // GET_BOTH: exact match
+   {
+      MDBX_val key{const_cast<char*>("a"), 1};
+      MDBX_val data{const_cast<char*>("2"), 1};
+      REQUIRE(mdbx_cursor_get(cur, &key, &data, MDBX_GET_BOTH) == MDBX_SUCCESS);
+   }
+
+   // GET_BOTH_RANGE: lower bound within key's values
+   {
+      MDBX_val key{const_cast<char*>("a"), 1};
+      MDBX_val data{const_cast<char*>("15"), 2}; // between "1" and "2"
+      int rc = mdbx_cursor_get(cur, &key, &data, MDBX_GET_BOTH_RANGE);
+      REQUIRE(rc == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(data.iov_base), data.iov_len) == "2");
+   }
+
+   mdbx_cursor_close(cur);
+   mdbx_txn_commit(txn);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: DUPSORT delete all dups", "[mdbx][dupsort]")
+{
+   auto dir = make_temp_dir("c_dupsort_delall");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 16);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+
+   MDBX_dbi dbi;
+   mdbx_dbi_open(txn, "delall",
+                  static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT), &dbi);
+
+   auto put = [&](const char* k, const char* v) {
+      MDBX_val key{const_cast<char*>(k), strlen(k)};
+      MDBX_val val{const_cast<char*>(v), strlen(v)};
+      mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT);
+   };
+
+   put("x", "1");
+   put("x", "2");
+   put("x", "3");
+   put("y", "a");
+
+   // Delete all dups for "x" (data=nullptr)
+   {
+      MDBX_val key{const_cast<char*>("x"), 1};
+      REQUIRE(mdbx_del(txn, dbi, &key, nullptr) == MDBX_SUCCESS);
+   }
+
+   // "x" should be gone
+   {
+      MDBX_val key{const_cast<char*>("x"), 1};
+      MDBX_val val;
+      REQUIRE(mdbx_get(txn, dbi, &key, &val) == MDBX_NOTFOUND);
+   }
+
+   // "y" should still exist
+   {
+      MDBX_val key{const_cast<char*>("y"), 1};
+      MDBX_val val;
+      REQUIRE(mdbx_get(txn, dbi, &key, &val) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "a");
+   }
+
+   mdbx_txn_commit(txn);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C++ API: DUPSORT multi-value", "[mdbx][dupsort][cpp-api]")
+{
+   auto dir = make_temp_dir("cpp_dupsort");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   // Write
+   {
+      auto txn = db.start_write();
+      auto map = txn.create_map("multi", mdbx::key_mode::usual, mdbx::value_mode::multi);
+
+      txn.upsert(map, mdbx::slice("color"), mdbx::slice("blue"));
+      txn.upsert(map, mdbx::slice("color"), mdbx::slice("green"));
+      txn.upsert(map, mdbx::slice("color"), mdbx::slice("red"));
+      txn.upsert(map, mdbx::slice("shape"), mdbx::slice("circle"));
+      txn.upsert(map, mdbx::slice("shape"), mdbx::slice("square"));
+
+      txn.commit();
+   }
+
+   // Read with cursor
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("multi");
+      auto cur = txn.open_cursor(map);
+
+      // First entry
+      auto r = cur.to_first(false);
+      REQUIRE(r.done);
+      REQUIRE(r.key.string_view() == "color");
+      REQUIRE(r.value.string_view() == "blue");
+
+      // Next dup
+      r = cur.to_next_dup(false);
+      REQUIRE(r.done);
+      REQUIRE(r.key.string_view() == "color");
+      REQUIRE(r.value.string_view() == "green");
+
+      r = cur.to_next_dup(false);
+      REQUIRE(r.done);
+      REQUIRE(r.value.string_view() == "red");
+
+      // No more dups for "color"
+      r = cur.to_next_dup(false);
+      REQUIRE(!r.done);
+
+      // Next unique key
+      r = cur.to_next(false);
+      REQUIRE(r.done);
+      REQUIRE(r.key.string_view() == "shape");
+      REQUIRE(r.value.string_view() == "circle");
+
+      // Count dups for "shape"
+      size_t count = cur.count_multivalue();
+      REQUIRE(count == 2);
+   }
 }

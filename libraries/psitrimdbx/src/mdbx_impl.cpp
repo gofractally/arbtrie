@@ -89,45 +89,155 @@ struct MDBX_env
    }
 };
 
-/// Cursor state for a single DBI — either merge cursor or direct.
-struct cursor_state
+// ── DUPSORT composite key encoding ──────────────────────────────
+//
+// For DUPSORT tables, we store (key, value) pairs as a single psitri
+// key using an escaped-separator encoding:
+//
+//   composite = escape(key) + \x00\x00 + value
+//
+// where escape() replaces each \x00 byte with \x00\x01.
+// This preserves lexicographic ordering: entries sort by key first,
+// then by value within the same key. The \x00\x00 separator cannot
+// appear in an escaped key, so decoding is unambiguous.
+
+static std::string dupsort_encode(std::string_view key, std::string_view value)
 {
-   psitri::dwal::owned_merge_cursor mc;
-   bool                             valid   = false;
-   std::string                      key_buf;
-   std::string                      val_buf;
-
-   // For DUPSORT: the current key's subtree cursor
-   // (TODO: subtree cursor for DUPSORT support)
-
-   explicit cursor_state(psitri::dwal::owned_merge_cursor m)
-       : mc(std::move(m))
+   std::string result;
+   result.reserve(key.size() + 2 + value.size());
+   for (char c : key)
    {
+      result += c;
+      if (c == '\0')
+         result += '\x01';
    }
+   result += '\0';
+   result += '\0';
+   result.append(value.data(), value.size());
+   return result;
+}
 
-   void sync_key_val()
+static std::string dupsort_key_prefix(std::string_view key)
+{
+   std::string result;
+   result.reserve(key.size() + 2);
+   for (char c : key)
    {
-      if (!mc->is_end() && !mc->is_rend())
-      {
-         valid = true;
-         key_buf.assign(mc->key().data(), mc->key().size());
+      result += c;
+      if (c == '\0')
+         result += '\x01';
+   }
+   result += '\0';
+   result += '\0';
+   return result;
+}
 
-         if (mc->current_source() == psitri::dwal::merge_cursor::source::tri)
+static std::string dupsort_key_upper(std::string_view key)
+{
+   std::string result;
+   result.reserve(key.size() + 2);
+   for (char c : key)
+   {
+      result += c;
+      if (c == '\0')
+         result += '\x01';
+   }
+   result += '\0';
+   result += '\x01';
+   return result;
+}
+
+static bool dupsort_decode(std::string_view composite,
+                           std::string& key_out,
+                           std::string& val_out)
+{
+   key_out.clear();
+   val_out.clear();
+
+   for (size_t i = 0; i < composite.size(); ++i)
+   {
+      if (composite[i] == '\0')
+      {
+         if (i + 1 < composite.size() && composite[i + 1] == '\x01')
          {
-            auto* tc = mc->tri_cursor();
-            tc->get_value([this](psitri::value_view vv) {
-               val_buf.assign(vv.data(), vv.size());
-            });
+            key_out += '\0';
+            ++i;
+         }
+         else if (i + 1 < composite.size() && composite[i + 1] == '\x00')
+         {
+            val_out.assign(composite.data() + i + 2, composite.size() - i - 2);
+            return true;
          }
          else
          {
-            auto& bv = mc->current_value();
-            val_buf.assign(bv.data.data(), bv.data.size());
+            return false;
          }
       }
       else
       {
+         key_out += composite[i];
+      }
+   }
+   return false;
+}
+
+/// Cursor state for a single DBI — either merge cursor or direct.
+struct cursor_state
+{
+   psitri::dwal::owned_merge_cursor mc;
+   bool                             valid     = false;
+   bool                             dupsort   = false;
+   std::string                      key_buf;   // exposed key
+   std::string                      val_buf;   // exposed value
+   std::string                      raw_key;   // raw composite (DUPSORT only)
+
+   explicit cursor_state(psitri::dwal::owned_merge_cursor m, bool ds = false)
+       : mc(std::move(m)), dupsort(ds)
+   {
+   }
+
+   /// Read the raw value from the merge cursor into val_buf (non-DUPSORT).
+   void read_value()
+   {
+      if (mc->current_source() == psitri::dwal::merge_cursor::source::tri)
+      {
+         auto* tc = mc->tri_cursor();
+         tc->get_value([this](psitri::value_view vv) {
+            val_buf.assign(vv.data(), vv.size());
+         });
+      }
+      else
+      {
+         auto& bv = mc->current_value();
+         val_buf.assign(bv.data.data(), bv.data.size());
+      }
+   }
+
+   void sync_key_val()
+   {
+      if (mc->is_end() || mc->is_rend())
+      {
          valid = false;
+         return;
+      }
+
+      valid = true;
+      if (!dupsort)
+      {
+         key_buf.assign(mc->key().data(), mc->key().size());
+         read_value();
+      }
+      else
+      {
+         // Composite key — decode into key + value
+         raw_key.assign(mc->key().data(), mc->key().size());
+         if (!dupsort_decode(raw_key, key_buf, val_buf))
+         {
+            valid = false;
+            return;
+         }
+         // For DUPSORT, the psitri "value" is empty (all data is in the key).
+         // But we read it anyway in case of non-dupsort entries mixed in.
       }
    }
 
@@ -694,14 +804,41 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
    if (root_idx == UINT32_MAX)
       return MDBX_BAD_DBI;
 
-   auto key_sv = to_sv(key);
-   auto* mtxn  = const_cast<MDBX_txn*>(txn);
+   auto    key_sv = to_sv(key);
+   auto*   mtxn   = const_cast<MDBX_txn*>(txn);
+   bool    is_ds  = dbi_is_dupsort(txn->env, dbi);
 
    try
    {
+      if (is_ds)
+      {
+         // DUPSORT: find the first composite key with this key prefix.
+         auto prefix = dupsort_key_prefix(key_sv);
+         bool writer = !txn->is_readonly() && txn->write_tx;
+         auto mc = txn->env->dwal_db->create_cursor(
+            root_idx, psitri::dwal::read_mode::latest, writer);
+         if (!mc->lower_bound(prefix) || mc->is_end())
+            return MDBX_NOTFOUND;
+
+         auto found = mc->key();
+         if (found.size() < prefix.size()
+             || found.substr(0, prefix.size()) != std::string_view(prefix))
+            return MDBX_NOTFOUND;
+
+         // Decode the composite to get the value part
+         std::string dk, dv;
+         if (!dupsort_decode(found, dk, dv))
+            return MDBX_NOTFOUND;
+
+         mtxn->get_buf = std::move(dv);
+         data->iov_base = mtxn->get_buf.data();
+         data->iov_len  = mtxn->get_buf.size();
+         return MDBX_SUCCESS;
+      }
+
+      // Non-DUPSORT path
       if (!txn->is_readonly() && txn->write_tx)
       {
-         // RW transaction: use multi-root transaction's get for read-your-writes
          auto result = txn->write_tx->get(root_idx, key_sv);
          if (!result.found)
             return MDBX_NOTFOUND;
@@ -713,9 +850,6 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
       }
       else
       {
-         // RO transaction or RW without write_tx yet:
-         // Use get_latest() for full RW → RO → Tri visibility.
-         // MDBX semantics serialize writers, so this is safe.
          auto result = txn->env->dwal_db->get_latest(root_idx, key_sv);
          if (!result.found)
             return MDBX_NOTFOUND;
@@ -738,9 +872,33 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
 int mdbx_get_ex(const MDBX_txn* txn, MDBX_dbi dbi,
                 MDBX_val* key, MDBX_val* data, size_t* values_count)
 {
+   int rc = mdbx_get(txn, dbi, key, data);
    if (values_count)
-      *values_count = 1; // DUPSORT TODO: count subtree entries
-   return mdbx_get(txn, dbi, key, data);
+   {
+      *values_count = 1;
+      if (rc == MDBX_SUCCESS && dbi_is_dupsort(txn->env, dbi))
+      {
+         // Count all entries with this key
+         auto key_sv = to_sv(key);
+         auto prefix = dupsort_key_prefix(key_sv);
+         auto upper  = dupsort_key_upper(key_sv);
+         bool writer = !txn->is_readonly() && txn->write_tx;
+         auto mc = txn->env->dwal_db->create_cursor(
+            dbi_root_index(txn->env, dbi), psitri::dwal::read_mode::latest, writer);
+         size_t n = 0;
+         if (mc->lower_bound(prefix))
+         {
+            while (!mc->is_end() && mc->key() < std::string_view(upper))
+            {
+               ++n;
+               if (!mc->next())
+                  break;
+            }
+         }
+         *values_count = n;
+      }
+   }
+   return rc;
 }
 
 /// Ensure a write transaction exists that covers the given root.
@@ -800,16 +958,54 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
 
    auto key_sv = to_sv(key);
    auto val_sv = to_sv(data);
+   bool is_ds  = dbi_is_dupsort(txn->env, dbi);
 
    try
    {
+      if (is_ds)
+      {
+         // DUPSORT: store as composite key, empty value
+         auto composite = dupsort_encode(key_sv, val_sv);
+
+         if (flags & MDBX_NODUPDATA)
+         {
+            // Check if this exact (key, value) pair exists
+            auto result = txn->write_tx->get(root_idx, composite);
+            if (result.found)
+               return MDBX_KEYEXIST;
+         }
+         if (flags & MDBX_NOOVERWRITE)
+         {
+            // Check if any entry with this key exists
+            auto prefix = dupsort_key_prefix(key_sv);
+            auto upper  = dupsort_key_upper(key_sv);
+            // Use lower_bound to check if any composite starts with this key
+            // We need a cursor for this — use get_latest range check
+            auto result = txn->write_tx->get(root_idx, prefix);
+            // A prefix match means: result key starts with our prefix
+            // Actually, we need a range scan. Simpler: just lower_bound.
+            // For now, do a cursor-based check.
+            auto mc = txn->env->dwal_db->create_cursor(
+               root_idx, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true);
+            if (mc->lower_bound(prefix) && !mc->is_end())
+            {
+               auto found_key = mc->key();
+               if (found_key.size() >= prefix.size()
+                   && found_key.substr(0, prefix.size()) == prefix)
+                  return MDBX_KEYEXIST;
+            }
+         }
+
+         txn->write_tx->upsert(root_idx, composite, std::string_view{});
+         return MDBX_SUCCESS;
+      }
+
+      // Non-DUPSORT path
       if (flags & MDBX_NOOVERWRITE)
       {
-         // Check if key exists
          auto result = txn->write_tx->get(root_idx, key_sv);
          if (result.found)
          {
-            // Return existing value in data
             data->iov_base = const_cast<char*>(result.value.data.data());
             data->iov_len  = result.value.data.size();
             return MDBX_KEYEXIST;
@@ -840,11 +1036,30 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
       return rc;
 
    auto key_sv = to_sv(key);
-   // data parameter: if non-null with DUPSORT, delete specific dup
-   // For now (non-DUPSORT): ignore data, delete the key
+   bool is_ds  = dbi_is_dupsort(txn->env, dbi);
 
    try
    {
+      if (is_ds)
+      {
+         if (data)
+         {
+            // Delete specific (key, value) pair
+            auto composite = dupsort_encode(key_sv, to_sv(data));
+            bool removed = txn->write_tx->remove(root_idx, composite);
+            return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
+         }
+         else
+         {
+            // Delete ALL values for this key — range remove
+            auto lo = dupsort_key_prefix(key_sv);
+            auto hi = dupsort_key_upper(key_sv);
+            txn->write_tx->remove_range(root_idx, lo, hi);
+            return MDBX_SUCCESS;
+         }
+      }
+
+      // Non-DUPSORT
       bool removed = txn->write_tx->remove(root_idx, key_sv);
       return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
    }
@@ -912,8 +1127,10 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
          }
       }
 
-      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode);
-      c->state = std::make_unique<cursor_state>(std::move(mc));
+      // Skip the RW lock if the writer thread already holds it.
+      bool writer = !txn->is_readonly() && txn->write_tx;
+      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
+      c->state = std::make_unique<cursor_state>(std::move(mc), c->is_dupsort);
 
       *cursor = c;
       return MDBX_SUCCESS;
@@ -967,7 +1184,23 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
             if (!key)
                return MDBX_EINVAL;
             auto key_sv = to_sv(key);
-            ok = mc->seek(key_sv);
+            if (st.dupsort)
+            {
+               // Seek to first entry with this key
+               auto prefix = dupsort_key_prefix(key_sv);
+               ok = mc->lower_bound(prefix);
+               if (ok && !mc->is_end())
+               {
+                  auto found = mc->key();
+                  if (found.size() < prefix.size()
+                      || found.substr(0, prefix.size()) != std::string_view(prefix))
+                     ok = false;
+               }
+            }
+            else
+            {
+               ok = mc->seek(key_sv);
+            }
             break;
          }
          case MDBX_SET_RANGE:
@@ -976,7 +1209,15 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
             if (!key)
                return MDBX_EINVAL;
             auto key_sv = to_sv(key);
-            ok = mc->lower_bound(key_sv);
+            if (st.dupsort)
+            {
+               auto prefix = dupsort_key_prefix(key_sv);
+               ok = mc->lower_bound(prefix);
+            }
+            else
+            {
+               ok = mc->lower_bound(key_sv);
+            }
             break;
          }
          case MDBX_SET_UPPERBOUND:
@@ -984,26 +1225,168 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
             if (!key)
                return MDBX_EINVAL;
             auto key_sv = to_sv(key);
-            ok = mc->upper_bound(key_sv);
+            if (st.dupsort)
+            {
+               auto upper = dupsort_key_upper(key_sv);
+               ok = mc->lower_bound(upper);
+            }
+            else
+            {
+               ok = mc->upper_bound(key_sv);
+            }
             break;
          }
+
          case MDBX_NEXT_NODUP:
-            // For non-DUPSORT, same as NEXT
-            ok = mc->next();
-            break;
-         case MDBX_PREV_NODUP:
-            ok = mc->prev();
+            if (st.dupsort && st.valid)
+            {
+               // Skip past all entries with the current key
+               auto upper = dupsort_key_upper(st.key_buf);
+               ok = mc->lower_bound(upper);
+            }
+            else
+            {
+               ok = mc->next();
+            }
             break;
 
-         // DUPSORT operations — stubs for now
+         case MDBX_PREV_NODUP:
+            if (st.dupsort && st.valid)
+            {
+               // Seek to first entry of current key, then prev
+               auto prefix = dupsort_key_prefix(st.key_buf);
+               ok = mc->lower_bound(prefix);
+               if (ok && !mc->is_end())
+                  ok = mc->prev();
+               // Now we're at the last entry of the previous key — sync will decode it
+            }
+            else
+            {
+               ok = mc->prev();
+            }
+            break;
+
+         // ── DUPSORT duplicate navigation ────────────────────────────
          case MDBX_FIRST_DUP:
+         {
+            if (!st.dupsort || !st.valid)
+               return MDBX_NOTFOUND;
+            auto prefix = dupsort_key_prefix(st.key_buf);
+            ok = mc->lower_bound(prefix);
+            if (ok && !mc->is_end())
+            {
+               auto found = mc->key();
+               if (found.size() < prefix.size()
+                   || found.substr(0, prefix.size()) != std::string_view(prefix))
+                  ok = false;
+            }
+            break;
+         }
          case MDBX_LAST_DUP:
+         {
+            if (!st.dupsort || !st.valid)
+               return MDBX_NOTFOUND;
+            // Seek to upper bound, then prev
+            auto upper = dupsort_key_upper(st.key_buf);
+            ok = mc->lower_bound(upper);
+            if (mc->is_end())
+               ok = mc->seek_last();
+            else
+               ok = mc->prev();
+            // Verify still in same key
+            if (ok && !mc->is_end() && !mc->is_rend())
+            {
+               auto prefix = dupsort_key_prefix(st.key_buf);
+               auto found  = mc->key();
+               if (found.size() < prefix.size()
+                   || found.substr(0, prefix.size()) != std::string_view(prefix))
+                  ok = false;
+            }
+            break;
+         }
          case MDBX_NEXT_DUP:
-         case MDBX_PREV_DUP:
-         case MDBX_GET_BOTH:
-         case MDBX_GET_BOTH_RANGE:
-            // TODO: DUPSORT subtree navigation
+         {
+            if (!st.dupsort || !st.valid)
+               return MDBX_NOTFOUND;
+            std::string saved_key = st.key_buf;
+            std::string saved_raw = st.raw_key;
+            ok = mc->next();
+            if (ok && !mc->is_end())
+            {
+               st.sync_key_val();
+               if (!st.valid || st.key_buf != saved_key)
+               {
+                  // Moved past current key — restore position
+                  mc->seek(saved_raw);
+                  st.sync_key_val();
+                  return MDBX_NOTFOUND;
+               }
+               if (key)
+                  *key = st.key_val();
+               if (data)
+                  *data = st.data_val();
+               return MDBX_SUCCESS;
+            }
+            // Hit end — restore
+            mc->seek(saved_raw);
+            st.sync_key_val();
             return MDBX_NOTFOUND;
+         }
+         case MDBX_PREV_DUP:
+         {
+            if (!st.dupsort || !st.valid)
+               return MDBX_NOTFOUND;
+            std::string saved_key = st.key_buf;
+            std::string saved_raw = st.raw_key;
+            ok = mc->prev();
+            if (ok && !mc->is_rend())
+            {
+               st.sync_key_val();
+               if (!st.valid || st.key_buf != saved_key)
+               {
+                  mc->seek(saved_raw);
+                  st.sync_key_val();
+                  return MDBX_NOTFOUND;
+               }
+               if (key)
+                  *key = st.key_val();
+               if (data)
+                  *data = st.data_val();
+               return MDBX_SUCCESS;
+            }
+            mc->seek(saved_raw);
+            st.sync_key_val();
+            return MDBX_NOTFOUND;
+         }
+         case MDBX_GET_BOTH:
+         {
+            if (!key || !data)
+               return MDBX_EINVAL;
+            if (!st.dupsort)
+               return MDBX_EINVAL;
+            auto composite = dupsort_encode(to_sv(key), to_sv(data));
+            ok = mc->seek(composite);
+            break;
+         }
+         case MDBX_GET_BOTH_RANGE:
+         {
+            if (!key || !data)
+               return MDBX_EINVAL;
+            if (!st.dupsort)
+               return MDBX_EINVAL;
+            // lower_bound on composite, verify same key
+            auto composite = dupsort_encode(to_sv(key), to_sv(data));
+            ok = mc->lower_bound(composite);
+            if (ok && !mc->is_end())
+            {
+               auto prefix = dupsort_key_prefix(to_sv(key));
+               auto found  = mc->key();
+               if (found.size() < prefix.size()
+                   || found.substr(0, prefix.size()) != std::string_view(prefix))
+                  ok = false;
+            }
+            break;
+         }
 
          default:
             return MDBX_EINVAL;
@@ -1044,7 +1427,30 @@ int mdbx_cursor_del(MDBX_cursor* cursor, MDBX_put_flags_t flags)
    if (!cursor->txn || cursor->txn->is_readonly())
       return MDBX_BAD_TXN;
 
-   MDBX_val key = cursor->state->key_val();
+   auto& st = *cursor->state;
+
+   if (st.dupsort)
+   {
+      if (flags & MDBX_ALLDUPS)
+      {
+         // Delete all duplicates for the current key
+         MDBX_val key = st.key_val();
+         return mdbx_del(cursor->txn, cursor->dbi, &key, nullptr);
+      }
+      else
+      {
+         // Delete current (key, value) pair — use the raw composite key
+         uint32_t root_idx = dbi_root_index(cursor->txn->env, cursor->dbi);
+         int rc = ensure_rw_root(cursor->txn, root_idx);
+         if (rc != MDBX_SUCCESS)
+            return rc;
+         auto composite = dupsort_encode(st.key_buf, st.val_buf);
+         cursor->txn->write_tx->remove(root_idx, composite);
+         return MDBX_SUCCESS;
+      }
+   }
+
+   MDBX_val key = st.key_val();
    return mdbx_del(cursor->txn, cursor->dbi, &key, nullptr);
 }
 
@@ -1052,9 +1458,38 @@ int mdbx_cursor_count(const MDBX_cursor* cursor, size_t* count)
 {
    if (!cursor || !count)
       return MDBX_EINVAL;
-   // For non-DUPSORT tables, count is always 1
-   *count = 1;
-   // TODO: DUPSORT — count entries in subtree
+
+   auto& st = *cursor->state;
+   if (!st.valid)
+      return MDBX_EINVAL;
+
+   if (!st.dupsort)
+   {
+      *count = 1;
+      return MDBX_SUCCESS;
+   }
+
+   // DUPSORT: count entries with same key prefix
+   auto prefix = dupsort_key_prefix(st.key_buf);
+   auto upper  = dupsort_key_upper(st.key_buf);
+
+   // Save cursor position, create a temp cursor to count
+   bool writer = !cursor->txn->is_readonly() && cursor->txn->write_tx;
+   auto temp_mc = cursor->txn->env->dwal_db->create_cursor(
+      dbi_root_index(cursor->txn->env, cursor->dbi),
+      psitri::dwal::read_mode::latest, writer);
+
+   size_t n = 0;
+   if (temp_mc->lower_bound(prefix))
+   {
+      while (!temp_mc->is_end() && temp_mc->key() < std::string_view(upper))
+      {
+         ++n;
+         if (!temp_mc->next())
+            break;
+      }
+   }
+   *count = n;
    return MDBX_SUCCESS;
 }
 
@@ -1073,8 +1508,9 @@ int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
       auto mode = txn->is_readonly()
                      ? psitri::dwal::read_mode::buffered
                      : psitri::dwal::read_mode::latest;
-      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode);
-      cursor->state = std::make_unique<cursor_state>(std::move(mc));
+      bool writer = !txn->is_readonly() && txn->write_tx;
+      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
+      cursor->state = std::make_unique<cursor_state>(std::move(mc), cursor->is_dupsort);
       return MDBX_SUCCESS;
    }
    catch (...)

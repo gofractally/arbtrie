@@ -511,7 +511,8 @@ namespace psitri::dwal
       return tri_get(root_index, key);
    }
 
-   owned_merge_cursor dwal_database::create_cursor(uint32_t root_index, read_mode mode)
+   owned_merge_cursor dwal_database::create_cursor(uint32_t root_index, read_mode mode,
+                                                    bool skip_rw_lock)
    {
       assert(root_index < max_roots);
 
@@ -526,7 +527,7 @@ namespace psitri::dwal
          if (mode == read_mode::latest)
          {
             std::shared_lock lk(root.rw_mutex, std::defer_lock);
-            if (root.enable_rw_locking)
+            if (root.enable_rw_locking && !skip_rw_lock)
                lk.lock();
             rw = root.rw_layer;
          }
