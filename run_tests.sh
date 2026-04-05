@@ -1,9 +1,17 @@
 #!/bin/bash
-# Test runner — remembers which tests passed, records timing, runs fastest first.
+# Test runner — dynamically discovers test binaries and tags, remembers which
+# tests passed, records timing, runs fastest first.
+#
 # Usage: bash run_tests.sh [--reset]
+#
+# Test binaries are discovered from build/release/bin/*-tests.
+# Tags are discovered via --list-tags. Each tag group is run individually.
+# [public-api] tests are run as individual test cases for isolation.
+# [fuzz] tests are run individually for isolation.
+# Tags in EXCLUDE_TAGS are never run as their own group.
 set -euo pipefail
 
-SCRIPT="$(readlink -f "$0")"
+SCRIPT="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 PROJECT_DIR="$(dirname "$SCRIPT")"
 STATE_DIR="$PROJECT_DIR/.test_state"
 PASSED_FILE="$STATE_DIR/passed.txt"
@@ -19,6 +27,12 @@ if [[ -n "$forbidden" ]]; then
   echo "$forbidden"
   exit 1
 fi
+
+# ── Tags that are run specially (not as simple tag groups) ──────────────────
+# public-api: run each test case individually for process isolation
+# fuzz: run each test case individually for isolation
+# benchmark: never run in test suite
+SPECIAL_TAGS="public-api|fuzz|benchmark"
 
 # ── State management ─────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--reset" ]]; then
@@ -47,8 +61,9 @@ record_time() {
 }
 
 sort_by_time() {
-  # stdin: one label per line → stdout: sorted by recorded time ascending
+  # stdin: one label per line -> stdout: sorted by recorded time ascending
   while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
     local t; t=$(get_time "$name")
     printf '%s\t%s\n' "$t" "$name"
   done | sort -t$'\t' -k1 -n | cut -f2-
@@ -58,187 +73,149 @@ sort_by_time() {
 PASS=0; FAIL=0; SKIP=0; ALREADY=0
 FAILED_TESTS=()
 
-# ── Time a command and set $ELAPSED (seconds, 1 decimal) ─────────────────────
-time_cmd() {
-  local t0 t1
-  t0=$(date +%s%N)
-  "$@"
-  t1=$(date +%s%N)
-  ELAPSED=$(awk "BEGIN{printf \"%.1f\", ($t1-$t0)/1000000000}")
-}
-
 # ── Run a binary and report pass/fail/crash. Stop at first failure. ──────────
 # Usage: _run_one <label> <binary> [args...]
 _run_one() {
   local label="$1" bin="$2"; shift 2
   local t0 t1 elapsed result bin_exit
   t0=$(date +%s%N)
-  result=$("$bin" "$@" 2>/dev/null | grep -aE "passed|failed" | tail -1 || true)
+  result=$("$bin" "$@" 2>/dev/null | grep -aE "passed|failed|All tests" | tail -1 || true)
   bin_exit=${PIPESTATUS[0]}
   t1=$(date +%s%N)
   elapsed=$(awk "BEGIN{printf \"%.1f\", ($t1-$t0)/1000000000}")
 
   if [[ $bin_exit -ge 128 ]]; then
-    printf 'CRASH (signal %d, %.1fs): %s\n' "$((bin_exit-128))" "$elapsed" "$label"
+    printf 'CRASH (signal %d, %ss): %s\n' "$((bin_exit-128))" "$elapsed" "$label"
     record_time "$label" "$elapsed"
     ((FAIL++)) || true; FAILED_TESTS+=("$label")
     echo "--- output ---"
     "$bin" "$@" 2>&1 | tail -40
     exit 1
   elif echo "$result" | grep -qE "passed.*0 failed|All tests passed"; then
-    printf 'PASS (%.1fs): %s\n' "$elapsed" "$label"
+    local assertions
+    assertions=$(echo "$result" | grep -oE '[0-9]+ assertions' | head -1 || echo "")
+    printf 'PASS (%ss, %s): %s\n' "$elapsed" "$assertions" "$label"
     mark_passed "$label"; record_time "$label" "$elapsed"
     ((PASS++)) || true
   elif echo "$result" | grep -q "failed"; then
-    printf 'FAIL (%.1fs): %s  ← %s\n' "$elapsed" "$label" "$result"
+    printf 'FAIL (%ss): %s  <- %s\n' "$elapsed" "$label" "$result"
     record_time "$label" "$elapsed"
     ((FAIL++)) || true; FAILED_TESTS+=("$label")
     echo "--- output ---"
     "$bin" "$@" 2>&1 | tail -40
     exit 1
   else
-    printf 'SKIP: %s (no matching tests)\n' "$label"
+    printf 'SKIP: %s (no matching tests or no output)\n' "$label"
     ((SKIP++)) || true
   fi
 }
 
-# ── Run sal-tests (no name filter, just run all) ──────────────────────────────
-run_sal() {
-  local label="sal-tests (all)"
+run_cached() {
+  local label="$1"; shift
   if already_passed "$label"; then
-    printf '  (already passed in %.1fs: %s)\n' "$(get_time "$label")" "$label"
+    printf '  (already passed in %ss: %s)\n' "$(get_time "$label")" "$label"
     ((ALREADY++)) || true
     return
   fi
-  _run_one "$label" "$BIN/sal-tests"
+  _run_one "$label" "$@"
 }
 
-# ── Run a psitri tag group (args are separate Catch2 tokens) ─────────────────
-run_tag() {
-  local label="$1"; shift   # remaining args go to psitri-tests
-  if already_passed "$label"; then
-    printf '  (already passed in %.1fs: %s)\n' "$(get_time "$label")" "$label"
-    ((ALREADY++)) || true
-    return
+# ── Discover test binaries ──────────────────────────────────────────────────
+TEST_BINS=()
+for b in "$BIN"/*-tests; do
+  [[ -x "$b" ]] && TEST_BINS+=("$b")
+done
+
+if [[ ${#TEST_BINS[@]} -eq 0 ]]; then
+  echo "ERROR: No test binaries found in $BIN"
+  echo "Build first: ninja -C build/release"
+  exit 1
+fi
+
+echo "======================================================================"
+echo " Test Run — $(date '+%Y-%m-%d %H:%M:%S')"
+echo " Discovered binaries: ${TEST_BINS[*]##*/}"
+echo "======================================================================"
+
+# ── Run each test binary ──────────────────────────────────────────────────────
+for bin in "${TEST_BINS[@]}"; do
+  bin_name=$(basename "$bin")
+
+  # Get available tags for this binary
+  TAGS=$("$bin" --list-tags 2>/dev/null | sed -n 's/.*\[\(.*\)\].*/\1/p' || true)
+
+  if [[ -z "$TAGS" ]]; then
+    # No tags — run the whole binary as one group
+    echo ""
+    echo "--- $bin_name (all) ---"
+    run_cached "$bin_name" "$bin"
+    continue
   fi
-  _run_one "$label" "$BIN/psitri-tests" "$@"
-}
 
-# ── Run a single named psitri test case ──────────────────────────────────────
-run_test() {
-  local name="$1"
-  if already_passed "$name"; then
-    printf '  (already passed in %.1fs: %s)\n' "$(get_time "$name")" "$name"
-    ((ALREADY++)) || true
-    return
+  # ── Regular tag groups (excluding special tags) ────────────────────────────
+  REGULAR_TAGS=$(echo "$TAGS" | grep -vE "^($SPECIAL_TAGS)$" | grep -v '^!' | sort -u || true)
+
+  if [[ -n "$REGULAR_TAGS" ]]; then
+    echo ""
+    echo "--- $bin_name: tag groups ---"
+
+    # Build exclude args for special tags present in this binary
+    EXCLUDE_ARGS=()
+    for special in benchmark; do
+      if echo "$TAGS" | grep -qx "$special"; then
+        EXCLUDE_ARGS+=("~[$special]")
+      fi
+    done
+
+    sorted_tags=$(echo "$REGULAR_TAGS" | while IFS= read -r tag; do
+      printf '%s\n' "$bin_name:$tag"
+    done | sort_by_time)
+
+    while IFS= read -r label; do
+      [[ -z "$label" ]] && continue
+      tag="${label#*:}"
+      run_cached "$label" "$bin" "[$tag]" "~[public-api]" "~[fuzz]" ${EXCLUDE_ARGS[@]+"${EXCLUDE_ARGS[@]}"}
+    done <<< "$sorted_tags"
   fi
-  _run_one "$name" "$BIN/psitri-tests" "$name"
-}
 
-# ════════════════════════════════════════════════════════════════════════════
-echo "======================================================================"
-echo " sal-tests"
-echo "======================================================================"
-run_sal
+  # ── Public-API tests (individual isolation) ─────────────────────────────────
+  if echo "$TAGS" | grep -qx "public-api"; then
+    echo ""
+    echo "--- $bin_name: [public-api] (individual tests) ---"
 
-# ── psitri non-database tag groups ───────────────────────────────────────────
-echo ""
-echo "======================================================================"
-echo " psitri-tests: non-database tag groups (fastest first)"
-echo "======================================================================"
+    API_TESTS=$("$bin" --list-tests "[public-api]" 2>/dev/null | sed -n 's/^  \([^ ].*\)/\1/p' || true)
 
-declare -A TAG_MAP
-TAG_MAP["psitri [leaf_node]"]="[leaf_node]"
-TAG_MAP["psitri [inner_node]"]="[inner_node]"
-TAG_MAP["psitri [inner_node_util]"]="[inner_node_util]"
-TAG_MAP["psitri [inner_prefix_node]"]="[inner_prefix_node]"
-TAG_MAP["psitri [find_clines]"]="[find_clines]"
-TAG_MAP["psitri [cursor]"]="[cursor]"
-TAG_MAP["psitri [trie]"]="[trie]"
-TAG_MAP["psitri [tree_context]"]="[tree_context]"
-TAG_MAP["psitri [remove]"]="[remove]"
-TAG_MAP["psitri [collapse]"]="[collapse]"
-TAG_MAP["psitri [smart_ptr]"]="[smart_ptr]"
-TAG_MAP["psitri [subtree]"]="[subtree]"
-TAG_MAP["psitri [recovery]"]="[recovery]"
-TAG_MAP["psitri [truncate]"]="[truncate]"
-TAG_MAP["psitri [coverage]"]="[coverage]"
-TAG_MAP["psitri [fuzz]"]="[fuzz]"
-TAG_MAP["psitri [multi_writer]"]="[multi_writer]"
-TAG_MAP["psitri [count_keys]"]="[count_keys]"
-TAG_MAP["psitri [integrity]"]="[integrity]"
-TAG_MAP["psitri [range_remove]"]="[range_remove]"
-TAG_MAP["psitri [update_value]"]="[update_value]"
+    if [[ -n "$API_TESTS" ]]; then
+      sorted_api=$(echo "$API_TESTS" | while IFS= read -r name; do
+        printf '%s\n' "$name"
+      done | sort_by_time)
 
-sorted_tag_labels=$(printf '%s\n' "${!TAG_MAP[@]}" | sort_by_time)
-while IFS= read -r label; do
-  tag="${TAG_MAP[$label]}"
-  run_tag "$label" "$tag" "~[public-api]" "~[benchmark]"
-done <<< "$sorted_tag_labels"
+      while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        run_cached "$name" "$bin" "$name"
+      done <<< "$sorted_api"
+    fi
+  fi
 
-# ── psitri public-api tests (one process each) ────────────────────────────────
-echo ""
-echo "======================================================================"
-echo " psitri-tests: public-api (fastest first, each in its own process)"
-echo "======================================================================"
+  # ── Fuzz tests (individual isolation) ──────────────────────────────────────
+  if echo "$TAGS" | grep -qx "fuzz"; then
+    echo ""
+    echo "--- $bin_name: [fuzz] (individual tests) ---"
 
-PUBLIC_API_TESTS=(
-  "write_cursor basic CRUD"
-  "write_cursor read_cursor iteration"
-  "write_cursor get into buffer"
-  "transaction commit persists root"
-  "transaction abort discards changes"
-  "transaction destructor aborts"
-  "transaction sub_transaction commit"
-  "transaction sub_transaction abort"
-  "transaction read_cursor snapshot"
-  "session get_root empty returns null"
-  "session set_root and get_root round-trip"
-  "multiple independent roots"
-  "database reopen preserves data"
-  "bulk insert and verify"
-  "bulk insert then remove all"
-  "remove does not leak references - repeated insert/remove cycles"
-  "remove nonexistent keys does not leak references"
-  "batched remove across multiple transactions"
-  "remove same key repeatedly does not leak references"
-  "high-frequency insert/remove on overlapping keys"
-  "insert-removeall-reinsert 3 keys"
-  "insert-removeall-reinsert 50 keys"
-  "insert-removeall-reinsert 500 keys"
-  "insert-removeall-reinsert 500 keys with large values"
-  "insert-removeall-reinsert 5000 keys"
-  "50 cycles of insert-removeall 500 keys"
-  "5 cycles insert-removeall 500 keys with large values"
-  "interleaved insert and remove in same transaction"
-  "remove half then reinsert"
-  "batched remove 100 at a time from 5000"
-  "leak: insert then release root leaves zero allocated objects"
-  "leak: insert large values then release root leaves zero allocated"
-  "leak: insert-release-reinsert cycles via root release"
-  "leak: insert-remove-reinsert cycles have no cumulative leaks"
-  "leak: interleaved insert/remove in same tx - no orphans"
-  "leak: interleaved insert and range_remove - no orphans"
-  "leak: remove-all sequential leaves zero allocated objects"
-  "leak: remove-all reverse order leaves zero allocated objects"
-  "leak: remove-all random order leaves zero allocated objects"
-  "leak: remove half - reachable equals allocated"
-  "leak: large values - remove-all leaves zero allocated"
-  "leak: mixed key sizes - remove-all leaves zero allocated"
-  "leak: batched remove across transactions - no orphans"
-  "leak: range_remove all keys leaves zero allocated"
-  "leak: range_remove subset leaves no orphans"
-  "leak: range_remove subset scaling diagnosis"
-  "leak: range_remove with large values leaves no orphans"
-  "leak: repeated range_remove cycles leave zero allocated"
-  "leak: snapshot held during remove - no orphans after release"
-  "leak: diagnose remove leak scaling"
-)
+    FUZZ_TESTS=$("$bin" --list-tests "[fuzz]" 2>/dev/null | sed -n 's/^  \([^ ].*\)/\1/p' || true)
 
-sorted_tests=$(printf '%s\n' "${PUBLIC_API_TESTS[@]}" | sort_by_time)
-while IFS= read -r name; do
-  run_test "$name"
-done <<< "$sorted_tests"
+    if [[ -n "$FUZZ_TESTS" ]]; then
+      sorted_fuzz=$(echo "$FUZZ_TESTS" | while IFS= read -r name; do
+        printf '%s\n' "$name"
+      done | sort_by_time)
+
+      while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        run_cached "$name" "$bin" "$name"
+      done <<< "$sorted_fuzz"
+    fi
+  fi
+done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""

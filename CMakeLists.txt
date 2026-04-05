@@ -240,6 +240,8 @@ if(ENABLE_COVERAGE)
         COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters
         # SAL tests
         COMMAND ${CMAKE_BINARY_DIR}/bin/sal-tests ${COVERAGE_EXCLUDE_TAGS} || true
+        # ART tests
+        COMMAND ${CMAKE_BINARY_DIR}/bin/art-tests ${COVERAGE_EXCLUDE_TAGS} || true
         # psitri batch: all tests except crash-prone groups (fast, covers most code)
         COMMAND ${PSITRI_TESTS} "~[fuzz]" "~[multi-writer]" "~[power_loss]" "~[recovery]" "~[truncate]" ${COVERAGE_EXCLUDE_TAGS} || true
         # Isolated groups that may crash or hang
@@ -254,7 +256,7 @@ if(ENABLE_COVERAGE)
     add_custom_target(coverage-run
         ${COVERAGE_RUN_COMMANDS}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        DEPENDS sal-tests psitri-tests
+        DEPENDS sal-tests psitri-tests art-tests
         COMMENT "Running coverage test groups..."
     )
 
@@ -280,7 +282,7 @@ if(ENABLE_COVERAGE)
 
     # coverage: run all test groups then generate report
     add_custom_target(coverage
-        DEPENDS sal-tests psitri-tests
+        DEPENDS sal-tests psitri-tests art-tests
         ${COVERAGE_RUN_COMMANDS}
         COMMAND ${LCOV}
             --directory ${CMAKE_BINARY_DIR}
