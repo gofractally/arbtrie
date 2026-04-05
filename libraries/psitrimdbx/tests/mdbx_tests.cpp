@@ -958,3 +958,62 @@ TEST_CASE("C++ API: drop_map and clear_map", "[mdbx][cpp-api][drop]")
 
    fs::remove_all(dir);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// DBI persistence tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: named DBI persists across env reopen", "[mdbx][c-api][persistence]")
+{
+   auto dir = make_temp_dir("c_persist");
+
+   // Phase 1: create a named DB and insert data
+   {
+      MDBX_env* env = nullptr;
+      REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+      REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+      REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr) == MDBX_SUCCESS);
+
+      MDBX_dbi dbi = 0;
+      REQUIRE(mdbx_dbi_open(txn, "accounts", MDBX_CREATE, &dbi) == MDBX_SUCCESS);
+
+      std::string key = "alice";
+      std::string val = "100";
+      MDBX_val    k{key.data(), key.size()};
+      MDBX_val    v{val.data(), val.size()};
+      REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      REQUIRE(mdbx_txn_commit_ex(txn, nullptr) == MDBX_SUCCESS);
+      mdbx_env_close_ex(env, false);
+   }
+
+   // Phase 2: reopen and verify the named DB and data are still there
+   {
+      MDBX_env* env = nullptr;
+      REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+      REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+      REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr) == MDBX_SUCCESS);
+
+      // Open without CREATE — should find existing DB
+      MDBX_dbi dbi = 0;
+      REQUIRE(mdbx_dbi_open(txn, "accounts", MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
+
+      // Read back the value
+      std::string key = "alice";
+      MDBX_val    k{key.data(), key.size()};
+      MDBX_val    v{};
+      REQUIRE(mdbx_get(txn, dbi, &k, &v) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(v.iov_base), v.iov_len) == "100");
+
+      REQUIRE(mdbx_txn_commit_ex(txn, nullptr) == MDBX_SUCCESS);
+      mdbx_env_close_ex(env, false);
+   }
+
+   fs::remove_all(dir);
+}

@@ -138,6 +138,10 @@ namespace psitri::dwal
       /// Lazily initialize a root's DWAL state (public for transaction).
       dwal_root& ensure_root_public(uint32_t index) { return ensure_root(index); }
 
+      /// Clear thread-local caches for the calling thread.
+      /// Must be called from the same thread that used create_cursor/tri_get.
+      void clear_thread_local_cache();
+
       /// Ensure WAL directory and files exist for a root (public for transaction).
       void ensure_wal_public(uint32_t root_index) { ensure_wal(root_index); }
 

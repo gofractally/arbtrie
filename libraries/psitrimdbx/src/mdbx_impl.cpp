@@ -10,6 +10,9 @@
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/transaction.hpp>
 #include <psitri/read_session_impl.hpp>
+#include <psitri/transaction.hpp>
+#include <psitri/write_session.hpp>
+#include <psitri/write_session_impl.hpp>
 
 #include <atomic>
 #include <cassert>
@@ -419,6 +422,29 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       env->dwal_db->ensure_root_public(0).enable_rw_locking = true;
       env->dwal_db->ensure_root_public(1).enable_rw_locking = true;
 
+      // Restore named DBIs from catalog (PsiTri root 0).
+      try
+      {
+         auto rs = env->db->start_read_session();
+         auto cur = rs->create_cursor(0);
+         if (cur.seek_begin())
+         {
+            do
+            {
+               auto name = std::string(cur.key().data(), cur.key().size());
+               auto val = cur.value<std::string>();
+               unsigned f = 0;
+               if (val && val->size() >= sizeof(uint32_t))
+                  std::memcpy(&f, val->data(), sizeof(uint32_t));
+               env->allocate_dbi(name, f);
+            } while (cur.next());
+         }
+      }
+      catch (...)
+      {
+         // If catalog read fails on first open, no named DBIs to restore.
+      }
+
       env->opened = true;
 
       return MDBX_SUCCESS;
@@ -434,10 +460,46 @@ int mdbx_env_close(MDBX_env* env)
    return mdbx_env_close_ex(env, 0);
 }
 
-int mdbx_env_close_ex(MDBX_env* env, int /*dont_sync*/)
+int mdbx_env_close_ex(MDBX_env* env, int dont_sync)
 {
    if (!env)
       return MDBX_EINVAL;
+
+   // Drain all DWAL RW btrees into PsiTri before closing.
+   // This ensures all committed data survives across restarts.
+   if (env->dwal_db && env->db && !dont_sync)
+   {
+      try
+      {
+         std::shared_lock lk(env->dbi_mutex);
+         std::vector<uint32_t> active_roots;
+         for (auto& di : env->dbis)
+         {
+            if (di.root_index != UINT32_MAX)
+               active_roots.push_back(di.root_index);
+         }
+         lk.unlock();
+
+         auto ws = env->db->start_write_session();
+         for (auto root_idx : active_roots)
+         {
+            auto mc = env->dwal_db->create_cursor(root_idx, psitri::dwal::read_mode::latest);
+            if (mc->seek_begin())
+            {
+               auto wt = ws->start_transaction(root_idx);
+               do
+               {
+                  wt.upsert(mc->key(), mc->current_value().data);
+               } while (mc->next());
+               wt.commit();
+            }
+         }
+      }
+      catch (...)
+      {
+         // Best effort — if drain fails, data may be lost.
+      }
+   }
 
    env->dwal_db.reset();
    env->db.reset();
@@ -690,6 +752,8 @@ int mdbx_txn_flags(const MDBX_txn* txn)
    return txn ? static_cast<int>(txn->txn_flags) : MDBX_EINVAL;
 }
 
+static int ensure_rw_root(MDBX_txn* txn, uint32_t root_idx);
+
 // ── DBI operations ───────────────────────────────────────────────
 
 int mdbx_dbi_open(MDBX_txn* txn, const char* name,
@@ -739,8 +803,26 @@ int mdbx_dbi_open(MDBX_txn* txn, const char* name,
          return MDBX_DBS_FULL;
 
       *dbi = env->allocate_dbi(sname, flags);
-      return MDBX_SUCCESS;
    }
+
+   // Persist the DBI name→flags mapping directly to PsiTri root 0 (catalog).
+   // We write directly to PsiTri (bypassing DWAL) to ensure the catalog
+   // survives restart without depending on WAL recovery.
+   try
+   {
+      auto ws = env->db->start_write_session();
+      auto wt = ws->start_transaction(0);
+      uint32_t f = flags;
+      std::string_view fv(reinterpret_cast<const char*>(&f), sizeof(f));
+      wt.upsert(sname, fv);
+      wt.commit();
+   }
+   catch (...)
+   {
+      // Non-fatal: catalog entry not persisted.
+   }
+
+   return MDBX_SUCCESS;
 }
 
 int mdbx_dbi_close(MDBX_env* /*env*/, MDBX_dbi /*dbi*/)
@@ -784,8 +866,6 @@ int mdbx_dbi_stat(const MDBX_txn* txn, MDBX_dbi dbi,
    return MDBX_SUCCESS;
 }
 
-static int ensure_rw_root(MDBX_txn* txn, uint32_t root_idx);
-
 int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
 {
    if (!txn || txn->is_readonly())
@@ -795,17 +875,6 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
    if (root_idx == UINT32_MAX)
       return MDBX_BAD_DBI;
 
-   // Ensure the data root is writable; also ensure the catalog root (1) if deleting.
-   if (del)
-   {
-      int rc = ensure_rw_root(txn, 1);  // catalog root first
-      if (rc != MDBX_SUCCESS)
-         return rc;
-      rc = ensure_rw_root(txn, root_idx);
-      if (rc != MDBX_SUCCESS)
-         return rc;
-   }
-   else
    {
       int rc = ensure_rw_root(txn, root_idx);
       if (rc != MDBX_SUCCESS)
@@ -830,13 +899,18 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
 
       if (del)
       {
-         // Remove the DBI entry from the catalog (root 1).
+         // Remove the DBI entry from PsiTri root 0 (catalog) directly.
          std::shared_lock lk(txn->env->dbi_mutex);
          if (dbi < txn->env->dbis.size() && !txn->env->dbis[dbi].name.empty())
          {
             auto name = txn->env->dbis[dbi].name;
             lk.unlock();
-            txn->write_tx->remove(1, name);
+
+            auto ws = txn->env->db->start_write_session();
+            auto wt = ws->start_transaction(0);
+            wt.remove(name);
+            wt.commit();
+
             std::unique_lock wlk(txn->env->dbi_mutex);
             txn->env->name_to_dbi.erase(name);
             txn->env->dbis[dbi].name.clear();
