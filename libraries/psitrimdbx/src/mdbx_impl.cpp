@@ -863,7 +863,7 @@ int mdbx_dbi_stat(const MDBX_txn* txn, MDBX_dbi dbi,
       static constexpr psitri::dwal::read_mode modes[] = {
          psitri::dwal::read_mode::buffered,
          psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::persistent,
+         psitri::dwal::read_mode::trie,
       };
       auto mode = txn->is_readonly() ? modes[txn->env->read_mode]
                                      : psitri::dwal::read_mode::latest;
@@ -1026,7 +1026,7 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
          static constexpr psitri::dwal::read_mode modes[] = {
             psitri::dwal::read_mode::buffered,
             psitri::dwal::read_mode::latest,
-            psitri::dwal::read_mode::persistent,
+            psitri::dwal::read_mode::trie,
          };
          auto dwal_mode = modes[txn->env->read_mode];
          auto result = txn->read_session->get(root_idx, key_sv, dwal_mode);
@@ -1681,7 +1681,7 @@ int mdbx_cursor_on_first(const MDBX_cursor* cursor)
    static constexpr psitri::dwal::read_mode modes[] = {
       psitri::dwal::read_mode::buffered,
       psitri::dwal::read_mode::latest,
-      psitri::dwal::read_mode::persistent,
+      psitri::dwal::read_mode::trie,
    };
    auto mode = cursor->txn->is_readonly() ? modes[cursor->txn->env->read_mode]
                                            : psitri::dwal::read_mode::latest;
@@ -1704,7 +1704,7 @@ int mdbx_cursor_on_last(const MDBX_cursor* cursor)
    static constexpr psitri::dwal::read_mode modes[] = {
       psitri::dwal::read_mode::buffered,
       psitri::dwal::read_mode::latest,
-      psitri::dwal::read_mode::persistent,
+      psitri::dwal::read_mode::trie,
    };
    auto mode = cursor->txn->is_readonly() ? modes[cursor->txn->env->read_mode]
                                            : psitri::dwal::read_mode::latest;
@@ -1730,7 +1730,7 @@ int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
       static constexpr psitri::dwal::read_mode modes[] = {
          psitri::dwal::read_mode::buffered,
          psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::persistent,
+         psitri::dwal::read_mode::trie,
       };
       auto mode = txn->is_readonly() ? modes[txn->env->read_mode]
                                      : psitri::dwal::read_mode::latest;
@@ -2233,7 +2233,7 @@ namespace mdbx
       static constexpr psitri::dwal::read_mode modes[] = {
          psitri::dwal::read_mode::buffered,
          psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::persistent,
+         psitri::dwal::read_mode::trie,
       };
       auto mode = handle_->txn->is_readonly() ? modes[handle_->txn->env->read_mode]
                                                : psitri::dwal::read_mode::latest;
@@ -2251,7 +2251,7 @@ namespace mdbx
       static constexpr psitri::dwal::read_mode modes[] = {
          psitri::dwal::read_mode::buffered,
          psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::persistent,
+         psitri::dwal::read_mode::trie,
       };
       auto mode = handle_->txn->is_readonly() ? modes[handle_->txn->env->read_mode]
                                                : psitri::dwal::read_mode::latest;

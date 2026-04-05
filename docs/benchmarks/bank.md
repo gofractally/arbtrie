@@ -258,19 +258,19 @@ PsiTriMDBX exposes three read modes that control which DWAL layers are searched 
 %%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB,#16A34A,#7C3AED,#DC2626'}}}}%%
 xychart-beta
     title "MDBX API: Reader Throughput by Read Mode (reads/sec)"
-    x-axis ["Persistent", "Buffered", "Latest", "Native MDBX"]
+    x-axis ["Trie", "Buffered", "Latest", "Native MDBX"]
     y-axis "Reads per second" 0 --> 1600000
     bar [1534646, 1165690, 323626, 1276659]
 ```
 
 | Read Mode | Layers | Reader (reads/s) | Write+Read (tx/s) | Write Impact |
 |-----------|--------|------------------|-------------------|-------------|
-| **Persistent** | Tri only | **1,535K** | 260K | -42% |
+| **Trie** | Tri only | **1,535K** | 260K | -42% |
 | **Buffered** | RO + Tri | 1,166K | 254K | -39% |
 | **Latest** | RW + RO + Tri | 324K | 373K | -20% |
 | Native MDBX | B+tree | 1,277K | 79K | +109% |
 
-- **Persistent** mode reads only the merged COW trie — **20% faster than native MDBX** on
+- **Trie** mode reads only the merged COW trie — **20% faster than native MDBX** on
   point lookups, with zero lock contention. The tradeoff: very recently committed data may
   not be visible until the background merge completes.
 - **Buffered** mode adds the RO btree snapshot — within **10% of native MDBX** read speed,

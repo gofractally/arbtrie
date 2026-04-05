@@ -70,8 +70,8 @@ namespace psitri::dwal
       if (!cache.initialized || cur_gen != cache.gen)
          refresh(root_index);
 
-      // Persistent: PsiTri only.
-      if (mode == read_mode::persistent)
+      // Trie mode: PsiTri only.
+      if (mode == read_mode::trie)
       {
          std::string buf;
          if (cache.tri_cursor.get(key_view(key.data(), key.size()), &buf) >= 0)

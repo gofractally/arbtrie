@@ -231,10 +231,10 @@ int   mdbx_env_set_userctx(MDBX_env* env, void* ctx);
 /* ── PsiTri extension: read mode for RO transactions ─────────────── */
 /* 0=buffered (RO snapshot+Tri, no locks)                             */
 /* 1=latest (RW+RO+Tri, shared lock on RW, sees all committed data)   */
-/* 2=persistent (Tri only, no DWAL layers)                            */
+/* 2=trie (Tri only, no DWAL layers)                                  */
 #define PSITRI_READ_MODE_BUFFERED   0
 #define PSITRI_READ_MODE_LATEST     1
-#define PSITRI_READ_MODE_PERSISTENT 2
+#define PSITRI_READ_MODE_TRIE       2
 int   mdbx_env_set_read_mode(MDBX_env* env, int mode);
 
 /* ── Transaction functions ────────────────────────────────────────── */

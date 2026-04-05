@@ -1038,7 +1038,7 @@ class MdbxEngine : public BankEngine
       {
          int rm = PSITRI_READ_MODE_LATEST;
          if (_read_mode == "buffered") rm = PSITRI_READ_MODE_BUFFERED;
-         else if (_read_mode == "persistent") rm = PSITRI_READ_MODE_PERSISTENT;
+         else if (_read_mode == "trie") rm = PSITRI_READ_MODE_TRIE;
          MDBX_CHECK(mdbx_env_set_read_mode(_env, rm));
       }
 #endif
@@ -1421,7 +1421,7 @@ int main(int argc, char** argv)
    opt("reads-per-tx", po::value(&cfg.reads_per_tx)->default_value(100),
        "Point reads per reader thread read-transaction batch");
    opt("read-mode", po::value(&cfg.read_mode)->default_value("latest"),
-       "Read mode: buffered (RO+Tri), latest (RW+RO+Tri), persistent (Tri only)");
+       "Read mode: buffered (RO+Tri), latest (RW+RO+Tri), trie (Tri only)");
    opt("help,h", "Show help");
 
    po::variables_map vm;

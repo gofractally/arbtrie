@@ -90,7 +90,7 @@ namespace psitri::dwal
       /// Does NOT see uncommitted RW data. Prefer start_read_session() for repeated reads.
       dwal_transaction::lookup_result get(uint32_t         root_index,
                                           std::string_view key,
-                                          read_mode        mode = read_mode::persistent);
+                                          read_mode        mode = read_mode::trie);
 
       /// Full layered lookup: RW → RO → Tri.
       /// Sees uncommitted writes in the RW btree. Intended for same-thread
@@ -101,7 +101,7 @@ namespace psitri::dwal
       /// Locking is handled internally based on the read mode:
       ///   - latest:    RW + RO + Tri (writer-thread only — RW is not locked)
       ///   - buffered:  RO + Tri (acquires buffered_mutex internally)
-      ///   - persistent: Tri only (no DWAL locks)
+      ///   - trie: Tri only (no DWAL locks)
       /// The returned cursor owns shared_ptr copies of the layer snapshots,
       /// so callers do not need to hold any locks during iteration.
       owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode,

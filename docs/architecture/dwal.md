@@ -18,7 +18,7 @@ Reads and writes flow through three layers:
 │  Read-Only ART map (frozen)         │  ← background thread merges to PsiTri
 │  art::art_map, immutable            │     no contention with writers
 ├─────────────────────────────────────┤
-│  PsiTri COW tree   (persistent)     │  ← on-disk, segment-allocated
+│  PsiTri COW tree   (trie)           │  ← on-disk, segment-allocated
 │  concurrent readers via sessions    │
 └─────────────────────────────────────┘
 ```
@@ -385,7 +385,7 @@ The **writer** decides when to swap — it pushes work to the merge stage:
      been touched for longer than `idle_flush_interval`. This ensures
      idle roots drain to PsiTri promptly — without it, a burst of
      writes followed by silence would leave data stranded in the RW
-     map, invisible to `persistent`-mode readers.
+     map, invisible to `trie`-mode readers.
 
    The swap procedure (writer thread only):
    - Check that this root's RO slot is free (previous merge completed
@@ -655,10 +655,10 @@ transaction, trading freshness for latency:
 |------|--------|------|-----------|----------|
 | **latest** | RW + RO + Tri | `buffered_mutex` (shared, brief) | none — sees all committed writes | writer thread reading its own writes |
 | **buffered** | RO + Tri | `buffered_mutex` (shared, brief) | up to one swap behind | external readers, low contention |
-| **persistent** | Tri only | none | up to one merge behind | cheapest read, no DWAL overhead |
+| **trie** | Tri only | none | up to one merge behind | cheapest read, no DWAL overhead |
 
 ```cpp
-enum class read_mode { latest, buffered, persistent };
+enum class read_mode { latest, buffered, trie };
 
 // create_cursor handles all locking internally
 auto mc = dwal.create_cursor(root_index, read_mode::buffered);
@@ -668,13 +668,13 @@ mc->seek_begin();  // iterate over RO + Tri, no locks held during iteration
 All three modes see only committed data. The difference is recency:
 `latest` includes the RW map (writer-thread only — the RW map is not
 thread-safe for concurrent access), `buffered` lags by at most one swap
-interval, and `persistent` lags by at most one merge cycle.
+interval, and `trie` lags by at most one merge cycle.
 
 **`latest` is writer-thread only.** The RW map has no lock — it is
 writer-private. Only the single writer thread may use `latest` mode.
-External reader threads must use `buffered` or `persistent`.
+External reader threads must use `buffered` or `trie`.
 
-The `persistent` mode is equivalent to reading PsiTri directly — the
+The `trie` mode is equivalent to reading PsiTri directly — the
 DWAL layer is invisible and there is zero DWAL overhead. This is the
 **default** — most reads don't need sub-swap-interval freshness. The
 `buffered` mode acquires `buffered_mutex` only briefly to copy a

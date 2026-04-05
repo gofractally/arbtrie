@@ -52,7 +52,7 @@ namespace psitri::dwal
 
       /// Layered lookup with automatic snapshot caching.
       ///
-      /// - persistent: PsiTri cursor only (refreshed on gen change)
+      /// - trie: PsiTri cursor only (refreshed on gen change)
       /// - buffered/latest: cached DWAL snapshot + PsiTri fallback
       ///
       /// Fast path (gen unchanged): atomic load + cached btree search. No locks.

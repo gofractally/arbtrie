@@ -369,7 +369,7 @@ namespace psitri::dwal
                                                       std::string_view key,
                                                       read_mode        mode)
    {
-      if (mode == read_mode::persistent)
+      if (mode == read_mode::trie)
          return {false, {}};
 
       assert(root_index < max_roots);
@@ -567,7 +567,7 @@ namespace psitri::dwal
          }
 
          // RO layer: included for latest and buffered modes
-         if (mode != read_mode::persistent)
+         if (mode != read_mode::trie)
          {
             std::shared_lock lk(root.buffered_mutex);
             ro = root.buffered_ptr;

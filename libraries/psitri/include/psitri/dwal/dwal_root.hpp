@@ -16,7 +16,7 @@ namespace psitri::dwal
    {
       latest,      // frozen RW snapshot + Tri (one swap behind writer)
       buffered,    // same as latest (frozen RW snapshot + Tri)
-      persistent,  // Tri only — zero DWAL overhead
+      trie,        // Tri only — zero DWAL overhead
    };
 
    /// Transaction mode: buffered writes vs direct COW.

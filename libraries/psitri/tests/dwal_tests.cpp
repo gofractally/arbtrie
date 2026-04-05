@@ -2007,7 +2007,7 @@ TEST_CASE("get_latest RW tombstone shadows RO and Tri", "[dwal]")
 // dwal_read_session — read mode semantics
 // ═══════════════════════════════════════════════════════════════════════
 
-TEST_CASE("read_session persistent mode only sees Tri", "[dwal]")
+TEST_CASE("read_session trie mode only sees Tri", "[dwal]")
 {
    temp_dir td;
    auto     db = psitri::database::create(td.path / "db");
@@ -2038,12 +2038,12 @@ TEST_CASE("read_session persistent mode only sees Tri", "[dwal]")
 
    auto reader = dwal_db.start_read_session();
 
-   // persistent: sees only merged data.
-   auto p1 = reader.get(0, "merged", psitri::dwal::read_mode::persistent);
+   // trie mode: sees only merged data.
+   auto p1 = reader.get(0, "merged", psitri::dwal::read_mode::trie);
    CHECK(p1.found);
    CHECK(p1.value == "in_tri");
 
-   auto p2 = reader.get(0, "buffered_only", psitri::dwal::read_mode::persistent);
+   auto p2 = reader.get(0, "buffered_only", psitri::dwal::read_mode::trie);
    CHECK_FALSE(p2.found);
 }
 
@@ -4006,8 +4006,8 @@ TEST_CASE("dwal get() with buffered mode reads RO layer after swap", "[dwal][get
    CHECK(r1.found);
    CHECK(r1.value.data == "buf_val");
 
-   // get() with persistent mode should return not-found (no PsiTri data).
-   auto r2 = dwal_db.get(0, "buf_key", psitri::dwal::read_mode::persistent);
+   // get() with trie mode should return not-found (no PsiTri data).
+   auto r2 = dwal_db.get(0, "buf_key", psitri::dwal::read_mode::trie);
    CHECK_FALSE(r2.found);
 
    // get() on non-existent root should return not-found.

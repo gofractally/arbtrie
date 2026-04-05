@@ -208,8 +208,8 @@ void write_only_bench(bench_config cfg, const std::filesystem::path& db_dir)
 // Runs each read mode as a separate sequential phase so they don't
 // interfere with each other. Each phase: writer + N readers of one mode.
 //
-// For DWAL: 3 phases (persistent, buffered, latest).
-// For direct COW: 1 phase (persistent via PsiTri cursor).
+// For DWAL: 3 phases (trie, buffered, latest).
+// For direct COW: 1 phase (trie via PsiTri cursor).
 
 void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
 {
@@ -284,9 +284,9 @@ void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
 
    // Read modes to test sequentially.
    uint32_t    num_phases = cfg.use_dwal ? 3 : 1;
-   const char* phase_names[] = {"persistent", "buffered", "latest"};
+   const char* phase_names[] = {"trie", "buffered", "latest"};
    dwal::read_mode phase_modes[] = {
-       dwal::read_mode::persistent, dwal::read_mode::buffered, dwal::read_mode::latest};
+       dwal::read_mode::trie, dwal::read_mode::buffered, dwal::read_mode::latest};
 
    for (uint32_t phase = 0; phase < num_phases && !bench::interrupted(); ++phase)
    {
