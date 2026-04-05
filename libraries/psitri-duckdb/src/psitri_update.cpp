@@ -1,12 +1,12 @@
-#include <psitri-sql/psitri_update.hpp>
-#include <psitri-sql/psitri_catalog.hpp>
-#include <psitri-sql/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_update.hpp>
+#include <psitri-duckdb/psitri_catalog.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
 
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/execution/execution_context.hpp"
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // Reuse from psitri_insert.cpp
 extern ColumnValue extract_column_value(duckdb::Vector& vec, duckdb::idx_t row, SqlType type);
@@ -196,4 +196,4 @@ PsitriUpdate::GetData(duckdb::ExecutionContext& context,
    return duckdb::SourceResultType::FINISHED;
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

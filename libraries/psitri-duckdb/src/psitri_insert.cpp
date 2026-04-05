@@ -1,6 +1,6 @@
-#include <psitri-sql/psitri_insert.hpp>
-#include <psitri-sql/psitri_catalog.hpp>
-#include <psitri-sql/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_insert.hpp>
+#include <psitri-duckdb/psitri_catalog.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
 
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -8,7 +8,7 @@
 
 #include <psitri/transaction.hpp>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // ===========================================================================
 // Helper: extract a ColumnValue from a DuckDB Vector at a given row
@@ -231,4 +231,4 @@ PsitriInsert::GetData(duckdb::ExecutionContext& context,
    return duckdb::SourceResultType::FINISHED;
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

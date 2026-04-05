@@ -1,5 +1,5 @@
-# psitri-sql: DuckDB storage extension backed by psitri
-add_library(psitri-sql
+# psitri-duckdb: DuckDB storage extension backed by psitri
+add_library(psitri-duckdb
     src/row_encoding.cpp
     src/psitri_extension.cpp
     src/psitri_catalog.cpp
@@ -10,15 +10,15 @@ add_library(psitri-sql
     src/psitri_update.cpp
 )
 
-target_include_directories(psitri-sql PUBLIC
+target_include_directories(psitri-duckdb PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
 # Link against psitri (storage) and duckdb (query engine)
-target_link_libraries(psitri-sql PUBLIC psitri duckdb)
+target_link_libraries(psitri-duckdb PUBLIC psitri duckdb)
 
 # DuckDB headers
-target_include_directories(psitri-sql SYSTEM PUBLIC
+target_include_directories(psitri-duckdb SYSTEM PUBLIC
     ${duckdb_SOURCE_DIR}/src/include
 )
 
@@ -26,7 +26,7 @@ target_include_directories(psitri-sql SYSTEM PUBLIC
 # For comparison against system SQLite, build a separate binary or
 # link against SQLite3 instead (flip HAS_SYSTEM_SQLITE3).
 add_executable(tatp-bench benchmarks/tatp_bench.cpp)
-target_link_libraries(tatp-bench PRIVATE psitri-sql psitri-sqlite)
+target_link_libraries(tatp-bench PRIVATE psitri-duckdb psitri-sqlite)
 
 # psitri-sqlite provides the sqlite3 API for tatp-bench
 target_compile_definitions(tatp-bench PRIVATE HAS_SQLITE3=1)
@@ -36,7 +36,7 @@ target_compile_definitions(tatp-bench PRIVATE HAS_SQLITE3=1)
 find_package(SQLite3 QUIET)
 if(SQLite3_FOUND)
     add_executable(tatp-bench-system-sqlite benchmarks/tatp_bench.cpp)
-    target_link_libraries(tatp-bench-system-sqlite PRIVATE psitri-sql ${SQLite3_LIBRARIES})
+    target_link_libraries(tatp-bench-system-sqlite PRIVATE psitri-duckdb ${SQLite3_LIBRARIES})
     target_include_directories(tatp-bench-system-sqlite PRIVATE ${SQLite3_INCLUDE_DIRS})
     target_compile_definitions(tatp-bench-system-sqlite PRIVATE HAS_SQLITE3=1)
 endif()

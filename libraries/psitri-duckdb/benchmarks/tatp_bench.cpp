@@ -23,8 +23,8 @@
 #include <algorithm>
 
 #include "duckdb.hpp"
-#include <psitri-sql/psitri_sql.hpp>
-#include <psitri-sql/row_encoding.hpp>
+#include <psitri-duckdb/psitri_duckdb.hpp>
+#include <psitri-duckdb/row_encoding.hpp>
 #include <psitri/dwal/dwal_database.hpp>
 #include <psitri/dwal/transaction.hpp>
 #include <psitri/database.hpp>
@@ -1126,8 +1126,8 @@ static constexpr uint32_t ROOT_SPECIAL_FAC    = 3;
 static constexpr uint32_t ROOT_CALL_FWD       = 4;
 static constexpr uint32_t ROOT_IDX_SUB_NBR    = 5;
 
-using CV = psitri_sql::ColumnValue;
-using ST = psitri_sql::SqlType;
+using CV = psitri_duckdb::ColumnValue;
+using ST = psitri_duckdb::SqlType;
 
 // Subscriber value layout: sub_nbr, bit_1..10, hex_1..10, byte2_1..10, msc_location, vlr_location
 static const std::vector<ST> sub_val_types = {
@@ -1157,21 +1157,21 @@ static const std::vector<ST> cf_val_types = {
 };
 
 static std::string make_sub_key(int32_t s_id) {
-   return psitri_sql::encode_key({CV::make_int(ST::INTEGER, s_id)});
+   return psitri_duckdb::encode_key({CV::make_int(ST::INTEGER, s_id)});
 }
 
 static std::string make_ai_key(int32_t s_id, int16_t ai_type) {
-   return psitri_sql::encode_key({
+   return psitri_duckdb::encode_key({
       CV::make_int(ST::INTEGER, s_id), CV::make_int(ST::SMALLINT, ai_type)});
 }
 
 static std::string make_sf_key(int32_t s_id, int16_t sf_type) {
-   return psitri_sql::encode_key({
+   return psitri_duckdb::encode_key({
       CV::make_int(ST::INTEGER, s_id), CV::make_int(ST::SMALLINT, sf_type)});
 }
 
 static std::string make_cf_key(int32_t s_id, int16_t sf_type, int16_t start_time) {
-   return psitri_sql::encode_key({
+   return psitri_duckdb::encode_key({
       CV::make_int(ST::INTEGER, s_id), CV::make_int(ST::SMALLINT, sf_type),
       CV::make_int(ST::SMALLINT, start_time)});
 }
@@ -1202,10 +1202,10 @@ static void native_populate(psitri::dwal::dwal_database& dwal_db,
          vals.push_back(CV::make_int(ST::INTEGER, rng() % 0x7FFFFFFF));
 
          auto key = make_sub_key(i);
-         tx.upsert(ROOT_SUBSCRIBER, key, psitri_sql::encode_value(vals));
+         tx.upsert(ROOT_SUBSCRIBER, key, psitri_duckdb::encode_value(vals));
 
          // Sub_nbr index: sub_nbr → encoded s_id key
-         auto idx_key = psitri_sql::encode_key({CV::make_varchar(sub_nbr)});
+         auto idx_key = psitri_duckdb::encode_key({CV::make_varchar(sub_nbr)});
          tx.upsert(ROOT_IDX_SUB_NBR, idx_key, key);
 
          // Access info: 1-4 per subscriber
@@ -1218,7 +1218,7 @@ static void native_populate(psitri::dwal::dwal_database& dwal_db,
                CV::make_varchar(std::string(1 + rng() % 5, 'a' + rng() % 26)),
             };
             tx.upsert(ROOT_ACCESS_INFO, make_ai_key(i, t),
-                       psitri_sql::encode_value(ai_vals));
+                       psitri_duckdb::encode_value(ai_vals));
          }
 
          // Special facility: 1-4 per subscriber
@@ -1232,7 +1232,7 @@ static void native_populate(psitri::dwal::dwal_database& dwal_db,
                CV::make_varchar(std::string(1 + rng() % 5, 'x' + rng() % 3)),
             };
             tx.upsert(ROOT_SPECIAL_FAC, make_sf_key(i, t),
-                       psitri_sql::encode_value(sf_vals));
+                       psitri_duckdb::encode_value(sf_vals));
          }
 
          // Call forwarding: 0-3 per special_facility
@@ -1248,7 +1248,7 @@ static void native_populate(psitri::dwal::dwal_database& dwal_db,
                   CV::make_varchar(zero_pad(1 + rng() % N)),
                };
                tx.upsert(ROOT_CALL_FWD, make_cf_key(i, sf, st),
-                          psitri_sql::encode_value(cf_vals));
+                          psitri_duckdb::encode_value(cf_vals));
             }
          }
       }
@@ -1296,7 +1296,7 @@ static void run_native_benchmark(psitri::dwal::dwal_database& dwal_db,
             // Check special_facility(s_id, sf_type).is_active
             auto sf_r = dwal_db.get_latest(ROOT_SPECIAL_FAC, make_sf_key(s_id, sf_type));
             if (sf_r.found && sf_r.value.is_data() && sf_r.value.data.size() > 0) {
-               auto sf_vals = psitri_sql::decode_value(sf_r.value.data, sf_val_types);
+               auto sf_vals = psitri_duckdb::decode_value(sf_r.value.data, sf_val_types);
                if (!sf_vals[0].is_null && sf_vals[0].i64 == 1) {
                   // Scan call_forwarding for matching entries
                   auto prefix = make_sf_key(s_id, sf_type);  // (s_id, sf_type) prefix
@@ -1309,7 +1309,7 @@ static void run_native_benchmark(psitri::dwal::dwal_database& dwal_db,
                      auto k = mc.key();
                      if (k.substr(0, prefix.size()) != prefix) break;
                      // Decode CF key to get start_time
-                     auto cf_key = psitri_sql::decode_key(k,
+                     auto cf_key = psitri_duckdb::decode_key(k,
                         {ST::INTEGER, ST::SMALLINT, ST::SMALLINT});
                      int16_t cf_st = (int16_t)cf_key[2].i64;
                      if (cf_st <= start_time) {
@@ -1330,7 +1330,7 @@ static void run_native_benchmark(psitri::dwal::dwal_database& dwal_db,
                            }
                         }
                         if (!val_data.empty()) {
-                           auto cf_vals = psitri_sql::decode_value(val_data, cf_val_types);
+                           auto cf_vals = psitri_duckdb::decode_value(val_data, cf_val_types);
                            if (!cf_vals[0].is_null && cf_vals[0].i64 > start_time) {
                               ok = true;
                            }
@@ -1347,18 +1347,18 @@ static void run_native_benchmark(psitri::dwal::dwal_database& dwal_db,
             auto sub_nbr = zero_pad(s_id);
             uint32_t vlr_loc = rng() % 0x7FFFFFFF;
             // Look up s_id from sub_nbr index
-            auto idx_key = psitri_sql::encode_key({CV::make_varchar(sub_nbr)});
+            auto idx_key = psitri_duckdb::encode_key({CV::make_varchar(sub_nbr)});
             auto idx_r = dwal_db.get_latest(ROOT_IDX_SUB_NBR, idx_key);
             if (idx_r.found && idx_r.value.is_data() && idx_r.value.data.size() > 0) {
                std::string pk_key(idx_r.value.data);
                // Read subscriber row
                auto sub_r = dwal_db.get_latest(ROOT_SUBSCRIBER, pk_key);
                if (sub_r.found && sub_r.value.is_data() && sub_r.value.data.size() > 0) {
-                  auto vals = psitri_sql::decode_value(sub_r.value.data, sub_val_types);
+                  auto vals = psitri_duckdb::decode_value(sub_r.value.data, sub_val_types);
                   // Update vlr_location (last column, index 32)
                   vals[32] = CV::make_int(ST::INTEGER, vlr_loc);
                   auto tx = dwal_db.start_write_transaction(ROOT_SUBSCRIBER);
-                  tx.upsert(pk_key, psitri_sql::encode_value(vals));
+                  tx.upsert(pk_key, psitri_duckdb::encode_value(vals));
                   tx.commit();
                   ok = true;
                }
@@ -1375,7 +1375,7 @@ static void run_native_benchmark(psitri::dwal::dwal_database& dwal_db,
             };
             auto tx = dwal_db.start_write_transaction(ROOT_CALL_FWD);
             tx.upsert(make_cf_key(s_id, sf_type, start_time),
-                       psitri_sql::encode_value(cf_vals));
+                       psitri_duckdb::encode_value(cf_vals));
             tx.commit();
             ok = true;
             break;
@@ -1395,20 +1395,20 @@ static void run_native_benchmark(psitri::dwal::dwal_database& dwal_db,
             // Read & update subscriber.bit_1
             auto sub_r = dwal_db.get_latest(ROOT_SUBSCRIBER, sub_key);
             if (sub_r.found && sub_r.value.is_data() && sub_r.value.data.size() > 0) {
-               auto vals = psitri_sql::decode_value(sub_r.value.data, sub_val_types);
+               auto vals = psitri_duckdb::decode_value(sub_r.value.data, sub_val_types);
                vals[1] = CV::make_int(ST::SMALLINT, bit_1);  // bit_1 is index 1
                auto tx = dwal_db.start_write_transaction(ROOT_SUBSCRIBER);
-               tx.upsert(sub_key, psitri_sql::encode_value(vals));
+               tx.upsert(sub_key, psitri_duckdb::encode_value(vals));
                tx.commit();
             }
             // Read & update special_facility.data_a
             auto sf_key = make_sf_key(s_id, sf_type);
             auto sf_r = dwal_db.get_latest(ROOT_SPECIAL_FAC, sf_key);
             if (sf_r.found && sf_r.value.is_data() && sf_r.value.data.size() > 0) {
-               auto vals = psitri_sql::decode_value(sf_r.value.data, sf_val_types);
+               auto vals = psitri_duckdb::decode_value(sf_r.value.data, sf_val_types);
                vals[2] = CV::make_int(ST::SMALLINT, data_a);  // data_a is index 2
                auto tx = dwal_db.start_write_transaction(ROOT_SPECIAL_FAC);
-               tx.upsert(sf_key, psitri_sql::encode_value(vals));
+               tx.upsert(sf_key, psitri_duckdb::encode_value(vals));
                tx.commit();
             }
             ok = true;
@@ -1460,7 +1460,7 @@ int main(int argc, char* argv[]) {
    duckdb::DuckDB db(nullptr, &db_config);
 
    if (cfg.engine == "psitri") {
-      psitri_sql::RegisterPsitriStorage(db);
+      psitri_duckdb::RegisterPsitriStorage(db);
       duckdb::Connection conn(db);
 
       // Create temp directory for psitri storage

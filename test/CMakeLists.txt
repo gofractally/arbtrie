@@ -69,14 +69,14 @@ target_include_directories(init-replace-branch-test
 target_compile_definitions(init-replace-branch-test PUBLIC XXH_INLINE_ALL)
 set_target_properties(init-replace-branch-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# psitri-sql integration tests
+# psitri-duckdb integration tests
 if(BUILD_SQL)
-    add_executable(psitri-sql-tests
-        ../libraries/psitri-sql/tests/sql_integration_tests.cpp
+    add_executable(psitri-duckdb-tests
+        ../libraries/psitri-duckdb/tests/sql_integration_tests.cpp
     )
-    target_link_libraries(psitri-sql-tests PRIVATE psitri-sql Catch2::Catch2WithMain)
-    set_target_properties(psitri-sql-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-    add_test(NAME psitri-sql-tests COMMAND psitri-sql-tests)
+    target_link_libraries(psitri-duckdb-tests PRIVATE psitri-duckdb Catch2::Catch2WithMain)
+    set_target_properties(psitri-duckdb-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME psitri-duckdb-tests COMMAND psitri-duckdb-tests)
 endif()
 
 # Sanitizer / coverage settings

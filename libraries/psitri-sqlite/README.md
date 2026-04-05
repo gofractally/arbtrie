@@ -75,15 +75,15 @@ Run the benchmark:
 
 ```bash
 ninja -C build/release tatp-bench
-./build/release/libraries/psitri-sql/tatp-bench --engine sqlite --subscribers 10000 --sync off
-./build/release/libraries/psitri-sql/tatp-bench --engine sqlite --subscribers 10000 --sync full
+./build/release/libraries/psitri-duckdb/tatp-bench --engine sqlite --subscribers 10000 --sync off
+./build/release/libraries/psitri-duckdb/tatp-bench --engine sqlite --subscribers 10000 --sync full
 ```
 
 For comparison against system SQLite (requires system SQLite3 dev package):
 
 ```bash
 ninja -C build/release tatp-bench-system-sqlite
-./build/release/libraries/psitri-sql/tatp-bench-system-sqlite --engine sqlite --subscribers 10000 --sync full
+./build/release/libraries/psitri-duckdb/tatp-bench-system-sqlite --engine sqlite --subscribers 10000 --sync full
 ```
 
 ## Limitations

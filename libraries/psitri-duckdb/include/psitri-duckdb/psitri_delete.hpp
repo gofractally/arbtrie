@@ -2,22 +2,20 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/common/index_vector.hpp"
 
-#include <psitri-sql/row_encoding.hpp>
+#include <psitri-duckdb/row_encoding.hpp>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
-struct PsitriUpdateGlobalState : public duckdb::GlobalSinkState {
-   int64_t update_count = 0;
+struct PsitriDeleteGlobalState : public duckdb::GlobalSinkState {
+   int64_t delete_count = 0;
 };
 
-class PsitriUpdate : public duckdb::PhysicalOperator {
+class PsitriDelete : public duckdb::PhysicalOperator {
 public:
-   PsitriUpdate(duckdb::LogicalOperator& op,
+   PsitriDelete(duckdb::LogicalOperator& op,
                 duckdb::TableCatalogEntry& table,
-                TableMeta meta,
-                std::vector<duckdb::PhysicalIndex> columns);
+                TableMeta meta);
 
    duckdb::SinkResultType Sink(duckdb::ExecutionContext& context,
                                duckdb::DataChunk& chunk,
@@ -42,7 +40,6 @@ public:
 private:
    duckdb::TableCatalogEntry& table_;
    TableMeta meta_;
-   std::vector<duckdb::PhysicalIndex> columns_;  // which columns are being updated
 };
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

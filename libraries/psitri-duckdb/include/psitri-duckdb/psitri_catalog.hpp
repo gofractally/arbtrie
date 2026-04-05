@@ -11,12 +11,12 @@
 
 #include <psitri/database.hpp>
 #include <psitri/dwal/dwal_database.hpp>
-#include <psitri-sql/row_encoding.hpp>
+#include <psitri-duckdb/row_encoding.hpp>
 
 #include <mutex>
 #include <unordered_map>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 class PsitriSchemaEntry;
 
@@ -209,4 +209,4 @@ private:
    TableMeta meta_;
 };
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

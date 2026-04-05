@@ -1,5 +1,5 @@
-#include <psitri-sql/psitri_catalog.hpp>
-#include <psitri-sql/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_catalog.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
 
 #include "duckdb.hpp"
 #include "duckdb/main/attached_database.hpp"
@@ -12,7 +12,7 @@
 #include <psitri/database.hpp>
 #include <psitri/dwal/dwal_database.hpp>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // ---------------------------------------------------------------------------
 // ATTACH handler: creates a PsitriCatalog backed by the given path
@@ -82,4 +82,4 @@ void RegisterPsitriStorage(duckdb::DBConfig& config) {
    config.storage_extensions["psitri"] = duckdb::make_uniq<PsitriStorageExtension>();
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

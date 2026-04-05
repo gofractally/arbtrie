@@ -161,7 +161,7 @@ set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(abseil)
 
-# DuckDB (query engine for psitri-sql)
+# DuckDB (query engine for psitri-duckdb)
 option(BUILD_SQL "Build DuckDB-based SQL layer" ON)
 if(BUILD_SQL)
     FetchContent_Declare(
@@ -260,7 +260,7 @@ add_subdirectory(libraries/psitrirocks)
 
 # PsiTri SQL: DuckDB-based SQL layer
 if(BUILD_SQL)
-    add_subdirectory(libraries/psitri-sql)
+    add_subdirectory(libraries/psitri-duckdb)
     add_subdirectory(libraries/psitri-sqlite)
 endif()
 

@@ -6,7 +6,7 @@ class DuckDB;
 class DBConfig;
 } // namespace duckdb
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // Register the psitri storage extension with a DuckDB instance.
 // After calling this, users can:
@@ -22,4 +22,4 @@ void RegisterPsitriStorage(duckdb::DuckDB& db);
 // without trying to autoload it as a file-based extension.
 void RegisterPsitriStorage(duckdb::DBConfig& config);
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

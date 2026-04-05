@@ -7,7 +7,7 @@
 #include <optional>
 #include <stdexcept>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // --------------------------------------------------------------------------
 // Memcomparable key encoding
@@ -225,4 +225,4 @@ struct TableMeta {
 std::string   serialize_table_meta(const TableMeta& meta);
 TableMeta     deserialize_table_meta(std::string_view data);
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

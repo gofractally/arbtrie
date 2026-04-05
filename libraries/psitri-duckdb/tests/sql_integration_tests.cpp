@@ -2,8 +2,8 @@
 #include <catch2/catch_approx.hpp>
 
 #include "duckdb.hpp"
-#include <psitri-sql/psitri_sql.hpp>
-#include <psitri-sql/row_encoding.hpp>
+#include <psitri-duckdb/psitri_duckdb.hpp>
+#include <psitri-duckdb/row_encoding.hpp>
 
 #include <filesystem>
 #include <string>
@@ -23,7 +23,7 @@ run(duckdb::Connection& conn, const std::string& sql) {
 // Helper: create a temp directory that cleans up on destruction
 struct TempDir {
    fs::path path;
-   TempDir() : path(fs::temp_directory_path() / ("psitri_sql_test_" + std::to_string(std::rand()))) {
+   TempDir() : path(fs::temp_directory_path() / ("psitri_duckdb_test_" + std::to_string(std::rand()))) {
       fs::create_directories(path);
    }
    ~TempDir() { fs::remove_all(path); }
@@ -46,12 +46,12 @@ private:
       config.options.autoload_known_extensions = false;
       config.options.autoinstall_known_extensions = false;
       duckdb::DuckDB db(nullptr, &config);
-      psitri_sql::RegisterPsitriStorage(db);
+      psitri_duckdb::RegisterPsitriStorage(db);
       return db;
    }
 };
 
-TEST_CASE("CREATE TABLE and basic INSERT/SELECT", "[psitri-sql]") {
+TEST_CASE("CREATE TABLE and basic INSERT/SELECT", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -77,7 +77,7 @@ TEST_CASE("CREATE TABLE and basic INSERT/SELECT", "[psitri-sql]") {
    CHECK(result->GetValue(2, 2).GetValue<int32_t>() == 35);
 }
 
-TEST_CASE("SELECT with WHERE filter", "[psitri-sql]") {
+TEST_CASE("SELECT with WHERE filter", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -89,7 +89,7 @@ TEST_CASE("SELECT with WHERE filter", "[psitri-sql]") {
    CHECK(result->GetValue(0, 0).ToString() == "banana");
 }
 
-TEST_CASE("SELECT COUNT and aggregates", "[psitri-sql]") {
+TEST_CASE("SELECT COUNT and aggregates", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -103,7 +103,7 @@ TEST_CASE("SELECT COUNT and aggregates", "[psitri-sql]") {
    CHECK(result->GetValue(2, 0).GetValue<double>() == Catch::Approx(61.0 / 3.0));
 }
 
-TEST_CASE("Multiple data types", "[psitri-sql]") {
+TEST_CASE("Multiple data types", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -135,7 +135,7 @@ TEST_CASE("Multiple data types", "[psitri-sql]") {
    CHECK(result->GetValue(4, 1).ToString() == "world");
 }
 
-TEST_CASE("Empty table returns no rows", "[psitri-sql]") {
+TEST_CASE("Empty table returns no rows", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -144,7 +144,7 @@ TEST_CASE("Empty table returns no rows", "[psitri-sql]") {
    CHECK(result->RowCount() == 0);
 }
 
-TEST_CASE("Multiple tables in same database", "[psitri-sql]") {
+TEST_CASE("Multiple tables in same database", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -160,7 +160,7 @@ TEST_CASE("Multiple tables in same database", "[psitri-sql]") {
    CHECK(r2->GetValue(0, 0).GetValue<int64_t>() == 2);
 }
 
-TEST_CASE("Large batch insert", "[psitri-sql]") {
+TEST_CASE("Large batch insert", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -188,7 +188,7 @@ TEST_CASE("Large batch insert", "[psitri-sql]") {
    CHECK(ordered->GetValue(0, 4).GetValue<int32_t>() == 4);
 }
 
-TEST_CASE("Negative and zero integer keys", "[psitri-sql]") {
+TEST_CASE("Negative and zero integer keys", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -208,7 +208,7 @@ TEST_CASE("Negative and zero integer keys", "[psitri-sql]") {
    CHECK(result->GetValue(1, 2).ToString() == "pos");
 }
 
-TEST_CASE("VARCHAR primary key", "[psitri-sql]") {
+TEST_CASE("VARCHAR primary key", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -226,7 +226,7 @@ TEST_CASE("VARCHAR primary key", "[psitri-sql]") {
 // DELETE tests
 // ===========================================================================
 
-TEST_CASE("DELETE single row", "[psitri-sql][delete]") {
+TEST_CASE("DELETE single row", "[psitri-duckdb][delete]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -240,7 +240,7 @@ TEST_CASE("DELETE single row", "[psitri-sql][delete]") {
    CHECK(result->GetValue(0, 1).GetValue<int32_t>() == 3);
 }
 
-TEST_CASE("DELETE all rows", "[psitri-sql][delete]") {
+TEST_CASE("DELETE all rows", "[psitri-duckdb][delete]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -252,7 +252,7 @@ TEST_CASE("DELETE all rows", "[psitri-sql][delete]") {
    CHECK(result->GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
-TEST_CASE("DELETE with complex WHERE", "[psitri-sql][delete]") {
+TEST_CASE("DELETE with complex WHERE", "[psitri-duckdb][delete]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -270,7 +270,7 @@ TEST_CASE("DELETE with complex WHERE", "[psitri-sql][delete]") {
 // UPDATE tests
 // ===========================================================================
 
-TEST_CASE("UPDATE single column", "[psitri-sql][update]") {
+TEST_CASE("UPDATE single column", "[psitri-duckdb][update]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -283,7 +283,7 @@ TEST_CASE("UPDATE single column", "[psitri-sql][update]") {
    CHECK(result->GetValue(0, 0).GetValue<int32_t>() == 100);
 }
 
-TEST_CASE("UPDATE all rows", "[psitri-sql][update]") {
+TEST_CASE("UPDATE all rows", "[psitri-duckdb][update]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -302,7 +302,7 @@ TEST_CASE("UPDATE all rows", "[psitri-sql][update]") {
 // DROP TABLE tests
 // ===========================================================================
 
-TEST_CASE("DROP TABLE", "[psitri-sql][drop]") {
+TEST_CASE("DROP TABLE", "[psitri-duckdb][drop]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -319,7 +319,7 @@ TEST_CASE("DROP TABLE", "[psitri-sql][drop]") {
 // Persistence tests
 // ===========================================================================
 
-TEST_CASE("Tables persist across re-attach", "[psitri-sql][persistence]") {
+TEST_CASE("Tables persist across re-attach", "[psitri-duckdb][persistence]") {
    TempDir tmp;
    std::string db_path = tmp.str() + "/persist.db";
 
@@ -329,7 +329,7 @@ TEST_CASE("Tables persist across re-attach", "[psitri-sql][persistence]") {
       config.options.autoload_known_extensions = false;
       config.options.autoinstall_known_extensions = false;
       duckdb::DuckDB db(nullptr, &config);
-      psitri_sql::RegisterPsitriStorage(db);
+      psitri_duckdb::RegisterPsitriStorage(db);
       duckdb::Connection conn(db);
 
       run(conn, "ATTACH '" + db_path + "' AS pdb (TYPE psitri)");
@@ -343,7 +343,7 @@ TEST_CASE("Tables persist across re-attach", "[psitri-sql][persistence]") {
       config.options.autoload_known_extensions = false;
       config.options.autoinstall_known_extensions = false;
       duckdb::DuckDB db(nullptr, &config);
-      psitri_sql::RegisterPsitriStorage(db);
+      psitri_duckdb::RegisterPsitriStorage(db);
       duckdb::Connection conn(db);
 
       run(conn, "ATTACH '" + db_path + "' AS pdb (TYPE psitri)");
@@ -360,7 +360,7 @@ TEST_CASE("Tables persist across re-attach", "[psitri-sql][persistence]") {
 // NULL handling tests
 // ===========================================================================
 
-TEST_CASE("INSERT and SELECT with NULLs", "[psitri-sql][null]") {
+TEST_CASE("INSERT and SELECT with NULLs", "[psitri-duckdb][null]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -386,7 +386,7 @@ TEST_CASE("INSERT and SELECT with NULLs", "[psitri-sql][null]") {
 // ALTER TABLE tests
 // ===========================================================================
 
-TEST_CASE("ALTER TABLE RENAME", "[psitri-sql][alter]") {
+TEST_CASE("ALTER TABLE RENAME", "[psitri-duckdb][alter]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -399,7 +399,7 @@ TEST_CASE("ALTER TABLE RENAME", "[psitri-sql][alter]") {
    CHECK(result->GetValue(0, 0).GetValue<int32_t>() == 42);
 }
 
-TEST_CASE("ALTER TABLE ADD COLUMN", "[psitri-sql][alter]") {
+TEST_CASE("ALTER TABLE ADD COLUMN", "[psitri-duckdb][alter]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -415,7 +415,7 @@ TEST_CASE("ALTER TABLE ADD COLUMN", "[psitri-sql][alter]") {
    // y was added after the row was inserted, so it will be null or default
 }
 
-TEST_CASE("ALTER TABLE RENAME COLUMN", "[psitri-sql][alter]") {
+TEST_CASE("ALTER TABLE RENAME COLUMN", "[psitri-duckdb][alter]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -432,7 +432,7 @@ TEST_CASE("ALTER TABLE RENAME COLUMN", "[psitri-sql][alter]") {
 // Upsert / duplicate key behavior
 // ===========================================================================
 
-TEST_CASE("INSERT overwrites duplicate keys (upsert behavior)", "[psitri-sql]") {
+TEST_CASE("INSERT overwrites duplicate keys (upsert behavior)", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -449,7 +449,7 @@ TEST_CASE("INSERT overwrites duplicate keys (upsert behavior)", "[psitri-sql]") 
 // Filter pushdown verification
 // ===========================================================================
 
-TEST_CASE("Filter pushdown on PK equality", "[psitri-sql][filter]") {
+TEST_CASE("Filter pushdown on PK equality", "[psitri-duckdb][filter]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -473,7 +473,7 @@ TEST_CASE("Filter pushdown on PK equality", "[psitri-sql][filter]") {
 // CREATE TABLE AS SELECT
 // ===========================================================================
 
-TEST_CASE("CREATE TABLE AS SELECT", "[psitri-sql][ctas]") {
+TEST_CASE("CREATE TABLE AS SELECT", "[psitri-duckdb][ctas]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -494,8 +494,8 @@ TEST_CASE("CREATE TABLE AS SELECT", "[psitri-sql][ctas]") {
 // Row encoding round-trip tests
 // ===========================================================================
 
-TEST_CASE("Row encoding round-trip", "[psitri-sql][row-encoding]") {
-   using namespace psitri_sql;
+TEST_CASE("Row encoding round-trip", "[psitri-duckdb][row-encoding]") {
+   using namespace psitri_duckdb;
 
    SECTION("integer key encoding preserves order") {
       auto neg = encode_key({ColumnValue::make_int(SqlType::INTEGER, -1)});
@@ -670,7 +670,7 @@ TEST_CASE("Row encoding round-trip", "[psitri-sql][row-encoding]") {
 // DATE / TIME / TIMESTAMP type tests
 // ===========================================================================
 
-TEST_CASE("DATE type support", "[psitri-sql][types]") {
+TEST_CASE("DATE type support", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -684,7 +684,7 @@ TEST_CASE("DATE type support", "[psitri-sql][types]") {
    CHECK(result->GetValue(1, 2).ToString() == "2025-12-31");
 }
 
-TEST_CASE("TIMESTAMP type support", "[psitri-sql][types]") {
+TEST_CASE("TIMESTAMP type support", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -697,7 +697,7 @@ TEST_CASE("TIMESTAMP type support", "[psitri-sql][types]") {
    CHECK(result->GetValue(1, 1).ToString() == "2023-06-30 23:59:59");
 }
 
-TEST_CASE("TIME type support", "[psitri-sql][types]") {
+TEST_CASE("TIME type support", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -711,7 +711,7 @@ TEST_CASE("TIME type support", "[psitri-sql][types]") {
    CHECK(result->GetValue(1, 2).ToString() == "00:00:00");
 }
 
-TEST_CASE("Unsigned integer types", "[psitri-sql][types]") {
+TEST_CASE("Unsigned integer types", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -733,7 +733,7 @@ TEST_CASE("Unsigned integer types", "[psitri-sql][types]") {
    CHECK(result->GetValue(3, 1).GetValue<uint64_t>() == 0);
 }
 
-TEST_CASE("TINYINT and SMALLINT types", "[psitri-sql][types]") {
+TEST_CASE("TINYINT and SMALLINT types", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -748,7 +748,7 @@ TEST_CASE("TINYINT and SMALLINT types", "[psitri-sql][types]") {
    CHECK(result->GetValue(1, 1).GetValue<int16_t>() == 32767);
 }
 
-TEST_CASE("FLOAT type support", "[psitri-sql][types]") {
+TEST_CASE("FLOAT type support", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -762,7 +762,7 @@ TEST_CASE("FLOAT type support", "[psitri-sql][types]") {
    CHECK(result->GetValue(0, 2).GetValue<float>() == Catch::Approx(0.0f));
 }
 
-TEST_CASE("BLOB type support", "[psitri-sql][types]") {
+TEST_CASE("BLOB type support", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -779,7 +779,7 @@ TEST_CASE("BLOB type support", "[psitri-sql][types]") {
 // NOT NULL constraint tests
 // ===========================================================================
 
-TEST_CASE("NOT NULL constraint on insert", "[psitri-sql][constraints]") {
+TEST_CASE("NOT NULL constraint on insert", "[psitri-duckdb][constraints]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -799,7 +799,7 @@ TEST_CASE("NOT NULL constraint on insert", "[psitri-sql][constraints]") {
    CHECK(check->GetValue(0, 0).GetValue<int64_t>() == 2);
 }
 
-TEST_CASE("NOT NULL constraint on update", "[psitri-sql][constraints]") {
+TEST_CASE("NOT NULL constraint on update", "[psitri-duckdb][constraints]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -814,7 +814,7 @@ TEST_CASE("NOT NULL constraint on update", "[psitri-sql][constraints]") {
    CHECK(check->GetValue(0, 0).ToString() == "Alice");
 }
 
-TEST_CASE("PK columns are implicitly NOT NULL", "[psitri-sql][constraints]") {
+TEST_CASE("PK columns are implicitly NOT NULL", "[psitri-duckdb][constraints]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -828,7 +828,7 @@ TEST_CASE("PK columns are implicitly NOT NULL", "[psitri-sql][constraints]") {
 // VIEW tests
 // ===========================================================================
 
-TEST_CASE("CREATE VIEW and SELECT", "[psitri-sql][view]") {
+TEST_CASE("CREATE VIEW and SELECT", "[psitri-duckdb][view]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -843,7 +843,7 @@ TEST_CASE("CREATE VIEW and SELECT", "[psitri-sql][view]") {
    CHECK(result->GetValue(0, 1).ToString() == "Bob");
 }
 
-TEST_CASE("DROP VIEW", "[psitri-sql][view]") {
+TEST_CASE("DROP VIEW", "[psitri-duckdb][view]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -859,7 +859,7 @@ TEST_CASE("DROP VIEW", "[psitri-sql][view]") {
 // SEQUENCE tests
 // ===========================================================================
 
-TEST_CASE("CREATE SEQUENCE basic", "[psitri-sql][sequence]") {
+TEST_CASE("CREATE SEQUENCE basic", "[psitri-duckdb][sequence]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -875,7 +875,7 @@ TEST_CASE("CREATE SEQUENCE basic", "[psitri-sql][sequence]") {
 // Secondary index tests
 // ===========================================================================
 
-TEST_CASE("CREATE INDEX and index-assisted queries", "[psitri-sql][index]") {
+TEST_CASE("CREATE INDEX and index-assisted queries", "[psitri-duckdb][index]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -892,7 +892,7 @@ TEST_CASE("CREATE INDEX and index-assisted queries", "[psitri-sql][index]") {
    CHECK(result->GetValue(1, 0).ToString() == "alice@x.com");
 }
 
-TEST_CASE("UNIQUE INDEX prevents duplicates", "[psitri-sql][index][unique]") {
+TEST_CASE("UNIQUE INDEX prevents duplicates", "[psitri-duckdb][index][unique]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -913,7 +913,7 @@ TEST_CASE("UNIQUE INDEX prevents duplicates", "[psitri-sql][index][unique]") {
    CHECK(check->GetValue(0, 0).GetValue<int64_t>() == 3);
 }
 
-TEST_CASE("Index maintained through INSERT/DELETE", "[psitri-sql][index]") {
+TEST_CASE("Index maintained through INSERT/DELETE", "[psitri-duckdb][index]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -930,7 +930,7 @@ TEST_CASE("Index maintained through INSERT/DELETE", "[psitri-sql][index]") {
    // (The query won't use index for non-PK, but the unique check works)
 }
 
-TEST_CASE("Index maintained through UPDATE", "[psitri-sql][index]") {
+TEST_CASE("Index maintained through UPDATE", "[psitri-duckdb][index]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -952,7 +952,7 @@ TEST_CASE("Index maintained through UPDATE", "[psitri-sql][index]") {
    CHECK(check->GetValue(0, 0).GetValue<int64_t>() == 4);
 }
 
-TEST_CASE("UNIQUE index violation on UPDATE", "[psitri-sql][index][unique]") {
+TEST_CASE("UNIQUE index violation on UPDATE", "[psitri-duckdb][index][unique]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -973,7 +973,7 @@ TEST_CASE("UNIQUE index violation on UPDATE", "[psitri-sql][index][unique]") {
 // Composite PK and multi-column tests
 // ===========================================================================
 
-TEST_CASE("Composite primary key", "[psitri-sql]") {
+TEST_CASE("Composite primary key", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -995,7 +995,7 @@ TEST_CASE("Composite primary key", "[psitri-sql]") {
 // JOIN across psitri tables
 // ===========================================================================
 
-TEST_CASE("JOIN between psitri tables", "[psitri-sql]") {
+TEST_CASE("JOIN between psitri tables", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -1019,7 +1019,7 @@ TEST_CASE("JOIN between psitri tables", "[psitri-sql]") {
 // PK filter pushdown range queries
 // ===========================================================================
 
-TEST_CASE("PK range filter pushdown", "[psitri-sql][filter]") {
+TEST_CASE("PK range filter pushdown", "[psitri-duckdb][filter]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -1044,7 +1044,7 @@ TEST_CASE("PK range filter pushdown", "[psitri-sql][filter]") {
 // DATE/TIME arithmetic in queries
 // ===========================================================================
 
-TEST_CASE("DATE arithmetic and WHERE", "[psitri-sql][types]") {
+TEST_CASE("DATE arithmetic and WHERE", "[psitri-duckdb][types]") {
    TestDB t;
    auto& conn = t.conn;
 
@@ -1063,7 +1063,7 @@ TEST_CASE("DATE arithmetic and WHERE", "[psitri-sql][types]") {
 // Subqueries
 // ===========================================================================
 
-TEST_CASE("Subquery with psitri table", "[psitri-sql]") {
+TEST_CASE("Subquery with psitri table", "[psitri-duckdb]") {
    TestDB t;
    auto& conn = t.conn;
 

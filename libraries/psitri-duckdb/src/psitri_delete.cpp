@@ -1,12 +1,12 @@
-#include <psitri-sql/psitri_delete.hpp>
-#include <psitri-sql/psitri_catalog.hpp>
-#include <psitri-sql/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_delete.hpp>
+#include <psitri-duckdb/psitri_catalog.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
 
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/execution/execution_context.hpp"
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 PsitriDelete::PsitriDelete(duckdb::LogicalOperator& op,
                            duckdb::TableCatalogEntry& table,
@@ -94,4 +94,4 @@ PsitriDelete::GetData(duckdb::ExecutionContext& context,
    return duckdb::SourceResultType::FINISHED;
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

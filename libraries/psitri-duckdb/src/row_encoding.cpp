@@ -1,9 +1,9 @@
-#include <psitri-sql/row_encoding.hpp>
+#include <psitri-duckdb/row_encoding.hpp>
 #include <bit>
 #include <cassert>
 #include <cstring>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // --------------------------------------------------------------------------
 // Key encoding helpers
@@ -693,4 +693,4 @@ TableMeta deserialize_table_meta(std::string_view data) {
    return meta;
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

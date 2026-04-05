@@ -1,9 +1,9 @@
-#include <psitri-sql/psitri_transaction.hpp>
-#include <psitri-sql/psitri_catalog.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_catalog.hpp>
 
 #include "duckdb/main/client_context.hpp"
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // ===========================================================================
 // PsitriTransaction
@@ -125,4 +125,4 @@ void PsitriTransactionManager::Checkpoint(duckdb::ClientContext& context, bool f
    catalog_.GetStorage()->sync();
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

@@ -1,10 +1,10 @@
-#include <psitri-sql/psitri_catalog.hpp>
+#include <psitri-duckdb/psitri_catalog.hpp>
 #include <psitri/read_session_impl.hpp>
-#include <psitri-sql/psitri_transaction.hpp>
-#include <psitri-sql/psitri_scanner.hpp>
-#include <psitri-sql/psitri_insert.hpp>
-#include <psitri-sql/psitri_delete.hpp>
-#include <psitri-sql/psitri_update.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_scanner.hpp>
+#include <psitri-duckdb/psitri_insert.hpp>
+#include <psitri-duckdb/psitri_delete.hpp>
+#include <psitri-duckdb/psitri_update.hpp>
 
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
@@ -32,7 +32,7 @@
 #include <psitri/transaction.hpp>
 #include <psitri/cursor.hpp>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // Helper to convert DuckDB LogicalType to our SqlType
 static SqlType duckdb_type_to_sql(const duckdb::LogicalType& type) {
@@ -857,4 +857,4 @@ PsitriTableEntry::GetStorageInfo(duckdb::ClientContext& context) {
    return info;
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

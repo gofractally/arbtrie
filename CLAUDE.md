@@ -67,7 +67,7 @@ Notable test tags: `[leaf_node]`, `[inner_node]`, `[cursor]`, `[trie]`, `[tree_c
 | `libraries/psitri/` | Main database — trie engine, transactions, sessions, nodes |
 | `libraries/sal/` | Segment Allocator Library — persistent memory management (32 MB segments, ref-counting, COW) |
 | `libraries/psitri-sqlite/` | SQLite with btree.c replaced by psitri DWAL — drop-in sqlite3 API |
-| `libraries/psitri-sql/` | DuckDB storage extension backed by psitri (+ TATP benchmark) |
+| `libraries/psitri-duckdb/` | DuckDB storage extension backed by psitri (+ TATP benchmark) |
 | `libraries/psitrirocks/` | RocksDB-compatible drop-in replacement API wrapping psitri |
 | `libraries/mdbxrocks/` | MDBX backend wrapper (for benchmark comparisons) |
 | `libraries/ucc/` | Unsigned character comparison / branch encoding utilities |

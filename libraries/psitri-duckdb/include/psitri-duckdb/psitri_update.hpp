@@ -4,28 +4,21 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/index_vector.hpp"
 
-#include <psitri-sql/row_encoding.hpp>
+#include <psitri-duckdb/row_encoding.hpp>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
-class PsitriCatalog;
-
-// Global sink state for insert
-struct PsitriInsertGlobalState : public duckdb::GlobalSinkState {
-   PsitriCatalog* catalog = nullptr;
-   TableMeta      meta;
-   int64_t        insert_count = 0;
+struct PsitriUpdateGlobalState : public duckdb::GlobalSinkState {
+   int64_t update_count = 0;
 };
 
-// Physical operator for INSERT INTO psitri tables
-class PsitriInsert : public duckdb::PhysicalOperator {
+class PsitriUpdate : public duckdb::PhysicalOperator {
 public:
-   PsitriInsert(duckdb::LogicalOperator& op,
+   PsitriUpdate(duckdb::LogicalOperator& op,
                 duckdb::TableCatalogEntry& table,
                 TableMeta meta,
-                duckdb::physical_index_vector_t<duckdb::idx_t> column_index_map);
+                std::vector<duckdb::PhysicalIndex> columns);
 
-   // Sink interface
    duckdb::SinkResultType Sink(duckdb::ExecutionContext& context,
                                duckdb::DataChunk& chunk,
                                duckdb::OperatorSinkInput& input) const override;
@@ -38,7 +31,6 @@ public:
    duckdb::unique_ptr<duckdb::GlobalSinkState>
    GetGlobalSinkState(duckdb::ClientContext& context) const override;
 
-   // Source interface
    duckdb::SourceResultType GetData(duckdb::ExecutionContext& context,
                                     duckdb::DataChunk& chunk,
                                     duckdb::OperatorSourceInput& input) const override;
@@ -50,7 +42,7 @@ public:
 private:
    duckdb::TableCatalogEntry& table_;
    TableMeta meta_;
-   duckdb::physical_index_vector_t<duckdb::idx_t> column_index_map_;
+   std::vector<duckdb::PhysicalIndex> columns_;  // which columns are being updated
 };
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

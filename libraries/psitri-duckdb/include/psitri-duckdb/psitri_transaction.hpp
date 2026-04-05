@@ -14,7 +14,7 @@
 #include <memory>
 #include <string>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 class PsitriCatalog;
 
@@ -72,4 +72,4 @@ private:
    duckdb::reference_map_t<duckdb::Transaction, duckdb::unique_ptr<PsitriTransaction>> transactions_;
 };
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

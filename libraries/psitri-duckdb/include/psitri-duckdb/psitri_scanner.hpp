@@ -4,14 +4,14 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
-#include <psitri-sql/row_encoding.hpp>
+#include <psitri-duckdb/row_encoding.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/dwal_database.hpp>
 
 #include <memory>
 #include <optional>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 class PsitriCatalog;
 
@@ -89,4 +89,4 @@ void PsitriPushdownComplexFilter(duckdb::ClientContext& context,
                                  duckdb::FunctionData* bind_data,
                                  duckdb::vector<duckdb::unique_ptr<duckdb::Expression>>& filters);
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb

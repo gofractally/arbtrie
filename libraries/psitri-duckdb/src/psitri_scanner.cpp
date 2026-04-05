@@ -1,6 +1,6 @@
-#include <psitri-sql/psitri_scanner.hpp>
-#include <psitri-sql/psitri_catalog.hpp>
-#include <psitri-sql/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_scanner.hpp>
+#include <psitri-duckdb/psitri_catalog.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
 
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -12,9 +12,9 @@
 
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/dwal_database.hpp>
-#include <psitri-sql/psitri_transaction.hpp>
+#include <psitri-duckdb/psitri_transaction.hpp>
 
-namespace psitri_sql {
+namespace psitri_duckdb {
 
 // ===========================================================================
 // Bind data
@@ -573,4 +573,4 @@ void PsitriPushdownComplexFilter(duckdb::ClientContext& context,
    }
 }
 
-} // namespace psitri_sql
+} // namespace psitri_duckdb
