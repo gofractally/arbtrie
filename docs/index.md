@@ -78,6 +78,11 @@ Delete an entire range of keys in logarithmic time. Interior subtrees are releas
 Migrate existing RocksDB applications with a compatibility shim. Same API, PsiTri performance underneath.
 </div>
 
+<div class="feature-card" markdown>
+### MDBX Drop-in Wrapper
+Migrate existing libmdbx applications with a compatibility shim. 12x faster writes than native MDBX using the same C/C++ API. Three read modes trade off freshness vs throughput.
+</div>
+
 </div>
 
 ---

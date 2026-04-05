@@ -83,6 +83,7 @@ struct BankConfig
    uint64_t    batch_size       = 1;
    uint64_t    sync_every       = 0;  // sync every N commits (0 = never)
    uint64_t    reads_per_tx     = 100; // point reads per reader "transaction"
+   std::string read_mode        = "latest"; // buffered, latest, or direct
 };
 
 // ============================================================
@@ -1005,8 +1006,10 @@ class MdbxEngine : public BankEngine
    MDBX_env* _env = nullptr;
    MDBX_dbi  _dbi = 0;
    MDBX_txn* _txn = nullptr;  // current batch transaction
+   std::string _read_mode = "latest";
 
   public:
+   void set_read_mode(const std::string& m) { _read_mode = m; }
    const char* name() const override { return "MDBX"; }
 
    void open(const std::string& path, const std::string& sync_mode) override
@@ -1029,6 +1032,16 @@ class MdbxEngine : public BankEngine
 
       unsigned flags = sync_flags | MDBX_LIFORECLAIM | MDBX_NOSUBDIR;
       MDBX_CHECK(mdbx_env_open(_env, path.c_str(), (MDBX_env_flags_t)flags, 0664));
+
+#ifdef PSITRI_READ_MODE_BUFFERED
+      // PsiTri extension: set read mode for RO transactions
+      {
+         int rm = PSITRI_READ_MODE_LATEST;
+         if (_read_mode == "buffered") rm = PSITRI_READ_MODE_BUFFERED;
+         else if (_read_mode == "persistent") rm = PSITRI_READ_MODE_PERSISTENT;
+         MDBX_CHECK(mdbx_env_set_read_mode(_env, rm));
+      }
+#endif
 
       MDBX_txn* txn = nullptr;
       MDBX_CHECK(mdbx_txn_begin(_env, nullptr, (MDBX_txn_flags_t)0, &txn));
@@ -1407,6 +1420,8 @@ int main(int argc, char** argv)
        "Sync to disk every N batch commits (0 = no periodic sync)");
    opt("reads-per-tx", po::value(&cfg.reads_per_tx)->default_value(100),
        "Point reads per reader thread read-transaction batch");
+   opt("read-mode", po::value(&cfg.read_mode)->default_value("latest"),
+       "Read mode: buffered (RO+Tri), latest (RW+RO+Tri), persistent (Tri only)");
    opt("help,h", "Show help");
 
    po::variables_map vm;
@@ -1428,7 +1443,11 @@ int main(int argc, char** argv)
 #elif defined(BANK_ENGINE_ROCKSDB)
    engine = std::make_unique<RocksDbEngine>();
 #elif defined(BANK_ENGINE_MDBX)
-   engine = std::make_unique<MdbxEngine>();
+   {
+      auto me = std::make_unique<MdbxEngine>();
+      me->set_read_mode(cfg.read_mode);
+      engine = std::move(me);
+   }
 #elif defined(BANK_ENGINE_TIDESDB)
    engine = std::make_unique<TidesDbEngine>();
 #else
@@ -1443,6 +1462,7 @@ int main(int argc, char** argv)
           cfg.sync_every > 0 ? format_comma(cfg.sync_every).c_str() : "never");
    printf("  Sync mode:    %s\n", cfg.sync_mode.c_str());
    printf("  Seed:         %llu\n", (unsigned long long)cfg.seed);
+   printf("  Read mode:    %s\n", cfg.read_mode.c_str());
    printf("  DB path:      %s\n", cfg.db_path.c_str());
    printf("\n");
 

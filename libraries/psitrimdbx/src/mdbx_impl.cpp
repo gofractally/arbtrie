@@ -52,6 +52,9 @@ struct MDBX_env
    bool              opened      = false;
    void*             userctx     = nullptr;
 
+   // Read mode for RO transactions: 0=buffered, 1=latest, 2=direct(get_latest)
+   int               read_mode   = 1;  // default: latest (sees all committed data)
+
    // Geometry (stored but ignored — psitri manages its own sizing)
    intptr_t geo_lower = -1, geo_now = -1, geo_upper = -1;
    intptr_t geo_growth = -1, geo_shrink = -1, geo_pagesize = -1;
@@ -597,6 +600,14 @@ int mdbx_env_set_userctx(MDBX_env* env, void* ctx)
    return MDBX_SUCCESS;
 }
 
+int mdbx_env_set_read_mode(MDBX_env* env, int mode)
+{
+   if (!env || mode < 0 || mode > 2)
+      return MDBX_EINVAL;
+   env->read_mode = mode;
+   return MDBX_SUCCESS;
+}
+
 // ── Transactions ─────────────────────────────────────────────────
 
 int mdbx_txn_begin_ex(MDBX_env* env, MDBX_txn* parent,
@@ -717,7 +728,7 @@ int mdbx_txn_reset(MDBX_txn* txn)
 {
    if (!txn || !txn->is_readonly())
       return MDBX_BAD_TXN;
-   txn->read_session.reset();
+   // Don't destroy the session — just mark as reset. Renew will refresh it.
    return MDBX_SUCCESS;
 }
 
@@ -727,8 +738,10 @@ int mdbx_txn_renew(MDBX_txn* txn)
       return MDBX_BAD_TXN;
    try
    {
-      txn->read_session = std::make_unique<psitri::dwal::dwal_read_session>(
-         txn->env->dwal_db->start_read_session());
+      if (!txn->read_session)
+         txn->read_session = std::make_unique<psitri::dwal::dwal_read_session>(
+            txn->env->dwal_db->start_read_session());
+      // Session auto-refreshes on generation change — no explicit refresh needed.
       return MDBX_SUCCESS;
    }
    catch (...)
@@ -998,14 +1011,24 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
       }
       else
       {
-         auto result = txn->env->dwal_db->get_latest(root_idx, key_sv);
+         if (!txn->read_session)
+         {
+            // Lazily create session if missing
+            mtxn->read_session = std::make_unique<psitri::dwal::dwal_read_session>(
+               txn->env->dwal_db->start_read_session());
+         }
+
+         static constexpr psitri::dwal::read_mode modes[] = {
+            psitri::dwal::read_mode::buffered,
+            psitri::dwal::read_mode::latest,
+            psitri::dwal::read_mode::persistent,
+         };
+         auto dwal_mode = modes[txn->env->read_mode];
+         auto result = txn->read_session->get(root_idx, key_sv, dwal_mode);
          if (!result.found)
             return MDBX_NOTFOUND;
 
-         if (!result.owned_data.empty())
-            mtxn->get_buf = std::move(result.owned_data);
-         else
-            mtxn->get_buf.assign(result.value.data.data(), result.value.data.size());
+         mtxn->get_buf = std::move(result.value);
          data->iov_base = mtxn->get_buf.data();
          data->iov_len  = mtxn->get_buf.size();
          return MDBX_SUCCESS;
