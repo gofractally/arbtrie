@@ -240,6 +240,16 @@ namespace psitri
          sal::read_lock lock = _session.lock();
          validate(_session.get_ref(_root.address()));
       }
+      void validate_unique_refs()
+      {
+#ifdef NDEBUG
+         return;
+#endif
+         if (not _root)
+            return;
+         sal::read_lock lock = _session.lock();
+         validate_unique_refs(_session.get_ref(_root.address()));
+      }
       void validate(const smart_ptr<alloc_header>& r)
       {
          if (r)

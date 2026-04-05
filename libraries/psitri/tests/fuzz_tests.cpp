@@ -623,6 +623,7 @@ namespace
                break;
          }
 
+
       }
 
       void do_insert()
@@ -1236,8 +1237,7 @@ TEST_CASE("fuzz sequential heavy", "[fuzz]")
 
 TEST_CASE("fuzz remove heavy", "[fuzz][remove_range]")
 {
-   uint64_t seed = GENERATE(42, 55555, 161803, 7777777, 0xDEAD, 98765, 112233, 0xF00D,
-                            0xACE, 3030303, 6543210, 0xDAD, 4141414, 8888881);
+   uint64_t seed = GENERATE(42, 55555, 161803, 7777777, 0xDEAD, 98765, 112233, 0xF00D, 0xACE, 3030303, 6543210, 0xDAD, 4141414, 8888881);
    INFO("seed=" << seed);
 
    test_db     tdb("fuzz_remove_heavy_" + std::to_string(seed));

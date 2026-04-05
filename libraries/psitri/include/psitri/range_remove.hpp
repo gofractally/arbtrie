@@ -21,15 +21,17 @@ namespace psitri
 
       auto rref     = *_root;
       auto old_addr = _root.take();
+      // When ref > 1, range_remove delegates to shared mode, and the shared
+      // dispatch releases the ref. Only release here when uniquely owned.
+      bool uniquely_owned = (rref.ref() == 1);
 
       branch_set result = range_remove<upsert_mode::unique>({}, rref, range);
 
       if (result.count() == 0)
       {
-         // Do not release old_addr here. The old root address remains in _root_objects until
-         // commit calls set_root(null), which extracts it and releases it via the returned
-         // smart_ptr. Releasing here AND in set_root causes a double-free.
-         (void)old_addr;
+         if (uniquely_owned)
+            _session.release(old_addr);
+         // else: shared dispatch already released via delegation
       }
       else if (result.count() == 1)
          _root.give(result.get_first_branch());
@@ -85,10 +87,6 @@ namespace psitri
          if (!result.contains(ref.address())) [[likely]]
             ref.release();
       }
-      // Unique mode: caller is responsible for releasing ref when result is empty.
-      // We do NOT release here to avoid a use-after-free race: if the release queue is
-      // full, _session.release() calls final_release() synchronously (freeing the node),
-      // and the caller's subsequent _session.retain() would then access freed memory.
 
       return result;
    }
@@ -243,6 +241,9 @@ namespace psitri
       {
          auto  badr = node->get_branch(start);
          auto  bref = _session.get_ref(badr);
+         // Track if child ref>1: if so, range_remove<unique> will delegate to shared
+         // and the shared dispatch will release badr when result is empty.
+         [[maybe_unused]] bool badr_shared = (bref.ref() > 1);
 
          if constexpr (mode.is_shared())
             retain_children(node);
@@ -254,17 +255,23 @@ namespace psitri
             // This branch became empty — treat like single-branch remove
             if (node->num_branches() == 1)
             {
-               // Unique: badr is still in the node; return {} so the caller's dispatch
-               // releases this inner node, whose destroy() cascade releases badr.
-               // No retain needed (dispatch no longer pre-releases recursed nodes).
+               if constexpr (mode.is_unique())
+               {
+                  // Return {} so parent cascade releases this node + its children.
+                  // If the child was shared (ref>1), the shared dispatch already released
+                  // it; retain to prevent double-release from cascade.
+                  if (badr_shared)
+                     _session.retain(badr);
+               }
                return {};
             }
 
             if constexpr (mode.is_unique())
             {
                // badr is no longer in the node after remove_branch; release it explicitly
-               // (dispatch no longer does this for unique mode).
-               _session.release(badr);
+               // UNLESS the shared dispatch already released it (child had ref > 1).
+               if (!badr_shared)
+                  _session.release(badr);
                node.modify(
                    [&](auto* n)
                    {
@@ -323,10 +330,14 @@ namespace psitri
       bool        start_empty    = false;
       bool        start_changed  = false;
       ptr_address new_start_addr = start_addr;
+      bool        start_recursed = false;
+      [[maybe_unused]] bool start_shared = false;
 
       if (!range.lower_bound.empty())
       {
+         start_recursed = true;
          auto start_ref = _session.get_ref(start_addr);
+         start_shared   = (start_ref.ref() > 1);
          _delta_descendents = 0;
          branch_set start_result = range_remove<mode>(node->get_branch_clines(), start_ref, range);
          if (start_result.count() == 0)
@@ -359,12 +370,14 @@ namespace psitri
       bool        boundary_changed  = false;
       ptr_address new_boundary_addr = sal::null_ptr_address;
       int64_t     boundary_delta    = 0;
+      [[maybe_unused]] bool boundary_shared = false;
 
       if (has_boundary)
       {
          boundary_addr     = node->get_branch(boundary);
          new_boundary_addr = boundary_addr;
          auto boundary_ref = _session.get_ref(boundary_addr);
+         boundary_shared   = (boundary_ref.ref() > 1);
          _delta_descendents = 0;
          branch_set boundary_result =
              range_remove<mode>(node->get_branch_clines(), boundary_ref, range);
@@ -398,15 +411,17 @@ namespace psitri
       {
          if constexpr (mode.is_unique())
          {
-            // The caller releases this node via the dispatch; its destroy() cascade
-            // releases ALL remaining children in the node's branch table.
+            // Return {} so the parent cascade releases this node + all children.
+            // Middle branches and non-recursed start/boundary are still in the branch
+            // table — cascade handles them correctly.
             //
-            // Middle branches and untouched start/boundary were NOT recursed into,
-            // so they still live in the node — destroy handles them correctly.
-            //
-            // Recursed-into branches (start if lower non-empty, boundary if has_boundary)
-            // are also still in the node because the dispatch no longer pre-releases them.
-            // Destroy will release them exactly once.  No retain or explicit release needed.
+            // For recursed children that were shared (ref>1), the unique dispatch
+            // delegated to shared mode which already released them. But they're still
+            // in the branch table, so cascade would release again → retain to compensate.
+            if (start_recursed && start_shared)
+               _session.retain(start_addr);
+            if (has_boundary && boundary_shared)
+               _session.retain(boundary_addr);
          }
          else
          {
@@ -428,18 +443,25 @@ namespace psitri
 
       if constexpr (mode.is_unique())
       {
-         // Release middle branches
+         // Release middle branches (not recursed into — always safe to release)
          for (uint16_t i = *start + 1; i < *end; ++i)
             _session.release(node->get_branch(branch_number(i)));
 
-         // Release start if it was completely removed (unbounded lower or recursed+empty).
-         // Dispatch no longer releases recursed nodes, so we handle both cases here.
+         // Release start if it was completely removed.
+         // Skip if the shared dispatch already released it (recursed + shared).
          if (start_empty)
-            _session.release(start_addr);
+         {
+            if (!(start_recursed && start_shared))
+               _session.release(start_addr);
+         }
 
          // Release boundary if it was completely removed by recursion.
+         // Skip if the shared dispatch already released it (always recursed when has_boundary).
          if (boundary_empty && has_boundary)
-            _session.release(boundary_addr);
+         {
+            if (!boundary_shared)
+               _session.release(boundary_addr);
+         }
 
          // Now we need to remove branches from the inner node.
          // Determine the contiguous range to remove from [start..end+has_boundary-1]:
@@ -571,46 +593,11 @@ namespace psitri
          {
             // No branches to remove from the node, but addresses may have changed.
             // Need to allocate a new node copying all branches with updated addresses.
-            // For simplicity, use subrange to build a new node:
-            // Actually we just need to handle replaced start/boundary.
-            // The easiest path: if no branches removed and no addresses changed,
-            // just update descendents; but in shared mode we can't modify in place.
-            // Build a new node that's a copy with updated descendents.
+            // For simplicity, use merge_branches for the changed branches.
 
             if (!start_changed && !boundary_changed)
             {
-               // Nothing actually changed — return original
-               // But we've already retained children... undo by releasing them
-               // Actually in shared mode, the caller will release `ref` if result doesn't contain it.
-               // Since we're returning node.address(), the caller will NOT release it. Good.
-               // But wait — retain_children was called but nothing changed.
-               // In the shared upsert path, retain_children is called before recursion.
-               // If recursion results in no change, the caller releases the old ref,
-               // and the retained children balance with the new copy... but here we're
-               // returning the original address, so the retain has no matching release.
-               // We need to release children to undo the retain.
-
-               // Actually, let me re-examine: in the shared path of upsert() (tree_ops.hpp:1017-1018),
-               // retain_children is called and then sub_branches is computed. If the result is unchanged
-               // (same address), the code at line 1306-1316 returns in.address(). The caller at line 767-768
-               // checks `if (not result.contains(r.address())) r.release()`. Since result == node.address()
-               // and r == ref, they match, so ref is NOT released. But retain_children gave +1 to all children.
-               // Who decrements those? In the unchanged case, the old node still owns them.
-               // The retain was speculative and now needs to be undone.
-               // But in the existing code this is handled by... hmm, let me look more carefully.
-
-               // Actually in the existing shared upsert code, retain_children is ALWAYS called before
-               // recursion. If recursion doesn't change anything, the sub_branches still contains
-               // the old address, and merge_branches is skipped. The code at line 1306-1316 returns
-               // in.address(). Since the result contains in.address(), the old ref is NOT released.
-               // So the old node survives with its children. The children were retained (+1),
-               // and... this IS a bug in the existing code (over-retain). But actually it works out
-               // because the shared path only runs when ref > 1, meaning someone else has a copy.
-               // The retain ensures children survive when the caller eventually releases the ref.
-               // Hmm, this is tricky.
-
-               // For range_remove in shared mode, if nothing changed, we can avoid retain entirely.
-               // But retain was already called. To compensate, release each child once.
+               // Nothing actually changed — retain_children was speculative, undo it.
                node->visit_branches(
                    [this](ptr_address br) { _session.release(br); });
                return node.address();
