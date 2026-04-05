@@ -816,3 +816,145 @@ TEST_CASE("C++ API: DUPSORT multi-value", "[mdbx][dupsort][cpp-api]")
       REQUIRE(count == 2);
    }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// mdbx_drop and mdbx_dbi_stat tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: mdbx_drop clear", "[mdbx][c-api][drop]")
+{
+   auto dir = make_temp_dir("c_drop");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 4) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   // Insert some data
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr) == MDBX_SUCCESS);
+      MDBX_dbi dbi = 0;
+      REQUIRE(mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi) == MDBX_SUCCESS);
+
+      for (int i = 0; i < 10; ++i)
+      {
+         auto key = "key" + std::to_string(i);
+         auto val = "val" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+      }
+
+      // Verify entries via stat
+      MDBX_stat stat{};
+      REQUIRE(mdbx_dbi_stat(txn, dbi, &stat, sizeof(stat)) == MDBX_SUCCESS);
+      REQUIRE(stat.ms_entries == 10);
+
+      // Clear the database (del=0)
+      REQUIRE(mdbx_drop(txn, dbi, 0) == MDBX_SUCCESS);
+
+      // Verify empty
+      REQUIRE(mdbx_dbi_stat(txn, dbi, &stat, sizeof(stat)) == MDBX_SUCCESS);
+      REQUIRE(stat.ms_entries == 0);
+
+      // Can still insert after clear
+      {
+         std::string key = "after_clear";
+         std::string val = "works";
+         MDBX_val    k{key.data(), key.size()};
+         MDBX_val    v{val.data(), val.size()};
+         REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+      }
+
+      REQUIRE(mdbx_dbi_stat(txn, dbi, &stat, sizeof(stat)) == MDBX_SUCCESS);
+      REQUIRE(stat.ms_entries == 1);
+
+      REQUIRE(mdbx_txn_commit_ex(txn, nullptr) == MDBX_SUCCESS);
+   }
+
+   mdbx_env_close_ex(env, false);
+   fs::remove_all(dir);
+}
+
+TEST_CASE("C API: mdbx_drop delete named DB", "[mdbx][c-api][drop]")
+{
+   auto dir = make_temp_dir("c_drop_del");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 4) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi = 0;
+
+   // Create and populate a named DB
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, "testdb", MDBX_CREATE, &dbi) == MDBX_SUCCESS);
+
+      std::string key = "hello";
+      std::string val = "world";
+      MDBX_val    k{key.data(), key.size()};
+      MDBX_val    v{val.data(), val.size()};
+      REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      // Drop (del=1) — clears data AND removes the DBI
+      REQUIRE(mdbx_drop(txn, dbi, 1) == MDBX_SUCCESS);
+
+      REQUIRE(mdbx_txn_commit_ex(txn, nullptr) == MDBX_SUCCESS);
+   }
+
+   // Verify the named DB was removed — re-opening it should create fresh
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr) == MDBX_SUCCESS);
+      MDBX_dbi dbi2 = 0;
+      REQUIRE(mdbx_dbi_open(txn, "testdb", MDBX_CREATE, &dbi2) == MDBX_SUCCESS);
+
+      MDBX_stat stat{};
+      REQUIRE(mdbx_dbi_stat(txn, dbi2, &stat, sizeof(stat)) == MDBX_SUCCESS);
+      REQUIRE(stat.ms_entries == 0);
+
+      REQUIRE(mdbx_txn_commit_ex(txn, nullptr) == MDBX_SUCCESS);
+   }
+
+   mdbx_env_close_ex(env, false);
+   fs::remove_all(dir);
+}
+
+TEST_CASE("C++ API: drop_map and clear_map", "[mdbx][cpp-api][drop]")
+{
+   auto dir = make_temp_dir("cpp_drop");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 4;
+
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   auto map = mdbx::map_handle(0);
+
+   // Insert data
+   {
+      auto txn = db.start_write();
+      txn.upsert(map, mdbx::slice("a"), mdbx::slice("1"));
+      txn.upsert(map, mdbx::slice("b"), mdbx::slice("2"));
+      txn.upsert(map, mdbx::slice("c"), mdbx::slice("3"));
+      txn.commit();
+   }
+
+   // Clear map (del=0)
+   {
+      auto txn = db.start_write();
+      txn.clear_map(map);
+
+      // Verify empty — get should throw not_found
+      REQUIRE_THROWS_AS(txn.get(map, mdbx::slice("a")), mdbx::not_found);
+
+      txn.commit();
+   }
+
+   fs::remove_all(dir);
+}

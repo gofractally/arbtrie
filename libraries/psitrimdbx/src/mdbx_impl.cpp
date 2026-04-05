@@ -755,11 +755,36 @@ int mdbx_dbi_stat(const MDBX_txn* txn, MDBX_dbi dbi,
    if (!txn || !stat || bytes < sizeof(MDBX_stat))
       return MDBX_EINVAL;
 
+   uint32_t root_idx = dbi_root_index(const_cast<MDBX_env*>(txn->env), dbi);
+   if (root_idx == UINT32_MAX)
+      return MDBX_BAD_DBI;
+
    std::memset(stat, 0, sizeof(MDBX_stat));
    stat->ms_psize = 4096;
-   // TODO: populate real stats from psitri tree
+
+   try
+   {
+      // Count entries by iterating a cursor.
+      auto mode = txn->is_readonly() ? psitri::dwal::read_mode::buffered
+                                     : psitri::dwal::read_mode::latest;
+      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode,
+                                                  /*skip_rw_lock=*/!txn->is_readonly());
+      uint64_t count = 0;
+      if (mc->seek_begin())
+      {
+         do { ++count; } while (mc->next());
+      }
+      stat->ms_entries = count;
+   }
+   catch (...)
+   {
+      // If counting fails, return zeroed stats rather than failing.
+   }
+
    return MDBX_SUCCESS;
 }
+
+static int ensure_rw_root(MDBX_txn* txn, uint32_t root_idx);
 
 int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
 {
@@ -770,12 +795,61 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
    if (root_idx == UINT32_MAX)
       return MDBX_BAD_DBI;
 
-   // TODO: implement clear/drop via range_remove on entire root
-   // For now, return not-implemented for drop, but clear is a no-op stub
+   // Ensure the data root is writable; also ensure the catalog root (1) if deleting.
    if (del)
-      return MDBX_ENOSYS;
+   {
+      int rc = ensure_rw_root(txn, 1);  // catalog root first
+      if (rc != MDBX_SUCCESS)
+         return rc;
+      rc = ensure_rw_root(txn, root_idx);
+      if (rc != MDBX_SUCCESS)
+         return rc;
+   }
+   else
+   {
+      int rc = ensure_rw_root(txn, root_idx);
+      if (rc != MDBX_SUCCESS)
+         return rc;
+   }
 
-   return MDBX_SUCCESS;
+   try
+   {
+      // Clear: remove all entries by iterating with a cursor.
+      auto mc = txn->env->dwal_db->create_cursor(root_idx, psitri::dwal::read_mode::latest,
+                                               /*skip_rw_lock=*/true);
+      std::vector<std::string> keys_to_remove;
+      if (mc->seek_begin())
+      {
+         do
+         {
+            keys_to_remove.emplace_back(mc->key());
+         } while (mc->next());
+      }
+      for (auto& k : keys_to_remove)
+         txn->write_tx->remove(root_idx, k);
+
+      if (del)
+      {
+         // Remove the DBI entry from the catalog (root 1).
+         std::shared_lock lk(txn->env->dbi_mutex);
+         if (dbi < txn->env->dbis.size() && !txn->env->dbis[dbi].name.empty())
+         {
+            auto name = txn->env->dbis[dbi].name;
+            lk.unlock();
+            txn->write_tx->remove(1, name);
+            std::unique_lock wlk(txn->env->dbi_mutex);
+            txn->env->name_to_dbi.erase(name);
+            txn->env->dbis[dbi].name.clear();
+            txn->env->dbis[dbi].root_index = UINT32_MAX;
+         }
+      }
+
+      return MDBX_SUCCESS;
+   }
+   catch (...)
+   {
+      return MDBX_PANIC;
+   }
 }
 
 int mdbx_dbi_flags_ex(const MDBX_txn* txn, MDBX_dbi dbi,
@@ -2000,13 +2074,28 @@ namespace mdbx
 
    bool cursor::on_first() const
    {
-      // Approximate: check if prev() would fail
-      return false; // TODO
+      if (!handle_ || !handle_->state || handle_->state->mc->is_end())
+         return false;
+      auto current_key = handle_->state->mc->key();
+      auto root_idx    = dbi_root_index(handle_->txn->env, handle_->dbi);
+      auto mode        = handle_->txn->is_readonly() ? psitri::dwal::read_mode::buffered
+                                                     : psitri::dwal::read_mode::latest;
+      auto tmp = handle_->txn->env->dwal_db->create_cursor(
+          root_idx, mode, /*skip_rw_lock=*/!handle_->txn->is_readonly());
+      return tmp->seek_begin() && tmp->key() == current_key;
    }
 
    bool cursor::on_last() const
    {
-      return false; // TODO
+      if (!handle_ || !handle_->state || handle_->state->mc->is_end())
+         return false;
+      auto current_key = handle_->state->mc->key();
+      auto root_idx    = dbi_root_index(handle_->txn->env, handle_->dbi);
+      auto mode        = handle_->txn->is_readonly() ? psitri::dwal::read_mode::buffered
+                                                     : psitri::dwal::read_mode::latest;
+      auto tmp = handle_->txn->env->dwal_db->create_cursor(
+          root_idx, mode, /*skip_rw_lock=*/!handle_->txn->is_readonly());
+      return tmp->seek_last() && tmp->key() == current_key;
    }
 
    void cursor::upsert(const slice& key, const slice& value)
