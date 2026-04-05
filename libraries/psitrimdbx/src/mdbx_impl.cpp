@@ -860,7 +860,12 @@ int mdbx_dbi_stat(const MDBX_txn* txn, MDBX_dbi dbi,
    try
    {
       // Count entries by iterating a cursor.
-      auto mode = txn->is_readonly() ? psitri::dwal::read_mode::buffered
+      static constexpr psitri::dwal::read_mode modes[] = {
+         psitri::dwal::read_mode::buffered,
+         psitri::dwal::read_mode::latest,
+         psitri::dwal::read_mode::persistent,
+      };
+      auto mode = txn->is_readonly() ? modes[txn->env->read_mode]
                                      : psitri::dwal::read_mode::latest;
       auto mc = txn->env->dwal_db->create_cursor(root_idx, mode,
                                                   /*skip_rw_lock=*/!txn->is_readonly());
@@ -1664,6 +1669,52 @@ int mdbx_cursor_count(const MDBX_cursor* cursor, size_t* count)
    return MDBX_SUCCESS;
 }
 
+int mdbx_cursor_on_first(const MDBX_cursor* cursor)
+{
+   if (!cursor || !cursor->state || !cursor->state->valid)
+      return MDBX_NOTFOUND;
+   if (cursor->state->mc->is_end())
+      return MDBX_NOTFOUND;
+
+   auto current_key = cursor->state->mc->key();
+   auto root_idx    = dbi_root_index(cursor->txn->env, cursor->dbi);
+   static constexpr psitri::dwal::read_mode modes[] = {
+      psitri::dwal::read_mode::buffered,
+      psitri::dwal::read_mode::latest,
+      psitri::dwal::read_mode::persistent,
+   };
+   auto mode = cursor->txn->is_readonly() ? modes[cursor->txn->env->read_mode]
+                                           : psitri::dwal::read_mode::latest;
+   auto tmp = cursor->txn->env->dwal_db->create_cursor(
+       root_idx, mode, /*skip_rw_lock=*/!cursor->txn->is_readonly());
+   if (tmp->seek_begin() && tmp->key() == current_key)
+      return MDBX_RESULT_TRUE;
+   return MDBX_RESULT_FALSE;
+}
+
+int mdbx_cursor_on_last(const MDBX_cursor* cursor)
+{
+   if (!cursor || !cursor->state || !cursor->state->valid)
+      return MDBX_NOTFOUND;
+   if (cursor->state->mc->is_end())
+      return MDBX_NOTFOUND;
+
+   auto current_key = cursor->state->mc->key();
+   auto root_idx    = dbi_root_index(cursor->txn->env, cursor->dbi);
+   static constexpr psitri::dwal::read_mode modes[] = {
+      psitri::dwal::read_mode::buffered,
+      psitri::dwal::read_mode::latest,
+      psitri::dwal::read_mode::persistent,
+   };
+   auto mode = cursor->txn->is_readonly() ? modes[cursor->txn->env->read_mode]
+                                           : psitri::dwal::read_mode::latest;
+   auto tmp = cursor->txn->env->dwal_db->create_cursor(
+       root_idx, mode, /*skip_rw_lock=*/!cursor->txn->is_readonly());
+   if (tmp->seek_last() && tmp->key() == current_key)
+      return MDBX_RESULT_TRUE;
+   return MDBX_RESULT_FALSE;
+}
+
 int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
 {
    if (!txn || !cursor)
@@ -1676,9 +1727,13 @@ int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
    try
    {
       cursor->txn = txn;
-      auto mode = txn->is_readonly()
-                     ? psitri::dwal::read_mode::buffered
-                     : psitri::dwal::read_mode::latest;
+      static constexpr psitri::dwal::read_mode modes[] = {
+         psitri::dwal::read_mode::buffered,
+         psitri::dwal::read_mode::latest,
+         psitri::dwal::read_mode::persistent,
+      };
+      auto mode = txn->is_readonly() ? modes[txn->env->read_mode]
+                                     : psitri::dwal::read_mode::latest;
       bool writer = !txn->is_readonly() && txn->write_tx;
       auto mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
       cursor->state = std::make_unique<cursor_state>(std::move(mc), cursor->is_dupsort);
@@ -2175,8 +2230,13 @@ namespace mdbx
          return false;
       auto current_key = handle_->state->mc->key();
       auto root_idx    = dbi_root_index(handle_->txn->env, handle_->dbi);
-      auto mode        = handle_->txn->is_readonly() ? psitri::dwal::read_mode::buffered
-                                                     : psitri::dwal::read_mode::latest;
+      static constexpr psitri::dwal::read_mode modes[] = {
+         psitri::dwal::read_mode::buffered,
+         psitri::dwal::read_mode::latest,
+         psitri::dwal::read_mode::persistent,
+      };
+      auto mode = handle_->txn->is_readonly() ? modes[handle_->txn->env->read_mode]
+                                               : psitri::dwal::read_mode::latest;
       auto tmp = handle_->txn->env->dwal_db->create_cursor(
           root_idx, mode, /*skip_rw_lock=*/!handle_->txn->is_readonly());
       return tmp->seek_begin() && tmp->key() == current_key;
@@ -2188,8 +2248,13 @@ namespace mdbx
          return false;
       auto current_key = handle_->state->mc->key();
       auto root_idx    = dbi_root_index(handle_->txn->env, handle_->dbi);
-      auto mode        = handle_->txn->is_readonly() ? psitri::dwal::read_mode::buffered
-                                                     : psitri::dwal::read_mode::latest;
+      static constexpr psitri::dwal::read_mode modes[] = {
+         psitri::dwal::read_mode::buffered,
+         psitri::dwal::read_mode::latest,
+         psitri::dwal::read_mode::persistent,
+      };
+      auto mode = handle_->txn->is_readonly() ? modes[handle_->txn->env->read_mode]
+                                               : psitri::dwal::read_mode::latest;
       auto tmp = handle_->txn->env->dwal_db->create_cursor(
           root_idx, mode, /*skip_rw_lock=*/!handle_->txn->is_readonly());
       return tmp->seek_last() && tmp->key() == current_key;

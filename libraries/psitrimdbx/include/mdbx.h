@@ -289,6 +289,8 @@ int  mdbx_replace(MDBX_txn* txn, MDBX_dbi dbi,
 
 int  mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor);
 void mdbx_cursor_close(MDBX_cursor* cursor);
+int  mdbx_cursor_on_first(const MDBX_cursor* cursor);
+int  mdbx_cursor_on_last(const MDBX_cursor* cursor);
 int  mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
                      MDBX_val* data, MDBX_cursor_op op);
 int  mdbx_cursor_put(MDBX_cursor* cursor, const MDBX_val* key,

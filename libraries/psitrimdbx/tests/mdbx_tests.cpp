@@ -3,9 +3,12 @@
 #include <mdbx.h>
 #include <mdbx.h++>
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -1016,4 +1019,967 @@ TEST_CASE("C API: named DBI persists across env reopen", "[mdbx][c-api][persiste
    }
 
    fs::remove_all(dir);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// txn_reset / txn_renew tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: txn_reset and txn_renew cycle", "[mdbx][c-api][reset]")
+{
+   auto dir = make_temp_dir("c_reset");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   // Populate
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+      for (int i = 0; i < 100; i++)
+      {
+         auto key = "key_" + std::to_string(i);
+         auto val = "val_" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Open RO txn, then cycle reset/renew multiple times
+   MDBX_txn* ro = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(ro, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   for (int cycle = 0; cycle < 10; cycle++)
+   {
+      REQUIRE(mdbx_txn_renew(ro) == MDBX_SUCCESS);
+
+      // Read a value
+      auto key = "key_" + std::to_string(cycle * 10);
+      MDBX_val k{key.data(), key.size()};
+      MDBX_val v{};
+      REQUIRE(mdbx_get(ro, dbi, &k, &v) == MDBX_SUCCESS);
+
+      auto expected = "val_" + std::to_string(cycle * 10);
+      REQUIRE(std::string(static_cast<char*>(v.iov_base), v.iov_len) == expected);
+
+      REQUIRE(mdbx_txn_reset(ro) == MDBX_SUCCESS);
+   }
+
+   // Reset on RW txn should fail
+   MDBX_txn* rw = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &rw);
+   REQUIRE(mdbx_txn_reset(rw) == MDBX_BAD_TXN);
+   REQUIRE(mdbx_txn_renew(rw) == MDBX_BAD_TXN);
+   mdbx_txn_abort(rw);
+
+   mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: txn_renew sees new writes", "[mdbx][c-api][reset]")
+{
+   auto dir = make_temp_dir("c_renew_sees");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   // Create DBI
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+      MDBX_val k{const_cast<char*>("key"), 3};
+      MDBX_val v{const_cast<char*>("v1"), 2};
+      mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      mdbx_txn_commit(txn);
+   }
+
+   // Start RO txn, read v1
+   MDBX_txn* ro = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(ro, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   {
+      MDBX_val k{const_cast<char*>("key"), 3};
+      MDBX_val v{};
+      REQUIRE(mdbx_get(ro, dbi, &k, &v) == MDBX_SUCCESS);
+      REQUIRE(std::string(static_cast<char*>(v.iov_base), v.iov_len) == "v1");
+   }
+
+   mdbx_txn_reset(ro);
+
+   // Write v2 while RO is reset
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      MDBX_val k{const_cast<char*>("key"), 3};
+      MDBX_val v{const_cast<char*>("v2"), 2};
+      mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      mdbx_txn_commit(txn);
+   }
+
+   // Renew and verify we see v2
+   mdbx_txn_renew(ro);
+   {
+      MDBX_val k{const_cast<char*>("key"), 3};
+      MDBX_val v{};
+      REQUIRE(mdbx_get(ro, dbi, &k, &v) == MDBX_SUCCESS);
+      REQUIRE(std::string(static_cast<char*>(v.iov_base), v.iov_len) == "v2");
+   }
+
+   mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Cursor SET / SET_RANGE tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: cursor SET exact match", "[mdbx][c-api][cursor]")
+{
+   auto dir = make_temp_dir("c_cursor_set");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   const char* keys[] = {"aaa", "bbb", "ccc", "ddd", "eee"};
+   for (auto* k : keys)
+   {
+      MDBX_val key{const_cast<char*>(k), strlen(k)};
+      MDBX_val val{const_cast<char*>("x"), 1};
+      mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT);
+   }
+   mdbx_txn_commit(txn);
+
+   MDBX_txn* ro = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+   MDBX_cursor* cur = nullptr;
+   mdbx_cursor_open(ro, dbi, &cur);
+
+   // SET: exact match
+   {
+      MDBX_val k{const_cast<char*>("ccc"), 3};
+      MDBX_val v{};
+      REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_SET) == MDBX_SUCCESS);
+      REQUIRE(std::string(static_cast<char*>(k.iov_base), k.iov_len) == "ccc");
+   }
+
+   // SET: key not found
+   {
+      MDBX_val k{const_cast<char*>("abc"), 3};
+      MDBX_val v{};
+      REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_SET) == MDBX_NOTFOUND);
+   }
+
+   // SET_RANGE: exact match
+   {
+      MDBX_val k{const_cast<char*>("bbb"), 3};
+      MDBX_val v{};
+      REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_SET_RANGE) == MDBX_SUCCESS);
+      REQUIRE(std::string(static_cast<char*>(k.iov_base), k.iov_len) == "bbb");
+   }
+
+   // SET_RANGE: lands on next key
+   {
+      MDBX_val k{const_cast<char*>("bbc"), 3};
+      MDBX_val v{};
+      REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_SET_RANGE) == MDBX_SUCCESS);
+      REQUIRE(std::string(static_cast<char*>(k.iov_base), k.iov_len) == "ccc");
+   }
+
+   // SET_RANGE: past last key
+   {
+      MDBX_val k{const_cast<char*>("zzz"), 3};
+      MDBX_val v{};
+      REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_SET_RANGE) == MDBX_NOTFOUND);
+   }
+
+   mdbx_cursor_close(cur);
+   mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: cursor reverse iteration", "[mdbx][c-api][cursor]")
+{
+   auto dir = make_temp_dir("c_cursor_rev");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   for (int i = 0; i < 20; i++)
+   {
+      auto key = "k" + std::to_string(1000 + i);
+      MDBX_val k{key.data(), key.size()};
+      MDBX_val v{key.data(), key.size()};
+      mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+   }
+   mdbx_txn_commit(txn);
+
+   MDBX_txn* ro = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+   MDBX_cursor* cur = nullptr;
+   mdbx_cursor_open(ro, dbi, &cur);
+
+   // LAST
+   MDBX_val k, v;
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_LAST) == MDBX_SUCCESS);
+   REQUIRE(std::string(static_cast<char*>(k.iov_base), k.iov_len) == "k1019");
+
+   // PREV all the way back
+   int count = 1;
+   std::string prev_key(static_cast<char*>(k.iov_base), k.iov_len);
+   while (mdbx_cursor_get(cur, &k, &v, MDBX_PREV) == MDBX_SUCCESS)
+   {
+      std::string cur_key(static_cast<char*>(k.iov_base), k.iov_len);
+      REQUIRE(cur_key < prev_key);
+      prev_key = cur_key;
+      count++;
+   }
+   REQUIRE(count == 20);
+
+   mdbx_cursor_close(cur);
+   mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// mdbx_replace tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: mdbx_replace get-and-set", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_replace");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   // Insert initial value
+   MDBX_val k{const_cast<char*>("key"), 3};
+   MDBX_val v{const_cast<char*>("old_value"), 9};
+   mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+
+   // Replace: get old, put new
+   MDBX_val new_val{const_cast<char*>("new_value"), 9};
+   MDBX_val old_val{};
+   REQUIRE(mdbx_replace(txn, dbi, &k, &new_val, &old_val, MDBX_UPSERT) == MDBX_SUCCESS);
+   REQUIRE(std::string(static_cast<char*>(old_val.iov_base), old_val.iov_len) == "old_value");
+
+   // Verify new value
+   MDBX_val got{};
+   REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+   REQUIRE(std::string(static_cast<char*>(got.iov_base), got.iov_len) == "new_value");
+
+   // Replace on missing key: old_data should be empty
+   MDBX_val k2{const_cast<char*>("missing"), 7};
+   MDBX_val new2{const_cast<char*>("val"), 3};
+   MDBX_val old2{};
+   int rc = mdbx_replace(txn, dbi, &k2, &new2, &old2, MDBX_UPSERT);
+   REQUIRE(rc == MDBX_SUCCESS);
+
+   mdbx_txn_commit(txn);
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Large value tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: large values", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_large");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   // Test various value sizes: 1B, 100B, 1KB, 10KB, 100KB, 1MB
+   std::vector<size_t> sizes = {1, 100, 1024, 10240, 102400, 1048576};
+
+   for (size_t sz : sizes)
+   {
+      auto key = "size_" + std::to_string(sz);
+      std::string val(sz, 'A' + (sz % 26));
+
+      MDBX_val k{key.data(), key.size()};
+      MDBX_val v{val.data(), val.size()};
+      REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+   }
+   mdbx_txn_commit(txn);
+
+   // Read back and verify
+   MDBX_txn* ro = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+
+   for (size_t sz : sizes)
+   {
+      auto key = "size_" + std::to_string(sz);
+      MDBX_val k{key.data(), key.size()};
+      MDBX_val v{};
+      REQUIRE(mdbx_get(ro, dbi, &k, &v) == MDBX_SUCCESS);
+      REQUIRE(v.iov_len == sz);
+      // Verify first and last bytes
+      REQUIRE(static_cast<char*>(v.iov_base)[0] == (char)('A' + (sz % 26)));
+      REQUIRE(static_cast<char*>(v.iov_base)[sz - 1] == (char)('A' + (sz % 26)));
+   }
+
+   mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: empty value", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_empty_kv");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   // Empty value (zero-length)
+   {
+      MDBX_val k{const_cast<char*>("key_empty_val"), 13};
+      MDBX_val v{nullptr, 0};
+      REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      MDBX_val got{};
+      REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+      REQUIRE(got.iov_len == 0);
+   }
+
+   mdbx_txn_commit(txn);
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Read mode tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: read modes return correct data", "[mdbx][c-api][read-mode]")
+{
+   auto dir = make_temp_dir("c_readmode");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   // Populate data
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+      for (int i = 0; i < 50; i++)
+      {
+         auto key = "rk_" + std::to_string(i);
+         auto val = "rv_" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Test all three read modes
+   int modes[] = {PSITRI_READ_MODE_BUFFERED, PSITRI_READ_MODE_LATEST, PSITRI_READ_MODE_PERSISTENT};
+   const char* mode_names[] = {"buffered", "latest", "persistent"};
+
+   for (int mi = 0; mi < 3; mi++)
+   {
+      SECTION(mode_names[mi])
+      {
+         REQUIRE(mdbx_env_set_read_mode(env, modes[mi]) == MDBX_SUCCESS);
+
+         MDBX_txn* ro = nullptr;
+         mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+         MDBX_dbi dbi = 0;
+         mdbx_dbi_open(ro, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+         // Read 10 keys spread across the range
+         for (int i = 0; i < 50; i += 5)
+         {
+            auto key = "rk_" + std::to_string(i);
+            auto expected = "rv_" + std::to_string(i);
+            MDBX_val k{key.data(), key.size()};
+            MDBX_val v{};
+            int rc = mdbx_get(ro, dbi, &k, &v);
+            // buffered/persistent modes may not see data not yet swapped/merged
+            if (modes[mi] != PSITRI_READ_MODE_LATEST && rc == MDBX_NOTFOUND)
+               continue;
+            REQUIRE(rc == MDBX_SUCCESS);
+            REQUIRE(std::string(static_cast<char*>(v.iov_base), v.iov_len) == expected);
+         }
+
+         // Missing key should return NOTFOUND in all modes
+         {
+            auto key = std::string("nonexistent");
+            MDBX_val k{key.data(), key.size()};
+            MDBX_val v{};
+            REQUIRE(mdbx_get(ro, dbi, &k, &v) == MDBX_NOTFOUND);
+         }
+
+         mdbx_txn_abort(ro);
+      }
+   }
+
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: invalid read mode rejected", "[mdbx][c-api][read-mode]")
+{
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   REQUIRE(mdbx_env_set_read_mode(env, -1) == MDBX_EINVAL);
+   REQUIRE(mdbx_env_set_read_mode(env, 3) == MDBX_EINVAL);
+   REQUIRE(mdbx_env_set_read_mode(env, 0) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_read_mode(env, 1) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_read_mode(env, 2) == MDBX_SUCCESS);
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Concurrent reader + writer tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: concurrent reader and writer", "[mdbx][c-api][concurrent]")
+{
+   auto dir = make_temp_dir("c_concurrent");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   // Create DBI and seed data
+   MDBX_dbi dbi = 0;
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+      for (int i = 0; i < 100; i++)
+      {
+         auto key = "ck_" + std::to_string(i);
+         std::string val = "cv_0";
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   std::atomic<bool> stop{false};
+   std::atomic<int> read_count{0};
+   std::atomic<int> read_errors{0};
+
+   // Reader thread: reset/renew loop doing point reads
+   std::thread reader([&]()
+   {
+      MDBX_txn* ro = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+      mdbx_txn_reset(ro);
+
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         mdbx_txn_renew(ro);
+
+         auto key = "ck_" + std::to_string(read_count.load() % 100);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{};
+         int rc = mdbx_get(ro, dbi, &k, &v);
+         if (rc == MDBX_SUCCESS)
+            read_count.fetch_add(1, std::memory_order_relaxed);
+         else
+            read_errors.fetch_add(1, std::memory_order_relaxed);
+
+         mdbx_txn_reset(ro);
+      }
+      mdbx_txn_abort(ro);
+   });
+
+   // Writer: update values
+   for (int round = 1; round <= 20; round++)
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      for (int i = 0; i < 100; i++)
+      {
+         auto key = "ck_" + std::to_string(i);
+         auto val = "cv_" + std::to_string(round);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   stop.store(true, std::memory_order_relaxed);
+   reader.join();
+
+   REQUIRE(read_count.load() > 0);
+   REQUIRE(read_errors.load() == 0);
+
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multiple named DBIs tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: many named DBIs", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_many_dbis");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 32);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   const int NUM_DBIS = 10;
+   MDBX_dbi dbis[NUM_DBIS];
+
+   // Create and populate all DBIs in one transaction
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+
+      for (int d = 0; d < NUM_DBIS; d++)
+      {
+         auto name = "db_" + std::to_string(d);
+         REQUIRE(mdbx_dbi_open(txn, name.c_str(), MDBX_CREATE, &dbis[d]) == MDBX_SUCCESS);
+
+         for (int i = 0; i < 10; i++)
+         {
+            auto key = "k" + std::to_string(d) + "_" + std::to_string(i);
+            auto val = "v" + std::to_string(d) + "_" + std::to_string(i);
+            MDBX_val k{key.data(), key.size()};
+            MDBX_val v{val.data(), val.size()};
+            mdbx_put(txn, dbis[d], &k, &v, MDBX_UPSERT);
+         }
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Verify each DBI has exactly 10 entries and correct data
+   {
+      MDBX_txn* ro = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+
+      for (int d = 0; d < NUM_DBIS; d++)
+      {
+         MDBX_stat stat{};
+         REQUIRE(mdbx_dbi_stat(ro, dbis[d], &stat, sizeof(stat)) == MDBX_SUCCESS);
+         REQUIRE(stat.ms_entries == 10);
+
+         // Check a specific key
+         auto key = "k" + std::to_string(d) + "_5";
+         auto expected = "v" + std::to_string(d) + "_5";
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{};
+         REQUIRE(mdbx_get(ro, dbis[d], &k, &v) == MDBX_SUCCESS);
+         REQUIRE(std::string(static_cast<char*>(v.iov_base), v.iov_len) == expected);
+
+         // Key from another DBI shouldn't exist
+         auto wrong_key = "k" + std::to_string((d + 1) % NUM_DBIS) + "_5";
+         MDBX_val wk{wrong_key.data(), wrong_key.size()};
+         MDBX_val wv{};
+         REQUIRE(mdbx_get(ro, dbis[d], &wk, &wv) == MDBX_NOTFOUND);
+      }
+
+      mdbx_txn_abort(ro);
+   }
+
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Overwrite / update tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: overwrite with different sizes", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_overwrite");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   MDBX_val k{const_cast<char*>("key"), 3};
+
+   // Write v1
+   MDBX_val v1{const_cast<char*>("short"), 5};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v1, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   // Overwrite with longer value
+   std::string long_val(500, 'X');
+   MDBX_val v2{long_val.data(), long_val.size()};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v2, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   // Read back
+   MDBX_val got{};
+   REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+   REQUIRE(got.iov_len == 500);
+   REQUIRE(static_cast<char*>(got.iov_base)[0] == 'X');
+
+   // Overwrite with shorter value
+   MDBX_val v3{const_cast<char*>("y"), 1};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v3, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   got = {};
+   REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+   REQUIRE(got.iov_len == 1);
+   REQUIRE(static_cast<char*>(got.iov_base)[0] == 'y');
+
+   mdbx_txn_commit(txn);
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// userctx tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: env userctx", "[mdbx][c-api]")
+{
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+
+   REQUIRE(mdbx_env_get_userctx(env) == nullptr);
+
+   int data = 42;
+   REQUIRE(mdbx_env_set_userctx(env, &data) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_get_userctx(env) == &data);
+
+   REQUIRE(mdbx_env_set_userctx(env, nullptr) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_get_userctx(env) == nullptr);
+
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Bulk insert + cursor scan consistency
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: bulk insert and full scan", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_bulk");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   const int N = 5000;
+
+   // Bulk insert
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+      for (int i = 0; i < N; i++)
+      {
+         char key[16];
+         snprintf(key, sizeof(key), "key_%08d", i);
+         auto val = "value_" + std::to_string(i);
+         MDBX_val k{key, strlen(key)};
+         MDBX_val v{val.data(), val.size()};
+         REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Stat should report N entries
+   {
+      MDBX_txn* ro = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(ro, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+      MDBX_stat stat{};
+      mdbx_dbi_stat(ro, dbi, &stat, sizeof(stat));
+      REQUIRE(stat.ms_entries == N);
+
+      // Full scan in sorted order
+      MDBX_cursor* cur = nullptr;
+      mdbx_cursor_open(ro, dbi, &cur);
+
+      MDBX_val k, v;
+      int count = 0;
+      std::string prev;
+      int rc = mdbx_cursor_get(cur, &k, &v, MDBX_FIRST);
+      while (rc == MDBX_SUCCESS)
+      {
+         std::string key(static_cast<char*>(k.iov_base), k.iov_len);
+         REQUIRE(key > prev);
+         prev = key;
+         count++;
+         rc = mdbx_cursor_get(cur, &k, &v, MDBX_NEXT);
+      }
+      REQUIRE(count == N);
+
+      mdbx_cursor_close(cur);
+      mdbx_txn_abort(ro);
+   }
+
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Delete + re-insert consistency
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: delete and re-insert", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_del_reinsert");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_dbi dbi = 0;
+
+   // Insert 100 keys
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+      for (int i = 0; i < 100; i++)
+      {
+         auto key = "dk_" + std::to_string(i);
+         auto val = "dv_" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Delete even keys
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      for (int i = 0; i < 100; i += 2)
+      {
+         auto key = "dk_" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         REQUIRE(mdbx_del(txn, dbi, &k, nullptr) == MDBX_SUCCESS);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Verify only odd keys remain
+   {
+      MDBX_txn* ro = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+
+      MDBX_stat stat{};
+      mdbx_dbi_stat(ro, dbi, &stat, sizeof(stat));
+      REQUIRE(stat.ms_entries == 50);
+
+      for (int i = 0; i < 100; i++)
+      {
+         auto key = "dk_" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{};
+         int rc = mdbx_get(ro, dbi, &k, &v);
+         if (i % 2 == 0)
+            REQUIRE(rc == MDBX_NOTFOUND);
+         else
+            REQUIRE(rc == MDBX_SUCCESS);
+      }
+      mdbx_txn_abort(ro);
+   }
+
+   // Re-insert even keys with new values
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      for (int i = 0; i < 100; i += 2)
+      {
+         auto key = "dk_" + std::to_string(i);
+         auto val = "new_" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Verify all 100 keys present, even keys have new values
+   {
+      MDBX_txn* ro = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+
+      MDBX_stat stat{};
+      mdbx_dbi_stat(ro, dbi, &stat, sizeof(stat));
+      REQUIRE(stat.ms_entries == 100);
+
+      for (int i = 0; i < 100; i++)
+      {
+         auto key = "dk_" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{};
+         REQUIRE(mdbx_get(ro, dbi, &k, &v) == MDBX_SUCCESS);
+
+         std::string val(static_cast<char*>(v.iov_base), v.iov_len);
+         if (i % 2 == 0)
+            REQUIRE(val == "new_" + std::to_string(i));
+         else
+            REQUIRE(val == "dv_" + std::to_string(i));
+      }
+      mdbx_txn_abort(ro);
+   }
+
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// cursor_on_first / cursor_on_last tests
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: cursor_on_first and cursor_on_last", "[mdbx][c-api][cursor]")
+{
+   auto dir = make_temp_dir("c_on_first_last");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   const char* keys[] = {"aaa", "bbb", "ccc"};
+   for (auto* k : keys)
+   {
+      MDBX_val key{const_cast<char*>(k), strlen(k)};
+      MDBX_val val{const_cast<char*>("v"), 1};
+      mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT);
+   }
+   mdbx_txn_commit(txn);
+
+   MDBX_txn* ro = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+   MDBX_cursor* cur = nullptr;
+   mdbx_cursor_open(ro, dbi, &cur);
+
+   MDBX_val k, v;
+
+   // Position at first
+   mdbx_cursor_get(cur, &k, &v, MDBX_FIRST);
+   REQUIRE(mdbx_cursor_on_first(cur) == MDBX_RESULT_TRUE);
+   REQUIRE(mdbx_cursor_on_last(cur) == MDBX_RESULT_FALSE);
+
+   // Move to middle
+   mdbx_cursor_get(cur, &k, &v, MDBX_NEXT);
+   REQUIRE(mdbx_cursor_on_first(cur) == MDBX_RESULT_FALSE);
+   REQUIRE(mdbx_cursor_on_last(cur) == MDBX_RESULT_FALSE);
+
+   // Move to last
+   mdbx_cursor_get(cur, &k, &v, MDBX_LAST);
+   REQUIRE(mdbx_cursor_on_first(cur) == MDBX_RESULT_FALSE);
+   REQUIRE(mdbx_cursor_on_last(cur) == MDBX_RESULT_TRUE);
+
+   mdbx_cursor_close(cur);
+   mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Sequential write transactions accumulate correctly
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: sequential write transactions", "[mdbx][c-api]")
+{
+   auto dir = make_temp_dir("c_seq_txn");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_dbi dbi = 0;
+
+   // 10 sequential write transactions
+   for (int t = 0; t < 10; t++)
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      if (t == 0)
+         mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+      for (int i = 0; i < 10; i++)
+      {
+         auto key = "t" + std::to_string(t) + "_k" + std::to_string(i);
+         std::string val = "val";
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   // Should have 100 entries total
+   MDBX_txn* ro = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+   MDBX_stat stat{};
+   mdbx_dbi_stat(ro, dbi, &stat, sizeof(stat));
+   REQUIRE(stat.ms_entries == 100);
+   mdbx_txn_abort(ro);
+
+   mdbx_env_close(env);
 }
