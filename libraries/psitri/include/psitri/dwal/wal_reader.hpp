@@ -25,6 +25,17 @@ namespace psitri::dwal
    {
       uint64_t                     sequence = 0;
       std::vector<wal_operation>   ops;
+
+      /// Multi-root transaction fields (0 for single-root entries).
+      uint8_t  entry_flags             = 0;
+      uint64_t multi_tx_id             = 0;
+      uint16_t multi_participant_count = 0;
+
+      bool is_multi_tx() const noexcept { return multi_tx_id != 0; }
+      bool is_multi_tx_commit() const noexcept
+      {
+         return (entry_flags & wal_entry_flag_multi_tx_commit) != 0;
+      }
    };
 
    /// Read-only WAL file reader for crash recovery.

@@ -155,7 +155,7 @@ TEST_CASE("full_verify recovery with diverse node types", "[recovery][full_verif
    std::map<std::string, std::string> oracle;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -163,7 +163,7 @@ TEST_CASE("full_verify recovery with diverse node types", "[recovery][full_verif
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::full_verify);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
    }
@@ -184,7 +184,7 @@ TEST_CASE("power_loss recovery with diverse node types", "[recovery][power_loss]
    std::map<std::string, std::string> oracle;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -192,7 +192,7 @@ TEST_CASE("power_loss recovery with diverse node types", "[recovery][power_loss]
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
    }
@@ -213,7 +213,7 @@ TEST_CASE("full_verify with multiple diverse roots", "[recovery][full_verify]")
    std::map<std::string, std::string> oracle0, oracle1, oracle2;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
 
       // Root 0: prefix-heavy data
@@ -269,7 +269,7 @@ TEST_CASE("full_verify with multiple diverse roots", "[recovery][full_verify]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::full_verify);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle0);
       verify_oracle(ses, 1, oracle1);
@@ -294,7 +294,7 @@ TEST_CASE("full_verify after insert-remove-reinsert cycles", "[recovery][full_ve
    std::map<std::string, std::string> oracle;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
 
       // Phase 1: Insert 1000 keys with large values
@@ -347,7 +347,7 @@ TEST_CASE("full_verify after insert-remove-reinsert cycles", "[recovery][full_ve
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::full_verify);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
    }
@@ -368,7 +368,7 @@ TEST_CASE("power_loss after insert-remove-reinsert cycles", "[recovery][power_lo
    std::map<std::string, std::string> oracle;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
 
       {
@@ -406,7 +406,7 @@ TEST_CASE("power_loss after insert-remove-reinsert cycles", "[recovery][power_lo
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
    }
@@ -427,7 +427,7 @@ TEST_CASE("writes succeed after full_verify recovery", "[recovery][full_verify]"
    std::map<std::string, std::string> oracle;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -436,7 +436,7 @@ TEST_CASE("writes succeed after full_verify recovery", "[recovery][full_verify]"
 
    // Recover, then continue writing
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::full_verify);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       auto ses = db->start_write_session();
 
       // Verify existing data
@@ -467,7 +467,7 @@ TEST_CASE("writes succeed after full_verify recovery", "[recovery][full_verify]"
 
    // Reopen cleanly and verify persistence
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
    }
@@ -489,7 +489,7 @@ TEST_CASE("recovery handles corrupted segment data", "[recovery][corruption]")
    // Build a sizeable database with synced config
    std::map<std::string, std::string> oracle;
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -537,7 +537,7 @@ TEST_CASE("recovery handles corrupted segment data", "[recovery][corruption]")
    bool recovered = false;
    try
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
 
@@ -587,7 +587,7 @@ TEST_CASE("power_loss recovery with corrupted roots file", "[recovery][corruptio
 
    std::map<std::string, std::string> oracle;
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -612,7 +612,7 @@ TEST_CASE("power_loss recovery with corrupted roots file", "[recovery][corruptio
    bool recovered = false;
    try
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
 
@@ -658,7 +658,7 @@ TEST_CASE("power_loss recovery with truncated segment file", "[recovery][corrupt
 
    std::map<std::string, std::string> oracle;
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -687,7 +687,7 @@ TEST_CASE("power_loss recovery with truncated segment file", "[recovery][corrupt
    bool recovered = false;
    try
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
 
@@ -729,7 +729,7 @@ TEST_CASE("full_verify clears stale flag and recovers data", "[recovery][full_ve
    std::map<std::string, std::string> oracle;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -744,7 +744,7 @@ TEST_CASE("full_verify clears stale flag and recovers data", "[recovery][full_ve
    }
 
    {
-      auto db = std::make_shared<database>(dir, synced_config(), recovery_mode::full_verify);
+      auto db = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       // full_verify should clear the stale flag
       REQUIRE_FALSE(db->ref_counts_stale());
 
@@ -768,7 +768,7 @@ TEST_CASE("sequential full_verify then power_loss recovery", "[recovery][full_ve
    std::map<std::string, std::string> oracle;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       oracle   = populate_diverse_db(ses, 0);
    }
@@ -776,7 +776,7 @@ TEST_CASE("sequential full_verify then power_loss recovery", "[recovery][full_ve
    // First: full_verify
    corrupt_shutdown_flag(dir);
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::full_verify);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
    }
@@ -784,7 +784,7 @@ TEST_CASE("sequential full_verify then power_loss recovery", "[recovery][full_ve
    // Second: power_loss
    corrupt_shutdown_flag(dir);
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
    }

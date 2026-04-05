@@ -25,7 +25,7 @@ namespace
       {
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir + "/data");
-         db  = std::make_shared<database>(dir, runtime_config());
+         db  = database::open(dir);
          ses = db->start_write_session();
       }
       ~test_db() { std::filesystem::remove_all(dir); }
@@ -103,7 +103,7 @@ TEST_CASE("database::set_runtime_config updates config", "[database][config]")
 
    {
       runtime_config cfg;
-      auto db = std::make_shared<database>(dir, cfg);
+      auto db = database::open(dir, open_mode::create_or_open, cfg);
 
       // Write some data
       auto ses = db->start_write_session();
@@ -146,7 +146,7 @@ TEST_CASE("database constructor rejects corrupted magic number", "[database][err
 
    // Create a valid database first
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
    }
 
    // Corrupt the magic number in dbfile.bin
@@ -157,7 +157,7 @@ TEST_CASE("database constructor rejects corrupted magic number", "[database][err
       dbfile.sync(sal::sync_type::full);
    }
 
-   REQUIRE_THROWS_AS(std::make_shared<database>(dir, runtime_config()), std::runtime_error);
+   REQUIRE_THROWS_AS(database::open(dir, open_mode::open_existing), std::runtime_error);
 
    std::filesystem::remove_all(dir);
 }
@@ -170,7 +170,7 @@ TEST_CASE("database constructor rejects wrong file size", "[database][error]")
 
    // Create a valid database first
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
    }
 
    // Truncate dbfile.bin to a wrong size (but non-zero so it doesn't get re-initialized)
@@ -190,7 +190,7 @@ TEST_CASE("database constructor rejects wrong file size", "[database][error]")
       }
    }
 
-   REQUIRE_THROWS_AS(std::make_shared<database>(dir, runtime_config()), std::runtime_error);
+   REQUIRE_THROWS_AS(database::open(dir, open_mode::open_existing), std::runtime_error);
 
    std::filesystem::remove_all(dir);
 }
@@ -324,7 +324,7 @@ TEST_CASE("range_remove on shared root (snapshot + modify)", "[range_remove][sha
    std::filesystem::remove_all(dir);
    std::filesystem::create_directories(dir + "/data");
 
-   auto db  = std::make_shared<database>(dir, runtime_config());
+   auto db  = database::open(dir);
    auto ses = db->start_write_session();
 
    // Commit a tree with multiple prefix groups
@@ -441,7 +441,7 @@ TEST_CASE("wait_for_compactor returns true on idle database", "[database][compac
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 50; ++i)
@@ -486,7 +486,7 @@ TEST_CASE("database::recover rebuilds from segments", "[database][recover]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 200; ++i)
@@ -514,7 +514,7 @@ TEST_CASE("database::reset_reference_counts on live database", "[database][recov
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 200; ++i)

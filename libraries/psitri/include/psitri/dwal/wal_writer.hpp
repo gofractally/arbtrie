@@ -54,6 +54,11 @@ namespace psitri::dwal
       /// Returns the sequence number assigned to this entry.
       uint64_t commit_entry();
 
+      /// Finalize as part of a multi-root transaction.
+      /// Tags the entry with a shared tx_id and participant count.
+      /// If is_commit is true, sets the multi_tx_commit flag (last participant).
+      uint64_t commit_entry_multi(uint64_t tx_id, uint16_t participants, bool is_commit);
+
       /// Discard the current in-progress entry (transaction abort).
       void discard_entry();
 
@@ -73,6 +78,9 @@ namespace psitri::dwal
       bool entry_in_progress() const noexcept { return _entry_active; }
 
      private:
+      uint64_t finalize_entry(uint8_t entry_flags, uint64_t multi_tx_id,
+                              uint16_t multi_participant_count);
+
       void write_bytes(const void* data, size_t len);
       void write_u8(uint8_t v);
       void write_u16(uint16_t v);

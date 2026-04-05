@@ -5,6 +5,7 @@
 #include <psitri/dwal/epoch_lock.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/merge_pool.hpp>
+#include <psitri/dwal/transaction.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -62,10 +63,21 @@ namespace psitri::dwal
 
       // ── Transactions ──────────────────────────────────────────────
 
-      /// Start a buffered write transaction on a root.
+      /// Start a buffered write transaction on a root (legacy single-root API).
       /// Acquires the per-root exclusive lock.
       dwal_transaction start_write_transaction(uint32_t         root_index,
                                                transaction_mode mode = transaction_mode::buffered);
+
+      /// Start a multi-root transaction. Write roots get exclusive locks;
+      /// read roots get shared locks. Locks acquired in sorted index order.
+      transaction start_transaction(std::initializer_list<uint32_t> write_roots,
+                                    std::initializer_list<uint32_t> read_roots = {});
+
+      /// Convenience: single write root transaction.
+      transaction start_transaction(uint32_t root_index);
+
+      /// Generate a monotonically increasing multi-transaction ID.
+      uint64_t next_multi_tx_id() noexcept;
 
       // ── Read Access ───────────────────────────────────────────────
 
@@ -122,6 +134,12 @@ namespace psitri::dwal
       /// Check if a swap should be triggered for a root after a commit.
       bool should_swap(uint32_t root_index) const;
 
+      /// Lazily initialize a root's DWAL state (public for transaction).
+      dwal_root& ensure_root_public(uint32_t index) { return ensure_root(index); }
+
+      /// Ensure WAL directory and files exist for a root (public for transaction).
+      void ensure_wal_public(uint32_t root_index) { ensure_wal(root_index); }
+
       /// Tri-layer point lookup — reads directly from the PsiTri COW tree.
       /// Used by dwal_transaction::get() as the final fallback layer.
       /// Thread-safe: uses a thread-local read session internally.
@@ -138,6 +156,8 @@ namespace psitri::dwal
       void replay_wal_to_tri(uint32_t root_index, const std::filesystem::path& wal_path);
 
       /// Replay a single WAL file's entries into a root's RW btree layer.
+      /// @deprecated Superseded by inline replay in recover() which handles multi-tx filtering.
+      ///             Kept temporarily for existing tests. Remove when tests are migrated.
       void replay_wal_to_rw(uint32_t root_index, const std::filesystem::path& wal_path);
 
       /// Ensure WAL directory and files exist for a root.
@@ -154,6 +174,9 @@ namespace psitri::dwal
 
       /// Lazily initialize a root's DWAL state.
       dwal_root& ensure_root(uint32_t index);
+
+      /// Monotonically increasing counter for multi-root transaction IDs.
+      std::atomic<uint64_t> _next_multi_tx_id{1};
 
       /// Epoch registry for RO pool reclamation.
       epoch_registry _epochs;

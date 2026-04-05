@@ -10,7 +10,7 @@ int main()
 {
    auto dir = std::filesystem::temp_directory_path() / "psitri_ranges";
    std::filesystem::remove_all(dir);
-   auto db = psitri::database::create(dir);
+   auto db = psitri::database::open(dir);
    auto ws = db->start_write_session();
 
    // Insert 10,000 keys: "key/00000" .. "key/09999"

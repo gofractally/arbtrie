@@ -118,7 +118,8 @@ namespace psitri::dwal
 
    bool wal_reader::decode_entry(const std::vector<char>& buf, wal_entry& entry)
    {
-      if (buf.size() < wal_entry_header_size + wal_entry_hash_size)
+      // Accept both v1 (14-byte) and v2 (25-byte) headers.
+      if (buf.size() < wal_entry_header_size_v1 + wal_entry_hash_size)
          return false;
 
       const char* p = buf.data();
@@ -129,10 +130,27 @@ namespace psitri::dwal
       uint16_t op_count = 0;
       std::memcpy(&op_count, p + 12, 2);
 
+      // Parse v2 multi-tx fields if present, otherwise zero them.
+      size_t header_size;
+      if (buf.size() >= wal_entry_header_size + wal_entry_hash_size)
+      {
+         header_size = wal_entry_header_size;
+         std::memcpy(&entry.entry_flags, p + 14, 1);
+         std::memcpy(&entry.multi_tx_id, p + 15, 8);
+         std::memcpy(&entry.multi_participant_count, p + 23, 2);
+      }
+      else
+      {
+         header_size = wal_entry_header_size_v1;
+         entry.entry_flags             = 0;
+         entry.multi_tx_id             = 0;
+         entry.multi_participant_count = 0;
+      }
+
       entry.ops.clear();
       entry.ops.reserve(op_count);
 
-      const char* cur = p + wal_entry_header_size;
+      const char* cur = p + header_size;
       const char* end = p + buf.size() - wal_entry_hash_size;
 
       for (uint16_t i = 0; i < op_count; ++i)

@@ -6,7 +6,7 @@
 TEST_CASE("create_db", "[psitri][database]")
 {
    using namespace psitri;
-   auto db  = database::create("testdb", runtime_config());
+   auto db  = database::open("testdb");
    auto ses = db->start_write_session();
 
    // this will create a transient tree given it wasn't constructed
@@ -24,7 +24,7 @@ TEST_CASE("create_db", "[psitri][database]")
 TEST_CASE("multi_thread_subtree", "[psitri][database]")
 {
    using namespace psitri;
-   database_ptr db = database::create("testdb", runtime_config());
+   database_ptr db = database::open("testdb");
    // thread master
    write_cursor_ptr            cur = db->create_write_cursor(db.get_root(0));
    sal::shared_smart_ptr<node> b2  = cur->get_subtree("b2");

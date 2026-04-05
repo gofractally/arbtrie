@@ -14,6 +14,13 @@ namespace psitri::dwal
 {
    class dwal_database;
 
+   /// Mode for a root within a transaction.
+   enum class root_mode : uint8_t
+   {
+      read_write,  // Full access: RW btree mutations, undo log, WAL recording
+      read_only,   // Reads only: 3-layer lookup, no undo/WAL, no mutations
+   };
+
    /// A buffered write transaction on a single DWAL root.
    ///
    /// Single writer per root — no lock held. Mutations go to the RW btree +
@@ -29,7 +36,8 @@ namespace psitri::dwal
                        wal_writer*    wal,
                        uint32_t       root_index,
                        dwal_database* db     = nullptr,
-                       bool           nested = false);
+                       bool           nested = false,
+                       root_mode      mode   = root_mode::read_write);
 
       ~dwal_transaction();
 
@@ -84,6 +92,11 @@ namespace psitri::dwal
       /// Commit: write WAL entry, release undo log old subtrees, discard undo.
       void commit();
 
+      /// Commit as part of a multi-root transaction. Tags the WAL entry with
+      /// the shared tx_id and participant count. The last participant sets
+      /// is_commit = true, which writes the multi_tx_commit flag.
+      void commit_multi(uint64_t tx_id, uint16_t participants, bool is_commit);
+
       /// Abort: replay undo log, release new subtrees displaced during replay.
       void abort();
 
@@ -95,6 +108,7 @@ namespace psitri::dwal
 
       bool     is_committed() const noexcept { return _committed; }
       bool     is_aborted() const noexcept { return _aborted; }
+      bool     is_read_only() const noexcept { return _mode == root_mode::read_only; }
       uint32_t root_index() const noexcept { return _root_index; }
 
      private:
@@ -115,6 +129,7 @@ namespace psitri::dwal
       bool        _aborted    = false;
       bool        _nested     = false;
       bool        _owns_lock  = false;
+      root_mode   _mode       = root_mode::read_write;
 
       undo_log    _undo;
    };

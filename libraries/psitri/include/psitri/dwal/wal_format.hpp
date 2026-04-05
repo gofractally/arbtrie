@@ -30,16 +30,23 @@ namespace psitri::dwal
       upsert_subtree = 0x04,
    };
 
-   /// WAL entry layout (serialized field-by-field, 14-byte header):
+   /// WAL entry layout (serialized field-by-field, 25-byte header):
    ///   [0..4)   uint32  entry_size — total bytes including trailing hash
    ///   [4..12)  uint64  sequence   — monotonically increasing
    ///   [12..14) uint16  op_count   — number of operations
-   ///   [14..N-8)        operations[]
+   ///   [14..15) uint8   entry_flags — bit 0 = multi_tx_commit
+   ///   [15..23) uint64  multi_tx_id — 0 for single-root entries
+   ///   [23..25) uint16  multi_participant_count — 0 for single-root entries
+   ///   [25..N-8)        operations[]
    ///   [N-8..N) uint64  xxh3_64    — covers bytes [0, N-8)
-   static constexpr size_t wal_entry_header_size = 14;
-   static constexpr size_t wal_entry_hash_size   = 8;
+   static constexpr size_t wal_entry_header_size_v1 = 14;
+   static constexpr size_t wal_entry_header_size    = 25;
+   static constexpr size_t wal_entry_hash_size      = 8;
 
    /// Flag bit for clean close in wal_header::flags.
    static constexpr uint16_t wal_flag_clean_close = 0x0001;
+
+   /// Entry-level flags (in wal entry header, not file header).
+   static constexpr uint8_t wal_entry_flag_multi_tx_commit = 0x01;
 
 }  // namespace psitri::dwal

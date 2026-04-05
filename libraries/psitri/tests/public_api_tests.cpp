@@ -28,7 +28,7 @@ namespace
       {
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir + "/data");
-         db  = std::make_shared<database>(dir, runtime_config());
+         db  = database::open(dir);
          ses = db->start_write_session();
       }
 
@@ -372,7 +372,7 @@ TEST_CASE("database reopen preserves data", "[public-api][database]")
 
    // Write data and close
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       ses->set_sync(sal::sync_type::full);
       auto tx  = ses->start_transaction(0);
@@ -382,7 +382,7 @@ TEST_CASE("database reopen preserves data", "[public-api][database]")
 
    // Reopen and verify
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto root = ses->get_root(0);
       REQUIRE(root);

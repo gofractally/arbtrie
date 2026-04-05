@@ -13,6 +13,7 @@
 #include <psitri/dwal/undo_log.hpp>
 #include <psitri/dwal/epoch_lock.hpp>
 #include <psitri/dwal/merge_pool.hpp>
+#include <psitri/dwal/transaction.hpp>
 #include <psitri/dwal/wal_format.hpp>
 #include <psitri/dwal/wal_reader.hpp>
 #include <psitri/dwal/wal_writer.hpp>
@@ -4318,4 +4319,333 @@ TEST_CASE("dwal recover with multiple roots", "[dwal][recovery]")
    // Root 3 data in RW layer.
    auto r = dwal_db.get_latest(3, "r3_key");
    CHECK(r.found);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-root transaction tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root transaction: basic commit", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.root(0).upsert("users:42", "alice");
+      tx.root(1).upsert("orders:100", "order_data");
+      tx.commit();
+   }
+
+   // Both roots should have the data.
+   CHECK(dwal_db.root(0).rw_layer->map.get("users:42") != nullptr);
+   CHECK(dwal_db.root(0).rw_layer->map.get("users:42")->data == "alice");
+   CHECK(dwal_db.root(1).rw_layer->map.get("orders:100") != nullptr);
+   CHECK(dwal_db.root(1).rw_layer->map.get("orders:100")->data == "order_data");
+}
+
+TEST_CASE("multi-root transaction: abort rolls back all roots", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.root(0).upsert("k0", "v0");
+      tx.root(1).upsert("k1", "v1");
+      tx.abort();
+   }
+
+   // Neither root should have the data.
+   CHECK(dwal_db.root(0).rw_layer->map.get("k0") == nullptr);
+   CHECK(dwal_db.root(1).rw_layer->map.get("k1") == nullptr);
+}
+
+TEST_CASE("multi-root transaction: destructor aborts", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.root(0).upsert("k0", "v0");
+      tx.root(1).upsert("k1", "v1");
+      // destructor should abort
+   }
+
+   CHECK(dwal_db.root(0).rw_layer->map.get("k0") == nullptr);
+   CHECK(dwal_db.root(1).rw_layer->map.get("k1") == nullptr);
+}
+
+TEST_CASE("multi-root transaction: read-your-writes per root", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   auto tx = dwal_db.start_transaction({0, 1});
+   tx.root(0).upsert("key", "from_root_0");
+   tx.root(1).upsert("key", "from_root_1");
+
+   // Should see own writes through layered lookup.
+   auto r0 = tx.root(0).get("key");
+   CHECK(r0.found);
+   CHECK(r0.value.data == "from_root_0");
+
+   auto r1 = tx.root(1).get("key");
+   CHECK(r1.found);
+   CHECK(r1.value.data == "from_root_1");
+
+   tx.commit();
+}
+
+TEST_CASE("multi-root transaction: read-only root rejects mutations", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   // Seed root 2 with data.
+   {
+      auto tx = dwal_db.start_transaction({2});
+      tx.root(2).upsert("config", "value");
+      tx.commit();
+   }
+
+   // Start transaction with root 0 writable, root 2 read-only.
+   auto tx = dwal_db.start_transaction({0}, {2});
+
+   CHECK(tx.root(0).writable());
+   CHECK_FALSE(tx.root(2).writable());
+
+   // Read from read-only root should work.
+   auto r = tx.root(2).get("config");
+   CHECK(r.found);
+   CHECK(r.value.data == "value");
+
+   tx.root(0).upsert("new_key", "new_val");
+   tx.commit();
+}
+
+TEST_CASE("multi-root transaction: convenience methods", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.upsert(0, "k0", "v0");
+      tx.upsert(1, "k1", "v1");
+      tx.commit();
+   }
+
+   auto r0 = dwal_db.get_latest(0, "k0");
+   auto r1 = dwal_db.get_latest(1, "k1");
+   CHECK(r0.found);
+   CHECK(r1.found);
+}
+
+TEST_CASE("multi-root transaction: single write root is fast path", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_transaction(0);
+      tx.root(0).upsert("single", "root");
+      tx.commit();
+   }
+
+   CHECK(dwal_db.root(0).rw_layer->map.get("single")->data == "root");
+}
+
+TEST_CASE("multi-root transaction: write root in read set promoted to write", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   // If root 0 appears in both write and read sets, it should be writable.
+   {
+      auto tx = dwal_db.start_transaction({0}, {0, 1});
+      CHECK(tx.root(0).writable());
+      CHECK_FALSE(tx.root(1).writable());
+      tx.root(0).upsert("k", "v");
+      tx.commit();
+   }
+}
+
+TEST_CASE("multi-root transaction: sequential transactions on same roots", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.upsert(0, "k", "v1");
+      tx.upsert(1, "k", "v1");
+      tx.commit();
+   }
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.upsert(0, "k", "v2");
+      tx.upsert(1, "k", "v2");
+      tx.commit();
+   }
+
+   CHECK(dwal_db.root(0).rw_layer->map.get("k")->data == "v2");
+   CHECK(dwal_db.root(1).rw_layer->map.get("k")->data == "v2");
+}
+
+TEST_CASE("multi-root transaction: WAL multi-tx fields written correctly", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   {
+      auto tx = dwal_db.start_transaction({0, 1, 2});
+      tx.upsert(0, "a", "1");
+      tx.upsert(1, "b", "2");
+      tx.upsert(2, "c", "3");
+      tx.commit();
+   }
+
+   // Flush WALs to disk so we can read them.
+   dwal_db.flush_wal();
+
+   // Read each root's WAL and verify multi-tx fields.
+   uint64_t shared_tx_id = 0;
+   bool     commit_found = false;
+
+   for (uint32_t ri = 0; ri <= 2; ++ri)
+   {
+      auto wal_path =
+          td.path / "wal" / ("root-" + std::to_string(ri)) / "wal-rw.dwal";
+      psitri::dwal::wal_reader reader;
+      REQUIRE(reader.open(wal_path));
+
+      psitri::dwal::wal_entry entry;
+      REQUIRE(reader.next(entry));
+
+      CHECK(entry.is_multi_tx());
+      CHECK(entry.multi_participant_count == 3);
+
+      if (ri == 0)
+         shared_tx_id = entry.multi_tx_id;
+      else
+         CHECK(entry.multi_tx_id == shared_tx_id);
+
+      if (ri == 2)
+      {
+         CHECK(entry.is_multi_tx_commit());
+         commit_found = true;
+      }
+      else
+      {
+         CHECK_FALSE(entry.is_multi_tx_commit());
+      }
+   }
+
+   CHECK(commit_found);
+}
+
+TEST_CASE("multi-root transaction: recovery replays complete multi-tx", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+
+   // Phase 1: Write a multi-root transaction and flush to WAL.
+   {
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.upsert(0, "r0k", "r0v");
+      tx.upsert(1, "r1k", "r1v");
+      tx.commit();
+      dwal_db.flush_wal();
+
+      // Simulate crash: reset WAL writers without clean close.
+      dwal_db.root(0).wal.reset();
+      dwal_db.root(1).wal.reset();
+   }
+
+   // Phase 2: Reopen — recovery should replay both roots' entries.
+   {
+      psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+      auto r0 = dwal_db.get_latest(0, "r0k");
+      auto r1 = dwal_db.get_latest(1, "r1k");
+      CHECK(r0.found);
+      CHECK(r1.found);
+   }
+}
+
+TEST_CASE("multi-root transaction: recovery discards incomplete multi-tx", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   auto wal_path   = td.path / "wal";
+   auto root_dir_0 = wal_path / "root-0";
+   std::filesystem::create_directories(root_dir_0);
+
+   // Write a multi-tx entry to root 0's WAL with participant_count=2
+   // but no matching entry in root 1's WAL — simulating crash mid-commit.
+   {
+      psitri::dwal::wal_writer writer(root_dir_0 / "wal-rw.dwal", 0, 0);
+      writer.begin_entry();
+      writer.add_upsert_data("orphan_key", "orphan_val");
+      writer.commit_entry_multi(999, 2, false);  // tx_id=999, 2 participants, not commit
+      writer.flush();
+      // Don't close cleanly — simulate crash.
+   }
+
+   // Reopen — recovery should discard the incomplete multi-tx.
+   {
+      psitri::dwal::dwal_config dcfg;
+      dcfg.merge_threads = 0;
+      psitri::dwal::dwal_database dwal_db(db, wal_path, dcfg);
+
+      auto r = dwal_db.get_latest(0, "orphan_key");
+      CHECK_FALSE(r.found);
+   }
+}
+
+TEST_CASE("multi-root transaction: remove across roots", "[dwal][multi-root]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
+
+   // Seed data.
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.upsert(0, "k", "v");
+      tx.upsert(1, "k", "v");
+      tx.commit();
+   }
+
+   // Remove from both roots atomically.
+   {
+      auto tx = dwal_db.start_transaction({0, 1});
+      tx.remove(0, "k");
+      tx.remove(1, "k");
+      tx.commit();
+   }
+
+   // Verify removed (tombstoned).
+   auto r0 = dwal_db.get_latest(0, "k");
+   auto r1 = dwal_db.get_latest(1, "k");
+   CHECK_FALSE(r0.found);
+   CHECK_FALSE(r1.found);
 }

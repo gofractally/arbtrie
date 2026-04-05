@@ -55,6 +55,11 @@ namespace psitri::dwal
       /// Checked by writer on commit — if true, writer swaps RW→RO.
       std::atomic<bool> merge_complete{true};
 
+      /// Per-root transaction-level read/write exclusion.
+      /// Writers take exclusive, readers take shared.
+      /// Acquired in sorted root-index order to prevent deadlocks.
+      std::shared_mutex tx_mutex;
+
       // ── Reader section (separated to avoid false sharing) ──────────
       alignas(128) std::shared_mutex buffered_mutex;
 

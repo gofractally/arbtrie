@@ -1,4 +1,5 @@
 #include <psitri/dwal/dwal_database.hpp>
+#include <psitri/dwal/transaction.hpp>
 
 #include <psitri/cursor.hpp>
 #include <psitri/database.hpp>
@@ -11,6 +12,8 @@
 #include <cassert>
 #include <shared_mutex>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace psitri::dwal
 {
@@ -30,6 +33,16 @@ namespace psitri::dwal
    void dwal_database::recover()
    {
       std::error_code ec;
+
+      // Collect root directories and their WAL paths.
+      struct root_wal_info
+      {
+         uint32_t              root_index;
+         std::filesystem::path ro_wal;
+         std::filesystem::path rw_wal;
+      };
+      std::vector<root_wal_info> roots;
+
       for (auto& entry : std::filesystem::directory_iterator(_wal_dir, ec))
       {
          if (!entry.is_directory())
@@ -52,34 +65,120 @@ namespace psitri::dwal
          if (root_index >= max_roots)
             continue;
 
-         auto ro_wal = entry.path() / "wal-ro.dwal";
-         auto rw_wal = entry.path() / "wal-rw.dwal";
+         roots.push_back(
+             {root_index, entry.path() / "wal-ro.dwal", entry.path() / "wal-rw.dwal"});
+      }
 
-         // Phase 1: Replay RO WAL into PsiTri (frozen data that wasn't merged).
-         // The RO WAL exists because a swap happened but the merge thread
-         // didn't finish (or didn't run). Always replay — the clean_close flag
-         // on an RO WAL just means it was cleanly written, not that its data
-         // was merged into Tri. (The merge_pool deletes wal-ro.dwal on success.)
-         if (std::filesystem::exists(ro_wal, ec))
+      // Phase 1: Replay RO WALs into PsiTri (frozen data that wasn't merged).
+      // RO WALs never contain multi-tx entries (swap only happens after commit).
+      for (auto& ri : roots)
+      {
+         if (std::filesystem::exists(ri.ro_wal, ec))
          {
-            replay_wal_to_tri(root_index, ro_wal);
-            std::filesystem::remove(ro_wal, ec);
+            replay_wal_to_tri(ri.root_index, ri.ro_wal);
+            std::filesystem::remove(ri.ro_wal, ec);
+         }
+      }
+
+      // Phase 2a: Scan all RW WALs to build multi-tx index.
+      // For each multi_tx_id, track how many participants we found and
+      // whether the commit flag was seen.
+      struct multi_tx_info
+      {
+         uint16_t participant_count = 0;
+         uint16_t entries_found     = 0;
+         bool     commit_seen       = false;
+      };
+      std::unordered_map<uint64_t, multi_tx_info> multi_tx_index;
+
+      for (auto& ri : roots)
+      {
+         if (!std::filesystem::exists(ri.rw_wal, ec))
+            continue;
+
+         wal_reader reader;
+         if (!reader.open(ri.rw_wal) || reader.was_clean_close())
+            continue;
+
+         wal_entry entry;
+         while (reader.next(entry))
+         {
+            if (entry.is_multi_tx())
+            {
+               auto& info = multi_tx_index[entry.multi_tx_id];
+               info.participant_count = entry.multi_participant_count;
+               info.entries_found++;
+               if (entry.is_multi_tx_commit())
+                  info.commit_seen = true;
+            }
+         }
+      }
+
+      // Determine which multi-tx IDs are complete (safe to replay).
+      std::unordered_set<uint64_t> committed_multi_txs;
+      for (auto& [tx_id, info] : multi_tx_index)
+      {
+         if (info.commit_seen && info.entries_found == info.participant_count)
+            committed_multi_txs.insert(tx_id);
+      }
+
+      // Phase 2b: Replay RW WALs into RW btrees, filtering multi-tx entries.
+      for (auto& ri : roots)
+      {
+         if (!std::filesystem::exists(ri.rw_wal, ec))
+            continue;
+
+         wal_reader reader;
+         if (!reader.open(ri.rw_wal) || reader.was_clean_close())
+         {
+            std::filesystem::remove(ri.rw_wal, ec);
+            continue;
          }
 
-         // Phase 2: Replay RW WAL into the RW btree (uncommitted writes at crash).
-         if (std::filesystem::exists(rw_wal, ec))
+         auto& root = ensure_root(ri.root_index);
+
+         wal_entry entry;
+         while (reader.next(entry))
          {
-            wal_reader reader;
-            if (reader.open(rw_wal))
+            // Skip incomplete multi-root transactions.
+            if (entry.is_multi_tx() &&
+                committed_multi_txs.find(entry.multi_tx_id) == committed_multi_txs.end())
+               continue;
+
+            // Replay this entry's ops into the RW btree.
+            for (auto& op : entry.ops)
             {
-               if (!reader.was_clean_close())
+               switch (op.type)
                {
-                  replay_wal_to_rw(root_index, rw_wal);
+                  case wal_op_type::upsert_data:
+                     root.rw_layer->store_data(op.key, op.value);
+                     break;
+                  case wal_op_type::upsert_subtree:
+                     root.rw_layer->store_subtree(op.key, op.subtree);
+                     break;
+                  case wal_op_type::remove:
+                     root.rw_layer->store_tombstone(op.key);
+                     break;
+                  case wal_op_type::remove_range:
+                  {
+                     std::vector<std::string> keys_to_erase;
+                     auto it = root.rw_layer->map.lower_bound(op.range_low);
+                     for (; it != root.rw_layer->map.end() && it.key() < op.range_high; ++it)
+                        keys_to_erase.emplace_back(it.key());
+                     for (auto& k : keys_to_erase)
+                        root.rw_layer->map.erase(k);
+                     root.rw_layer->tombstones.add(std::string(op.range_low),
+                                                   std::string(op.range_high));
+                     break;
+                  }
                }
             }
-            // Delete the old RW WAL — a fresh one will be created on first write.
-            std::filesystem::remove(rw_wal, ec);
          }
+
+         root.next_wal_seq = reader.end_sequence();
+
+         // Delete the old RW WAL — a fresh one will be created on first write.
+         std::filesystem::remove(ri.rw_wal, ec);
       }
    }
 
@@ -214,6 +313,22 @@ namespace psitri::dwal
       ensure_wal(root_index);
 
       return dwal_transaction(root, root.wal.get(), root_index, this);
+   }
+
+   transaction dwal_database::start_transaction(std::initializer_list<uint32_t> write_roots,
+                                                std::initializer_list<uint32_t> read_roots)
+   {
+      return transaction(*this, write_roots, read_roots);
+   }
+
+   transaction dwal_database::start_transaction(uint32_t root_index)
+   {
+      return transaction(*this, {root_index});
+   }
+
+   uint64_t dwal_database::next_multi_tx_id() noexcept
+   {
+      return _next_multi_tx_id.fetch_add(1, std::memory_order_relaxed);
    }
 
    dwal_transaction::lookup_result dwal_database::get(uint32_t         root_index,

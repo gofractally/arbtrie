@@ -10,7 +10,7 @@ int main()
 {
    auto dir = std::filesystem::temp_directory_path() / "psitri_subtrees";
    std::filesystem::remove_all(dir);
-   auto db = psitri::database::create(dir);
+   auto db = psitri::database::open(dir);
    auto ws = db->start_write_session();
 
    // --- Build a subtree for user metadata ---

@@ -594,22 +594,17 @@ namespace rocksdb
       try
       {
          auto path = std::filesystem::path(name);
-         if (options.create_if_missing)
-         {
-            std::filesystem::create_directories(path);
-         }
-         else if (!std::filesystem::exists(path))
-         {
-            return Status::IOError("Directory does not exist: " + name);
-         }
 
-         if (options.error_if_exists && std::filesystem::exists(path) &&
-             !std::filesystem::is_empty(path))
-         {
-            return Status::InvalidArgument("Database already exists: " + name);
-         }
+         // Map RocksDB options to psitri open_mode.
+         psitri::open_mode mode;
+         if (options.error_if_exists)
+            mode = psitri::open_mode::create_only;
+         else if (options.create_if_missing)
+            mode = psitri::open_mode::create_or_open;
+         else
+            mode = psitri::open_mode::open_existing;
 
-         auto db = psitri::database::create(path);
+         auto db = psitri::database::open(path, mode);
          auto wal_dir = path / "wal";
          std::filesystem::create_directories(wal_dir);
          auto dwal = std::make_unique<psitri::dwal::dwal_database>(db, wal_dir);

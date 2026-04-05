@@ -546,7 +546,7 @@ static std::shared_ptr<database> make_db()
     std::filesystem::remove_all(DB_PATH);
     psitri::runtime_config cfg;
     cfg.sync_mode = sal::sync_type::none;
-    return database::create(DB_PATH, cfg);
+    return database::open(DB_PATH, open_mode::create_or_open, cfg);
 }
 
 static void prepopulate(database& db, uint64_t count)
