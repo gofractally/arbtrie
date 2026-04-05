@@ -388,14 +388,19 @@ namespace psitri::dwal
       if (!root.merge_complete.load(std::memory_order_acquire))
          return;
 
-      // Freeze current RW as the new buffered RO (exclusive lock — writers only).
+      // Freeze current RW as the new buffered RO.
+      // Exclusive rw_mutex blocks readers from the RW layer during swap;
+      // buffered_mutex publishes the frozen snapshot to RO readers.
       {
-         std::unique_lock lk(root.buffered_mutex);
-         root.buffered_ptr = std::move(root.rw_layer);
+         std::unique_lock rw_lk(root.rw_mutex, std::defer_lock);
+         if (root.enable_rw_locking)
+            rw_lk.lock();
+         {
+            std::unique_lock lk(root.buffered_mutex);
+            root.buffered_ptr = std::move(root.rw_layer);
+         }
+         root.rw_layer = std::make_shared<btree_layer>();
       }
-
-      // Allocate a fresh RW btree.
-      root.rw_layer = std::make_shared<btree_layer>();
 
       // Capture the current PsiTri root as the base for this RO btree.
       uint32_t base = root.tri_root.load(std::memory_order_acquire);
@@ -460,18 +465,24 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // Layer 1: RW btree (writer-private — only safe from writer thread)
-         if (root.rw_layer)
+         // Layer 1: RW btree — shared lock allows concurrent readers
+         // when rw_locking is enabled.
          {
-            auto* v = root.rw_layer->map.get(key);
-            if (v)
+            std::shared_lock lk(root.rw_mutex, std::defer_lock);
+            if (root.enable_rw_locking)
+               lk.lock();
+            if (root.rw_layer)
             {
-               if (v->is_tombstone())
+               auto* v = root.rw_layer->map.get(key);
+               if (v)
+               {
+                  if (v->is_tombstone())
+                     return {false, {}};
+                  return {true, *v};
+               }
+               if (root.rw_layer->tombstones.is_deleted(key))
                   return {false, {}};
-               return {true, *v};
             }
-            if (root.rw_layer->tombstones.is_deleted(key))
-               return {false, {}};
          }
 
          // Layer 2: RO btree (frozen snapshot)
@@ -510,9 +521,15 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // RW layer: only included for latest mode (writer-thread only, no lock needed)
+         // RW layer: included for latest mode. Shared lock allows concurrent
+         // readers; copying the shared_ptr gives the cursor a stable snapshot.
          if (mode == read_mode::latest)
+         {
+            std::shared_lock lk(root.rw_mutex, std::defer_lock);
+            if (root.enable_rw_locking)
+               lk.lock();
             rw = root.rw_layer;
+         }
 
          // RO layer: included for latest and buffered modes
          if (mode != read_mode::persistent)

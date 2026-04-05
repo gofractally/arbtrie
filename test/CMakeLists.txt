@@ -50,6 +50,18 @@ target_compile_definitions(psitri-tests PUBLIC XXH_INLINE_ALL)
 set_target_properties(psitri-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_test(NAME psitri-tests COMMAND psitri-tests)
 
+# MDBX compatibility tests
+add_executable(mdbx-tests
+    ../libraries/psitrimdbx/tests/mdbx_tests.cpp
+)
+target_link_libraries(mdbx-tests
+    PRIVATE
+        psitrimdbx
+        Catch2::Catch2WithMain
+)
+set_target_properties(mdbx-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_test(NAME mdbx-tests COMMAND mdbx-tests)
+
 # ART map tests
 add_executable(art-tests
     ../libraries/art/tests/art_map_tests.cpp

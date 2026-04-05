@@ -23,7 +23,7 @@ namespace psitri::dwal
       _inner->upsert_subtree(key, addr);
    }
 
-   bool transaction::root_handle::remove(std::string_view key)
+   remove_result transaction::root_handle::remove(std::string_view key)
    {
       assert(_writable && "remove called on read-only root");
       return _inner->remove(key);
@@ -147,7 +147,7 @@ namespace psitri::dwal
       root(root_index).upsert(key, value);
    }
 
-   bool transaction::remove(uint32_t root_index, std::string_view key)
+   remove_result transaction::remove(uint32_t root_index, std::string_view key)
    {
       return root(root_index).remove(key);
    }

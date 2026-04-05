@@ -41,6 +41,15 @@ namespace psitri::dwal
       dwal_read_session(dwal_database& db);
       ~dwal_read_session();
 
+      dwal_read_session(dwal_read_session&& other) noexcept
+          : _db(other._db), _tri_session(std::move(other._tri_session)), _cache(other._cache)
+      {
+         other._cache = nullptr;
+      }
+      dwal_read_session& operator=(dwal_read_session&&) = delete;
+      dwal_read_session(const dwal_read_session&)       = delete;
+      dwal_read_session& operator=(const dwal_read_session&) = delete;
+
       /// Layered lookup with automatic snapshot caching.
       ///
       /// - persistent: PsiTri cursor only (refreshed on gen change)

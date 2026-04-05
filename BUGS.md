@@ -9,7 +9,19 @@
 - **Likely cause**: Bookkeeping bug in SAL's ptr_alloc — a release decremented the ref but not the `used()` counter, or a root-table operation created an untracked allocation.
 - **Pattern**: Double `commit_reopen` (making root shared via root table + cursor + snapshot) followed by shared-mode upsert. The upsert triggers COW, and somewhere in the release cascade the counter gets out of sync.
 
+### 2. `database::get_stats().total_live_objects` returns 0 after writes
+- **Repro**: `psitri-tests "database dump and get_stats"`
+- **File**: `libraries/psitri/tests/coverage_gap_tests.cpp:475`
+- **Symptom**: After inserting 100 keys and committing, `stats.total_live_objects` is 0.
+- **Likely cause**: `get_stats()` doesn't account for objects allocated during the session, or the stat counter isn't wired up.
+
 ## Fixed (recent)
+
+### DWAL undo replay leaves dangling pointers in RW layer
+- **Repro**: write→commit→write→abort, then `get_latest()` on the restored key
+- **Symptom**: After abort, the RW layer's ART map has `btree_value.data` pointing into the freed undo_log arena. Reads return garbage or crash.
+- **Root cause**: `dwal_transaction::abort()` replays `overwrite_buffered`/`erase_buffered` entries by upserting `entry.old_value` directly into the btree_layer's ART map. The `old_value.data` string_view points into the undo_log's arena (monotonic_buffer_resource). When the transaction is destroyed, the undo_log and its arena are freed, but the ART map entry still holds the dangling pointer.
+- **Fix**: In both outer and inner abort replay paths in `dwal_transaction.cpp`, copy restored value data into the btree_layer's pool via `layer.store_string()` before upserting back into the ART map.
 
 ### `insert()`/`update()` used throw for precondition violations — now assert/abort
 - `unique_insert`/`unique_update` threw on precondition violation, corrupting root state. Throw implied recoverability — callers caught it and returned false, masking the corruption.

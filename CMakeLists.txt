@@ -174,6 +174,9 @@ add_subdirectory(libraries/art)
 # PsiTriRocks: RocksDB-compatible wrapper around psitri
 add_subdirectory(libraries/psitrirocks)
 
+# PsiTriMDBX: MDBX-compatible wrapper around psitri
+add_subdirectory(libraries/psitrimdbx)
+
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-O0 -g -fno-omit-frame-pointer)
