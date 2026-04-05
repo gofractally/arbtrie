@@ -437,18 +437,28 @@ namespace psitri::dwal
 
    void dwal_database::flush_wal()
    {
+      flush_wal(sal::sync_type::full);
+   }
+
+   void dwal_database::flush_wal(sal::sync_type sync)
+   {
       for (uint32_t i = 0; i < max_roots; ++i)
       {
          if (_roots[i] && _roots[i]->wal)
-            _roots[i]->wal->flush();
+            _roots[i]->wal->flush(sync);
       }
    }
 
    void dwal_database::flush_wal(uint32_t root_index)
    {
+      flush_wal(root_index, sal::sync_type::full);
+   }
+
+   void dwal_database::flush_wal(uint32_t root_index, sal::sync_type sync)
+   {
       assert(root_index < max_roots);
       if (_roots[root_index] && _roots[root_index]->wal)
-         _roots[root_index]->wal->flush();
+         _roots[root_index]->wal->flush(sync);
    }
 
    dwal_transaction::lookup_result dwal_database::get_latest(uint32_t         root_index,

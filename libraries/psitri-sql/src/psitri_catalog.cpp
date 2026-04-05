@@ -96,12 +96,35 @@ static duckdb::LogicalType sql_type_to_duckdb(SqlType type) {
 // ===========================================================================
 
 PsitriCatalog::PsitriCatalog(duckdb::AttachedDatabase& db,
-                             std::shared_ptr<psitri::database> storage)
-    : duckdb::Catalog(db), storage_(std::move(storage)) {
+                             std::shared_ptr<psitri::database> storage,
+                             std::shared_ptr<psitri::dwal::dwal_database> dwal_db)
+    : duckdb::Catalog(db), storage_(std::move(storage)), dwal_db_(std::move(dwal_db)) {
    catalog_session_ = storage_->start_write_session();
 }
 
-PsitriCatalog::~PsitriCatalog() = default;
+PsitriCatalog::~PsitriCatalog() {
+   // Drain DWAL data to Tri before shutdown. For each table root,
+   // swap RW→RO so the merge pool can drain it. The dwal_database
+   // destructor calls merge_pool::shutdown() which waits for completion.
+   if (dwal_db_) {
+      try {
+         auto tables = ListTables("main");
+         for (auto& meta : tables) {
+            auto swap_root = [&](uint32_t root_index) {
+               try {
+                  // Only swap if the root has a WAL (was written to through DWAL)
+                  dwal_db_->ensure_root_public(root_index);
+                  dwal_db_->ensure_wal_public(root_index);
+                  dwal_db_->try_swap_rw_to_ro(root_index);
+               } catch (...) {}
+            };
+            swap_root(meta.root_index);
+            for (auto& idx : meta.indexes)
+               swap_root(idx.root_index);
+         }
+      } catch (...) {}
+   }
+}
 
 void PsitriCatalog::Initialize(bool load_builtin) {
    auto system_txn = duckdb::CatalogTransaction::GetSystemTransaction(GetDatabase());
@@ -293,25 +316,35 @@ PsitriCatalog::BindCreateIndex(duckdb::Binder& binder, duckdb::CreateStatement& 
 
    // Use the active PsitriTransaction's write session to build the index
    auto& txn = PsitriTransaction::Get(binder.context, *this);
-   auto& idx_tx = txn.GetOrCreateRootTransaction(idx_meta.root_index);
+   auto& idx_tx = txn.GetOrCreateRootHandle(idx_meta.root_index);
 
-   // Read existing data and populate index
-   auto rs = GetStorage()->start_read_session();
-   auto cursor = rs->create_cursor(meta.root_index);
+   // Read existing data and populate index (use DWAL merge cursor to see buffered writes)
+   auto merge_cur = GetDwalDb()->create_cursor(meta.root_index, psitri::dwal::read_mode::latest);
+   auto& mc = merge_cur.cursor();
    auto pk_types = meta.pk_types();
    auto val_types = meta.value_types();
 
-   cursor.seek_begin();
-   while (!cursor.is_end()) {
-      auto key_view = cursor.key();
+   mc.seek_begin();
+   while (!mc.is_end()) {
+      auto key_view = mc.key();
       auto pk_vals = decode_key(key_view, pk_types);
-      // Zero-copy value read via callback
+      // Read value based on source layer
       std::vector<ColumnValue> val_vals;
-      cursor.get_value([&](psitri::value_view vv) {
-         if (vv.size() > 0) {
-            val_vals = decode_value(vv, val_types);
+      auto src = mc.current_source();
+      if (src == psitri::dwal::merge_cursor::source::rw ||
+          src == psitri::dwal::merge_cursor::source::ro) {
+         auto data = mc.current_value().data;
+         if (data.size() > 0)
+            val_vals = decode_value(data, val_types);
+      } else {
+         auto* tri = mc.tri_cursor();
+         if (tri) {
+            tri->get_value([&](psitri::value_view vv) {
+               if (vv.size() > 0)
+                  val_vals = decode_value(vv, val_types);
+            });
          }
-      });
+      }
       if (val_vals.empty()) {
          for (auto t : val_types) val_vals.push_back(ColumnValue::null_value(t));
       }
@@ -330,7 +363,7 @@ PsitriCatalog::BindCreateIndex(duckdb::Binder& binder, duckdb::CreateStatement& 
          idx_key_vals.push_back(all_cols[ci]);
       }
       idx_tx.upsert(encode_key(idx_key_vals), std::string(key_view));
-      cursor.next();
+      mc.next();
    }
 
    // Update table metadata
@@ -806,17 +839,18 @@ PsitriTableEntry::GetStorageInfo(duckdb::ClientContext& context) {
    duckdb::TableStorageInfo info;
    // Estimate row count by scanning (capped for performance)
    auto& cat = catalog.Cast<PsitriCatalog>();
-   auto rs = cat.GetStorage()->start_read_session();
-   auto cursor = rs->create_cursor(meta_.root_index);
-   cursor.seek_begin();
+   auto merge_cur = cat.GetDwalDb()->create_cursor(meta_.root_index,
+                                                    psitri::dwal::read_mode::latest);
+   auto& mc = merge_cur.cursor();
+   mc.seek_begin();
    duckdb::idx_t count = 0;
    constexpr duckdb::idx_t MAX_SCAN = 10000;
-   while (!cursor.is_end() && count < MAX_SCAN) {
+   while (!mc.is_end() && count < MAX_SCAN) {
       count++;
-      cursor.next();
+      mc.next();
    }
    info.cardinality = count;
-   if (!cursor.is_end()) {
+   if (!mc.is_end()) {
       // We hit the cap — estimate higher
       info.cardinality = count * 10;
    }

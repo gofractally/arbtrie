@@ -10,6 +10,7 @@
 #include "duckdb/common/enums/access_mode.hpp"
 
 #include <psitri/database.hpp>
+#include <psitri/dwal/dwal_database.hpp>
 
 namespace psitri_sql {
 
@@ -30,13 +31,17 @@ PsitriAttach(duckdb::StorageExtensionInfo* storage_info,
    std::shared_ptr<psitri::database> storage;
    bool exists = std::filesystem::exists(path) && std::filesystem::is_directory(path);
    if (exists) {
-      // Open existing database: use make_shared + constructor, then
-      // init shared ownership via a write session round-trip
       storage = std::make_shared<psitri::database>(path, psitri::runtime_config{});
    } else {
       storage = psitri::database::create(path);
    }
-   return duckdb::make_uniq<PsitriCatalog>(db, std::move(storage));
+
+   // Create DWAL layer for buffered writes
+   auto wal_dir = std::filesystem::path(path) / "wal";
+   auto dwal_db = std::make_shared<psitri::dwal::dwal_database>(
+      storage, wal_dir, psitri::dwal::dwal_config{});
+
+   return duckdb::make_uniq<PsitriCatalog>(db, std::move(storage), std::move(dwal_db));
 }
 
 // ---------------------------------------------------------------------------

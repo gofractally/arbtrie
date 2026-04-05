@@ -215,13 +215,26 @@ namespace psitri::dwal
 
    void wal_writer::flush()
    {
+      flush(sal::sync_type::full);
+   }
+
+   void wal_writer::flush(sal::sync_type sync)
+   {
       assert(_fd >= 0);
       flush_write_buffer();
+      if (sync >= sal::sync_type::full)
+      {
 #ifdef __APPLE__
-      ::fcntl(_fd, F_FULLFSYNC);
+         ::fcntl(_fd, F_FULLFSYNC);
 #else
-      ::fsync(_fd);
+         ::fsync(_fd);
 #endif
+      }
+      else if (sync >= sal::sync_type::fsync)
+      {
+         ::fsync(_fd);
+      }
+      // For msync_async or less, write buffer is flushed but no sync call
    }
 
    void wal_writer::close()

@@ -22,3 +22,21 @@ target_include_directories(psitri-sql SYSTEM PUBLIC
     ${duckdb_SOURCE_DIR}/src/include
 )
 
+# TATP Benchmark — uses psitri-sqlite for all SQLite API calls.
+# For comparison against system SQLite, build a separate binary or
+# link against SQLite3 instead (flip HAS_SYSTEM_SQLITE3).
+add_executable(tatp-bench benchmarks/tatp_bench.cpp)
+target_link_libraries(tatp-bench PRIVATE psitri-sql psitri-sqlite)
+
+# psitri-sqlite provides the sqlite3 API for tatp-bench
+target_compile_definitions(tatp-bench PRIVATE HAS_SQLITE3=1)
+
+# Separate binary linked against system SQLite3 for comparison benchmarks.
+# Uses the exact same source but with real SQLite instead of psitri-sqlite.
+find_package(SQLite3 QUIET)
+if(SQLite3_FOUND)
+    add_executable(tatp-bench-system-sqlite benchmarks/tatp_bench.cpp)
+    target_link_libraries(tatp-bench-system-sqlite PRIVATE psitri-sql ${SQLite3_LIBRARIES})
+    target_include_directories(tatp-bench-system-sqlite PRIVATE ${SQLite3_INCLUDE_DIRS})
+    target_compile_definitions(tatp-bench-system-sqlite PRIVATE HAS_SQLITE3=1)
+endif()

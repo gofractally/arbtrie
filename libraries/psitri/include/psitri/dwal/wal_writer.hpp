@@ -1,5 +1,6 @@
 #pragma once
 #include <psitri/dwal/wal_format.hpp>
+#include <sal/config.hpp>
 #include <sal/numbers.hpp>
 
 #include <cstdint>
@@ -64,6 +65,12 @@ namespace psitri::dwal
 
       /// Flush the OS write buffer to disk (fsync).
       void flush();
+
+      /// Flush with explicit sync level:
+      ///   fsync → regular fsync (data to drive controller)
+      ///   full  → F_FULLFSYNC on macOS (data to physical media)
+      ///   anything less → just flush the write buffer (no sync)
+      void flush(sal::sync_type sync);
 
       /// Mark the file as cleanly closed and flush.
       void close();

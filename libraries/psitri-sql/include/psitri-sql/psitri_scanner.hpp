@@ -5,8 +5,8 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include <psitri-sql/row_encoding.hpp>
-#include <psitri/cursor.hpp>
-#include <psitri/read_session.hpp>
+#include <psitri/dwal/merge_cursor.hpp>
+#include <psitri/dwal/dwal_database.hpp>
 
 #include <memory>
 #include <optional>
@@ -23,10 +23,17 @@ struct PsitriScanBindData : public duckdb::FunctionData {
    // PK filter pushdown from pushdown_complex_filter
    bool has_pk_eq_filter = false;
    std::string pk_eq_key;
+   bool has_pk_prefix_filter = false;   // equality on leading PK columns (composite)
+   std::string pk_prefix_key;
    bool has_lower_bound = false;
    bool has_upper_bound = false;
    std::string lower_bound_key;
    std::string upper_bound_key;
+
+   // Secondary index filter pushdown
+   bool has_index_lookup = false;
+   uint32_t index_root = 0;          // root index of the secondary index
+   std::string index_lookup_key;     // encoded index key to look up
 
    duckdb::unique_ptr<duckdb::FunctionData> Copy() const override;
    bool Equals(const duckdb::FunctionData& other) const override;
@@ -44,17 +51,22 @@ struct PsitriScanGlobalState : public duckdb::GlobalTableFunctionState {
 struct PsitriScanLocalState : public duckdb::LocalTableFunctionState {
    std::vector<duckdb::column_t> column_ids;
    bool initialized = false;
-   std::shared_ptr<psitri::read_session> read_session;
-   std::optional<psitri::cursor> cursor;
+   std::optional<psitri::dwal::owned_merge_cursor> merge_cursor;
 
-   // Filter pushdown: if we have a PK equality filter, store the exact key
+   // Filter pushdown
    bool has_pk_eq_filter = false;
    std::string pk_eq_key;
-   // Range filters
+   bool has_pk_prefix_filter = false;
+   std::string pk_prefix_key;
    bool has_lower_bound = false;
    bool has_upper_bound = false;
    std::string lower_bound_key;
    std::string upper_bound_key;
+
+   // Secondary index filter pushdown
+   bool has_index_lookup = false;
+   uint32_t index_root = 0;
+   std::string index_lookup_key;
 };
 
 // The scan function itself

@@ -32,7 +32,7 @@ PsitriUpdate::Sink(duckdb::ExecutionContext& context,
    auto& gstate = input.global_state.Cast<PsitriUpdateGlobalState>();
 
    auto& txn     = PsitriTransaction::Get(context.client, table_.catalog);
-   auto& root_tx = txn.GetOrCreateRootTransaction(meta_.root_index);
+   auto& root_tx = txn.GetOrCreateRootHandle(meta_.root_index);
 
    auto pk_indices  = meta_.pk_column_indices();
    auto val_indices = meta_.value_column_indices();
@@ -62,16 +62,12 @@ PsitriUpdate::Sink(duckdb::ExecutionContext& context,
       // Read old PK and value from the old key
       auto old_pk_vals = decode_key(*old_key_ptr, pk_types);
 
-      // Zero-copy read of old value columns via read_cursor callback
+      // Read old value columns via DWAL layered lookup
       std::vector<ColumnValue> old_val_vals;
       {
-         auto rc = root_tx.read_cursor();
-         if (rc.seek(*old_key_ptr)) {
-            rc.get_value([&](psitri::value_view vv) {
-               if (vv.size() > 0) {
-                  old_val_vals = decode_value(vv, val_types);
-               }
-            });
+         auto result = root_tx.get(*old_key_ptr);
+         if (result.found && result.value.is_data() && result.value.data.size() > 0) {
+            old_val_vals = decode_value(result.value.data, val_types);
          }
          if (old_val_vals.empty()) {
             for (auto t : val_types) {
@@ -130,7 +126,7 @@ PsitriUpdate::Sink(duckdb::ExecutionContext& context,
          }
 
          for (auto& idx : meta_.indexes) {
-            auto& idx_tx = txn.GetOrCreateRootTransaction(idx.root_index);
+            auto& idx_tx = txn.GetOrCreateRootHandle(idx.root_index);
 
             // Remove old index entry
             std::vector<ColumnValue> old_idx_key_vals;
@@ -146,17 +142,9 @@ PsitriUpdate::Sink(duckdb::ExecutionContext& context,
             if (old_idx_key != new_idx_key) {
                idx_tx.remove(old_idx_key);
                if (idx.is_unique) {
-                  // Zero-copy uniqueness check via read_cursor callback
-                  bool is_duplicate = false;
-                  auto rc = idx_tx.read_cursor();
-                  if (rc.seek(new_idx_key)) {
-                     rc.get_value([&](psitri::value_view existing_pk) {
-                        if (existing_pk.size() > 0 && existing_pk != new_key) {
-                           is_duplicate = true;
-                        }
-                     });
-                  }
-                  if (is_duplicate) {
+                  auto result = idx_tx.get(new_idx_key);
+                  if (result.found && result.value.is_data() &&
+                      result.value.data.size() > 0 && result.value.data != new_key) {
                      throw duckdb::ConstraintException(
                         "Duplicate key value violates unique constraint \"%s\"",
                         idx.name);

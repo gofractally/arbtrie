@@ -7,6 +7,9 @@ compile_commands.json
 .DS_Store
 db/
 external/
+test_db/
+truncate_testdb/
+fuzz_multi_*/
 
 # scratch binaries and experiments at repo root
 maxpop

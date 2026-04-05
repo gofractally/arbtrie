@@ -28,7 +28,7 @@ PsitriDelete::Sink(duckdb::ExecutionContext& context,
    auto& gstate = input.global_state.Cast<PsitriDeleteGlobalState>();
 
    auto& txn     = PsitriTransaction::Get(context.client, table_.catalog);
-   auto& root_tx = txn.GetOrCreateRootTransaction(meta_.root_index);
+   auto& root_tx = txn.GetOrCreateRootHandle(meta_.root_index);
 
    chunk.Flatten();
 
@@ -45,15 +45,11 @@ PsitriDelete::Sink(duckdb::ExecutionContext& context,
          // Remove index entries before removing the row
          if (!meta_.indexes.empty()) {
             auto pk_vals = decode_key(*key_ptr, pk_types);
-            // Zero-copy read of old value via read_cursor callback
+            // Read old value via DWAL layered lookup
             std::vector<ColumnValue> val_vals;
-            auto rc = root_tx.read_cursor();
-            if (rc.seek(*key_ptr)) {
-               rc.get_value([&](psitri::value_view vv) {
-                  if (vv.size() > 0) {
-                     val_vals = decode_value(vv, val_types);
-                  }
-               });
+            auto result = root_tx.get(*key_ptr);
+            if (result.found && result.value.is_data() && result.value.data.size() > 0) {
+               val_vals = decode_value(result.value.data, val_types);
             }
             if (val_vals.empty()) {
                for (auto t : val_types) val_vals.push_back(ColumnValue::null_value(t));
@@ -69,7 +65,7 @@ PsitriDelete::Sink(duckdb::ExecutionContext& context,
             for (auto& idx : meta_.indexes) {
                std::vector<ColumnValue> idx_key_vals;
                for (auto ci : idx.column_indices) idx_key_vals.push_back(all_cols[ci]);
-               auto& idx_tx = txn.GetOrCreateRootTransaction(idx.root_index);
+               auto& idx_tx = txn.GetOrCreateRootHandle(idx.root_index);
                idx_tx.remove(encode_key(idx_key_vals));
             }
          }

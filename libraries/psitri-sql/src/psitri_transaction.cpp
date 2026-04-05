@@ -16,14 +16,15 @@ PsitriTransaction::PsitriTransaction(duckdb::TransactionManager& manager,
 }
 
 PsitriTransaction::~PsitriTransaction() {
-   // Abort any uncommitted root transactions
    for (auto& [root_idx, tx] : root_transactions_) {
-      tx.abort();
+      if (!tx.is_committed() && !tx.is_aborted()) {
+         tx.abort();
+      }
    }
 }
 
 void PsitriTransaction::Start() {
-   write_session_ = catalog_.GetStorage()->start_write_session();
+   // Nothing to do — DWAL transactions are created lazily per root
 }
 
 void PsitriTransaction::Commit() {
@@ -35,23 +36,28 @@ void PsitriTransaction::Commit() {
 
 void PsitriTransaction::Rollback() {
    for (auto& [root_idx, tx] : root_transactions_) {
-      tx.abort();
+      if (!tx.is_committed() && !tx.is_aborted()) {
+         tx.abort();
+      }
    }
    root_transactions_.clear();
 }
 
-psitri::transaction&
-PsitriTransaction::GetOrCreateRootTransaction(uint32_t root_index) {
+psitri::dwal::transaction::root_handle&
+PsitriTransaction::GetOrCreateRootHandle(uint32_t root_index) {
    auto it = root_transactions_.find(root_index);
    if (it != root_transactions_.end()) {
-      return it->second;
+      return it->second.root(root_index);
    }
-   // std::map::emplace with piecewise_construct to move-construct in place
    auto [inserted, _] = root_transactions_.emplace(
       std::piecewise_construct,
       std::forward_as_tuple(root_index),
-      std::forward_as_tuple(write_session_->start_transaction(root_index)));
-   return inserted->second;
+      std::forward_as_tuple(GetDwalDb().start_transaction(root_index)));
+   return inserted->second.root(root_index);
+}
+
+psitri::dwal::dwal_database& PsitriTransaction::GetDwalDb() {
+   return *catalog_.GetDwalDb();
 }
 
 PsitriTransaction& PsitriTransaction::Get(duckdb::ClientContext& context,

@@ -117,7 +117,7 @@ PsitriInsert::Sink(duckdb::ExecutionContext& context,
 
    // Get the psitri transaction for this table's root
    auto& txn    = PsitriTransaction::Get(context.client, table_.catalog);
-   auto& root_tx = txn.GetOrCreateRootTransaction(meta.root_index);
+   auto& root_tx = txn.GetOrCreateRootHandle(meta.root_index);
 
    auto pk_indices  = meta.pk_column_indices();
    auto val_indices = meta.value_column_indices();
@@ -194,19 +194,11 @@ PsitriInsert::Sink(duckdb::ExecutionContext& context,
          }
          std::string idx_key = encode_key(idx_key_vals);
 
-         auto& idx_tx = txn.GetOrCreateRootTransaction(idx.root_index);
+         auto& idx_tx = txn.GetOrCreateRootHandle(idx.root_index);
          if (idx.is_unique) {
-            // Zero-copy uniqueness check via read_cursor callback
-            bool is_duplicate = false;
-            auto rc = idx_tx.read_cursor();
-            if (rc.seek(idx_key)) {
-               rc.get_value([&](psitri::value_view existing_pk) {
-                  if (existing_pk.size() > 0 && existing_pk != key) {
-                     is_duplicate = true;
-                  }
-               });
-            }
-            if (is_duplicate) {
+            auto result = idx_tx.get(idx_key);
+            if (result.found && result.value.is_data() &&
+                result.value.data.size() > 0 && result.value.data != key) {
                throw duckdb::ConstraintException(
                   "Duplicate key value violates unique constraint \"%s\"",
                   idx.name);

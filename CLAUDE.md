@@ -66,6 +66,8 @@ Notable test tags: `[leaf_node]`, `[inner_node]`, `[cursor]`, `[trie]`, `[tree_c
 |---------|------|
 | `libraries/psitri/` | Main database — trie engine, transactions, sessions, nodes |
 | `libraries/sal/` | Segment Allocator Library — persistent memory management (32 MB segments, ref-counting, COW) |
+| `libraries/psitri-sqlite/` | SQLite with btree.c replaced by psitri DWAL — drop-in sqlite3 API |
+| `libraries/psitri-sql/` | DuckDB storage extension backed by psitri (+ TATP benchmark) |
 | `libraries/psitrirocks/` | RocksDB-compatible drop-in replacement API wrapping psitri |
 | `libraries/mdbxrocks/` | MDBX backend wrapper (for benchmark comparisons) |
 | `libraries/ucc/` | Unsigned character comparison / branch encoding utilities |
@@ -89,6 +91,10 @@ Notable test tags: `[leaf_node]`, `[inner_node]`, `[cursor]`, `[trie]`, `[tree_c
 - **Composable subtrees**: Entire subtrees can be stored as values in other trees (`value_node`)
 - **SAL segments**: All persistent data lives in 32 MB mmap'd segments managed by the Segment Allocator Library
 
+### SQLite Compatibility
+
+`libraries/psitri-sqlite/` replaces SQLite's btree.c with a psitri DWAL backend. Link against `psitri-sqlite` instead of system SQLite to get the full `sqlite3_*` API backed by psitri. `PRAGMA synchronous` maps to psitri sync levels (OFF=none, NORMAL=msync_async, FULL=fsync, fullfsync=F_FULLFSYNC). See `libraries/psitri-sqlite/README.md` for architecture details and benchmark results.
+
 ### RocksDB Compatibility
 
 `libraries/psitrirocks/` provides a drop-in RocksDB API. Include `<rocksdb/db.h>` from that library to use psitri with existing RocksDB code.
@@ -99,6 +105,8 @@ See `BUGS.md` for active known issues with repro steps. Current open issue: 1-ob
 
 ## Benchmarks
 
-Benchmark targets: `psitri-benchmark`, `bank-bench-*`, `psitrirocks-bench`. Configure via CMake variables: `BENCH_NUM_OPERATIONS` (default 100M), `BENCH_NUM_THREADS` (default 8), `BENCH_KEY_SIZE` (default 16), `BENCH_VALUE_SIZE` (default 100).
+Benchmark targets: `psitri-benchmark`, `bank-bench-*`, `psitrirocks-bench`, `tatp-bench`. Configure via CMake variables: `BENCH_NUM_OPERATIONS` (default 100M), `BENCH_NUM_THREADS` (default 8), `BENCH_KEY_SIZE` (default 16), `BENCH_VALUE_SIZE` (default 100).
+
+TATP benchmark (telecom workload): `tatp-bench --engine sqlite --subscribers 10000 --sync off|full`. Compare against system SQLite with `tatp-bench-system-sqlite`.
 
 Scripts `run_bank_matrix.sh` and `run_scale_bench.sh` automate multi-configuration benchmark runs.

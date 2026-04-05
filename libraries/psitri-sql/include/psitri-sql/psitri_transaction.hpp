@@ -5,22 +5,22 @@
 #include "duckdb/common/reference_map.hpp"
 
 #include <psitri/database.hpp>
-#include <psitri/write_session.hpp>
-#include <psitri/transaction.hpp>
+#include <psitri/dwal/dwal_database.hpp>
+#include <psitri/dwal/transaction.hpp>
 
 #include <mutex>
 #include <map>
 #include <unordered_map>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace psitri_sql {
 
 class PsitriCatalog;
 
 // ---------------------------------------------------------------------------
-// PsitriTransaction -- wraps a psitri write session for one DuckDB transaction
+// PsitriTransaction -- wraps DWAL transactions for one DuckDB transaction.
+// Each root gets its own dwal::transaction (single write root) created lazily.
 // ---------------------------------------------------------------------------
 class PsitriTransaction : public duckdb::Transaction {
 public:
@@ -33,27 +33,23 @@ public:
    void Commit();
    void Rollback();
 
-   // Get or create a psitri transaction for a specific root index.
-   psitri::transaction& GetOrCreateRootTransaction(uint32_t root_index);
+   // Get a root_handle for a specific root. Creates a DWAL transaction if needed.
+   psitri::dwal::transaction::root_handle& GetOrCreateRootHandle(uint32_t root_index);
 
-   psitri::write_session& GetWriteSession() { return *write_session_; }
    PsitriCatalog& GetCatalog() { return catalog_; }
+   psitri::dwal::dwal_database& GetDwalDb();
 
    static PsitriTransaction& Get(duckdb::ClientContext& context, duckdb::Catalog& catalog);
 
    // Row ID → encoded key mapping for DELETE/UPDATE support.
-   // During scan, we record the encoded key for each sequential row_id.
-   // DELETE/UPDATE operators look up the key by row_id.
    void RegisterRowKey(uint32_t root_index, int64_t row_id, std::string key);
    const std::string* LookupRowKey(uint32_t root_index, int64_t row_id) const;
    void ClearRowKeys(uint32_t root_index);
 
 private:
    PsitriCatalog& catalog_;
-   std::shared_ptr<psitri::write_session> write_session_;
-   // psitri::transaction is move-constructible but not move-assignable;
-   // std::map supports emplace with move construction.
-   std::map<uint32_t, psitri::transaction> root_transactions_;
+   // Per-root DWAL transactions, created lazily via start_transaction(root_index)
+   std::map<uint32_t, psitri::dwal::transaction> root_transactions_;
    std::unordered_map<uint32_t, std::unordered_map<int64_t, std::string>> row_id_keys_;
 };
 

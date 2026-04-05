@@ -10,6 +10,7 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <psitri/database.hpp>
+#include <psitri/dwal/dwal_database.hpp>
 #include <psitri-sql/row_encoding.hpp>
 
 #include <mutex>
@@ -31,7 +32,8 @@ static constexpr uint32_t FIRST_TABLE_ROOT = 1;
 class PsitriCatalog : public duckdb::Catalog {
 public:
    PsitriCatalog(duckdb::AttachedDatabase& db,
-                 std::shared_ptr<psitri::database> storage);
+                 std::shared_ptr<psitri::database> storage,
+                 std::shared_ptr<psitri::dwal::dwal_database> dwal_db);
    ~PsitriCatalog() override;
 
    std::string GetCatalogType() override { return "psitri"; }
@@ -86,6 +88,7 @@ public:
 
    // Storage access
    std::shared_ptr<psitri::database>& GetStorage() { return storage_; }
+   std::shared_ptr<psitri::dwal::dwal_database>& GetDwalDb() { return dwal_db_; }
 
    // Catalog metadata operations
    uint32_t AllocateRootIndex();
@@ -96,6 +99,7 @@ public:
 
 private:
    std::shared_ptr<psitri::database> storage_;
+   std::shared_ptr<psitri::dwal::dwal_database> dwal_db_;
    std::shared_ptr<psitri::write_session> catalog_session_;
    std::mutex schema_lock_;
    std::unordered_map<std::string, duckdb::unique_ptr<PsitriSchemaEntry>> schemas_;

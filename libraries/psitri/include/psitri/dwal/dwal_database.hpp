@@ -116,11 +116,17 @@ namespace psitri::dwal
       /// Legacy entry point — delegates to try_swap_rw_to_ro.
       void swap_rw_to_ro(uint32_t root_index);
 
-      /// Flush all dirty WAL files to disk (fsync).
+      /// Flush all dirty WAL files to disk (F_FULLFSYNC).
       void flush_wal();
 
-      /// Flush a specific root's WAL to disk.
+      /// Flush all dirty WAL files with explicit sync level.
+      void flush_wal(sal::sync_type sync);
+
+      /// Flush a specific root's WAL to disk (F_FULLFSYNC).
       void flush_wal(uint32_t root_index);
+
+      /// Flush a specific root's WAL with explicit sync level.
+      void flush_wal(uint32_t root_index, sal::sync_type sync);
 
       // ── Accessors ─────────────────────────────────────────────────
 

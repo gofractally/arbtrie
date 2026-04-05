@@ -261,6 +261,7 @@ add_subdirectory(libraries/psitrirocks)
 # PsiTri SQL: DuckDB-based SQL layer
 if(BUILD_SQL)
     add_subdirectory(libraries/psitri-sql)
+    add_subdirectory(libraries/psitri-sqlite)
 endif()
 
 # Debug specific settings at the global level
