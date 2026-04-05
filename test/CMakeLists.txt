@@ -82,7 +82,7 @@ target_compile_definitions(init-replace-branch-test PUBLIC XXH_INLINE_ALL)
 set_target_properties(init-replace-branch-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # psitri-duckdb integration tests
-if(BUILD_SQL)
+if(BUILD_DUCKDB)
     add_executable(psitri-duckdb-tests
         ../libraries/psitri-duckdb/tests/sql_integration_tests.cpp
     )

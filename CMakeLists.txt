@@ -162,8 +162,9 @@ set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(abseil)
 
 # DuckDB (query engine for psitri-duckdb)
-option(BUILD_SQL "Build DuckDB-based SQL layer" ON)
-if(BUILD_SQL)
+option(BUILD_DUCKDB "Build DuckDB storage extension" OFF)
+option(BUILD_SQLITE "Build psitri-sqlite (SQLite API backed by psitri DWAL)" OFF)
+if(BUILD_DUCKDB)
     FetchContent_Declare(
         duckdb
         GIT_REPOSITORY https://github.com/duckdb/duckdb.git
@@ -258,10 +259,12 @@ add_subdirectory(libraries/art)
 # PsiTriRocks: RocksDB-compatible wrapper around psitri
 add_subdirectory(libraries/psitrirocks)
 
-# PsiTri SQL: DuckDB-based SQL layer
-if(BUILD_SQL)
-    add_subdirectory(libraries/psitri-duckdb)
+# PsiTri SQL layers (independently optional)
+if(BUILD_SQLITE)
     add_subdirectory(libraries/psitri-sqlite)
+endif()
+if(BUILD_DUCKDB)
+    add_subdirectory(libraries/psitri-duckdb)
 endif()
 
 # PsiTriMDBX: MDBX-compatible wrapper around psitri

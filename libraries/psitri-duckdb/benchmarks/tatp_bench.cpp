@@ -23,13 +23,15 @@
 #include <algorithm>
 
 #include "duckdb.hpp"
-#include <psitri-duckdb/psitri_duckdb.hpp>
+#include <psitri-duckdb/psitri_sql.hpp>
 #include <psitri-duckdb/row_encoding.hpp>
 #include <psitri/dwal/dwal_database.hpp>
 #include <psitri/dwal/transaction.hpp>
 #include <psitri/database.hpp>
 // psitri-sqlite provides the sqlite3 API (btree replaced by psitri DWAL)
+#if HAS_SQLITE3
 #include <sqlite3.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -513,8 +515,9 @@ static void run_benchmark(duckdb::Connection& conn, const std::string& cat,
 }
 
 // ---------------------------------------------------------------------------
-// SQLite engine
+// SQLite engine (only when linked with psitri-sqlite or system SQLite)
 // ---------------------------------------------------------------------------
+#if HAS_SQLITE3
 
 // ---------------------------------------------------------------------------
 // SQLite engine (uses psitri-sqlite or system SQLite depending on link)
@@ -855,6 +858,8 @@ static void run_sqlite_benchmark(sqlite3* db, const Config& cfg) {
    double elapsed = std::chrono::duration<double>(t1 - t0).count();
    print_stats("sqlite", N, elapsed, total_txns, stats);
 }
+
+#endif // HAS_SQLITE3
 
 // (psqlite custom-parser engine removed — replaced by btree_psitri.cpp approach.
 //  The "sqlite" engine now uses psitri-backed SQLite when linked with psitri-sqlite.)
@@ -1499,6 +1504,7 @@ int main(int argc, char* argv[]) {
       run_benchmark(conn, "", cfg);
 
    } else if (cfg.engine == "sqlite") {
+#if HAS_SQLITE3
       // Uses psitri-backed SQLite (btree replaced by DWAL) when linked with psitri-sqlite.
       // For comparison with real SQLite, rebuild linking against system SQLite3 instead.
       auto tmp = fs::temp_directory_path() / "tatp_bench_sqlite";
@@ -1533,6 +1539,11 @@ int main(int argc, char* argv[]) {
 
       sqlite3_close(sdb);
       fs::remove_all(tmp);
+
+#else
+      std::fprintf(stderr, "SQLite engine not available. Rebuild with -DBUILD_SQLITE=ON.\n");
+      return 1;
+#endif // HAS_SQLITE3
 
    } else if (cfg.engine == "native") {
       // Direct psitri DWAL access — no SQL overhead
