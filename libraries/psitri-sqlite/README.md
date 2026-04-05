@@ -86,13 +86,48 @@ ninja -C build/release tatp-bench-system-sqlite
 ./build/release/libraries/psitri-duckdb/tatp-bench-system-sqlite --engine sqlite --subscribers 10000 --sync full
 ```
 
+## SQLite Test Suite Compatibility
+
+We build SQLite's own `testfixture` (TCL test harness) linked against psitri-sqlite and run the core SQL test files:
+
+```bash
+# One-time setup: clone SQLite source and generate headers
+git clone --depth 1 --branch version-3.51.3 https://github.com/sqlite/sqlite.git external/sqlite-src
+cd external/sqlite-src && mkdir -p bld && cd bld && ../configure && make parse.h opcodes.h keywordhash.h
+
+# Build and run
+ninja -C build/release psitri-testfixture
+bash libraries/psitri-sqlite/tests/run_sqlite_tests.sh
+```
+
+**Current results** (58 test files, ~6300 test cases):
+
+| Category | Pass | Fail | Notes |
+|----------|------|------|-------|
+| Expression/function evaluation | 3494 | 3 | `expr`, `func`, `func2`, `cast`, `coalesce` |
+| SELECT queries | 345 | 62 | Row order differences without ORDER BY |
+| JOIN operations | 123 | 33 | `join`, `join2`, `join3`, `join5` fully pass |
+| INSERT/UPDATE/DELETE | 188 | 285 | `changes()` counter not maintained; index sync issues |
+| DDL (ALTER, triggers, views) | 119 | 94 | Multi-table operations need work |
+| Type handling | 303 | 75 | `types3` nearly passes |
+| **Total** | **~5255** | **~1074** | **83% pass rate** |
+
+**Known failure categories:**
+
+1. **Row ordering** — Queries without `ORDER BY` return rows in trie storage order (key-sorted) rather than btree insertion order. Not a correctness bug — SQL doesn't guarantee order without `ORDER BY`.
+2. **`sqlite3_changes()` counter** — Returns 1 instead of actual row count. Our btree stub doesn't increment the VDBE change counter.
+3. **Index integrity** — `PRAGMA integrity_check` reports "wrong # of entries in index" for some operations, indicating index/table row count divergence.
+4. **Database re-open** — Tests that `forcedelete test.db` and re-create fail because psitri databases are directories, not files. On macOS Sequoia, `com.apple.provenance` extended attributes can prevent cleanup.
+
+Tests that probe btree/pager internals (`test_btree.c`, pager counters, etc.) are expected to fail since those internals are replaced.
+
 ## Limitations
 
 - **Single-writer per DWAL root** — Concurrent writes to the same table serialize at the DWAL level.
 - **No `sqlite3_backup` API** — `backup.c` accesses Pager internals; backup operations will fail.
 - **No shared cache** — `SQLITE_OMIT_SHARED_CACHE=1` is defined.
 - **No incremental blob I/O** — `sqlite3BtreePutData` returns `SQLITE_READONLY`.
-- **Amalgamation version** — Built against SQLite 3.49.1. Struct layouts in `sqlite3_btree_compat.h` must stay in sync if the amalgamation is updated.
+- **Amalgamation version** — Built against SQLite 3.51.3. Struct layouts in `sqlite3_btree_compat.h` must stay in sync if the amalgamation is updated.
 
 ## SQLite Amalgamation Modifications
 

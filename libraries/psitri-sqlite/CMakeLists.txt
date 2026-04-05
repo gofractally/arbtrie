@@ -45,3 +45,6 @@ target_link_libraries(psitri-sqlite PUBLIC psitri)
 add_executable(psitri-sqlite-smoke tests/smoke_test.cpp)
 target_link_libraries(psitri-sqlite-smoke PRIVATE psitri-sqlite)
 target_compile_options(psitri-sqlite-smoke PRIVATE -fno-lto)
+
+# SQLite testfixture and test infrastructure
+add_subdirectory(tests)
