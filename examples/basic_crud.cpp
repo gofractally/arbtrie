@@ -11,7 +11,7 @@ int main()
    // Create (or open) a database in a temporary directory
    auto dir = std::filesystem::temp_directory_path() / "psitri_basic_crud";
    std::filesystem::remove_all(dir);
-   auto db = psitri::database::create(dir);
+   auto db = psitri::database::open(dir);
 
    // All writes go through a write session (one per thread)
    auto ws = db->start_write_session();

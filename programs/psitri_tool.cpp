@@ -416,7 +416,7 @@ int main(int argc, char** argv)
    try
    {
       auto mode = parse_recovery(recovery_str);
-      auto db   = std::make_shared<database>(db_dir, cfg, mode);
+      auto db   = database::open(db_dir, open_mode::open_existing, cfg, mode);
 
       if (command == "info")
          cmd_info(*db, db_dir);

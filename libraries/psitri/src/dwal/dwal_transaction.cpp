@@ -13,19 +13,24 @@ namespace psitri::dwal
                                       wal_writer*    wal,
                                       uint32_t       root_index,
                                       dwal_database* db,
-                                      bool           nested)
+                                      bool           nested,
+                                      root_mode      mode)
        : _root(&root),
          _wal(wal),
          _db(db),
          _root_index(root_index),
          _nested(nested),
-         _owns_lock(false)
+         _owns_lock(false),
+         _mode(mode)
    {
-      _undo.push_frame();
+      if (_mode == root_mode::read_write)
+      {
+         _undo.push_frame();
 
-      // For outer transactions, begin a WAL entry.
-      if (!_nested && _wal)
-         _wal->begin_entry();
+         // For outer transactions, begin a WAL entry.
+         if (!_nested && _wal)
+            _wal->begin_entry();
+      }
    }
 
    dwal_transaction::~dwal_transaction()
@@ -42,7 +47,8 @@ namespace psitri::dwal
          _committed(other._committed),
          _aborted(other._aborted),
          _nested(other._nested),
-         _owns_lock(other._owns_lock)
+         _owns_lock(other._owns_lock),
+         _mode(other._mode)
          , _undo(std::move(other._undo))
    {
       other._owns_lock = false;
@@ -53,7 +59,7 @@ namespace psitri::dwal
 
    void dwal_transaction::upsert(std::string_view key, std::string_view value)
    {
-      assert(_root && !_committed && !_aborted);
+      assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
 
       record_undo_for_upsert(key);
       _root->rw_layer->store_data(key, value);
@@ -65,7 +71,7 @@ namespace psitri::dwal
 
    void dwal_transaction::upsert_subtree(std::string_view key, sal::ptr_address addr)
    {
-      assert(_root && !_committed && !_aborted);
+      assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
 
       record_undo_for_upsert(key);
       _root->rw_layer->store_subtree(key, addr);
@@ -76,7 +82,7 @@ namespace psitri::dwal
 
    bool dwal_transaction::remove(std::string_view key)
    {
-      assert(_root && !_committed && !_aborted);
+      assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
 
       record_undo_for_remove(key);
 
@@ -90,7 +96,7 @@ namespace psitri::dwal
 
    void dwal_transaction::remove_range(std::string_view low, std::string_view high)
    {
-      assert(_root && !_committed && !_aborted);
+      assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
 
       auto& layer = *_root->rw_layer;
 
@@ -188,6 +194,10 @@ namespace psitri::dwal
       assert(_root && !_committed && !_aborted);
       _committed = true;
 
+      // Read-only transactions have no undo/WAL state.
+      if (_mode == root_mode::read_only)
+         return;
+
       if (!_nested)
       {
          // Write WAL entry for the outermost transaction.
@@ -208,10 +218,25 @@ namespace psitri::dwal
       }
    }
 
+   void dwal_transaction::commit_multi(uint64_t tx_id, uint16_t participants, bool is_commit)
+   {
+      assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
+      _committed = true;
+
+      if (_wal)
+         _wal->commit_entry_multi(tx_id, participants, is_commit);
+
+      _undo.discard();
+   }
+
    void dwal_transaction::abort()
    {
       assert(_root && !_committed && !_aborted);
       _aborted = true;
+
+      // Read-only transactions have no undo/WAL state.
+      if (_mode == root_mode::read_only)
+         return;
 
       if (!_nested)
       {

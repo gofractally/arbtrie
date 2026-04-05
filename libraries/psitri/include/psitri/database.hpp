@@ -18,6 +18,24 @@ namespace psitri
    class read_session;
 
    static constexpr uint32_t num_top_roots = 512;
+
+   /// Controls how database::open() handles existing vs. new databases.
+   enum class open_mode
+   {
+      /// Open an existing database or create a new one.
+      create_or_open,
+
+      /// Create a new database. Fails if the database already exists.
+      create_only,
+
+      /// Open an existing database. Fails if the database does not exist.
+      open_existing,
+
+      /// Open an existing database in read-only mode.
+      /// Not yet implemented — reserved for future use.
+      read_only,
+   };
+
    namespace detail
    {
       class database_state;
@@ -119,26 +137,46 @@ namespace psitri
       ///@{
 
       /**
-       * @brief Open an existing database or create a new one.
-       * @param dir  Directory containing (or to contain) the database files.
-       * @param cfg  Runtime configuration (cache budget, sync mode, etc.).
-       * @param mode Recovery mode to apply on open. Default is none (no recovery).
+       * @brief Open or create a database.
+       *
+       * This is the primary entry point for obtaining a database instance.
+       *
+       * @param dir   Directory containing (or to contain) the database files.
+       * @param mode  How to handle existing vs. new databases.
+       * @param cfg   Runtime configuration (cache budget, sync mode, etc.).
+       * @return A shared_ptr to the database.
+       *
+       * @throws std::runtime_error if mode is create_only and the database exists.
+       * @throws std::runtime_error if mode is open_existing and the database does not exist.
+       * @throws std::runtime_error if mode is read_only (not yet implemented).
        */
-      database(const std::filesystem::path& dir,
-               const runtime_config&       cfg,
-               recovery_mode               mode = recovery_mode::none);
-      ~database();
+      static std::shared_ptr<database> open(std::filesystem::path dir,
+                                            open_mode             mode     = open_mode::create_or_open,
+                                            const runtime_config& cfg      = {},
+                                            recovery_mode         recovery = recovery_mode::none);
 
       /**
-       * @brief Convenience factory that creates a database with default config.
-       * @param dir  Directory for the database files (created if it doesn't exist).
-       * @param cfg  Optional runtime configuration.
-       * @return A shared_ptr to the new database.
+       * @brief Create a new database. Fails if the database already exists.
+       * @deprecated Use database::open(dir, open_mode::create_only) instead.
        */
       static std::shared_ptr<database> create(std::filesystem::path dir,
                                               const runtime_config& = {});
 
+      ~database();
+
       ///@}
+
+      /// @cond INTERNAL
+      /**
+       * @brief Low-level constructor. Prefer database::open() for normal use.
+       * @param dir  Directory containing the database files.
+       * @param cfg  Runtime configuration.
+       * @param mode Recovery mode to apply on open.
+       */
+      database(const std::filesystem::path& dir,
+               const runtime_config&       cfg,
+               recovery_mode               mode = recovery_mode::none);
+      /// @endcond
 
       /** @name Sessions */
       ///@{

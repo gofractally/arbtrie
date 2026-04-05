@@ -23,7 +23,7 @@ namespace
           : dir(name)
       {
          std::filesystem::remove_all(dir);
-         db = database::create(dir, runtime_config());
+         db = database::open(dir);
       }
 
       ~smart_ptr_db() { std::filesystem::remove_all(dir); }

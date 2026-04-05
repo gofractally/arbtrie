@@ -52,7 +52,7 @@ namespace
             cfg.compact_pinned_unused_threshold_mb = 255;
             cfg.compact_unpinned_unused_threshold_mb = 255;
          }
-         db  = std::make_shared<database>(dir, cfg);
+         db  = database::open(dir, open_mode::create_or_open, cfg);
          ses = db->start_write_session();
       }
 

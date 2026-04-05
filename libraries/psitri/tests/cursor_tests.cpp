@@ -26,7 +26,7 @@ namespace
       {
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir + "/data");
-         db  = std::make_shared<database>(dir, runtime_config());
+         db  = database::open(dir);
          ses = db->start_write_session();
       }
 
@@ -484,7 +484,7 @@ TEST_CASE("cursor: complex tree survives reopen", "[cursor][persistence]")
    {
       std::filesystem::remove_all(dir);
       std::filesystem::create_directories(dir + "/data");
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
 
@@ -521,7 +521,7 @@ TEST_CASE("cursor: complex tree survives reopen", "[cursor][persistence]")
 
    // Reopen and verify everything
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto root = ses->get_root(0);
       REQUIRE(root);

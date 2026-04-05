@@ -842,14 +842,9 @@ int main(int argc, char** argv)
    }
 
    // Open or create
-   bool created = false;
-   if (!std::filesystem::exists(db_dir / std::filesystem::path("data")))
-   {
-      std::filesystem::create_directories(db_dir / std::filesystem::path("data"));
-      created = true;
-   }
+   bool created = !std::filesystem::exists(db_dir / std::filesystem::path("data"));
 
-   auto db  = std::make_shared<database>(db_dir, runtime_config());
+   auto db  = database::open(db_dir);
    auto ses = db->start_write_session();
 
    if (stat)

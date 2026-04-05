@@ -69,7 +69,7 @@ TEST_CASE("clean shutdown and reopen", "[recovery]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -78,7 +78,7 @@ TEST_CASE("clean shutdown and reopen", "[recovery]")
    }
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
       REQUIRE(root);
@@ -97,7 +97,7 @@ TEST_CASE("unclean shutdown triggers recovery", "[recovery]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -108,7 +108,7 @@ TEST_CASE("unclean shutdown triggers recovery", "[recovery]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
       REQUIRE(root);
@@ -127,7 +127,7 @@ TEST_CASE("recovery with multiple roots", "[recovery]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
 
       {
@@ -148,7 +148,7 @@ TEST_CASE("recovery with multiple roots", "[recovery]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_read_session();
 
       {
@@ -178,13 +178,13 @@ TEST_CASE("empty database crash recovery", "[recovery]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
    }
 
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
       if (root)
@@ -204,7 +204,7 @@ TEST_CASE("double recovery survives", "[recovery]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -214,12 +214,12 @@ TEST_CASE("double recovery survives", "[recovery]")
 
    corrupt_shutdown_flag(dir);
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
    }
 
    corrupt_shutdown_flag(dir);
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
       REQUIRE(root);
@@ -238,7 +238,7 @@ TEST_CASE("explicit app_crash recovery mode", "[recovery]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -249,7 +249,7 @@ TEST_CASE("explicit app_crash recovery mode", "[recovery]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config(), recovery_mode::app_crash);
+      auto db  = database::open(dir, open_mode::create_or_open, {}, recovery_mode::app_crash);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
       REQUIRE(root);
@@ -277,7 +277,7 @@ TEST_CASE("explicit power_loss recovery mode", "[recovery][power_loss]")
    REQUIRE(words.size() > 1000);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (auto& w : words)
@@ -288,7 +288,7 @@ TEST_CASE("explicit power_loss recovery mode", "[recovery][power_loss]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       auto root = ses->get_root(0);
       REQUIRE(root);
@@ -311,7 +311,7 @@ TEST_CASE("power_loss recovery with multiple roots", "[recovery][power_loss]")
    size_t half = words.size() / 2;
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config());
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config());
       auto ses = db->start_write_session();
 
       {
@@ -332,7 +332,7 @@ TEST_CASE("power_loss recovery with multiple roots", "[recovery][power_loss]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db  = std::make_shared<database>(dir, synced_config(), recovery_mode::power_loss);
+      auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
 
       {
@@ -362,7 +362,7 @@ TEST_CASE("corruption flag halts writes", "[recovery]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 10; ++i)
@@ -389,7 +389,7 @@ TEST_CASE("deferred_cleanup is default for unclean shutdown", "[recovery][deferr
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -401,7 +401,7 @@ TEST_CASE("deferred_cleanup is default for unclean shutdown", "[recovery][deferr
 
    {
       // Default mode (none) with unclean shutdown should use deferred_cleanup
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
       REQUIRE(db->ref_counts_stale());
 
       // Data should still be readable
@@ -423,7 +423,7 @@ TEST_CASE("deferred_cleanup flag persists across reopens", "[recovery][deferred_
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 50; ++i)
@@ -435,13 +435,13 @@ TEST_CASE("deferred_cleanup flag persists across reopens", "[recovery][deferred_
 
    // First reopen: deferred_cleanup sets the stale flag
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
       REQUIRE(db->ref_counts_stale());
    }
 
    // Second reopen (clean shutdown): flag should still be set
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
       REQUIRE(db->ref_counts_stale());
    }
 
@@ -455,7 +455,7 @@ TEST_CASE("reclaim_leaked_memory clears stale flag", "[recovery][deferred_cleanu
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -466,7 +466,7 @@ TEST_CASE("reclaim_leaked_memory clears stale flag", "[recovery][deferred_cleanu
    corrupt_shutdown_flag(dir);
 
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
       REQUIRE(db->ref_counts_stale());
 
       // Trigger deferred cleanup
@@ -484,7 +484,7 @@ TEST_CASE("reclaim_leaked_memory clears stale flag", "[recovery][deferred_cleanu
 
    // Flag should be cleared on next reopen
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
       REQUIRE_FALSE(db->ref_counts_stale());
    }
 
@@ -498,7 +498,7 @@ TEST_CASE("explicit deferred_cleanup mode", "[recovery][deferred_cleanup]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -509,7 +509,7 @@ TEST_CASE("explicit deferred_cleanup mode", "[recovery][deferred_cleanup]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db = std::make_shared<database>(dir, runtime_config(), recovery_mode::deferred_cleanup);
+      auto db = database::open(dir, open_mode::create_or_open, {}, recovery_mode::deferred_cleanup);
       REQUIRE(db->ref_counts_stale());
 
       auto ses = db->start_read_session();
@@ -530,7 +530,7 @@ TEST_CASE("app_crash clears stale flag from prior deferred_cleanup", "[recovery]
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -542,7 +542,7 @@ TEST_CASE("app_crash clears stale flag from prior deferred_cleanup", "[recovery]
 
    // First: deferred_cleanup
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
       REQUIRE(db->ref_counts_stale());
    }
 
@@ -550,7 +550,7 @@ TEST_CASE("app_crash clears stale flag from prior deferred_cleanup", "[recovery]
 
    // Second: explicit app_crash should clear the stale flag
    {
-      auto db = std::make_shared<database>(dir, runtime_config(), recovery_mode::app_crash);
+      auto db = database::open(dir, open_mode::create_or_open, {}, recovery_mode::app_crash);
       REQUIRE_FALSE(db->ref_counts_stale());
 
       auto ses = db->start_read_session();
@@ -571,7 +571,7 @@ TEST_CASE("writes work with stale ref counts", "[recovery][deferred_cleanup]")
    std::filesystem::create_directories(dir + "/data");
 
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < 50; ++i)
@@ -582,7 +582,7 @@ TEST_CASE("writes work with stale ref counts", "[recovery][deferred_cleanup]")
    corrupt_shutdown_flag(dir);
 
    {
-      auto db = std::make_shared<database>(dir, runtime_config());
+      auto db = database::open(dir);
       REQUIRE(db->ref_counts_stale());
 
       // Writes should still work even with stale ref counts

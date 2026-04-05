@@ -113,7 +113,7 @@ struct padded_counters
 
 void write_only_bench(bench_config cfg, const std::filesystem::path& db_dir)
 {
-   auto db = database::create(db_dir);
+   auto db = database::open(db_dir);
 
    std::string mode_label = cfg.use_dwal ? "DWAL buffered" : "direct COW";
    std::cout << "═══════════════════════════════════════════════════════════════\n";
@@ -213,7 +213,7 @@ void write_only_bench(bench_config cfg, const std::filesystem::path& db_dir)
 
 void rw_bench(bench_config cfg, const std::filesystem::path& db_dir)
 {
-   auto db = database::create(db_dir);
+   auto db = database::open(db_dir);
 
    std::string mode_label = cfg.use_dwal ? "DWAL buffered" : "direct COW";
    std::cout << "═══════════════════════════════════════════════════════════════\n";

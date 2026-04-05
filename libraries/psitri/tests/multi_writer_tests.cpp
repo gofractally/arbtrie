@@ -24,7 +24,7 @@ namespace
       {
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir + "/data");
-         db = std::make_shared<database>(dir, runtime_config());
+         db = database::open(dir);
       }
 
       ~multi_writer_db() { std::filesystem::remove_all(dir); }

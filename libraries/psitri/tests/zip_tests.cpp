@@ -51,7 +51,7 @@ namespace
       {
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir + "/data");
-         db  = std::make_shared<database>(dir, runtime_config());
+         db  = database::open(dir);
          ses = db->start_write_session();
       }
       ~zip_db() { std::filesystem::remove_all(dir); }

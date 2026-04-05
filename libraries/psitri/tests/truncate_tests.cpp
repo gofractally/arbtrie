@@ -31,12 +31,12 @@ namespace
       {
          if (!created)
          {
-            db      = database::create(test_dir);
+            db      = database::open(test_dir);
             created = true;
          }
          else
          {
-            db = std::make_shared<database>(test_dir, runtime_config());
+            db = database::open(test_dir);
          }
          ses = db->start_write_session();
       }

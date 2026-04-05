@@ -121,6 +121,7 @@ namespace psitri::dwal
       _entry_active = true;
 
       // Reserve space for the entry header (written at commit time).
+      // Uses the v2 header size (25 bytes) which includes multi-tx fields.
       _entry_buf.resize(wal_entry_header_size);
    }
 
@@ -161,7 +162,8 @@ namespace psitri::dwal
       ++_op_count;
    }
 
-   uint64_t wal_writer::commit_entry()
+   uint64_t wal_writer::finalize_entry(uint8_t entry_flags, uint64_t multi_tx_id,
+                                       uint16_t multi_participant_count)
    {
       assert(_entry_active);
       _entry_active = false;
@@ -174,6 +176,9 @@ namespace psitri::dwal
       std::memcpy(hdr + 0, &entry_size, 4);
       std::memcpy(hdr + 4, &seq, 8);
       std::memcpy(hdr + 12, &_op_count, 2);
+      std::memcpy(hdr + 14, &entry_flags, 1);
+      std::memcpy(hdr + 15, &multi_tx_id, 8);
+      std::memcpy(hdr + 23, &multi_participant_count, 2);
 
       // Compute hash over everything except the hash itself.
       uint64_t hash = XXH3_64bits(_entry_buf.data(), _entry_buf.size());
@@ -187,6 +192,17 @@ namespace psitri::dwal
       _write_buf.insert(_write_buf.end(), _entry_buf.begin(), _entry_buf.end());
 
       return seq;
+   }
+
+   uint64_t wal_writer::commit_entry()
+   {
+      return finalize_entry(0, 0, 0);
+   }
+
+   uint64_t wal_writer::commit_entry_multi(uint64_t tx_id, uint16_t participants, bool is_commit)
+   {
+      uint8_t flags = is_commit ? wal_entry_flag_multi_tx_commit : 0;
+      return finalize_entry(flags, tx_id, participants);
    }
 
    void wal_writer::discard_entry()

@@ -392,7 +392,7 @@ class PsiTriEngine : public BankEngine
       else
          cfg.sync_mode = sal::sync_type::none;
       // Use default compaction thresholds
-      _db  = psitri::database::create(path, cfg);
+      _db  = psitri::database::open(path, psitri::open_mode::create_or_open, cfg);
       _ses = _db->start_write_session();
    }
 
@@ -607,7 +607,7 @@ class DwalEngine : public BankEngine
          cfg.sync_mode = sal::sync_type::msync_sync;
       else
          cfg.sync_mode = sal::sync_type::none;
-      _db = psitri::database::create(path, cfg);
+      _db = psitri::database::open(path, psitri::open_mode::create_or_open, cfg);
       _ws = _db->start_write_session();
 
       auto wal_dir = std::filesystem::path(path) / "wal";

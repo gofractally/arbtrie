@@ -370,7 +370,7 @@ static void run_pattern(const char*                                             
    }
 
    // -- Open database --
-   auto db = std::make_shared<database>(db_path, runtime_config());
+   auto db = database::open(db_path);
 
    // -- PUT --
    {
@@ -402,7 +402,7 @@ static void run_pattern(const char*                                             
    // -- Close and reopen for cold cache --
    printf(BOLDGREEN "\nClosing and reopening database to clear caches...\n" RESET);
    db.reset();
-   db = std::make_shared<database>(db_path, runtime_config());
+   db = database::open(db_path, open_mode::open_existing);
 
    // -- Concurrent read tests --
    {

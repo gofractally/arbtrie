@@ -26,7 +26,7 @@ namespace
       {
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir + "/data");
-         db  = std::make_shared<database>(dir, runtime_config());
+         db  = database::open(dir);
          ses = db->start_write_session();
       }
 
@@ -328,7 +328,7 @@ TEST_CASE("integrity: 3-phase persist with structural changes", "[integrity][per
    {
       std::filesystem::remove_all(dir);
       std::filesystem::create_directories(dir + "/data");
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
       for (int i = 0; i < N; ++i)
@@ -341,7 +341,7 @@ TEST_CASE("integrity: 3-phase persist with structural changes", "[integrity][per
 
    // Phase 2: Reopen, bulk remove (forces collapses), add new keys
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto tx  = ses->start_transaction(0);
 
@@ -364,7 +364,7 @@ TEST_CASE("integrity: 3-phase persist with structural changes", "[integrity][per
 
    // Phase 3: Reopen and verify final state matches oracle
    {
-      auto db  = std::make_shared<database>(dir, runtime_config());
+      auto db  = database::open(dir);
       auto ses = db->start_write_session();
       auto root = ses->get_root(0);
       REQUIRE(root);

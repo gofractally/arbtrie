@@ -82,17 +82,48 @@ namespace psitri
       _dbfile.sync(sal::sync_type::full);
    }
 
-   std::shared_ptr<database> database::create(std::filesystem::path dir, const runtime_config& cfg)
+   static bool database_exists(const std::filesystem::path& dir)
    {
-      if (std::filesystem::exists(std::filesystem::symlink_status(dir / "db")) ||
-          std::filesystem::exists(std::filesystem::symlink_status(dir / "data")))
-         throw std::runtime_error("directory already exists: " + dir.generic_string());
+      return std::filesystem::exists(std::filesystem::symlink_status(dir / "data"));
+   }
 
-      std::filesystem::create_directories(dir / "data");
+   std::shared_ptr<database> database::open(std::filesystem::path dir,
+                                            open_mode             mode,
+                                            const runtime_config& cfg,
+                                            recovery_mode         recovery)
+   {
+      bool exists = database_exists(dir);
 
-      auto db = std::make_shared<database>(dir, cfg);
+      switch (mode)
+      {
+         case open_mode::create_only:
+            if (exists)
+               throw std::runtime_error("database already exists: " + dir.generic_string());
+            break;
+
+         case open_mode::open_existing:
+            if (!exists)
+               throw std::runtime_error("database does not exist: " + dir.generic_string());
+            break;
+
+         case open_mode::create_or_open:
+            break;
+
+         case open_mode::read_only:
+            throw std::runtime_error("read_only mode not yet implemented");
+      }
+
+      if (!exists)
+         std::filesystem::create_directories(dir / "data");
+
+      auto db = std::make_shared<database>(dir, cfg, recovery);
       db->_allocator.init_shared_ownership(db);
       return db;
+   }
+
+   std::shared_ptr<database> database::create(std::filesystem::path dir, const runtime_config& cfg)
+   {
+      return open(std::move(dir), open_mode::create_only, cfg);
    }
 
    bool database::ref_counts_stale() const
