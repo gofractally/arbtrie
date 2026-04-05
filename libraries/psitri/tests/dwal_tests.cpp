@@ -4649,3 +4649,796 @@ TEST_CASE("multi-root transaction: remove across roots", "[dwal][multi-root]")
    CHECK_FALSE(r0.found);
    CHECK_FALSE(r1.found);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Psibase integration feature tests
+// ═══════════════════════════════════════════════════════════════════════
+
+namespace
+{
+   /// Helper: read the value at the current merge_cursor position.
+   /// Handles both btree-layer values (data field) and Tri-layer values
+   /// (must use tri_cursor->value<T>()).
+   std::string mc_value(psitri::dwal::merge_cursor& mc)
+   {
+      if (mc.current_source() == psitri::dwal::merge_cursor::source::tri)
+      {
+         auto opt = mc.tri_cursor()->value<std::string>();
+         return opt ? *opt : std::string{};
+      }
+      return std::string(mc.current_value().data);
+   }
+
+   /// Helper: collect all (key, value) pairs from a merge_cursor.
+   std::vector<std::pair<std::string, std::string>> mc_collect(psitri::dwal::merge_cursor& mc)
+   {
+      std::vector<std::pair<std::string, std::string>> out;
+      mc.seek_begin();
+      while (!mc.is_end())
+      {
+         out.emplace_back(std::string(mc.key()), mc_value(mc));
+         mc.next();
+      }
+      return out;
+   }
+
+   /// Helper: collect all keys from a merge_cursor.
+   std::vector<std::string> mc_keys(psitri::dwal::merge_cursor& mc)
+   {
+      std::vector<std::string> out;
+      mc.seek_begin();
+      while (!mc.is_end())
+      {
+         out.emplace_back(mc.key());
+         mc.next();
+      }
+      return out;
+   }
+}  // namespace
+
+TEST_CASE("psibase prefix-partitioned multi-DB in single root", "[dwal][psibase][prefix]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write keys across 12 "databases" using 1-byte prefix.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int prefix = 0; prefix < 12; ++prefix)
+      {
+         char pfx = static_cast<char>(prefix);
+         for (int i = 0; i < 3; ++i)
+         {
+            std::string key   = std::string(1, pfx) + "key" + std::to_string(i);
+            std::string value = "db" + std::to_string(prefix) + "_v" + std::to_string(i);
+            tx.upsert(key, value);
+         }
+      }
+      tx.commit();
+   }
+
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+
+   // lower_bound at prefix 0x01 start → first key in prefix 1.
+   std::string prefix1_start(1, '\x01');
+   cursor->lower_bound(prefix1_start);
+   REQUIRE_FALSE(cursor->is_end());
+   CHECK(cursor->key().substr(0, 1) == prefix1_start);
+
+   // Iterate forward within prefix 1 — should find exactly 3 keys.
+   int count = 0;
+   while (!cursor->is_end() && cursor->key()[0] == '\x01')
+   {
+      ++count;
+      cursor->next();
+   }
+   CHECK(count == 3);
+
+   // After prefix 1, should be at prefix 2.
+   if (!cursor->is_end())
+   {
+      CHECK(cursor->key()[0] == '\x02');
+   }
+
+   // lower_bound past end of prefix 1 → should land on prefix 2.
+   std::string past_prefix1 = std::string(1, '\x01') + "\xff\xff\xff";
+   cursor->lower_bound(past_prefix1);
+   if (!cursor->is_end())
+   {
+      CHECK(cursor->key()[0] == '\x02');
+   }
+
+   // Total keys: 12 prefixes × 3 = 36.
+   CHECK(cursor->count_keys() == 36);
+}
+
+TEST_CASE("psibase prefix remove_range clears one DB", "[dwal][psibase][prefix]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write 3 keys each in prefix 0x00, 0x01, 0x02.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int pfx = 0; pfx < 3; ++pfx)
+      {
+         char p = static_cast<char>(pfx);
+         for (int i = 0; i < 3; ++i)
+         {
+            std::string key = std::string(1, p) + "k" + std::to_string(i);
+            tx.upsert(key, "v" + std::to_string(pfx) + std::to_string(i));
+         }
+      }
+      tx.commit();
+   }
+
+   // Remove all keys in prefix 0x01: ["\x01", "\x02")
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove_range(std::string(1, '\x01'), std::string(1, '\x02'));
+      tx.commit();
+   }
+
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+
+   // Prefix 0x00: still has 3 keys.
+   int count_p0 = 0;
+   cursor->lower_bound(std::string(1, '\x00'));
+   while (!cursor->is_end() && cursor->key()[0] == '\x00')
+   {
+      ++count_p0;
+      cursor->next();
+   }
+   CHECK(count_p0 == 3);
+
+   // Prefix 0x01: empty.
+   cursor->lower_bound(std::string(1, '\x01'));
+   CHECK((!cursor->is_end() ? cursor->key()[0] != '\x01' : true));
+
+   // Prefix 0x02: still has 3 keys.
+   int count_p2 = 0;
+   cursor->lower_bound(std::string(1, '\x02'));
+   while (!cursor->is_end() && cursor->key()[0] == '\x02')
+   {
+      ++count_p2;
+      cursor->next();
+   }
+   CHECK(count_p2 == 3);
+
+   // Total: 6 keys remain.
+   CHECK(cursor->count_keys() == 6);
+}
+
+TEST_CASE("psibase get_less_than via lower_bound then prev", "[dwal][psibase][cursor-pattern]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("c", "2");
+      tx.upsert("e", "3");
+      tx.upsert("g", "4");
+      tx.commit();
+   }
+
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+
+   // Helper: get_less_than(key) = lower_bound(key) then prev().
+   auto get_less_than = [&](std::string_view key)
+       -> std::optional<std::string>
+   {
+      cursor->lower_bound(key);
+      cursor->prev();
+      if (cursor->is_rend())
+         return std::nullopt;
+      return std::string(cursor->key());
+   };
+
+   // get_less_than("e") → "c"
+   CHECK(get_less_than("e") == "c");
+
+   // get_less_than("d") → lower_bound lands on "e", prev → "c"
+   CHECK(get_less_than("d") == "c");
+
+   // get_less_than("a") → nothing less than "a"
+   CHECK(get_less_than("a") == std::nullopt);
+
+   // get_less_than("b") → "a"
+   CHECK(get_less_than("b") == "a");
+
+   // get_less_than past end → "g" (last key)
+   CHECK(get_less_than("z") == "g");
+}
+
+TEST_CASE("psibase get_max via upper_bound prefix pattern", "[dwal][psibase][cursor-pattern]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert(std::string(1, '\x01') + "aaa", "v1");
+      tx.upsert(std::string(1, '\x01') + "bbb", "v2");
+      tx.upsert(std::string(1, '\x01') + "zzz", "v3");
+      tx.upsert(std::string(1, '\x02') + "aaa", "v4");
+      tx.commit();
+   }
+
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+
+   // Helper: get_max(prefix) = lower_bound(prefix+1) then prev().
+   auto get_max = [&](std::string prefix) -> std::optional<std::string>
+   {
+      std::string upper = prefix;
+      upper[upper.size() - 1]++;
+
+      cursor->lower_bound(upper);
+      cursor->prev();
+      if (cursor->is_rend())
+         return std::nullopt;
+      if (cursor->key().substr(0, prefix.size()) != prefix)
+         return std::nullopt;
+      return std::string(cursor->key());
+   };
+
+   // Max of prefix 0x01 → "\x01zzz"
+   CHECK(get_max(std::string(1, '\x01')) == std::string(1, '\x01') + "zzz");
+
+   // Max of prefix 0x02 → "\x02aaa"
+   CHECK(get_max(std::string(1, '\x02')) == std::string(1, '\x02') + "aaa");
+
+   // Max of empty prefix 0x05 → nullopt
+   CHECK(get_max(std::string(1, '\x05')) == std::nullopt);
+
+   // Global seek_last → "\x02aaa"
+   cursor->seek_last();
+   REQUIRE_FALSE(cursor->is_end());
+   CHECK(cursor->key() == std::string(1, '\x02') + "aaa");
+}
+
+TEST_CASE("psibase is_empty via lower_bound range check", "[dwal][psibase][cursor-pattern]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("b", "1");
+      tx.upsert("d", "2");
+      tx.upsert("f", "3");
+      tx.commit();
+   }
+
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+
+   // is_empty(lo, hi): lower_bound(lo), check !is_end() && key() < hi
+   auto is_empty = [&](std::string_view lo, std::string_view hi) -> bool
+   {
+      cursor->lower_bound(lo);
+      return cursor->is_end() || cursor->key() >= hi;
+   };
+
+   CHECK(is_empty("a", "b") == true);   // no key in [a, b)
+   CHECK(is_empty("a", "c") == false);  // "b" is in [a, c)
+   CHECK(is_empty("c", "d") == true);   // no key in [c, d)
+   CHECK(is_empty("d", "e") == false);  // "d" is in [d, e)
+   CHECK(is_empty("g", "z") == true);   // no key in [g, z)
+}
+
+TEST_CASE("psibase splice equivalent via remove_range plus iterate-upsert", "[dwal][psibase][splice]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Root 0 (dest): "a"="D1", "b"="D2", "c"="D3", "d"="D4"
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert("a", "D1");
+      tx.upsert("b", "D2");
+      tx.upsert("c", "D3");
+      tx.upsert("d", "D4");
+      tx.commit();
+   }
+
+   // Root 1 (src): "b"="S2", "c"="S3_new"
+   {
+      auto tx = dwal_db.start_write_transaction(1);
+      tx.upsert("b", "S2");
+      tx.upsert("c", "S3_new");
+      tx.commit();
+   }
+
+   // Splice [b, d) from root 1 → root 0.
+   {
+      // Read source range.
+      auto src = dwal_db.create_cursor(1, psitri::dwal::read_mode::latest);
+      src->lower_bound("b");
+
+      std::vector<std::pair<std::string, std::string>> to_copy;
+      while (!src->is_end() && src->key() < "d")
+      {
+         to_copy.emplace_back(std::string(src->key()),
+                              std::string(src->current_value().data));
+         src->next();
+      }
+
+      // Modify dest.
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.remove_range("b", "d");
+      for (auto& [k, v] : to_copy)
+         tx.upsert(k, v);
+      tx.commit();
+   }
+
+   // Verify root 0: "a"="D1", "b"="S2", "c"="S3_new", "d"="D4"
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+   auto kv = mc_collect(*cursor);
+   REQUIRE(kv.size() == 4);
+   CHECK(kv[0] == std::pair<std::string, std::string>{"a", "D1"});
+   CHECK(kv[1] == std::pair<std::string, std::string>{"b", "S2"});
+   CHECK(kv[2] == std::pair<std::string, std::string>{"c", "S3_new"});
+   CHECK(kv[3] == std::pair<std::string, std::string>{"d", "D4"});
+}
+
+TEST_CASE("psibase is_equal_weak equivalent via dual cursor comparison", "[dwal][psibase][concurrency]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Root 0 and Root 1: identical data.
+   for (int root : {0, 1})
+   {
+      auto tx = dwal_db.start_write_transaction(root);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.upsert("c", "3");
+      tx.commit();
+   }
+
+   // Root 2: different "b" value.
+   {
+      auto tx = dwal_db.start_write_transaction(2);
+      tx.upsert("a", "1");
+      tx.upsert("b", "DIFFERENT");
+      tx.upsert("c", "3");
+      tx.commit();
+   }
+
+   // is_equal_weak: iterate both cursors in [lo, hi), compare key+value.
+   auto is_equal_weak = [&](uint32_t r1, uint32_t r2, std::string_view lo,
+                            std::string_view hi) -> bool
+   {
+      auto c1 = dwal_db.create_cursor(r1, psitri::dwal::read_mode::latest);
+      auto c2 = dwal_db.create_cursor(r2, psitri::dwal::read_mode::latest);
+      c1->lower_bound(lo);
+      c2->lower_bound(lo);
+      while (true)
+      {
+         bool e1 = c1->is_end() || c1->key() >= hi;
+         bool e2 = c2->is_end() || c2->key() >= hi;
+         if (e1 && e2)
+            return true;
+         if (e1 != e2)
+            return false;
+         if (c1->key() != c2->key())
+            return false;
+         if (c1->current_value().data != c2->current_value().data)
+            return false;
+         c1->next();
+         c2->next();
+      }
+   };
+
+   CHECK(is_equal_weak(0, 1, "", "\xff") == true);        // identical
+   CHECK(is_equal_weak(0, 2, "", "\xff") == false);        // b differs
+   CHECK(is_equal_weak(0, 2, "a", "b") == true);           // only "a" in range, same
+   CHECK(is_equal_weak(0, 2, "b", "c") == false);          // "b" differs
+   CHECK(is_equal_weak(0, 2, "c", "\xff") == true);        // only "c" in range, same
+}
+
+TEST_CASE("psibase block production pattern: write-commit-swap-read cycle",
+          "[dwal][psibase][block-pattern]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   dcfg.max_rw_entries = 5000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Block 1: write 10 keys with prefix 0x00, 5 keys with prefix 0x01.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 0; i < 10; ++i)
+         tx.upsert(std::string(1, '\x00') + "k" + std::to_string(i), "b1_" + std::to_string(i));
+      for (int i = 0; i < 5; ++i)
+         tx.upsert(std::string(1, '\x01') + "k" + std::to_string(i), "b1_" + std::to_string(i));
+      tx.commit();
+   }
+
+   // Swap block 1 → RO.
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   dwal_db.try_swap_rw_to_ro(0);
+
+   // Reader after block 1 swap (buffered mode sees RO).
+   auto cursor_b1 = dwal_db.create_cursor(0, psitri::dwal::read_mode::buffered);
+   auto keys_b1   = mc_keys(*cursor_b1);
+   CHECK(keys_b1.size() == 15);
+
+   // Manually merge block 1 RO → Tri (since merge_threads=0).
+   {
+      auto ro = dwal_db.root(0).buffered_ptr;
+      if (ro)
+      {
+         auto ws = db->start_write_session();
+         auto tx = ws->start_transaction(0);
+         for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
+         {
+            auto k = it.key();
+            auto& v = it.value();
+            tx.upsert(psitri::key_view(k.data(), k.size()),
+                       psitri::value_view(v.data.data(), v.data.size()));
+         }
+         tx.commit();
+         std::unique_lock lk(dwal_db.root(0).buffered_mutex);
+         dwal_db.root(0).buffered_ptr = nullptr;
+      }
+      dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   }
+
+   // Block 2: add 5 new keys + modify 3 existing.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 10; i < 15; ++i)
+         tx.upsert(std::string(1, '\x00') + "k" + std::to_string(i), "b2_" + std::to_string(i));
+      // Modify 3 existing keys.
+      for (int i = 0; i < 3; ++i)
+         tx.upsert(std::string(1, '\x00') + "k" + std::to_string(i), "b2_mod_" + std::to_string(i));
+      tx.commit();
+   }
+
+   // cursor_b1 was captured before block 2 — should still see block 1 snapshot.
+   auto keys_b1_recheck = mc_keys(*cursor_b1);
+   CHECK(keys_b1_recheck.size() == 15);
+
+   // Swap block 2 → RO.
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   dwal_db.try_swap_rw_to_ro(0);
+
+   // New cursor after block 2: block 1 (15 in Tri) + block 2 RO (8: 5 new + 3 modified) = 20 unique keys.
+   auto cursor_b2 = dwal_db.create_cursor(0, psitri::dwal::read_mode::buffered);
+   auto keys_b2   = mc_keys(*cursor_b2);
+   CHECK(keys_b2.size() == 20);
+}
+
+TEST_CASE("psibase upsert_subtree stores and retrieves subtree reference",
+          "[dwal][psibase][subtree]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   // Write some data directly to psitri root 1 via write_session.
+   sal::ptr_address subtree_addr;
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(1);
+      tx.upsert("sub_key1", "sub_val1");
+      tx.upsert("sub_key2", "sub_val2");
+      tx.commit();
+
+      auto root_ptr = ws->get_root(1);
+      subtree_addr  = root_ptr.address();
+   }
+   REQUIRE(subtree_addr != sal::null_ptr_address);
+
+   // Store the subtree address in DWAL root 0.
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert_subtree("revision_head", subtree_addr);
+      tx.commit();
+   }
+
+   // Verify via get — should report subtree.
+   auto result = dwal_db.get_latest(0, "revision_head");
+   REQUIRE(result.found);
+   CHECK(result.value.is_subtree());
+   CHECK(result.value.subtree_root == subtree_addr);
+
+   // Verify via cursor — is_subtree should be true.
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+   cursor->seek("revision_head");
+   REQUIRE_FALSE(cursor->is_end());
+   CHECK(cursor->is_subtree());
+}
+
+TEST_CASE("psibase fork resolution via stored snapshots", "[dwal][psibase][fork]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Helper: write a block's data, commit, swap, manual merge, return Tri root address.
+   auto produce_block = [&](std::vector<std::pair<std::string, std::string>> writes)
+       -> sal::ptr_address
+   {
+      // Write data.
+      {
+         auto tx = dwal_db.start_write_transaction(0);
+         for (auto& [k, v] : writes)
+            tx.upsert(k, v);
+         tx.commit();
+      }
+
+      // Swap RW → RO.
+      dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+      dwal_db.try_swap_rw_to_ro(0);
+
+      // Manual merge: drain RO into PsiTri.
+      auto ro = dwal_db.root(0).buffered_ptr;
+      if (ro)
+      {
+         auto ws = db->start_write_session();
+         auto tx = ws->start_transaction(0);
+         for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
+         {
+            auto k = it.key();
+            auto& v = it.value();
+            if (v.is_tombstone())
+               tx.remove(psitri::key_view(k.data(), k.size()));
+            else
+               tx.upsert(psitri::key_view(k.data(), k.size()),
+                          psitri::value_view(v.data.data(), v.data.size()));
+         }
+         tx.commit();
+
+         // Clear RO layer.
+         std::unique_lock lk(dwal_db.root(0).buffered_mutex);
+         dwal_db.root(0).buffered_ptr = nullptr;
+      }
+      dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+
+      // Get the Tri root address.
+      auto rs  = db->start_read_session();
+      auto ptr = rs->get_root(0);
+      return ptr.address();
+   };
+
+   // Block 1.
+   auto snap1_addr = produce_block({{"b1_a", "val1a"}, {"b1_b", "val1b"}});
+   REQUIRE(snap1_addr != sal::null_ptr_address);
+
+   // Store snapshot 1 in DWAL root 1 (metadata).
+   {
+      auto tx = dwal_db.start_write_transaction(1);
+      tx.upsert_subtree("snap_1", snap1_addr);
+      tx.commit();
+   }
+
+   // Block 2.
+   auto snap2_addr = produce_block({{"b2_a", "val2a"}});
+   {
+      auto tx = dwal_db.start_write_transaction(1);
+      tx.upsert_subtree("snap_2", snap2_addr);
+      tx.commit();
+   }
+
+   // Block 3.
+   auto snap3_addr = produce_block({{"b3_a", "val3a"}});
+   {
+      auto tx = dwal_db.start_write_transaction(1);
+      tx.upsert_subtree("snap_3", snap3_addr);
+      tx.commit();
+   }
+
+   // Fork resolution: read snapshot 1 and create a psitri cursor on it.
+   auto snap1_result = dwal_db.get_latest(1, "snap_1");
+   REQUIRE(snap1_result.found);
+   REQUIRE(snap1_result.value.is_subtree());
+
+   // Create a cursor from the stored address (smart_ptr from address).
+   auto rs = db->start_read_session();
+   {
+      auto root_ptr = rs->get_root(0);  // current root has blocks 1+2+3
+
+      // Snapshot 1: create cursor from stored address.
+      // retain=true because we're borrowing the address, not taking ownership.
+      sal::smart_ptr<sal::alloc_header> snap1_ptr(rs->allocator_session(),
+                                                   snap1_result.value.subtree_root, true);
+      psitri::cursor snap1_cursor(std::move(snap1_ptr));
+
+      // Verify snap1 sees only block 1 data.
+      snap1_cursor.seek_begin();
+      std::vector<std::string> snap1_keys;
+      while (!snap1_cursor.is_end())
+      {
+         snap1_keys.emplace_back(snap1_cursor.key());
+         snap1_cursor.next();
+      }
+      CHECK(snap1_keys.size() == 2);
+      CHECK(snap1_keys[0] == "b1_a");
+      CHECK(snap1_keys[1] == "b1_b");
+   }
+
+   {
+      // Snapshot 3: should see blocks 1+2+3.
+      auto snap3_result = dwal_db.get_latest(1, "snap_3");
+      REQUIRE(snap3_result.found);
+      REQUIRE(snap3_result.value.is_subtree());
+
+      sal::smart_ptr<sal::alloc_header> snap3_ptr(rs->allocator_session(),
+                                                   snap3_result.value.subtree_root, true);
+      psitri::cursor snap3_cursor(std::move(snap3_ptr));
+
+      snap3_cursor.seek_begin();
+      std::vector<std::string> snap3_keys;
+      while (!snap3_cursor.is_end())
+      {
+         snap3_keys.emplace_back(snap3_cursor.key());
+         snap3_cursor.next();
+      }
+      CHECK(snap3_keys.size() == 4);  // b1_a, b1_b, b2_a, b3_a
+   }
+}
+
+TEST_CASE("psibase concurrent readers with block commit", "[dwal][psibase][concurrency]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   dcfg.max_rw_entries = 50000;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // Write 100 keys, commit, swap.
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 0; i < 100; ++i)
+      {
+         char key[8];
+         snprintf(key, sizeof(key), "k%05d", i);
+         tx.upsert(std::string(key), "old_" + std::to_string(i));
+      }
+      tx.commit();
+   }
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   dwal_db.try_swap_rw_to_ro(0);
+
+   std::atomic<bool> writer_done{false};
+   std::atomic<int>  reader_errors{0};
+
+   // Launch 4 reader threads. Each creates a cursor and reads all keys.
+   std::vector<std::thread> readers;
+   for (int t = 0; t < 4; ++t)
+   {
+      readers.emplace_back(
+          [&dwal_db, &writer_done, &reader_errors]()
+          {
+             // Take a snapshot cursor before writer starts block 2.
+             auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::buffered);
+             auto keys   = mc_keys(*cursor);
+
+             // Should see exactly 100 keys.
+             if (keys.size() != 100)
+                reader_errors.fetch_add(1);
+
+             // Wait for writer, then verify the snapshot is still consistent.
+             while (!writer_done.load(std::memory_order_acquire))
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+             // Re-scan with same cursor — should still see 100 old values.
+             auto keys2 = mc_keys(*cursor);
+             if (keys2.size() != 100)
+                reader_errors.fetch_add(1);
+          });
+   }
+
+   // Writer: block 2 — update keys 50-99.
+   std::this_thread::sleep_for(std::chrono::milliseconds(50));
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      for (int i = 50; i < 100; ++i)
+      {
+         char key[8];
+         snprintf(key, sizeof(key), "k%05d", i);
+         tx.upsert(std::string(key), "new_" + std::to_string(i));
+      }
+      tx.commit();
+   }
+   dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
+   dwal_db.try_swap_rw_to_ro(0);
+   writer_done.store(true, std::memory_order_release);
+
+   for (auto& t : readers)
+      t.join();
+
+   CHECK(reader_errors.load() == 0);
+
+   // New cursor after block 2 should see updated values.
+   auto new_cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::buffered);
+   new_cursor->lower_bound("k00050");
+   REQUIRE_FALSE(new_cursor->is_end());
+   CHECK(new_cursor->current_value().data.substr(0, 4) == "new_");
+}
+
+TEST_CASE("psibase prefix iteration with matchKeySize", "[dwal][psibase][cursor-pattern]")
+{
+   temp_dir td;
+   auto     db = psitri::database::create(td.path / "db");
+
+   psitri::dwal::dwal_config dcfg;
+   dcfg.merge_threads = 0;
+   psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
+
+   // 8-byte prefix simulating AccountNumber, then suffix key.
+   std::string acct1(8, '\0');
+   acct1[7] = '\x01';
+   std::string acct2(8, '\0');
+   acct2[7] = '\x02';
+
+   {
+      auto tx = dwal_db.start_write_transaction(0);
+      tx.upsert(acct1 + "key1", "val1");
+      tx.upsert(acct1 + "key2", "val2");
+      tx.upsert(acct2 + "key1", "val3");
+      tx.commit();
+   }
+
+   auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
+
+   // lower_bound(acct1 + "key1") → exact match, prefix check passes.
+   cursor->lower_bound(acct1 + "key1");
+   REQUIRE_FALSE(cursor->is_end());
+   CHECK(cursor->key().substr(0, 8) == acct1);
+
+   // lower_bound(acct1 + "key3") → lands on acct2's key1, prefix check fails.
+   cursor->lower_bound(acct1 + "key3");
+   if (!cursor->is_end())
+   {
+      CHECK(cursor->key().substr(0, 8) != acct1);
+      CHECK(cursor->key().substr(0, 8) == acct2);
+   }
+
+   // lower_bound(acct1) → first key in acct1, prefix check passes.
+   cursor->lower_bound(acct1);
+   REQUIRE_FALSE(cursor->is_end());
+   CHECK(cursor->key().substr(0, 8) == acct1);
+}
