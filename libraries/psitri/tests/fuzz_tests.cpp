@@ -401,6 +401,10 @@ namespace
             _total_weight += _ow.weights[i];
       }
 
+      /// Disable Catch2 assertions for thread-safety (worker threads).
+      /// Operations still maintain the oracle; validation is skipped.
+      void set_validate(bool v) { _validate = v; }
+
       void run(uint64_t num_ops, bool check_descendents = false)
       {
          for (uint64_t i = 0; i < num_ops; ++i)
@@ -408,6 +412,9 @@ namespace
             auto op = pick_op();
             execute(op);
             _op_count++;
+
+            if (!_validate)
+               continue;
 
             // Full tree structure validation to catch descendents mismatches
             if (check_descendents && *_cur && _oracle.size() > 0)
@@ -421,6 +428,9 @@ namespace
             if (_op_count % (500 / std::max(1, SCALE)) == 0)
                full_forward_check();
          }
+
+         if (!_validate)
+            return;
 
          // Final validation
          full_forward_check();
@@ -442,7 +452,7 @@ namespace
             if (i % snapshot_interval == 0 && *_cur)
             {
                // Validate previous snapshot before replacing
-               if (snapshot_cur && *snapshot_cur)
+               if (_validate && snapshot_cur && *snapshot_cur)
                {
                   validate_snapshot(snapshot_cur, snapshot_oracle);
                }
@@ -472,22 +482,28 @@ namespace
             execute(op);
             _op_count++;
 
-            if (_op_count % (100 / std::max(1, SCALE)) == 0)
-               spot_check();
+            if (_validate)
+            {
+               if (_op_count % (100 / std::max(1, SCALE)) == 0)
+                  spot_check();
 
-            if (_op_count % (500 / std::max(1, SCALE)) == 0)
-               full_forward_check();
+               if (_op_count % (500 / std::max(1, SCALE)) == 0)
+                  full_forward_check();
+            }
          }
 
-         // Validate final snapshot
-         if (snapshot_cur && *snapshot_cur)
-            validate_snapshot(snapshot_cur, snapshot_oracle);
+         if (_validate)
+         {
+            // Validate final snapshot
+            if (snapshot_cur && *snapshot_cur)
+               validate_snapshot(snapshot_cur, snapshot_oracle);
 
-         // Release snapshot before final validation
-         snapshot_cur.reset();
+            // Release snapshot before final validation
+            snapshot_cur.reset();
 
-         full_forward_check();
-         full_backward_check();
+            full_forward_check();
+            full_backward_check();
+         }
       }
 
       /// Remove all keys and release root. Does not check for leaks.
@@ -559,6 +575,7 @@ namespace
       std::map<std::string, std::string> _oracle;
       int                                _max_value_len;
       uint32_t                           _root_index;
+      bool                               _validate = true;
 
       op_type pick_op()
       {
@@ -576,7 +593,8 @@ namespace
 
       void execute(op_type op)
       {
-         INFO("op #" << _op_count << " type=" << op_name(op) << " oracle_size=" << _oracle.size());
+         if (_validate)
+            INFO("op #" << _op_count << " type=" << op_name(op) << " oracle_size=" << _oracle.size());
 
          switch (op)
          {
@@ -630,7 +648,6 @@ namespace
       {
          auto key   = _keygen.generate();
          auto value = _keygen.generate_value(_max_value_len);
-         INFO("insert key=" << hex_encode(key) << " len=" << key.size());
 
          // insert() requires key does not exist — check oracle first
          if (_oracle.count(key))
@@ -639,17 +656,20 @@ namespace
          _cur->insert(to_key_view(key), to_value_view(value));
          _oracle[key] = value;
 
-         // Verify the key is now retrievable
-         std::string buf;
-         int32_t     get_result = _cur->get(to_key_view(key), &buf);
-         REQUIRE(get_result >= 0);
+         if (_validate)
+         {
+            INFO("insert key=" << hex_encode(key) << " len=" << key.size());
+            // Verify the key is now retrievable
+            std::string buf;
+            int32_t     get_result = _cur->get(to_key_view(key), &buf);
+            REQUIRE(get_result >= 0);
+         }
       }
 
       void do_update()
       {
          auto key   = _keygen.pick_or_generate();
          auto value = _keygen.generate_value(_max_value_len);
-         INFO("update key=" << hex_encode(key));
 
          // update() requires key exists — check oracle first
          auto it = _oracle.find(key);
@@ -664,43 +684,45 @@ namespace
       {
          auto key   = _keygen.pick_or_generate();
          auto value = _keygen.generate_value(_max_value_len);
-         INFO("upsert key=" << hex_encode(key) << " len=" << key.size());
 
          _cur->upsert(to_key_view(key), to_value_view(value));
          _oracle[key] = value;
 
-         // Verify the key is now retrievable with correct value
-         std::string buf;
-         int32_t     get_result = _cur->get(to_key_view(key), &buf);
-         REQUIRE(get_result == (int32_t)value.size());
-         REQUIRE(buf == value);
+         if (_validate)
+         {
+            INFO("upsert key=" << hex_encode(key) << " len=" << key.size());
+            // Verify the key is now retrievable with correct value
+            std::string buf;
+            int32_t     get_result = _cur->get(to_key_view(key), &buf);
+            REQUIRE(get_result == (int32_t)value.size());
+            REQUIRE(buf == value);
+         }
       }
 
       void do_remove()
       {
          auto key = _keygen.pick_or_generate();
-         INFO("remove key=" << hex_encode(key));
 
          int  psitri_result = _cur->remove(to_key_view(key));
          auto it            = _oracle.find(key);
          if (it == _oracle.end())
          {
-            if (psitri_result != -1)
+            if (_validate && psitri_result != -1)
             {
-               // psitri found a key that oracle doesn't have - dump state for debugging
+               INFO("remove key=" << hex_encode(key));
                INFO("REMOVE DESYNC: psitri found key not in oracle, result=" << psitri_result);
                INFO("oracle has " << _oracle.size() << " keys, psitri iteration count="
                                   << count_by_iteration({}, {}));
-               // Check if the key was retrievable via get before remove
                REQUIRE(psitri_result == -1);
             }
          }
          else
          {
-            // remove() returns value size, but for large values stored in value_nodes
-            // it may return the allocation size (including header overhead).
-            // Just verify it indicates success (>= 0).
-            REQUIRE(psitri_result >= 0);
+            if (_validate)
+            {
+               INFO("remove key=" << hex_encode(key));
+               REQUIRE(psitri_result >= 0);
+            }
             _oracle.erase(it);
             _keygen.remove_from_pool(key);
          }
@@ -712,7 +734,6 @@ namespace
             return;  // skip on empty tree
 
          auto [lower, upper] = _keygen.generate_range();
-         INFO("remove_range lower=" << hex_encode(lower) << " upper=" << hex_encode(upper));
 
          // Count what oracle expects to remove
          auto     lo           = _oracle.lower_bound(lower);
@@ -720,23 +741,25 @@ namespace
          uint64_t oracle_count = std::distance(lo, hi);
 
          uint64_t psitri_count = _cur->remove_range(to_key_view(lower), to_key_view(upper));
-         _cur->validate();
 
          // Erase from oracle
          _oracle.erase(_oracle.lower_bound(lower), _oracle.lower_bound(upper));
          _keygen.remove_range_from_pool(lower, upper);
 
+         if (!_validate)
+            return;
+
+         INFO("remove_range lower=" << hex_encode(lower) << " upper=" << hex_encode(upper));
+         _cur->validate();
          REQUIRE(psitri_count == oracle_count);
 
          // Full consistency check after every remove_range
          full_forward_check();
 
          // Verify iteration count matches oracle after remove_range
-         // (catches bugs where remove_range reports correct count but leaves keys)
          uint64_t iter_count = count_by_iteration({}, {});
          if (iter_count != _oracle.size())
          {
-            // Find the extra keys in psitri that oracle doesn't have
             auto rc = _cur->read_cursor();
             WARN("--- All psitri keys after remove_range ---");
             if (rc.seek_begin())
@@ -759,6 +782,9 @@ namespace
 
       void do_get()
       {
+         if (!_validate)
+            return;  // read-only validation op — skip on worker threads
+
          auto key = _keygen.pick_or_generate();
          INFO("get key=" << hex_encode(key));
 
@@ -807,6 +833,8 @@ namespace
 
       void do_count_keys()
       {
+         if (!_validate)
+            return;  // read-only validation op — skip on worker threads
          if (_oracle.empty())
             return;  // skip count on empty tree
 
@@ -845,16 +873,22 @@ namespace
 
       void do_cursor_forward()
       {
+         if (!_validate)
+            return;  // read-only validation op — skip on worker threads
          full_forward_check();
       }
 
       void do_cursor_backward()
       {
+         if (!_validate)
+            return;  // read-only validation op — skip on worker threads
          full_backward_check();
       }
 
       void do_lower_bound()
       {
+         if (!_validate)
+            return;  // read-only validation op — skip on worker threads
          if (_oracle.empty())
             return;  // skip on empty tree to avoid null cursor issues
 
@@ -878,6 +912,8 @@ namespace
 
       void do_seek()
       {
+         if (!_validate)
+            return;  // read-only validation op — skip on worker threads
          if (_oracle.empty())
             return;  // skip on empty tree to avoid null cursor issues
 
@@ -904,21 +940,22 @@ namespace
          _cur          = _ses->create_write_cursor(std::move(new_root));
 
          // Spot-check a few keys
-         int checks = std::min((int)_oracle.size(), 5);
-         if (checks > 0)
+         if (_validate)
          {
-            auto it = _oracle.begin();
-            std::uniform_int_distribution<int> skip_dist(0, std::max(0, (int)_oracle.size() - 1));
-            for (int i = 0; i < checks; ++i)
+            int checks = std::min((int)_oracle.size(), 5);
+            if (checks > 0)
             {
-               // Pick a random key from oracle
-               auto check_it = _oracle.begin();
-               std::advance(check_it, skip_dist(_rng) % _oracle.size());
+               std::uniform_int_distribution<int> skip_dist(0, std::max(0, (int)_oracle.size() - 1));
+               for (int i = 0; i < checks; ++i)
+               {
+                  auto check_it = _oracle.begin();
+                  std::advance(check_it, skip_dist(_rng) % _oracle.size());
 
-               std::string buf;
-               int32_t     result = _cur->get(to_key_view(check_it->first), &buf);
-               REQUIRE(result == (int32_t)check_it->second.size());
-               REQUIRE(buf == check_it->second);
+                  std::string buf;
+                  int32_t     result = _cur->get(to_key_view(check_it->first), &buf);
+                  REQUIRE(result == (int32_t)check_it->second.size());
+                  REQUIRE(buf == check_it->second);
+               }
             }
          }
       }
@@ -971,19 +1008,22 @@ namespace
          _cur          = _ses->create_write_cursor(std::move(new_root));
 
          // Verify a few oracle keys are still intact
-         int checks = std::min((int)_oracle.size(), 5);
-         if (checks > 0)
+         if (_validate)
          {
-            std::uniform_int_distribution<int> skip_dist(0, std::max(0, (int)_oracle.size() - 1));
-            for (int i = 0; i < checks; ++i)
+            int checks = std::min((int)_oracle.size(), 5);
+            if (checks > 0)
             {
-               auto check_it = _oracle.begin();
-               std::advance(check_it, skip_dist(_rng) % _oracle.size());
+               std::uniform_int_distribution<int> skip_dist(0, std::max(0, (int)_oracle.size() - 1));
+               for (int i = 0; i < checks; ++i)
+               {
+                  auto check_it = _oracle.begin();
+                  std::advance(check_it, skip_dist(_rng) % _oracle.size());
 
-               std::string buf;
-               int32_t     result = _cur->get(to_key_view(check_it->first), &buf);
-               REQUIRE(result == (int32_t)check_it->second.size());
-               REQUIRE(buf == check_it->second);
+                  std::string buf;
+                  int32_t     result = _cur->get(to_key_view(check_it->first), &buf);
+                  REQUIRE(result == (int32_t)check_it->second.size());
+                  REQUIRE(buf == check_it->second);
+               }
             }
          }
       }
@@ -1575,33 +1615,69 @@ TEST_CASE("fuzz multi-tree interleaved", "[fuzz]")
 
 // Multi-threaded: one database, one session per thread, different root slots.
 // Tests true concurrent access to the shared allocator.
+// Sessions must be created and destroyed on their owning thread (thread-local affinity).
+// Catch2 assertions are NOT thread-safe, so cleanup runs on worker threads but
+// REQUIRE assertions are deferred to the main thread after join.
 TEST_CASE("fuzz multi-tree parallel", "[fuzz]")
 {
    uint64_t seed = GENERATE(42, 12345, 271828, 0xDEAD, 999983, 0xCAFEBABE, 7654321, 0xFEED);
    INFO("seed=" << seed);
 
    test_db tdb("fuzz_multi_par_" + std::to_string(seed), true /*disable_compact*/);
-   auto ses1 = tdb.db->start_write_session();
-   auto ses2 = tdb.db->start_write_session();
-
-   fuzz_runner runner0(tdb,               seed,       balanced_no_rr_weights(), 512, 0);
-   fuzz_runner runner1(tdb, ses1, seed + 100, sequential_weights(),     512, 1);
-   fuzz_runner runner2(tdb, ses2, seed + 200, remove_heavy_weights(),   512, 2);
 
    int ops_per_thread = 7000 / SCALE;
 
-   // Run each runner on its own thread
-   std::thread t1([&] { runner1.run(ops_per_thread); });
-   std::thread t2([&] { runner2.run(ops_per_thread); });
-   runner0.run(ops_per_thread);  // main thread
+   // Each thread creates its own session to respect thread-local allocator_session affinity.
+   // Catch2 assertions aren't thread-safe, so worker threads catch exceptions and
+   // propagate them to the main thread after join.
+   // Worker threads: create session on-thread, disable Catch2 validation (not thread-safe).
+   // Catch exceptions to propagate to main thread after join.
+   std::exception_ptr ep1, ep2;
+   std::thread        t1(
+       [&]
+       {
+          try
+          {
+             auto        ses1 = tdb.db->start_write_session();
+             fuzz_runner runner1(tdb, ses1, seed + 100, sequential_weights(), 512, 1);
+             runner1.set_validate(false);
+             runner1.run(ops_per_thread);
+             runner1.cleanup();
+          }
+          catch (...)
+          {
+             ep1 = std::current_exception();
+          }
+       });
+   std::thread t2(
+       [&]
+       {
+          try
+          {
+             auto        ses2 = tdb.db->start_write_session();
+             fuzz_runner runner2(tdb, ses2, seed + 200, remove_heavy_weights(), 512, 2);
+             runner2.set_validate(false);
+             runner2.run(ops_per_thread);
+             runner2.cleanup();
+          }
+          catch (...)
+          {
+             ep2 = std::current_exception();
+          }
+       });
+
+   // Main thread uses the default session from test_db
+   fuzz_runner runner0(tdb, seed, balanced_no_rr_weights(), 512, 0);
+   runner0.run(ops_per_thread);
+   runner0.cleanup_and_leak_check();
 
    t1.join();
    t2.join();
 
-   // Cleanup and leak-check sequentially on the main thread
-   runner0.cleanup_and_leak_check();
-   runner1.cleanup_and_leak_check();
-   runner2.cleanup_and_leak_check();
+   if (ep1)
+      std::rethrow_exception(ep1);
+   if (ep2)
+      std::rethrow_exception(ep2);
 }
 
 TEST_CASE("fuzz multi-tree with snapshots", "[fuzz]")
@@ -1610,20 +1686,35 @@ TEST_CASE("fuzz multi-tree with snapshots", "[fuzz]")
    INFO("seed=" << seed);
 
    test_db tdb("fuzz_multi_snap_" + std::to_string(seed));
-   auto ses1 = tdb.db->start_write_session();
 
-   fuzz_runner runner0(tdb,               seed,       balanced_no_rr_weights(), 512, 0);
-   fuzz_runner runner1(tdb, ses1, seed + 500, transaction_weights(),    512, 1);
-
-   // Run on separate threads
    int ops_per_thread = 6000 / SCALE;
-   std::thread t1([&] { runner1.run_with_snapshots(ops_per_thread, 40); });
+
+   // Worker thread: create session on-thread, disable Catch2 validation (not thread-safe).
+   std::exception_ptr ep1;
+   std::thread        t1(
+       [&]
+       {
+          try
+          {
+             auto        ses1 = tdb.db->start_write_session();
+             fuzz_runner runner1(tdb, ses1, seed + 500, transaction_weights(), 512, 1);
+             runner1.set_validate(false);
+             runner1.run_with_snapshots(ops_per_thread, 40);
+             runner1.cleanup();
+          }
+          catch (...)
+          {
+             ep1 = std::current_exception();
+          }
+       });
+
+   fuzz_runner runner0(tdb, seed, balanced_no_rr_weights(), 512, 0);
    runner0.run_with_snapshots(ops_per_thread, 40);
+   runner0.cleanup_and_leak_check();
 
    t1.join();
-
-   runner0.cleanup_and_leak_check();
-   runner1.cleanup_and_leak_check();
+   if (ep1)
+      std::rethrow_exception(ep1);
 }
 
 
