@@ -17,6 +17,31 @@
 
 namespace psitri::dwal
 {
+   // Thread-local cache for PsiTri read sessions used by create_cursor and tri_get.
+   // Extracted to namespace scope so clear_thread_local_cache() can reset them.
+   struct tl_cache
+   {
+      // Used by create_cursor (Tri layer)
+      std::shared_ptr<psitri::read_session> cursor_session;
+      psitri::database*                     cursor_db = nullptr;
+
+      // Used by tri_get
+      std::shared_ptr<psitri::read_session> tri_session;
+      psitri::cursor*                       tri_cursor = nullptr;
+      psitri::database*                     tri_db     = nullptr;
+
+      void reset()
+      {
+         cursor_session.reset();
+         cursor_db = nullptr;
+         delete tri_cursor;
+         tri_cursor = nullptr;
+         tri_session.reset();
+         tri_db = nullptr;
+      }
+   };
+   static thread_local tl_cache s_tl_cache;
+
    dwal_database::dwal_database(std::shared_ptr<psitri::database> db,
                                 std::filesystem::path              wal_dir,
                                 dwal_config                        cfg)
@@ -274,6 +299,10 @@ namespace psitri::dwal
       if (_merge_pool)
          _merge_pool->shutdown();
 
+      // Clear thread-local caches on the destroying thread to release
+      // shared_ptr references to the underlying database.
+      clear_thread_local_cache();
+
       // Flush any remaining RW/RO data into the PsiTri trie before closing.
       // Without this, a clean close marks the WAL as clean_close and recovery
       // skips replay — losing any data that wasn't merged yet.
@@ -355,28 +384,14 @@ namespace psitri::dwal
       }
    }
 
-   // File-scoped thread-local caches for tri_get() and create_cursor().
-   // These were previously function-scoped, but are now file-scoped so that
-   // clear_thread_local_caches() can reset them.
-   static thread_local std::shared_ptr<psitri::read_session> tl_tri_session;
-   static thread_local psitri::cursor*                       tl_tri_cursor = nullptr;
-   static thread_local psitri::database*                     tl_tri_db     = nullptr;
-
-   static thread_local std::shared_ptr<psitri::read_session> tl_cursor_session;
-   static thread_local psitri::database*                     tl_cursor_db = nullptr;
+   void dwal_database::clear_thread_local_cache()
+   {
+      s_tl_cache.reset();
+   }
 
    void dwal_database::clear_thread_local_caches()
    {
-      // Release the calling thread's cached read sessions.
-      // This drops the shared_ptr<read_session> → shared_ptr<database> chain
-      // so the database can be fully destroyed and file locks released.
-      delete tl_tri_cursor;
-      tl_tri_cursor = nullptr;
-      tl_tri_session.reset();
-      tl_tri_db = nullptr;
-
-      tl_cursor_session.reset();
-      tl_cursor_db = nullptr;
+      s_tl_cache.reset();
    }
 
    dwal_root& dwal_database::ensure_root(uint32_t index)
@@ -433,7 +448,7 @@ namespace psitri::dwal
                                                       std::string_view key,
                                                       read_mode        mode)
    {
-      if (mode == read_mode::persistent)
+      if (mode == read_mode::trie)
          return {false, {}};
 
       assert(root_index < max_roots);
@@ -486,14 +501,19 @@ namespace psitri::dwal
       if (!root.merge_complete.load(std::memory_order_acquire))
          return;
 
-      // Freeze current RW as the new buffered RO (exclusive lock — writers only).
+      // Freeze current RW as the new buffered RO.
+      // Exclusive rw_mutex blocks readers from the RW layer during swap;
+      // buffered_mutex publishes the frozen snapshot to RO readers.
       {
-         std::unique_lock lk(root.buffered_mutex);
-         root.buffered_ptr = std::move(root.rw_layer);
+         std::unique_lock rw_lk(root.rw_mutex, std::defer_lock);
+         if (root.enable_rw_locking)
+            rw_lk.lock();
+         {
+            std::unique_lock lk(root.buffered_mutex);
+            root.buffered_ptr = std::move(root.rw_layer);
+         }
+         root.rw_layer = std::make_shared<btree_layer>();
       }
-
-      // Allocate a fresh RW btree.
-      root.rw_layer = std::make_shared<btree_layer>();
 
       // Capture the current PsiTri root as the base for this RO btree.
       uint32_t base = root.tri_root.load(std::memory_order_acquire);
@@ -568,18 +588,24 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // Layer 1: RW btree (writer-private — only safe from writer thread)
-         if (root.rw_layer)
+         // Layer 1: RW btree — shared lock allows concurrent readers
+         // when rw_locking is enabled.
          {
-            auto* v = root.rw_layer->map.get(key);
-            if (v)
+            std::shared_lock lk(root.rw_mutex, std::defer_lock);
+            if (root.enable_rw_locking)
+               lk.lock();
+            if (root.rw_layer)
             {
-               if (v->is_tombstone())
+               auto* v = root.rw_layer->map.get(key);
+               if (v)
+               {
+                  if (v->is_tombstone())
+                     return {false, {}};
+                  return {true, *v};
+               }
+               if (root.rw_layer->tombstones.is_deleted(key))
                   return {false, {}};
-               return {true, *v};
             }
-            if (root.rw_layer->tombstones.is_deleted(key))
-               return {false, {}};
          }
 
          // Layer 2: RO btree (frozen snapshot)
@@ -608,7 +634,8 @@ namespace psitri::dwal
       return tri_get(root_index, key);
    }
 
-   owned_merge_cursor dwal_database::create_cursor(uint32_t root_index, read_mode mode)
+   owned_merge_cursor dwal_database::create_cursor(uint32_t root_index, read_mode mode,
+                                                    bool skip_rw_lock)
    {
       assert(root_index < max_roots);
 
@@ -618,27 +645,34 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // RW layer: only included for latest mode (writer-thread only, no lock needed)
+         // RW layer: included for latest mode. Shared lock allows concurrent
+         // readers; copying the shared_ptr gives the cursor a stable snapshot.
          if (mode == read_mode::latest)
+         {
+            std::shared_lock lk(root.rw_mutex, std::defer_lock);
+            if (root.enable_rw_locking && !skip_rw_lock)
+               lk.lock();
             rw = root.rw_layer;
+         }
 
          // RO layer: included for latest and buffered modes
-         if (mode != read_mode::persistent)
+         if (mode != read_mode::trie)
          {
             std::shared_lock lk(root.buffered_mutex);
             ro = root.buffered_ptr;
          }
       }
 
-      // Tri layer: always included (uses file-scoped thread-local cache)
-      if (tl_cursor_db != _db.get())
+      // Tri layer: always included
+      auto& tlc = s_tl_cache;
+      if (tlc.cursor_db != _db.get())
       {
-         tl_cursor_session = _db->start_read_session();
-         tl_cursor_db      = _db.get();
+         tlc.cursor_session = _db->start_read_session();
+         tlc.cursor_db      = _db.get();
       }
 
       std::optional<psitri::cursor> tri_cursor;
-      tri_cursor.emplace(tl_cursor_session->create_cursor(root_index));
+      tri_cursor.emplace(tlc.cursor_session->create_cursor(root_index));
 
       return owned_merge_cursor(std::move(rw), std::move(ro), std::move(tri_cursor));
    }
@@ -647,27 +681,30 @@ namespace psitri::dwal
                                                          std::string_view key)
    {
       // Thread-local read session + cursor for Tri-layer lookups.
-      // Uses file-scoped thread-locals (shared with clear_thread_local_caches).
-      if (tl_tri_db != _db.get())
+      // Each calling thread gets its own session (safe for concurrent readers/writers).
+      auto& tlc = s_tl_cache;
+
+      // Re-create session if the database changed (shouldn't happen, but safe).
+      if (tlc.tri_db != _db.get())
       {
-         delete tl_tri_cursor;
-         tl_tri_cursor = nullptr;
-         tl_tri_session = _db->start_read_session();
-         tl_tri_db      = _db.get();
+         delete tlc.tri_cursor;
+         tlc.tri_cursor = nullptr;
+         tlc.tri_session = _db->start_read_session();
+         tlc.tri_db      = _db.get();
       }
 
-      if (!tl_tri_cursor)
+      if (!tlc.tri_cursor)
       {
-         auto root = tl_tri_session->create_cursor(root_index);
-         tl_tri_cursor = new psitri::cursor(std::move(root));
+         auto root = tlc.tri_session->create_cursor(root_index);
+         tlc.tri_cursor = new psitri::cursor(std::move(root));
       }
       else
       {
-         tl_tri_cursor->refresh(root_index);
+         tlc.tri_cursor->refresh(root_index);
       }
 
       std::string buf;
-      if (tl_tri_cursor->get(key_view(key.data(), key.size()), &buf) >= 0)
+      if (tlc.tri_cursor->get(key_view(key.data(), key.size()), &buf) >= 0)
          return dwal_transaction::lookup_result::make_owned(std::move(buf));
 
       return {false, {}};

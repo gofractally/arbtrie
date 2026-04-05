@@ -25,9 +25,17 @@ namespace psitri::dwal
    {
       if (_mode == root_mode::read_write)
       {
+         // Outer write transactions hold the RW mutex exclusively so
+         // concurrent readers (get_latest, latest-mode cursors) never
+         // see a torn, partially-applied transaction.
+         if (!_nested && _root->enable_rw_locking)
+         {
+            _root->rw_mutex.lock();
+            _owns_lock = true;
+         }
+
          _undo.push_frame();
 
-         // For outer transactions, begin a WAL entry.
          if (!_nested && _wal)
             _wal->begin_entry();
       }
@@ -80,9 +88,14 @@ namespace psitri::dwal
          _wal->add_upsert_subtree(key, addr);
    }
 
-   bool dwal_transaction::remove(std::string_view key)
+   remove_result dwal_transaction::remove(std::string_view key)
    {
       assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
+
+      // Check RW layer — this also determines the undo entry type.
+      auto& layer = *_root->rw_layer;
+      auto* v     = layer.map.get(key);
+      bool  in_rw = v && !v->is_tombstone();
 
       record_undo_for_remove(key);
 
@@ -91,7 +104,33 @@ namespace psitri::dwal
       if (!_nested && _wal)
          _wal->add_remove(key);
 
-      return true;  // We don't know if PsiTri had it; conservatively return true.
+      if (in_rw)
+         return remove_result(true);  // Known immediately.
+
+      // Defer RO + Tri check until the caller inspects the result.
+      return remove_result(this, std::string(key));
+   }
+
+   bool dwal_transaction::exists_in_lower_layers(std::string_view key) const
+   {
+      auto ro = ro_get(key);
+      if (ro.found)
+         return true;
+      if (ro.value.is_tombstone())
+         return false;
+
+      if (_db)
+      {
+         auto tri = _db->tri_get(_root_index, key);
+         return tri.found;
+      }
+      return false;
+   }
+
+   void remove_result::resolve()
+   {
+      _resolved = true;
+      _existed  = _tx && _tx->exists_in_lower_layers(_key);
    }
 
    void dwal_transaction::remove_range(std::string_view low, std::string_view high)
@@ -206,6 +245,14 @@ namespace psitri::dwal
 
          _undo.discard();
 
+         // Release the RW mutex before swap — readers can now see
+         // the committed state. Swap may re-acquire briefly.
+         if (_owns_lock)
+         {
+            _root->rw_mutex.unlock();
+            _owns_lock = false;
+         }
+
          // If the merge thread has finished and the RW btree is large enough, swap.
          if (_db && _root->merge_complete.load(std::memory_order_acquire)
              && _db->should_swap(_root_index))
@@ -227,6 +274,12 @@ namespace psitri::dwal
          _wal->commit_entry_multi(tx_id, participants, is_commit);
 
       _undo.discard();
+
+      if (_owns_lock)
+      {
+         _root->rw_mutex.unlock();
+         _owns_lock = false;
+      }
    }
 
    void dwal_transaction::abort()
@@ -245,6 +298,9 @@ namespace psitri::dwal
             _wal->discard_entry();
 
          // Replay all undo entries to restore the btree.
+         // String data in undo entries points into the undo_log's arena,
+         // which is freed when this transaction is destroyed. Copy restored
+         // values into the btree_layer's pool so they outlive the undo_log.
          _undo.replay_all(
              [this](const undo_entry& entry)
              {
@@ -259,8 +315,13 @@ namespace psitri::dwal
 
                    case undo_entry::kind::overwrite_buffered:
                    case undo_entry::kind::erase_buffered:
-                      layer.map.upsert(entry.key, entry.old_value);
+                   {
+                      btree_value restored = entry.old_value;
+                      if (restored.is_data() && !restored.data.empty())
+                         restored.data = layer.store_string(restored.data);
+                      layer.map.upsert(entry.key, restored);
                       break;
+                   }
 
                    case undo_entry::kind::erase_range:
                       if (entry.range)
@@ -268,17 +329,29 @@ namespace psitri::dwal
                          layer.tombstones.remove(entry.range->low, entry.range->high);
                          for (const auto& be : entry.range->buffered_keys)
                          {
-                            layer.map.upsert(be.key, be.old_value);
+                            btree_value restored = be.old_value;
+                            if (restored.is_data() && !restored.data.empty())
+                               restored.data = layer.store_string(restored.data);
+                            layer.map.upsert(be.key, restored);
                          }
                       }
                       break;
                 }
              });
 
+         if (_owns_lock)
+         {
+            _root->rw_mutex.unlock();
+            _owns_lock = false;
+         }
       }
       else
       {
          // Inner abort: replay current frame only.
+         // Same pool-copy treatment as outer abort — the undo arena may
+         // outlive this frame, but inner frames share the same arena, so
+         // the data is still alive. However, for consistency and safety
+         // (the arena is freed on ~undo_log), copy into the pool.
          _undo.replay_current_frame(
              [this](const undo_entry& entry)
              {
@@ -293,8 +366,13 @@ namespace psitri::dwal
 
                    case undo_entry::kind::overwrite_buffered:
                    case undo_entry::kind::erase_buffered:
-                      layer.map.upsert(entry.key, entry.old_value);
+                   {
+                      btree_value restored = entry.old_value;
+                      if (restored.is_data() && !restored.data.empty())
+                         restored.data = layer.store_string(restored.data);
+                      layer.map.upsert(entry.key, restored);
                       break;
+                   }
 
                    case undo_entry::kind::erase_range:
                       if (entry.range)
@@ -302,7 +380,10 @@ namespace psitri::dwal
                          layer.tombstones.remove(entry.range->low, entry.range->high);
                          for (const auto& be : entry.range->buffered_keys)
                          {
-                            layer.map.upsert(be.key, be.old_value);
+                            btree_value restored = be.old_value;
+                            if (restored.is_data() && !restored.data.empty())
+                               restored.data = layer.store_string(restored.data);
+                            layer.map.upsert(be.key, restored);
                          }
                       }
                       break;

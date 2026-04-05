@@ -13,6 +13,42 @@
 namespace psitri::dwal
 {
    class dwal_database;
+   class dwal_transaction;
+
+   /// Lazy result from dwal_transaction::remove().
+   ///
+   /// If the key was found in the RW layer, the answer is known immediately.
+   /// If not, converting to bool triggers a lookup in lower layers (RO + Tri).
+   /// Callers that discard the result pay no lookup cost.
+   class remove_result
+   {
+     public:
+      /// Implicit conversion — resolves the lazy check if needed.
+      operator bool()
+      {
+         if (!_resolved)
+            resolve();
+         return _existed;
+      }
+
+     private:
+      friend class dwal_transaction;
+
+      /// Already known (key was in RW layer).
+      explicit remove_result(bool existed)
+          : _existed(existed), _resolved(true) {}
+
+      /// Deferred — needs RO + Tri check.
+      remove_result(const dwal_transaction* tx, std::string key)
+          : _tx(tx), _key(std::move(key)), _resolved(false) {}
+
+      void resolve();
+
+      const dwal_transaction* _tx = nullptr;
+      std::string             _key;
+      bool                    _existed  = false;
+      bool                    _resolved = true;
+   };
 
    /// Mode for a root within a transaction.
    enum class root_mode : uint8_t
@@ -55,8 +91,11 @@ namespace psitri::dwal
       void upsert_subtree(std::string_view key, sal::ptr_address addr);
 
       /// Remove a single key.
-      /// Returns true if the key existed in any layer.
-      bool remove(std::string_view key);
+      /// Returns a remove_result that lazily checks whether the key existed.
+      /// If the key was in the RW layer, the result is immediate.
+      /// If not, converting to bool checks RO + Tri layers.
+      /// Discarding the result skips the lower-layer lookup entirely.
+      remove_result remove(std::string_view key);
 
       /// Remove all keys in [low, high).
       void remove_range(std::string_view low, std::string_view high);
@@ -112,8 +151,13 @@ namespace psitri::dwal
       uint32_t root_index() const noexcept { return _root_index; }
 
      private:
+      friend class remove_result;
+
       /// Check if a key exists in the RO btree. Returns the value if found.
       lookup_result ro_get(std::string_view key) const;
+
+      /// Check if a key exists in lower layers (RO + Tri). Used by remove_result.
+      bool exists_in_lower_layers(std::string_view key) const;
 
       /// Record the appropriate undo entry before modifying a key.
       void record_undo_for_upsert(std::string_view key);

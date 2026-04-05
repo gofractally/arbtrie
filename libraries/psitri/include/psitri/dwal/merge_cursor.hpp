@@ -17,7 +17,7 @@ namespace psitri::dwal
    /// layers for the same key.
    ///
    /// Layer pointers may be null to exclude layers (e.g., read_mode::buffered
-   /// omits RW, read_mode::persistent omits RW+RO).
+   /// omits RW, read_mode::trie omits RW+RO).
    class merge_cursor
    {
      public:

@@ -156,6 +156,30 @@ namespace psitri::dwal
       if (_at_rend)
          return false;
 
+      // When at end, position all sources at their last element.
+      if (_at_end)
+      {
+         if (_rw)
+         {
+            _rw_end = _rw->map.end();
+            _rw_it  = _rw_end;
+            if (_rw_it != _rw->map.begin())
+               --_rw_it;
+         }
+         if (_ro)
+         {
+            _ro_end = _ro->map.end();
+            _ro_it  = _ro_end;
+            if (_ro_it != _ro->map.begin())
+               --_ro_it;
+         }
+         if (_tri)
+            _tri->seek_last();
+
+         _at_end = false;
+         return advance_backward();
+      }
+
       // Retreat the source(s) past the current key.
       std::string_view cur = _current_key;
 

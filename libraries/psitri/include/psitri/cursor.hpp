@@ -271,7 +271,7 @@ namespace psitri
       if (_node.address() == sal::null_ptr_address)
       {
          _path_back->prefix_len = 0;
-         _root_end_branch       = branch_number(0);
+         _root_end_branch       = branch_number(-1);
          return;
       }
       auto read_lock = _node.session()->lock();

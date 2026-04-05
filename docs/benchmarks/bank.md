@@ -212,12 +212,81 @@ xychart-beta
 | Engine | Architecture | Strength | Weakness |
 |--------|-------------|----------|----------|
 | **PsiTri** | Radix/B-tree hybrid, mmap copy-on-write | Fastest transactions (377K/s), zero read contention | Larger file footprint |
+| **PsiTriMDBX** | PsiTri via MDBX API shim | 12x faster writes than MDBX, drop-in replacement | Reads 10–20% slower than native MDBX in buffered mode |
 | **PsiTriRocks** | PsiTri via RocksDB API shim | Drop-in RocksDB replacement | 29% write penalty with concurrent reads |
 | **TidesDB** | Skip-list + SSTables | Good tx speed (226K/s), compact | Slow scan, 100K txn op limit |
 | **RocksDB** | LSM-tree | Compact storage, minimal read impact | 3.0x slower than PsiTri |
 | **MDBX** | B+tree, MVCC copy-on-write | Fastest scan (110M/s) and reads (1.75M/s) | 6.6x slower transactions |
 
 All five engines pass validation: balance conservation verified and transaction log entry counts match across both phases.
+
+### PsiTriMDBX: Drop-In MDBX Replacement
+
+PsiTriMDBX provides an MDBX-compatible C/C++ API backed by PsiTri's DWAL layer. The same
+`mdbx_put` / `mdbx_get` / `mdbx_cursor_get` calls work unchanged — only the linker target
+changes. This section compares PsiTriMDBX against native libmdbx using the identical bank
+benchmark binary (same source, different link target).
+
+**Workload:** 100K accounts, 1M transactions, batch=100, sync=none, seed=12345.
+
+#### Write Throughput
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB,#DC2626'}}}}%%
+xychart-beta
+    title "MDBX API: Write-Only Throughput (tx/sec)"
+    x-axis ["PsiTriMDBX", "Native MDBX"]
+    y-axis "Transfers per second" 0 --> 500000
+    bar [452716, 37853]
+```
+
+| Engine | Write-Only | Write+Read (latest) | Ratio |
+|--------|-----------|------------|-------|
+| **PsiTriMDBX** | **452,716 tx/s** | **373,476 tx/s** | **12x / 4.7x faster** |
+| Native MDBX | 37,853 tx/s | 79,081 tx/s | 1.0x |
+
+PsiTriMDBX writes are **12x faster** than native MDBX. The DWAL layer absorbs writes into an
+in-memory btree and batches them for background merge into the persistent trie, avoiding
+MDBX's page-level copy-on-write overhead.
+
+#### Read Modes
+
+PsiTriMDBX exposes three read modes that control which DWAL layers are searched on each
+`mdbx_get` call (see [MDBX migration guide](../getting-started/mdbx-migration.md#psitri-extension-read-modes)):
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB,#16A34A,#7C3AED,#DC2626'}}}}%%
+xychart-beta
+    title "MDBX API: Reader Throughput by Read Mode (reads/sec)"
+    x-axis ["Trie", "Buffered", "Latest", "Native MDBX"]
+    y-axis "Reads per second" 0 --> 1600000
+    bar [1534646, 1165690, 323626, 1276659]
+```
+
+| Read Mode | Layers | Reader (reads/s) | Write+Read (tx/s) | Write Impact |
+|-----------|--------|------------------|-------------------|-------------|
+| **Trie** | Tri only | **1,535K** | 260K | -42% |
+| **Buffered** | RO + Tri | 1,166K | 254K | -39% |
+| **Latest** | RW + RO + Tri | 324K | 373K | -20% |
+| Native MDBX | B+tree | 1,277K | 79K | +109% |
+
+- **Trie** mode reads only the merged COW trie — **20% faster than native MDBX** on
+  point lookups, with zero lock contention. The tradeoff: very recently committed data may
+  not be visible until the background merge completes.
+- **Buffered** mode adds the RO btree snapshot — within **10% of native MDBX** read speed,
+  still with no lock contention with writers.
+- **Latest** mode checks all three layers including the active RW btree (shared lock). Lowest
+  write impact (-20%) but slowest reads due to writer contention.
+
+#### Total Wall Time
+
+| Engine | Total | vs. Native MDBX |
+|--------|-------|-----------------|
+| **PsiTriMDBX** (latest) | **4.9s** | **8.3x faster** |
+| **PsiTriMDBX** (buffered) | **6.8s** | **6.0x faster** |
+| Native MDBX | 40.8s | 1.0x |
+
+Both engines pass validation: balance conservation and log entry counts verified.
 
 ---
 

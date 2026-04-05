@@ -264,6 +264,9 @@ if(BUILD_SQL)
     add_subdirectory(libraries/psitri-sqlite)
 endif()
 
+# PsiTriMDBX: MDBX-compatible wrapper around psitri
+add_subdirectory(libraries/psitrimdbx)
+
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-O0 -g -fno-omit-frame-pointer)
@@ -694,6 +697,13 @@ target_link_libraries(bank-bench-dwal PRIVATE psitri Boost::program_options)
 set_target_properties(bank-bench-dwal PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# PsiTriMDBX bank bench — uses the same MDBX C API but backed by psitrimdbx
+add_executable(bank-bench-psitrimdbx programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-psitrimdbx PRIVATE BANK_ENGINE_MDBX=1)
+target_link_libraries(bank-bench-psitrimdbx PRIVATE psitrimdbx Boost::program_options)
+set_target_properties(bank-bench-psitrimdbx PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 if(BUILD_ROCKSDB_BENCH)
     # PsiTriRocks bank bench
     add_executable(bank-bench-psitrirocks programs/bank_bench.cpp)
@@ -710,12 +720,30 @@ if(BUILD_ROCKSDB_BENCH)
     set_target_properties(bank-bench-rocksdb PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-    # MDBX bank bench
+    # MDBX bank bench (native libmdbx)
     add_executable(bank-bench-mdbx programs/bank_bench.cpp)
     target_compile_definitions(bank-bench-mdbx PRIVATE BANK_ENGINE_MDBX=1)
     target_link_libraries(bank-bench-mdbx PRIVATE mdbx-static Boost::program_options)
     set_target_properties(bank-bench-mdbx PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+# Standalone native libmdbx bank bench (when BUILD_ROCKSDB_BENCH is off)
+if(NOT BUILD_ROCKSDB_BENCH AND EXISTS "${CMAKE_BINARY_DIR}/_deps/libmdbx-src/CMakeLists.txt")
+    set(MDBX_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(MDBX_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(MDBX_BUILD_CXX OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_BINARY_DIR}/_deps/libmdbx-src"
+                     "${CMAKE_BINARY_DIR}/_deps/libmdbx-build"
+                     EXCLUDE_FROM_ALL)
+
+    if(TARGET mdbx-static)
+        add_executable(bank-bench-mdbx programs/bank_bench.cpp)
+        target_compile_definitions(bank-bench-mdbx PRIVATE BANK_ENGINE_MDBX=1)
+        target_link_libraries(bank-bench-mdbx PRIVATE mdbx-static Boost::program_options)
+        set_target_properties(bank-bench-mdbx PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    endif()
 endif()
 
 if(BUILD_TIDESDB_BENCH AND TARGET tidesdb_lib)

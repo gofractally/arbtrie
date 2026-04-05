@@ -37,7 +37,7 @@ namespace psitri::dwal
          // ── Mutations (assert writable) ────────────────────────────
          void upsert(std::string_view key, std::string_view value);
          void upsert_subtree(std::string_view key, sal::ptr_address addr);
-         bool remove(std::string_view key);
+         remove_result remove(std::string_view key);
          void remove_range(std::string_view low, std::string_view high);
 
          // ── Reads (always allowed) ─────────────────────────────────
@@ -83,7 +83,8 @@ namespace psitri::dwal
       // ── Convenience methods (delegate to root_handle) ─────────────
 
       void upsert(uint32_t root_index, std::string_view key, std::string_view value);
-      bool remove(uint32_t root_index, std::string_view key);
+      remove_result remove(uint32_t root_index, std::string_view key);
+      void remove_range(uint32_t root_index, std::string_view low, std::string_view high);
       dwal_transaction::lookup_result get(uint32_t root_index, std::string_view key);
 
       // ── Transaction control ───────────────────────────────────────

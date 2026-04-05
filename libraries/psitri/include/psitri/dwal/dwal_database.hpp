@@ -90,7 +90,7 @@ namespace psitri::dwal
       /// Does NOT see uncommitted RW data. Prefer start_read_session() for repeated reads.
       dwal_transaction::lookup_result get(uint32_t         root_index,
                                           std::string_view key,
-                                          read_mode        mode = read_mode::persistent);
+                                          read_mode        mode = read_mode::trie);
 
       /// Full layered lookup: RW → RO → Tri.
       /// Sees uncommitted writes in the RW btree. Intended for same-thread
@@ -101,10 +101,11 @@ namespace psitri::dwal
       /// Locking is handled internally based on the read mode:
       ///   - latest:    RW + RO + Tri (writer-thread only — RW is not locked)
       ///   - buffered:  RO + Tri (acquires buffered_mutex internally)
-      ///   - persistent: Tri only (no DWAL locks)
+      ///   - trie: Tri only (no DWAL locks)
       /// The returned cursor owns shared_ptr copies of the layer snapshots,
       /// so callers do not need to hold any locks during iteration.
-      owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode);
+      owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode,
+                                      bool skip_rw_lock = false);
 
       // ── Flush & Swap ──────────────────────────────────────────────
 
@@ -142,6 +143,10 @@ namespace psitri::dwal
 
       /// Lazily initialize a root's DWAL state (public for transaction).
       dwal_root& ensure_root_public(uint32_t index) { return ensure_root(index); }
+
+      /// Clear thread-local caches for the calling thread.
+      /// Must be called from the same thread that used create_cursor/tri_get.
+      void clear_thread_local_cache();
 
       /// Ensure WAL directory and files exist for a root (public for transaction).
       void ensure_wal_public(uint32_t root_index) { ensure_wal(root_index); }

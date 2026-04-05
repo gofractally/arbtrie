@@ -70,8 +70,8 @@ namespace psitri::dwal
       if (!cache.initialized || cur_gen != cache.gen)
          refresh(root_index);
 
-      // Persistent: PsiTri only.
-      if (mode == read_mode::persistent)
+      // Trie mode: PsiTri only.
+      if (mode == read_mode::trie)
       {
          std::string buf;
          if (cache.tri_cursor.get(key_view(key.data(), key.size()), &buf) >= 0)
@@ -79,7 +79,28 @@ namespace psitri::dwal
          return {false, {}};
       }
 
-      // Latest/buffered: search cached DWAL snapshot first.
+      // Latest mode: also check RW layer (requires shared lock).
+      if (mode == read_mode::latest)
+      {
+         auto& root = _db.root(root_index);
+         std::shared_lock lk(root.rw_mutex, std::defer_lock);
+         if (root.enable_rw_locking)
+            lk.lock();
+         if (root.rw_layer)
+         {
+            auto* v = root.rw_layer->map.get(key);
+            if (v)
+            {
+               if (v->is_tombstone())
+                  return {false, {}};
+               return {true, std::string(v->data)};
+            }
+            if (root.rw_layer->tombstones.is_deleted(key))
+               return {false, {}};
+         }
+      }
+
+      // Buffered/latest: search cached RO snapshot.
       if (cache.snapshot)
       {
          auto* v = cache.snapshot->map.get(key);

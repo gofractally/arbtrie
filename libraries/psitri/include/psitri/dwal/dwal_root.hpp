@@ -16,7 +16,7 @@ namespace psitri::dwal
    {
       latest,      // frozen RW snapshot + Tri (one swap behind writer)
       buffered,    // same as latest (frozen RW snapshot + Tri)
-      persistent,  // Tri only — zero DWAL overhead
+      trie,        // Tri only — zero DWAL overhead
    };
 
    /// Transaction mode: buffered writes vs direct COW.
@@ -39,11 +39,22 @@ namespace psitri::dwal
    {
       // ── Writer-private section (only writer touches these) ─────────
 
-      /// The hot RW btree — private to the single writer thread.
+      /// The hot RW btree. Protected by rw_mutex: writer takes exclusive,
+      /// readers (get_latest, latest-mode cursors) take shared.
       /// Created via make_shared so the control block is co-allocated;
       /// on swap it moves directly to buffered_ptr with no extra allocation.
-      /// External readers must NOT access this — use buffered_ptr (RO) + Tri.
       std::shared_ptr<btree_layer> rw_layer;
+
+      /// Protects rw_layer for concurrent reader access.
+      /// Writer takes exclusive lock for mutations; readers take shared lock
+      /// for point lookups and cursor snapshot creation.
+      /// Only used when enable_rw_locking is true (opt-in for MDBX-style readers).
+      mutable std::shared_mutex rw_mutex;
+
+      /// When true, writer acquires rw_mutex exclusively around transactions
+      /// and readers acquire it shared. When false (default), no locking —
+      /// the single-writer model assumes no concurrent RW-layer readers.
+      bool enable_rw_locking{false};
 
       /// WAL writer for the current RW btree.
       std::unique_ptr<wal_writer> wal;
