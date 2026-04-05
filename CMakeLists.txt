@@ -50,7 +50,7 @@ endif()
 project(arbtrie VERSION 0.1.0 LANGUAGES CXX C)
 
 # Set global properties
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard" FORCE)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -161,6 +161,90 @@ set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(abseil)
 
+# DuckDB (query engine for psitri-sql)
+option(BUILD_SQL "Build DuckDB-based SQL layer" ON)
+if(BUILD_SQL)
+    FetchContent_Declare(
+        duckdb
+        GIT_REPOSITORY https://github.com/duckdb/duckdb.git
+        GIT_TAG        v1.2.2
+        GIT_SHALLOW    TRUE
+    )
+    set(BUILD_UNITTESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHELL OFF CACHE BOOL "" FORCE)
+    set(BUILD_PARQUET_EXTENSION OFF CACHE BOOL "" FORCE)
+    set(SKIP_EXTENSIONS "parquet" CACHE STRING "" FORCE)
+    set(BUILD_JEMALLOC_EXTENSION OFF CACHE BOOL "" FORCE)
+    set(BUILD_AUTOCOMPLETE_EXTENSION OFF CACHE BOOL "" FORCE)
+    set(DISABLE_BUILTIN_EXTENSIONS ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(duckdb)
+
+    # Patch DuckDB v1.2.2 for LLVM 22+ / libc++ C++23 compatibility.
+    #
+    # Problem: circular include chain select_statement.hpp -> query_node.hpp ->
+    # common_table_expression_info.hpp -> select_statement.hpp (blocked by
+    # #pragma once). This leaves SelectStatement incomplete when unique_ptr
+    # destructor is instantiated, triggering static_assert(sizeof(T) >= 0)
+    # in LLVM 22's libc++ under C++23.
+    #
+    # Fix: move constructors/destructors that trigger unique_ptr<incomplete>
+    # instantiation out-of-line into .cpp files.
+
+    # 1) SelectStatement: move inline ctor out-of-line
+    set(_ss_file "${duckdb_SOURCE_DIR}/src/include/duckdb/parser/statement/select_statement.hpp")
+    file(READ "${_ss_file}" _ss_content)
+    string(FIND "${_ss_content}" "SelectStatement() : SQLStatement" _ss_ctor_pos)
+    if(_ss_ctor_pos GREATER -1)
+        string(REPLACE
+            "SelectStatement() : SQLStatement(StatementType::SELECT_STATEMENT) {\n\t}"
+            "SelectStatement();"
+            _ss_content "${_ss_content}")
+        file(WRITE "${_ss_file}" "${_ss_content}")
+        file(APPEND "${duckdb_SOURCE_DIR}/src/parser/statement/select_statement.cpp"
+            "\n// Patched: out-of-line ctor for llvm 22+ compatibility\n"
+            "namespace duckdb {\n"
+            "SelectStatement::SelectStatement() : SQLStatement(StatementType::SELECT_STATEMENT) {}\n"
+            "} // namespace duckdb\n")
+        message(STATUS "Patched DuckDB SelectStatement ctor for llvm 22+ compat")
+    endif()
+
+    # 2) CommonTableExpressionInfo: add out-of-line destructor so the implicit
+    #    dtor doesn't instantiate unique_ptr<SelectStatement>::~unique_ptr()
+    #    while SelectStatement is still incomplete.
+    set(_cte_file "${duckdb_SOURCE_DIR}/src/include/duckdb/parser/common_table_expression_info.hpp")
+    file(READ "${_cte_file}" _cte_content)
+    string(FIND "${_cte_content}" "~CommonTableExpressionInfo" _cte_dtor_pos)
+    if(_cte_dtor_pos EQUAL -1)
+        string(REPLACE
+            "unique_ptr<CommonTableExpressionInfo> Copy();"
+            "unique_ptr<CommonTableExpressionInfo> Copy();\n\t~CommonTableExpressionInfo();"
+            _cte_content "${_cte_content}")
+        file(WRITE "${_cte_file}" "${_cte_content}")
+        file(APPEND "${duckdb_SOURCE_DIR}/src/parser/query_node.cpp"
+            "\n// Patched: out-of-line dtor for llvm 22+ compatibility\n"
+            "#include \"duckdb/parser/common_table_expression_info.hpp\"\n"
+            "namespace duckdb {\n"
+            "CommonTableExpressionInfo::~CommonTableExpressionInfo() = default;\n"
+            "} // namespace duckdb\n")
+        message(STATUS "Patched DuckDB CommonTableExpressionInfo dtor for llvm 22+ compat")
+    endif()
+
+    # 3) GetDatabaseType: skip autoload if storage extension is already registered.
+    #    DuckDB v1.2.2 tries to autoload/install a file-based extension for TYPE X
+    #    before checking config.storage_extensions, breaking in-process registration.
+    set(_dbm_file "${duckdb_SOURCE_DIR}/src/main/database_manager.cpp")
+    file(READ "${_dbm_file}" _dbm_content)
+    string(FIND "${_dbm_content}" "// Patched: skip autoload" _dbm_patch_pos)
+    if(_dbm_patch_pos EQUAL -1)
+        string(REPLACE
+            "// If we are loading a database type from an extension, then we need to check if that extension is loaded.\n\tif (!options.db_type.empty()) {\n\t\tif (!Catalog::TryAutoLoad(context, options.db_type)) {"
+            "// If we are loading a database type from an extension, then we need to check if that extension is loaded.\n\tif (!options.db_type.empty()) {\n\t\t// Patched: skip autoload if storage extension already registered in-process\n\t\tif (config.storage_extensions.find(options.db_type) != config.storage_extensions.end()) {\n\t\t\treturn;\n\t\t}\n\t\tif (!Catalog::TryAutoLoad(context, options.db_type)) {"
+            _dbm_content "${_dbm_content}")
+        file(WRITE "${_dbm_file}" "${_dbm_content}")
+        message(STATUS "Patched DuckDB GetDatabaseType to check storage_extensions first")
+    endif()
+endif()
+
 # SAL library setup
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
 option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
@@ -173,6 +257,11 @@ add_subdirectory(libraries/art)
 
 # PsiTriRocks: RocksDB-compatible wrapper around psitri
 add_subdirectory(libraries/psitrirocks)
+
+# PsiTri SQL: DuckDB-based SQL layer
+if(BUILD_SQL)
+    add_subdirectory(libraries/psitri-sql)
+endif()
 
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -240,6 +329,8 @@ if(ENABLE_COVERAGE)
         COMMAND ${LCOV} --directory ${CMAKE_BINARY_DIR} --zerocounters
         # SAL tests
         COMMAND ${CMAKE_BINARY_DIR}/bin/sal-tests ${COVERAGE_EXCLUDE_TAGS} || true
+        # ART tests
+        COMMAND ${CMAKE_BINARY_DIR}/bin/art-tests ${COVERAGE_EXCLUDE_TAGS} || true
         # psitri batch: all tests except crash-prone groups (fast, covers most code)
         COMMAND ${PSITRI_TESTS} "~[fuzz]" "~[multi-writer]" "~[power_loss]" "~[recovery]" "~[truncate]" ${COVERAGE_EXCLUDE_TAGS} || true
         # Isolated groups that may crash or hang
@@ -254,7 +345,7 @@ if(ENABLE_COVERAGE)
     add_custom_target(coverage-run
         ${COVERAGE_RUN_COMMANDS}
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        DEPENDS sal-tests psitri-tests
+        DEPENDS sal-tests psitri-tests art-tests
         COMMENT "Running coverage test groups..."
     )
 
@@ -280,7 +371,7 @@ if(ENABLE_COVERAGE)
 
     # coverage: run all test groups then generate report
     add_custom_target(coverage
-        DEPENDS sal-tests psitri-tests
+        DEPENDS sal-tests psitri-tests art-tests
         ${COVERAGE_RUN_COMMANDS}
         COMMAND ${LCOV}
             --directory ${CMAKE_BINARY_DIR}

@@ -69,6 +69,16 @@ target_include_directories(init-replace-branch-test
 target_compile_definitions(init-replace-branch-test PUBLIC XXH_INLINE_ALL)
 set_target_properties(init-replace-branch-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# psitri-sql integration tests
+if(BUILD_SQL)
+    add_executable(psitri-sql-tests
+        ../libraries/psitri-sql/tests/sql_integration_tests.cpp
+    )
+    target_link_libraries(psitri-sql-tests PRIVATE psitri-sql Catch2::Catch2WithMain)
+    set_target_properties(psitri-sql-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME psitri-sql-tests COMMAND psitri-sql-tests)
+endif()
+
 # Sanitizer / coverage settings
 if(ENABLE_SANITIZER)
     target_compile_options(psitri-tests PUBLIC -fsanitize=thread -g)
@@ -84,6 +94,9 @@ if(ENABLE_COVERAGE)
 
     target_compile_options(sim-db-test PUBLIC --coverage)
     target_link_options(sim-db-test PUBLIC --coverage)
+
+    target_compile_options(art-tests PUBLIC --coverage)
+    target_link_options(art-tests PUBLIC --coverage)
 endif()
 
 # Benchmarks

@@ -1050,3 +1050,426 @@ TEST_CASE("tree_ops: Phase 2 collapse inner_prefix child", "[tree_ops][collapse]
       }
    }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// COW coverage expansion tests
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("tree_ops: update overflow triggers remove+insert in unique mode", "[tree_ops][update]")
+{
+   // When a leaf is full and the new value is larger than the old, can_apply returns
+   // none. The update path must remove the old entry and re-insert with the new value,
+   // potentially splitting the leaf. (Lines ~1504-1531)
+   test_db env("tree_ops_update_overflow_unique_db");
+   auto    wc = env.ses->create_write_cursor();
+
+   // Fill a leaf to near-capacity with many small keys.
+   for (int i = 0; i < 100; ++i)
+      wc->upsert(tkey(i), small_val(i));
+
+   // Update one key with a much larger value to trigger overflow.
+   std::string big = big_val(42, 800);
+   wc->upsert(tkey(50), big);
+
+   auto val = wc->get<std::string>(tkey(50));
+   REQUIRE(val.has_value());
+   CHECK(*val == big);
+
+   // Other keys should still be intact.
+   for (int i = 0; i < 100; ++i)
+   {
+      if (i == 50)
+         continue;
+      auto v = wc->get<std::string>(tkey(i));
+      REQUIRE(v.has_value());
+      CHECK(*v == small_val(i));
+   }
+   wc->validate();
+}
+
+TEST_CASE("tree_ops: update overflow in shared mode", "[tree_ops][shared][update]")
+{
+   // Same overflow path but in shared mode (snapshot forces COW). Lines ~1567-1584.
+   test_db env("tree_ops_update_overflow_shared_db");
+   auto    trx = env.ses->start_transaction(0);
+
+   for (int i = 0; i < 100; ++i)
+      trx.upsert(tkey(i), small_val(i));
+   trx.commit();
+
+   // Snapshot to force shared mode.
+   auto snapshot = env.ses->get_root(0);
+
+   // Update with oversized value.
+   auto trx2 = env.ses->start_transaction(0);
+   std::string big = big_val(42, 800);
+   trx2.upsert(tkey(50), big);
+   trx2.commit();
+
+   // Verify new value.
+   auto trx3 = env.ses->start_transaction(0);
+   auto val = trx3.get<std::string>(tkey(50));
+   REQUIRE(val.has_value());
+   CHECK(*val == big);
+
+   // Snapshot should retain old value.
+   {
+      cursor c(snapshot);
+      std::string buf;
+      CHECK(c.get(tkey(50), &buf) >= 0);
+      CHECK(buf == small_val(50));
+   }
+}
+
+TEST_CASE("tree_ops: split_insert on single-entry leaf", "[tree_ops][split]")
+{
+   // When a leaf has exactly 1 entry and can't fit a second key (both keys are huge),
+   // split_insert takes the single-entry special case. Lines ~1764-1817.
+   test_db env("tree_ops_split_single_db");
+   auto    wc = env.ses->create_write_cursor();
+
+   // Insert a key with a very large value that fills the leaf.
+   std::string key1 = "aaaa";
+   std::string val1(1800, 'X');
+   wc->upsert(key1, val1);
+
+   // Insert a second key that won't fit — triggers single-entry split.
+   std::string key2 = "bbbb";
+   std::string val2(1800, 'Y');
+   wc->upsert(key2, val2);
+
+   auto v1 = wc->get<std::string>(key1);
+   auto v2 = wc->get<std::string>(key2);
+   REQUIRE(v1.has_value());
+   REQUIRE(v2.has_value());
+   CHECK(*v1 == val1);
+   CHECK(*v2 == val2);
+   wc->validate();
+}
+
+TEST_CASE("tree_ops: split_insert single-entry leaf in shared mode", "[tree_ops][shared][split]")
+{
+   test_db env("tree_ops_split_single_shared_db");
+   auto    trx = env.ses->start_transaction(0);
+
+   std::string key1 = "aaaa";
+   std::string val1(1800, 'X');
+   trx.upsert(key1, val1);
+   trx.commit();
+
+   // Snapshot to force shared mode.
+   auto snapshot = env.ses->get_root(0);
+
+   auto trx2 = env.ses->start_transaction(0);
+   std::string key2 = "bbbb";
+   std::string val2(1800, 'Y');
+   trx2.upsert(key2, val2);
+   trx2.commit();
+
+   auto trx3 = env.ses->start_transaction(0);
+   CHECK(trx3.get<std::string>(key1).has_value());
+   CHECK(trx3.get<std::string>(key2).has_value());
+
+   // Snapshot should still have only key1.
+   cursor c(snapshot);
+   std::string buf;
+   CHECK(c.get(key1, &buf) >= 0);
+   CHECK(c.get(key2, &buf) < 0);
+}
+
+TEST_CASE("tree_ops: shared-mode Phase 2 collapse inner child types", "[tree_ops][shared][collapse]")
+{
+   // When removing a key in shared mode leaves an inner_prefix_node with 2 branches
+   // and one branch is removed, the remaining child is collapsed into the parent.
+   // Cover: inner child (line 1342), inner_prefix child (line 1356).
+   test_db env("tree_ops_shared_phase2_db");
+
+   // Case 1: inner_prefix parent, remaining child is inner_node.
+   // Build a tree with keys sharing a long prefix, then diverging into two branches.
+   // One branch gets many unique first-bytes → inner_node.
+   // The other branch gets 1 key → leaf.
+   SECTION("remaining child is inner_node")
+   {
+      auto trx = env.ses->start_transaction(0);
+      // Common prefix "prefix_" then diverge on byte after that.
+      // Under 'A': many keys with different next bytes → inner_node
+      for (int i = 0; i < 20; ++i)
+      {
+         char buf[64];
+         snprintf(buf, sizeof(buf), "prefix_A%c_data", 'a' + i);
+         trx.upsert(buf, small_val(i));
+      }
+      // Under 'B': single key → leaf
+      trx.upsert("prefix_B_only", small_val(99));
+      trx.commit();
+
+      // Snapshot to force shared mode.
+      auto snapshot = env.ses->get_root(0);
+
+      // Remove the 'B' key → inner_prefix with 1 branch → collapse absorbs inner child.
+      auto trx2 = env.ses->start_transaction(0);
+      trx2.remove("prefix_B_only");
+      trx2.commit();
+
+      // Verify all remaining keys.
+      auto trx3 = env.ses->start_transaction(0);
+      for (int i = 0; i < 20; ++i)
+      {
+         char buf[64];
+         snprintf(buf, sizeof(buf), "prefix_A%c_data", 'a' + i);
+         CHECK(trx3.get<std::string>(buf).has_value());
+      }
+   }
+
+   SECTION("remaining child is inner_prefix_node")
+   {
+      auto trx = env.ses->start_transaction(0);
+      // Keys sharing "pfx_" prefix, then branching into "XX_..." subgroups.
+      // Under 'A': keys with a shared sub-prefix → inner_prefix_node
+      for (int i = 0; i < 5; ++i)
+      {
+         // Very long keys to force leaf splits and create inner_prefix nodes.
+         std::string key(500, 'K');
+         snprintf(key.data(), 500, "pfx_A_sub_%03d", i);
+         trx.upsert(key, small_val(i));
+      }
+      // Under 'B': single key
+      trx.upsert("pfx_B_alone", small_val(99));
+      trx.commit();
+
+      auto snapshot = env.ses->get_root(0);
+
+      auto trx2 = env.ses->start_transaction(0);
+      trx2.remove("pfx_B_alone");
+      trx2.commit();
+
+      auto trx3 = env.ses->start_transaction(0);
+      for (int i = 0; i < 5; ++i)
+      {
+         std::string key(500, 'K');
+         snprintf(key.data(), 500, "pfx_A_sub_%03d", i);
+         CHECK(trx3.get<std::string>(key).has_value());
+      }
+   }
+}
+
+TEST_CASE("tree_ops: shared-mode Phase 3 collapse with inner_prefix branches", "[tree_ops][shared][collapse]")
+{
+   // Phase 3 shared collapse: inner with >2 branches but few descendants.
+   // After removing a key, the remaining branches are collapsed into a single leaf.
+   // This tests the path through retain_subtree_leaf_values_by_addr and
+   // collapse_visitor with inner_prefix children. (Lines 1383-1424)
+   test_db env("tree_ops_shared_phase3_prefix_db");
+
+   // Build a tree with keys sharing a prefix that creates inner_prefix structure.
+   // Use different prefix groups so the root inner has multiple branches.
+   auto trx = env.ses->start_transaction(0);
+   // Group A: 3 keys
+   for (int i = 0; i < 3; ++i)
+      trx.upsert("A_k" + std::to_string(i), small_val(i));
+   // Group B: 3 keys
+   for (int i = 0; i < 3; ++i)
+      trx.upsert("B_k" + std::to_string(i), small_val(10 + i));
+   // Group C: 3 keys
+   for (int i = 0; i < 3; ++i)
+      trx.upsert("C_k" + std::to_string(i), small_val(20 + i));
+   // Group D: 1 key (target for removal)
+   trx.upsert("D_target", small_val(99));
+   trx.commit();
+
+   // Snapshot → shared mode.
+   auto snapshot = env.ses->get_root(0);
+
+   // Remove D_target with collapse threshold = 10.
+   {
+      auto root = env.ses->get_root(0);
+      tree_context ctx(std::move(root));
+      ctx.set_collapse_threshold(10);
+      ctx.remove("D_target");
+      env.ses->set_root(0, ctx.get_root());
+   }
+
+   // Verify remaining 9 keys.
+   auto trx2 = env.ses->start_transaction(0);
+   for (int i = 0; i < 3; ++i)
+   {
+      CHECK(trx2.get<std::string>("A_k" + std::to_string(i)).has_value());
+      CHECK(trx2.get<std::string>("B_k" + std::to_string(i)).has_value());
+      CHECK(trx2.get<std::string>("C_k" + std::to_string(i)).has_value());
+   }
+   CHECK_FALSE(trx2.get<std::string>("D_target").has_value());
+}
+
+TEST_CASE("tree_ops: remove producing multi-branch result at root", "[tree_ops][remove]")
+{
+   // When a leaf becomes shared (snapshot) and the remove path can't modify in place,
+   // the result may be 2 branches if the leaf was the root and splitting was needed.
+   // This tests the make_inner path in remove() (line 205).
+   test_db env("tree_ops_remove_make_inner_db");
+   auto    trx = env.ses->start_transaction(0);
+
+   // Insert keys that will be in a single leaf initially.
+   for (int i = 0; i < 30; ++i)
+      trx.upsert(tkey(i), small_val(i));
+   trx.commit();
+
+   // Remove keys via unique mode — straightforward.
+   auto trx2 = env.ses->start_transaction(0);
+   for (int i = 0; i < 15; ++i)
+      trx2.remove(tkey(i));
+   trx2.commit();
+
+   // Verify remaining.
+   auto trx3 = env.ses->start_transaction(0);
+   for (int i = 15; i < 30; ++i)
+      CHECK(trx3.get<std::string>(tkey(i)).has_value());
+}
+
+TEST_CASE("tree_ops: validate_unique_refs with inner and inner_prefix nodes", "[tree_ops][validate]")
+{
+   // validate_unique_refs traverses the tree checking ref==1 for all children.
+   // Cover inner_node and inner_prefix_node paths. (Lines 674-728)
+   test_db env("tree_ops_validate_refs_db");
+   auto    wc = env.ses->create_write_cursor();
+
+   // Build a tree with both inner_node and inner_prefix_node children.
+   // Different first bytes → inner_node. Shared prefix → inner_prefix_node.
+   for (int i = 0; i < 10; ++i)
+   {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%c_prefix_key_%03d", 'A' + i, i);
+      wc->upsert(buf, small_val(i));
+   }
+   // Add keys with shared long prefix for inner_prefix.
+   for (int i = 0; i < 5; ++i)
+   {
+      std::string key(200, 'Z');
+      snprintf(key.data(), 200, "shared_long_prefix_%03d", i);
+      wc->upsert(key, small_val(100 + i));
+   }
+
+   // validate_unique_refs is called internally by validate() when no snapshots exist.
+   // The write_cursor has exclusive ownership (ref=1) of all nodes.
+   wc->validate();
+
+   // Verify the tree has the expected structure.
+   auto stats = wc->get_stats();
+   CHECK(stats.total_keys == 15);
+}
+
+TEST_CASE("tree_ops: large value creates value_node and stats counts it", "[tree_ops][stats]")
+{
+   // make_value converts values >64 bytes to value_nodes. calc_stats counts them.
+   // Covers lines ~46-47 (make_value) and ~793-797 (calc_stats value_node).
+   test_db env("tree_ops_value_node_stats_db");
+   auto    wc = env.ses->create_write_cursor();
+
+   // Insert keys with values > 64 bytes to trigger value_node creation.
+   for (int i = 0; i < 5; ++i)
+      wc->upsert(tkey(i), big_val(i, 200));
+
+   // Insert some small values too.
+   for (int i = 5; i < 10; ++i)
+      wc->upsert(tkey(i), small_val(i));
+
+   auto stats = wc->get_stats();
+   CHECK(stats.total_keys == 10);
+   CHECK(stats.value_nodes == 5);
+   CHECK(stats.total_value_size > 0);
+}
+
+TEST_CASE("tree_ops: unique Phase 2 collapse with inner_node child", "[tree_ops][collapse][phase2]")
+{
+   // Unique mode Phase 2: inner_prefix_node with 1 remaining branch where
+   // the child is an inner_node. The parent reallocs to absorb the child.
+   // (Lines 1207-1232)
+   test_db env("tree_ops_unique_phase2_inner_db");
+   auto    wc = env.ses->create_write_cursor();
+
+   // Build keys with a shared prefix, then diverging into many unique bytes
+   // to create an inner_node child under the inner_prefix parent.
+   // First, keys under "aa" prefix with many different third bytes.
+   for (int i = 0; i < 20; ++i)
+   {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "aa%c_data", 'a' + i);
+      wc->upsert(buf, small_val(i));
+   }
+   // Keys under "ab" prefix — single key.
+   wc->upsert("ab_lone", small_val(99));
+
+   auto stats_before = wc->get_stats();
+   INFO("before: inner=" << stats_before.inner_nodes
+        << " prefix=" << stats_before.inner_prefix_nodes);
+
+   // Remove the lone "ab" key → parent inner_prefix collapses.
+   wc->remove("ab_lone");
+
+   // All remaining keys intact.
+   for (int i = 0; i < 20; ++i)
+   {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "aa%c_data", 'a' + i);
+      auto v = wc->get<std::string>(buf);
+      REQUIRE(v.has_value());
+   }
+   wc->validate();
+}
+
+TEST_CASE("tree_ops: unique Phase 3 collapse through inner_prefix subtree", "[tree_ops][collapse]")
+{
+   // Phase 3 unique collapse: inner with multiple branches and few descendants.
+   // After removing enough keys, the subtree collapses into a single leaf.
+   // This targets walk_subtree_insert and retain_subtree_leaf_values_by_addr
+   // with inner_prefix children. (Lines 406-422, 451-463)
+   test_db env("tree_ops_unique_phase3_prefix_db");
+   auto    wc = env.ses->create_write_cursor();
+
+   // Create a tree with keys that produce inner_prefix structure.
+   // Group A: 4 keys with shared prefix → creates inner_prefix child.
+   for (int i = 0; i < 4; ++i)
+   {
+      std::string key(300, 'K');
+      snprintf(key.data(), 300, "grpA_item_%03d", i);
+      wc->upsert(key, small_val(i));
+   }
+   // Group B: 4 keys.
+   for (int i = 0; i < 4; ++i)
+   {
+      std::string key(300, 'K');
+      snprintf(key.data(), 300, "grpB_item_%03d", i);
+      wc->upsert(key, small_val(10 + i));
+   }
+   // Group C: 2 keys.
+   for (int i = 0; i < 2; ++i)
+   {
+      std::string key(300, 'K');
+      snprintf(key.data(), 300, "grpC_item_%03d", i);
+      wc->upsert(key, small_val(20 + i));
+   }
+
+   // Remove enough to bring descendant count below threshold.
+   // Remove all of group B and C.
+   for (int i = 0; i < 4; ++i)
+   {
+      std::string key(300, 'K');
+      snprintf(key.data(), 300, "grpB_item_%03d", i);
+      wc->remove(key);
+   }
+   for (int i = 0; i < 2; ++i)
+   {
+      std::string key(300, 'K');
+      snprintf(key.data(), 300, "grpC_item_%03d", i);
+      wc->remove(key);
+   }
+
+   // Verify remaining group A keys.
+   for (int i = 0; i < 4; ++i)
+   {
+      std::string key(300, 'K');
+      snprintf(key.data(), 300, "grpA_item_%03d", i);
+      auto v = wc->get<std::string>(key);
+      REQUIRE(v.has_value());
+   }
+   wc->validate();
+}

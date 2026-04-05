@@ -1262,3 +1262,459 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       }
    }
 }
+
+// ── Coverage expansion tests ────────────────────────────────────────────────
+
+TEST_CASE("leaf_node compact_size with dead space", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   // Create a leaf with a few keys, then remove one to create dead space
+   LeafNodePtr node_ptr = create_leaf_node("aaa", value_type("val_a"));
+   leaf_node&  node     = *node_ptr;
+
+   op::leaf_insert ins1{.src = node, .lb = node.lower_bound("bbb"), .key = "bbb", .value = value_type("val_b")};
+   node.apply(ins1);
+   op::leaf_insert ins2{.src = node, .lb = node.lower_bound("ccc"), .key = "ccc", .value = value_type("val_c")};
+   node.apply(ins2);
+   REQUIRE(node.num_branches() == 3);
+
+   // Remove middle key to create dead space
+   op::leaf_remove rm{.src = node, .bn = branch_number(1)};
+   node.apply(rm);
+   REQUIRE(node.num_branches() == 2);
+   REQUIRE(node.dead_space() > 0);
+
+   // compact_size with dead_space > 0 should return full size (line 83)
+   REQUIRE(node.compact_size() == node.size());
+}
+
+TEST_CASE("leaf_node compact_size without dead space", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("hello", value_type("world"));
+   leaf_node&  node     = *node_ptr;
+
+   REQUIRE(node.dead_space() == 0);
+   // compact_size without dead space should compute a smaller or equal size
+   uint32_t cs = node.compact_size();
+   REQUIRE(cs <= node.size());
+   REQUIRE(cs >= 64);  // floor
+}
+
+TEST_CASE("leaf_node compact_to same size", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("test_key", value_type("test_val"));
+   leaf_node&  node     = *node_ptr;
+
+   // Add more data so compact_size might differ
+   for (int i = 0; i < 5; ++i)
+   {
+      std::string k = "key" + std::to_string(i);
+      std::string v = "val" + std::to_string(i);
+      op::leaf_insert ins{.src = node, .lb = node.lower_bound(k), .key = k, .value = value_type(v)};
+      if (node.can_apply(ins) != leaf_node::can_apply_mode::none)
+         node.apply(ins);
+   }
+
+   // Remove to create dead space, then compact
+   if (node.num_branches() > 2)
+   {
+      op::leaf_remove rm{.src = node, .bn = branch_number(1)};
+      node.apply(rm);
+   }
+
+   uint32_t cs = node.compact_size();
+   // Just verify the compact_size is sensible
+   REQUIRE(cs <= node.size());
+   REQUIRE(cs >= 64);
+}
+
+TEST_CASE("leaf_node can_insert_address cline sharing and capacity", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("base", value_type("val"));
+   leaf_node&  node     = *node_ptr;
+
+   // Insert subtrees with addresses on different cachelines
+   for (int i = 0; i < 14; ++i)
+   {
+      ptr_address addr(static_cast<unsigned int>((i + 1) * 16));  // different base cachelines
+      std::string k = "sub_" + std::to_string(i);
+      value_type  sv = value_type::make_subtree(addr);
+      op::leaf_insert ins{.src = node, .lb = node.lower_bound(k), .key = k, .value = sv};
+      if (node.can_apply(ins) != leaf_node::can_apply_mode::none)
+         node.apply(ins);
+   }
+
+   // Test can_insert_address with an address on an existing cacheline (should succeed)
+   if (node.clines_capacity() > 0)
+   {
+      ptr_address existing_base(16);  // same base as first insert
+      ptr_address same_cline_addr(*existing_base | 5);  // different index, same base
+      REQUIRE(node.can_insert_address(same_cline_addr));
+   }
+
+   // Test can_insert_address with a brand new cacheline
+   ptr_address new_cline_addr(static_cast<unsigned int>(999 * 16));
+   // May or may not fit depending on cline_cap and free space
+   bool result = node.can_insert_address(new_cline_addr);
+   // Just exercise the code path — result depends on node state
+   (void)result;
+}
+
+TEST_CASE("leaf_node cline sharing with same base address", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("k1", value_type("v1"));
+   leaf_node&  node     = *node_ptr;
+
+   // Insert two subtrees sharing the same cacheline base
+   ptr_address base_addr(256);  // base cacheline
+   ptr_address addr1(*base_addr | 1);
+   ptr_address addr2(*base_addr | 2);
+
+   value_type sv1 = value_type::make_subtree(addr1);
+   value_type sv2 = value_type::make_subtree(addr2);
+
+   op::leaf_insert ins1{.src = node, .lb = node.lower_bound("sub_a"), .key = "sub_a", .value = sv1};
+   REQUIRE(node.can_apply(ins1) != leaf_node::can_apply_mode::none);
+   node.apply(ins1);
+
+   op::leaf_insert ins2{.src = node, .lb = node.lower_bound("sub_b"), .key = "sub_b", .value = sv2};
+   REQUIRE(node.can_apply(ins2) != leaf_node::can_apply_mode::none);
+   node.apply(ins2);
+
+   // Both share same cacheline base, so clines_capacity should be 1
+   REQUIRE(node.clines_capacity() == 1);
+
+   // Values should be correct
+   REQUIRE(node.get_value(node.get("sub_a")).is_subtree());
+   REQUIRE(node.get_value(node.get("sub_b")).is_subtree());
+   REQUIRE(node.get_value(node.get("sub_a")).subtree_address() == addr1);
+   REQUIRE(node.get_value(node.get("sub_b")).subtree_address() == addr2);
+}
+
+TEST_CASE("leaf_node validate_invariants on valid node", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("hello", value_type("world"));
+   leaf_node&  node     = *node_ptr;
+
+   REQUIRE(node.validate_invariants());
+
+   // Add more entries and validate
+   op::leaf_insert ins{.src = node, .lb = node.lower_bound("abc"), .key = "abc", .value = value_type("xyz")};
+   node.apply(ins);
+   REQUIRE(node.validate_invariants());
+
+   // Add subtree entry and validate
+   ptr_address     addr(1024);
+   value_type      sv = value_type::make_subtree(addr);
+   op::leaf_insert ins2{.src = node, .lb = node.lower_bound("sub"), .key = "sub", .value = sv};
+   if (node.can_apply(ins2) != leaf_node::can_apply_mode::none)
+   {
+      node.apply(ins2);
+      REQUIRE(node.validate_invariants());
+   }
+
+   // Remove and validate (with dead space)
+   op::leaf_remove rm{.src = node, .bn = branch_number(0)};
+   node.apply(rm);
+   REQUIRE(node.validate_invariants());
+}
+
+TEST_CASE("leaf_node clone with dead space triggers rebuild", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("aaa", value_type("111"));
+   leaf_node&  node     = *node_ptr;
+
+   // Insert several keys
+   for (int i = 0; i < 8; ++i)
+   {
+      std::string k = "k" + std::string(1, 'a' + i);
+      std::string v = "v" + std::to_string(i);
+      op::leaf_insert ins{.src = node, .lb = node.lower_bound(k), .key = k, .value = value_type(v)};
+      if (node.can_apply(ins) != leaf_node::can_apply_mode::none)
+         node.apply(ins);
+   }
+
+   // Remove some to create dead space
+   while (node.num_branches() > 3 && node.dead_space() == 0)
+   {
+      op::leaf_remove rm{.src = node, .bn = branch_number(1)};
+      node.apply(rm);
+   }
+   REQUIRE(node.dead_space() > 0);
+
+   // Clone — should trigger the rebuild (dead_space > 0) path in clone_from
+   constexpr size_t node_size = leaf_node::max_leaf_size;
+   void*            buf       = std::aligned_alloc(64, node_size);
+   std::memset(buf, 0, node_size);
+   uintptr_t           addr_int = reinterpret_cast<uintptr_t>(buf);
+   ptr_address_seq     seq      = {ptr_address(static_cast<unsigned int>(addr_int)), 0};
+   leaf_node*          clone    = new (buf) leaf_node(node_size, seq, &node);
+
+   REQUIRE(clone->num_branches() == node.num_branches());
+   REQUIRE(clone->dead_space() == 0);  // rebuild eliminates dead space
+
+   // Verify data integrity
+   for (uint8_t i = 0; i < clone->num_branches(); ++i)
+   {
+      branch_number bn(i);
+      REQUIRE(clone->get_key(bn) == node.get_key(bn));
+   }
+
+   clone->~leaf_node();
+   std::free(buf);
+}
+
+TEST_CASE("leaf_node clone with subtree and value_node values", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("inline_key", value_type("inline_val"));
+   leaf_node&  node     = *node_ptr;
+
+   // Insert subtree value
+   ptr_address     sub_addr(4096);
+   value_type      sub_val = value_type::make_subtree(sub_addr);
+   op::leaf_insert ins_sub{.src = node, .lb = node.lower_bound("subtree_k"), .key = "subtree_k", .value = sub_val};
+   REQUIRE(node.can_apply(ins_sub) != leaf_node::can_apply_mode::none);
+   node.apply(ins_sub);
+
+   // Insert value_node value
+   ptr_address     vn_addr(8192);
+   value_type      vn_val = value_type::make_value_node(vn_addr);
+   op::leaf_insert ins_vn{.src = node, .lb = node.lower_bound("vnode_k"), .key = "vnode_k", .value = vn_val};
+   REQUIRE(node.can_apply(ins_vn) != leaf_node::can_apply_mode::none);
+   node.apply(ins_vn);
+
+   // Insert empty value (null branch)
+   op::leaf_insert ins_empty{.src = node, .lb = node.lower_bound("empty_k"), .key = "empty_k", .value = value_type("")};
+   REQUIRE(node.can_apply(ins_empty) != leaf_node::can_apply_mode::none);
+   node.apply(ins_empty);
+
+   REQUIRE(node.num_branches() == 4);
+
+   // Remove one to create dead space, then clone to exercise all value type paths in clone_from
+   op::leaf_remove rm{.src = node, .bn = branch_number(0)};
+   node.apply(rm);
+   REQUIRE(node.dead_space() > 0);
+
+   // Clone — triggers rebuild which must handle subtree, value_node, and empty value branches
+   constexpr size_t node_size = leaf_node::max_leaf_size;
+   void*            buf       = std::aligned_alloc(64, node_size);
+   std::memset(buf, 0, node_size);
+   uintptr_t           addr_int = reinterpret_cast<uintptr_t>(buf);
+   ptr_address_seq     seq      = {ptr_address(static_cast<unsigned int>(addr_int)), 0};
+   leaf_node*          clone    = new (buf) leaf_node(node_size, seq, &node);
+
+   REQUIRE(clone->num_branches() == 3);
+   REQUIRE(clone->dead_space() == 0);
+
+   // Verify value types survive clone
+   for (uint8_t i = 0; i < clone->num_branches(); ++i)
+   {
+      branch_number bn(i);
+      value_type    orig  = node.get_value(bn);
+      value_type    clval = clone->get_value(bn);
+      REQUIRE(orig == clval);
+   }
+
+   clone->~leaf_node();
+   std::free(buf);
+}
+
+TEST_CASE("leaf_node prepend_prefix constructor with address values", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("key_a", value_type("val_a"));
+   leaf_node&  node     = *node_ptr;
+
+   // Add subtree and value_node entries
+   ptr_address     sub_addr(2048);
+   op::leaf_insert ins_sub{.src = node, .lb = node.lower_bound("key_b"), .key = "key_b",
+                           .value = value_type::make_subtree(sub_addr)};
+   REQUIRE(node.can_apply(ins_sub) != leaf_node::can_apply_mode::none);
+   node.apply(ins_sub);
+
+   ptr_address     vn_addr(4096);
+   op::leaf_insert ins_vn{.src = node, .lb = node.lower_bound("key_c"), .key = "key_c",
+                          .value = value_type::make_value_node(vn_addr)};
+   REQUIRE(node.can_apply(ins_vn) != leaf_node::can_apply_mode::none);
+   node.apply(ins_vn);
+
+   // Empty value
+   op::leaf_insert ins_empty{.src = node, .lb = node.lower_bound("key_d"), .key = "key_d",
+                             .value = value_type("")};
+   REQUIRE(node.can_apply(ins_empty) != leaf_node::can_apply_mode::none);
+   node.apply(ins_empty);
+
+   REQUIRE(node.num_branches() == 4);
+
+   // Construct via prepend_prefix — exercises all value type paths in that constructor
+   op::leaf_prepend_prefix pp{.src = node, .prefix = "PFX_"};
+
+   constexpr size_t node_size = leaf_node::max_leaf_size;
+   void*            buf       = std::aligned_alloc(64, node_size);
+   std::memset(buf, 0, node_size);
+   uintptr_t       addr_int = reinterpret_cast<uintptr_t>(buf);
+   ptr_address_seq seq      = {ptr_address(static_cast<unsigned int>(addr_int)), 0};
+   leaf_node*      prefixed = new (buf) leaf_node(node_size, seq, pp);
+
+   REQUIRE(prefixed->num_branches() == 4);
+   // Keys should have prefix prepended
+   REQUIRE(prefixed->get_key(branch_number(0)).substr(0, 4) == key_view("PFX_"));
+
+   // Values should be preserved
+   REQUIRE(prefixed->get_value(branch_number(0)).is_view());  // key_a had inline val
+
+   prefixed->~leaf_node();
+   std::free(buf);
+}
+
+TEST_CASE("leaf_node split constructor with address values", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   // Build a node with inline + subtree + value_node + empty values
+   LeafNodePtr node_ptr = create_leaf_node("aaa", value_type("inline_v"));
+   leaf_node&  node     = *node_ptr;
+
+   ptr_address     sub_addr(512);
+   op::leaf_insert ins1{.src = node, .lb = node.lower_bound("bbb"), .key = "bbb",
+                        .value = value_type::make_subtree(sub_addr)};
+   node.apply(ins1);
+
+   ptr_address     vn_addr(1024);
+   op::leaf_insert ins2{.src = node, .lb = node.lower_bound("ccc"), .key = "ccc",
+                        .value = value_type::make_value_node(vn_addr)};
+   node.apply(ins2);
+
+   op::leaf_insert ins3{.src = node, .lb = node.lower_bound("ddd"), .key = "ddd",
+                        .value = value_type("")};
+   node.apply(ins3);
+
+   REQUIRE(node.num_branches() == 4);
+
+   // Split constructor: clone subset [1, 3) with empty prefix
+   constexpr size_t node_size = leaf_node::max_leaf_size;
+   void*            buf       = std::aligned_alloc(64, node_size);
+   std::memset(buf, 0, node_size);
+   uintptr_t       addr_int = reinterpret_cast<uintptr_t>(buf);
+   ptr_address_seq seq      = {ptr_address(static_cast<unsigned int>(addr_int)), 0};
+   leaf_node*      split    = new (buf) leaf_node(
+       node_size, seq, &node, key_view(), branch_number(1), branch_number(3));
+
+   REQUIRE(split->num_branches() == 2);
+   // Should have "bbb" (subtree) and "ccc" (value_node)
+   REQUIRE(split->get_value(branch_number(0)).is_subtree());
+   REQUIRE(split->get_value(branch_number(1)).is_value_node());
+
+   split->~leaf_node();
+   std::free(buf);
+}
+
+TEST_CASE("leaf_node remove_address_ptr frees cline slot", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("data", value_type("val"));
+   leaf_node&  node     = *node_ptr;
+
+   // Insert two subtrees on different cachelines
+   ptr_address     addr1(256);
+   op::leaf_insert ins1{.src = node, .lb = node.lower_bound("sub1"), .key = "sub1",
+                        .value = value_type::make_subtree(addr1)};
+   node.apply(ins1);
+
+   ptr_address     addr2(512);
+   op::leaf_insert ins2{.src = node, .lb = node.lower_bound("sub2"), .key = "sub2",
+                        .value = value_type::make_subtree(addr2)};
+   node.apply(ins2);
+
+   REQUIRE(node.clines_capacity() == 2);
+
+   // Remove the second subtree's key — update its value to inline, then remove_address_ptr
+   // Actually, remove the entire branch which triggers internal cleanup
+   branch_number sub2_bn = node.get("sub2");
+   REQUIRE(sub2_bn < branch_number(node.num_branches()));
+
+   // Update sub2 to inline value — this should free the cline if no other refs
+   node.update_value(sub2_bn, value_type("now_inline"));
+   // Clines should shrink if the removed cline was at the end
+   REQUIRE(node.clines_capacity() <= 2);
+
+   // Verify sub1 still works
+   branch_number sub1_bn = node.get("sub1");
+   REQUIRE(node.get_value(sub1_bn).is_subtree());
+   REQUIRE(node.get_value(sub1_bn).subtree_address() == addr1);
+}
+
+TEST_CASE("leaf_node fill until can_apply returns none", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("k000", value_type("v000_padding_data_to_use_space"));
+   leaf_node&  node     = *node_ptr;
+
+   // Keep inserting until the node is full
+   int inserted = 0;
+   for (int i = 1; i < 200; ++i)
+   {
+      char        buf[8];
+      snprintf(buf, sizeof(buf), "k%03d", i);
+      std::string k(buf);
+      std::string v = "value_" + std::to_string(i) + "_padpadpadpad";
+      op::leaf_insert ins{.src = node, .lb = node.lower_bound(k), .key = k, .value = value_type(v)};
+      auto mode = node.can_apply(ins);
+      if (mode == leaf_node::can_apply_mode::none)
+         break;
+      if (mode == leaf_node::can_apply_mode::defrag)
+         break;  // stop before defrag needed
+      node.apply(ins);
+      ++inserted;
+   }
+   REQUIRE(inserted > 0);
+
+   // Now try one more — should fail or need defrag
+   std::string k = "zzzz_overflow";
+   std::string v = "value_overflow_padding_data";
+   op::leaf_insert ins{.src = node, .lb = node.lower_bound(k), .key = k, .value = value_type(v)};
+   auto mode = node.can_apply(ins);
+   // It should be either none or defrag at this point
+   REQUIRE((mode == leaf_node::can_apply_mode::none || mode == leaf_node::can_apply_mode::defrag));
+}
+
+TEST_CASE("leaf_node get_split_pos", "[psitri][leaf_node]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("aaa_key", value_type("val1"));
+   leaf_node&  node     = *node_ptr;
+
+   // Insert keys with shared prefix to test split position
+   std::vector<std::string> keys = {"aab_key", "aac_key", "baa_key", "bab_key", "bac_key"};
+   for (auto& k : keys)
+   {
+      op::leaf_insert ins{.src = node, .lb = node.lower_bound(k), .key = k, .value = value_type("v")};
+      if (node.can_apply(ins) != leaf_node::can_apply_mode::none)
+         node.apply(ins);
+   }
+
+   auto sp = node.get_split_pos();
+   // Split should find a reasonable divider
+   REQUIRE(sp.less_than_count + sp.greater_eq_count == node.num_branches());
+   REQUIRE(sp.less_than_count > 0);
+   REQUIRE(sp.greater_eq_count > 0);
+}

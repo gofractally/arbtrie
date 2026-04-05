@@ -130,6 +130,7 @@ namespace psitri
       tree_context::stats get_stats() { return _ctx.get_stats(); }
       void                print() { _ctx.print(); }
       void                validate() { _ctx.validate(); }
+      void                validate_unique_refs() { _ctx.validate_unique_refs(); }
 
      private:
       friend class transaction;

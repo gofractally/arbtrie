@@ -251,25 +251,23 @@ namespace sal
    }
    inline void allocator_session::retain(ptr_address adr)
    {
-      //   SAL_WARN("retaining {} pre ref: {}", adr, get(adr).ref());
       get(adr).retain();
    }
    inline void allocator_session::release(ptr_address adr) noexcept
    {
-      auto& cb = get(adr);
-
-      if( cb.ref() == 1 and _release_queue.try_push(adr))
-           return;
+      auto& cb      = get(adr);
+      auto  cur_ref = cb.ref();
+      if (cur_ref == 1 and _release_queue.try_push(adr))
+         return;
 
       //     SAL_ERROR(" try push failed, final_release: {}", adr);
       final_release(adr);
    }
    inline void allocator_session::final_release(ptr_address adr) noexcept
    {
-      //  SAL_ERROR("final_release: {} ", adr);
       auto& cb   = get(adr);
       auto  prev = cb.release();
-      if( prev.ref > 1 )
+      if (prev.ref > 1)
          return;
 
       location loc = prev.loc();
@@ -279,7 +277,6 @@ namespace sal
          allocator_session_ptr ptr(this);
 
          const alloc_header* nptr = get<alloc_header>(loc);
-         //       SAL_ERROR("destroying {}", adr);
          vcall::destroy(nptr, ptr);
          record_freed_space(nptr);
       }
