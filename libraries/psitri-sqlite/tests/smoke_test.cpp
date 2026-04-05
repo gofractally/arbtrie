@@ -52,6 +52,41 @@ int main() {
    }
 
    sqlite3_close(db);
+   db = nullptr;
+
+   // Reopen and verify data persists
+   std::printf("\n--- Reopening database ---\n");
+   rc = sqlite3_open(db_path.c_str(), &db);
+   if (rc != SQLITE_OK) {
+      std::fprintf(stderr, "Reopen failed: %s\n", sqlite3_errmsg(db));
+      return 1;
+   }
+
+   stmt = nullptr;
+   rc = sqlite3_prepare_v2(db, "SELECT * FROM t1", -1, &stmt, nullptr);
+   std::printf("PREPARE returned %d\n", rc);
+   if (rc != SQLITE_OK) {
+      std::fprintf(stderr, "Query after reopen failed: %s\n", sqlite3_errmsg(db));
+      sqlite3_close(db);
+      return 1;
+   }
+
+   int rows = 0;
+   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      std::printf("  row: id=%lld, name=%s\n",
+         sqlite3_column_int64(stmt, 0),
+         sqlite3_column_text(stmt, 1));
+      rows++;
+   }
+   sqlite3_finalize(stmt);
+
+   if (rows != 1) {
+      std::fprintf(stderr, "FAIL: expected 1 row after reopen, got %d\n", rows);
+      sqlite3_close(db);
+      return 1;
+   }
+
+   sqlite3_close(db);
    fs::remove_all(tmp);
    std::printf("SUCCESS\n");
    return 0;

@@ -259,15 +259,21 @@ int sqlite3BtreeOpen(
          if (meta_r.found && meta_r.value.is_data() &&
              meta_r.value.data.size() >= sizeof(pdb->meta)) {
             std::memcpy(pdb->meta, meta_r.value.data.data(), sizeof(pdb->meta));
+            PTRACE("BtreeOpen: loaded metadata from root 0 (schema_version=%d)\n",
+                   pdb->meta[1]);
          } else {
             pdb->meta[BTREE_FILE_FORMAT] = 4;
             pdb->meta[BTREE_TEXT_ENCODING] = SQLITE_UTF8;
+            PTRACE("BtreeOpen: no metadata found — using defaults\n");
          }
 
          auto root_r = pdb->dwal_db->get_latest(0, "next_root");
          if (root_r.found && root_r.value.is_data() &&
              root_r.value.data.size() >= 4) {
             std::memcpy(&pdb->next_root, root_r.value.data.data(), 4);
+            PTRACE("BtreeOpen: loaded next_root=%d\n", pdb->next_root);
+         } else {
+            PTRACE("BtreeOpen: no next_root found — starting at 2\n");
          }
       } catch (const std::exception&) {
          delete pBt;
@@ -287,6 +293,7 @@ int sqlite3BtreeOpen(
 
 int sqlite3BtreeClose(Btree* p) {
    if (!p) return SQLITE_OK;
+   PTRACE("BtreeClose: pBtree=%p\n", (void*)p);
 
    auto* pBt = p->pBt;
    while (pBt->pCursor) {
@@ -308,10 +315,25 @@ int sqlite3BtreeClose(Btree* p) {
 
       std::lock_guard<std::mutex> lock(g_db_mutex);
       pBt->psitri->ref_count--;
+      PTRACE("BtreeClose: ref_count now %d for psitri=%p\n",
+             pBt->psitri->ref_count, (void*)pBt->psitri);
       if (pBt->psitri->ref_count <= 0) {
+         PTRACE("BtreeClose: last ref — destroying PsitriDb\n");
          // Last reference — remove from global registry (destroys PsitriDb)
          for (auto it = g_databases.begin(); it != g_databases.end(); ++it) {
             if (it->second.get() == pBt->psitri) {
+               PTRACE("BtreeClose: psi_db use_count=%ld dwal_db use_count=%ld\n",
+                      it->second->psi_db.use_count(), it->second->dwal_db.use_count());
+               // Clear thread-local caches that hold shared_ptr refs to the database.
+               // Must be done before destruction so the shared_ptrs can reach zero.
+               it->second->dwal_db->clear_thread_local_caches();
+               // Reset dwal_db first (stops merge threads, releases database ref)
+               it->second->dwal_db.reset();
+               PTRACE("BtreeClose: dwal_db reset, psi_db use_count=%ld\n",
+                      it->second->psi_db.use_count());
+               // Now reset psi_db (releases file locks)
+               it->second->psi_db.reset();
+               PTRACE("BtreeClose: psi_db reset — locks released\n");
                g_databases.erase(it);
                break;
             }

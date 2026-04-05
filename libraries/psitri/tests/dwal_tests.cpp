@@ -3063,17 +3063,16 @@ TEST_CASE("DWAL recovery: clean shutdown skips replay", "[dwal][recovery]")
    }
 
    // Phase 2: Reopen. WAL has clean_close flag → recovery skips it.
-   // The RW WAL file should be deleted.
+   // Data persists because the destructor flushes RW → Tri before marking clean.
    {
       psitri::dwal::dwal_database dwal_db(db, td.path / "wal");
 
-      // Data was only in the in-memory RW btree, which was lost on shutdown.
-      // With clean close, the WAL is NOT replayed (data was "intentionally" lost
-      // because it hadn't been swapped/merged yet — this is expected behavior
-      // for clean shutdown without explicit flush).
-      // The key should NOT be found since it was never merged to Tri.
+      // Data was flushed from the RW btree to the PsiTri trie during clean
+      // shutdown, so it should be found on reopen.
       auto r = dwal_db.get_latest(0, "k");
-      CHECK_FALSE(r.found);
+      CHECK(r.found);
+      CHECK(r.value.is_data());
+      CHECK(r.value.data == "v");
    }
 }
 
@@ -3869,6 +3868,16 @@ TEST_CASE("dwal recover RW WAL (unclean close) replays into RW layer", "[dwal][r
    temp_dir td;
    auto     db = psitri::database::create(td.path / "db");
 
+   // Allocate a real subtree node so we have a valid ptr_address for the WAL.
+   sal::ptr_address real_subtree_addr;
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(1);  // Use root 1 as the subtree source.
+      tx.upsert("sub_key", "sub_val");
+      tx.commit();
+      real_subtree_addr = ws->get_root(1).address();
+   }
+
    auto wal_dir  = td.path / "wal";
    auto root_dir = wal_dir / "root-0";
    std::filesystem::create_directories(root_dir);
@@ -3880,7 +3889,7 @@ TEST_CASE("dwal recover RW WAL (unclean close) replays into RW layer", "[dwal][r
       w.begin_entry();
       w.add_upsert_data("rw_key1", "rw_val1");
       w.add_upsert_data("rw_key2", "rw_val2");
-      w.add_upsert_subtree("subtree_key", sal::ptr_address(12345));
+      w.add_upsert_subtree("subtree_key", real_subtree_addr);
       w.add_remove("rw_key2");
       w.commit_entry();
 
@@ -3912,7 +3921,7 @@ TEST_CASE("dwal recover RW WAL (unclean close) replays into RW layer", "[dwal][r
    auto r3 = dwal_db.get_latest(0, "subtree_key");
    CHECK(r3.found);
    CHECK(r3.value.is_subtree());
-   CHECK(r3.value.subtree_root == sal::ptr_address(12345));
+   CHECK(r3.value.subtree_root == real_subtree_addr);
 
    // zap_a and zap_b should have been removed by range tombstone.
    auto r4 = dwal_db.get_latest(0, "zap_a");

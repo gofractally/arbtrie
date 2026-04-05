@@ -472,7 +472,8 @@ TEST_CASE("database dump and get_stats", "[database][diagnostics]")
    auto stats = t.db->get_stats();
    std::string stats_str = stats.to_string();
    REQUIRE(!stats_str.empty());
-   REQUIRE(stats.total_live_objects > 0);
+   REQUIRE(stats.total_segments > 0);
+   REQUIRE(stats.database_file_bytes > 0);
 }
 
 // ============================================================

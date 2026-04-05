@@ -151,6 +151,11 @@ namespace psitri::dwal
       /// Thread-safe: uses a thread-local read session internally.
       dwal_transaction::lookup_result tri_get(uint32_t root_index, std::string_view key);
 
+      /// Clear thread-local caches (read sessions, cursors) for the calling thread.
+      /// Must be called on each thread that used tri_get() or create_cursor()
+      /// before the database is destroyed, to avoid dangling shared_ptr references.
+      void clear_thread_local_caches();
+
       /// Replay any WAL files found on disk to recover from a crash.
       /// Called automatically by the constructor. Safe to call on clean startup
       /// (no WAL files = no-op).
