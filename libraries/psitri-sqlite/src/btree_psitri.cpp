@@ -53,7 +53,7 @@ struct Pager* psitri_get_dummy_pager(void);
 struct PsitriDb {
    std::shared_ptr<psitri::database>            psi_db;
    std::shared_ptr<psitri::dwal::dwal_database> dwal_db;
-   uint32_t next_root = 2;  // 0 = metadata, 1 = sqlite_schema (reserved)
+   uint32_t next_table_id = 2;  // 0 = metadata prefix, 1 = sqlite_schema
    u32 meta[SQLITE_N_BTREE_META] = {};
    int ref_count = 0;
    std::atomic<u32> data_version{1};
@@ -94,39 +94,27 @@ struct Btree {
    u64          nSeek = 0;
 #endif
 
-   // True if this connection has ever done a write transaction.
-   // Used to distinguish the writer connection (safe to use read_mode::latest
-   // which accesses the live RW ART map) from reader connections (must use
-   // read_mode::buffered to avoid heap-use-after-free from ART arena realloc).
-   bool         is_writer = false;
+   // True if this connection currently holds a write transaction.
+   // Writer uses read_mode::latest (skip_rw_lock).
+   // Non-writer uses read_mode::buffered.
+   bool is_writer = false;
 
-   // Per-connection DWAL transactions for the current SQLite write
-   // transaction.  Lazily created per root on first Insert/Delete,
-   // committed together during CommitPhaseOne, aborted on Rollback.
-   // Per-connection (not shared) to avoid cross-thread access from
-   // reader connections on the same PsitriDb singleton.
-   std::map<uint32_t, psitri::dwal::dwal_transaction> open_tx;
+   // Single DWAL transaction for all tables (root 0).
+   // Lazily created on first write, committed in CommitPhaseOne.
+   std::optional<psitri::dwal::dwal_transaction> active_tx;
 
-
-   psitri::dwal::dwal_transaction& get_tx(uint32_t root_index) {
-      auto it = open_tx.find(root_index);
-      if (it != open_tx.end())
-         return it->second;
-      auto [inserted, ok] = open_tx.try_emplace(
-         root_index, pBt->psitri->dwal_db->start_write_transaction(root_index));
-      return inserted->second;
+   psitri::dwal::dwal_transaction& get_tx() {
+      if (!active_tx)
+         active_tx.emplace(pBt->psitri->dwal_db->start_write_transaction(0));
+      return *active_tx;
    }
 
-   void commit_all_tx() {
-      for (auto& [root, tx] : open_tx)
-         tx.commit();
-      open_tx.clear();
+   void commit_tx() {
+      if (active_tx) { active_tx->commit(); active_tx.reset(); }
    }
 
-   void abort_all_tx() {
-      for (auto& [root, tx] : open_tx)
-         tx.abort();
-      open_tx.clear();
+   void abort_tx() {
+      if (active_tx) { active_tx->abort(); active_tx.reset(); }
    }
 };
 
@@ -145,6 +133,32 @@ static i64 decode_rowid(const char* data) {
    u64 v = 0;
    for (int i = 0; i < 8; i++) v = (v << 8) | (u8)data[i];
    return (i64)(v ^ ((u64)1 << 63));
+}
+
+// ============================================================================
+// Key prefix: all tables share DWAL root 0, distinguished by 4-byte prefix
+// ============================================================================
+
+static std::string make_prefixed_key(uint32_t table_id, std::string_view key) {
+   std::string result(4 + key.size(), '\0');
+   result[0] = (char)((table_id >> 24) & 0xFF);
+   result[1] = (char)((table_id >> 16) & 0xFF);
+   result[2] = (char)((table_id >>  8) & 0xFF);
+   result[3] = (char)((table_id      ) & 0xFF);
+   if (!key.empty())
+      std::memcpy(result.data() + 4, key.data(), key.size());
+   return result;
+}
+
+static std::string make_prefix(uint32_t table_id) {
+   return make_prefixed_key(table_id, {});
+}
+
+static bool has_prefix(std::string_view key, uint32_t table_id) {
+   if (key.size() < 4) return false;
+   uint32_t id = ((uint8_t)key[0] << 24) | ((uint8_t)key[1] << 16)
+               | ((uint8_t)key[2] <<  8) | (uint8_t)key[3];
+   return id == table_id;
 }
 
 // ============================================================================
@@ -210,15 +224,19 @@ static void cache_cursor_value(BtCursor* pCur) {
    auto& mc = pCur->cursor->cursor();
    auto key_sv = mc.key();
 
+   // Keys have a 4-byte table prefix — strip it before returning to SQLite
+   if (key_sv.size() < 4) {
+      pCur->is_valid = false;
+      pCur->eState = CURSOR_INVALID;
+      return;
+   }
+
    if (pCur->curIntKey) {
-      if (key_sv.size() >= 8) {
-         pCur->nKey = decode_rowid(key_sv.data());
+      if (key_sv.size() >= 4 + 8) {
+         pCur->nKey = decode_rowid(key_sv.data() + 4);  // skip prefix
       }
       pCur->cur_value = read_mc_value(mc);
    } else {
-      // BLOBKEY: the DWAL key is a byte-comparable encoding.
-      // The DWAL value contains the original packed record that SQLite
-      // expects to read back via sqlite3BtreePayload().
       auto val = read_mc_value(mc);
       pCur->nKey = (i64)val.size();
       pCur->cur_value = std::move(val);
@@ -322,12 +340,13 @@ int sqlite3BtreeOpen(
          pdb->dwal_db = std::make_shared<psitri::dwal::dwal_database>(
             pdb->psi_db, path + "/wal", cfg);
 
-         // Load metadata from root 0
-         auto meta_r = pdb->dwal_db->get_latest(0, "meta");
+         // Load metadata from root 0 (prefixed keys)
+         auto meta_key = make_prefixed_key(0, "meta");
+         auto meta_r = pdb->dwal_db->get_latest(0, meta_key);
          if (meta_r.found && meta_r.value.is_data() &&
              meta_r.value.data.size() >= sizeof(pdb->meta)) {
             std::memcpy(pdb->meta, meta_r.value.data.data(), sizeof(pdb->meta));
-            PTRACE("BtreeOpen: loaded metadata from root 0 (schema_version=%d)\n",
+            PTRACE("BtreeOpen: loaded metadata (schema_version=%d)\n",
                    pdb->meta[1]);
          } else {
             pdb->meta[BTREE_FILE_FORMAT] = 4;
@@ -335,13 +354,14 @@ int sqlite3BtreeOpen(
             PTRACE("BtreeOpen: no metadata found — using defaults\n");
          }
 
-         auto root_r = pdb->dwal_db->get_latest(0, "next_root");
+         auto tid_key = make_prefixed_key(0, "next_table_id");
+         auto root_r = pdb->dwal_db->get_latest(0, tid_key);
          if (root_r.found && root_r.value.is_data() &&
              root_r.value.data.size() >= 4) {
-            std::memcpy(&pdb->next_root, root_r.value.data.data(), 4);
-            PTRACE("BtreeOpen: loaded next_root=%d\n", pdb->next_root);
+            std::memcpy(&pdb->next_table_id, root_r.value.data.data(), 4);
+            PTRACE("BtreeOpen: loaded next_table_id=%d\n", pdb->next_table_id);
          } else {
-            PTRACE("BtreeOpen: no next_root found — starting at 2\n");
+            PTRACE("BtreeOpen: no next_table_id found — starting at 2\n");
          }
       } catch (const std::exception&) {
          delete pBt;
@@ -369,19 +389,19 @@ int sqlite3BtreeClose(Btree* p) {
       sqlite3BtreeCloseCursor(pBt->pCursor);
    }
 
-   // Commit any lingering DWAL transactions from autocommit mode
-   p->commit_all_tx();
+   // Commit any lingering DWAL transaction from autocommit mode
+   p->commit_tx();
 
    // Persist metadata and release global reference
    if (pBt->psitri && pBt->psitri->dwal_db) {
       try {
          auto tx = pBt->psitri->dwal_db->start_write_transaction(0);
-         tx.upsert("meta", std::string_view(
+         tx.upsert(make_prefixed_key(0, "meta"), std::string_view(
             reinterpret_cast<const char*>(pBt->psitri->meta),
             sizeof(pBt->psitri->meta)));
          std::string nr(4, '\0');
-         std::memcpy(nr.data(), &pBt->psitri->next_root, 4);
-         tx.upsert("next_root", nr);
+         std::memcpy(nr.data(), &pBt->psitri->next_table_id, 4);
+         tx.upsert(make_prefixed_key(0, "next_table_id"), nr);
          tx.commit();
       } catch (...) {}
 
@@ -488,10 +508,11 @@ int sqlite3BtreeTxnState(Btree* p) {
 }
 
 int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
-   PTRACE("BeginTrans: wrflag=%d inTrans=%d open_tx=%zu\n",
-          wrflag, (int)p->inTrans, p->open_tx.size());
+   PTRACE("BeginTrans: wrflag=%d inTrans=%d has_tx=%d\n",
+          wrflag, (int)p->inTrans, (int)p->active_tx.has_value());
    if (wrflag) {
       p->inTrans = TRANS_WRITE;
+      p->is_writer = true;
    } else if (p->inTrans == TRANS_NONE) {
       p->inTrans = TRANS_READ;
    }
@@ -504,19 +525,17 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
 }
 
 int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
-   PTRACE("CommitPhaseOne: open_tx=%zu inTrans=%d\n",
-          p ? p->open_tx.size() : 0, p ? (int)p->inTrans : -1);
+   PTRACE("CommitPhaseOne: has_tx=%d inTrans=%d\n",
+          p ? (int)p->active_tx.has_value() : 0, p ? (int)p->inTrans : -1);
    if (p && p->pBt && p->pBt->psitri) {
-      auto* psitri = p->pBt->psitri;
-
       try {
-         p->commit_all_tx();
+         p->commit_tx();
       } catch (const std::exception& e) {
-         PTRACE("CommitPhaseOne: commit_all_tx THREW: %s\n", e.what());
+         PTRACE("CommitPhaseOne: commit_tx THREW: %s\n", e.what());
          return SQLITE_ERROR;
       }
-      if (psitri->sync_mode >= sal::sync_type::fsync) {
-         psitri->dwal_db->flush_wal(psitri->sync_mode);
+      if (p->pBt->psitri->sync_mode >= sal::sync_type::fsync) {
+         p->pBt->psitri->dwal_db->flush_wal(p->pBt->psitri->sync_mode);
       }
    }
    return SQLITE_OK;
@@ -538,7 +557,7 @@ int sqlite3BtreeCommit(Btree* p) {
 
 int sqlite3BtreeRollback(Btree* p, int, int) {
    if (p && p->pBt && p->pBt->psitri) {
-      p->abort_all_tx();
+      p->abort_tx();
    }
    if (p) {
       p->inTrans = TRANS_NONE;
@@ -606,17 +625,17 @@ int sqlite3BtreeUpdateMeta(Btree* p, int idx, u32 value) {
 int sqlite3BtreeCreateTable(Btree* p, Pgno* piTable, int flags) {
    PTRACE("CreateTable: flags=%d\n", flags);
    auto* psitri = p->pBt->psitri;
-   *piTable = psitri->next_root++;
+   *piTable = psitri->next_table_id++;
 
+   // Persist table counter and flags in root 0 with prefix 0
    try {
-      auto tx = psitri->dwal_db->start_write_transaction(0);
+      auto& tx = p->get_tx();
       std::string nr(4, '\0');
-      std::memcpy(nr.data(), &psitri->next_root, 4);
-      tx.upsert("next_root", nr);
+      std::memcpy(nr.data(), &psitri->next_table_id, 4);
+      tx.upsert(make_prefixed_key(0, "next_table_id"), nr);
       std::string key = "tflags_" + std::to_string(*piTable);
       char f = (char)flags;
-      tx.upsert(key, std::string_view(&f, 1));
-      tx.commit();
+      tx.upsert(make_prefixed_key(0, key), std::string_view(&f, 1));
    } catch (...) {}
 
    return SQLITE_OK;
@@ -628,25 +647,13 @@ int sqlite3BtreeDropTable(Btree*, int, int* piMoved) {
 }
 
 int sqlite3BtreeClearTable(Btree* p, int iTable, i64* pnChange) {
-   auto* psitri = p->pBt->psitri;
    try {
-      auto cursor = psitri->dwal_db->create_cursor(
-         (uint32_t)iTable, psitri::dwal::read_mode::latest);
-      auto& mc = cursor.cursor();
-      mc.seek_begin();
-      std::vector<std::string> keys;
-      i64 count = 0;
-      while (!mc.is_end()) {
-         keys.push_back(std::string(mc.key()));
-         mc.next();
-         count++;
-      }
-      if (!keys.empty()) {
-         auto tx = psitri->dwal_db->start_write_transaction((uint32_t)iTable);
-         for (auto& k : keys) tx.remove(k);
-         tx.commit();
-      }
-      if (pnChange) *pnChange = count;
+      auto low  = make_prefix((uint32_t)iTable);
+      auto high = make_prefix((uint32_t)iTable + 1);
+      auto& tx = p->get_tx();
+      tx.remove_range(low, high);
+      // TODO: count deleted keys if pnChange needed
+      if (pnChange) *pnChange = 0;
    } catch (...) {
       if (pnChange) *pnChange = 0;
    }
@@ -789,26 +796,18 @@ int sqlite3BtreeCursorHasHint(BtCursor* pCur, unsigned mask) {
 static void ensure_cursor(BtCursor* pCur) {
    if (!pCur->cursor) {
       try {
-         bool used_tx_cursor = false;
-         if (pCur->pBtree) {
-            auto it = pCur->pBtree->open_tx.find(pCur->pgnoRoot);
-            if (it != pCur->pBtree->open_tx.end() && !it->second.is_committed()) {
-               pCur->cursor.emplace(it->second.create_cursor());
-               used_tx_cursor = true;
-            }
-         }
-         if (!used_tx_cursor) {
-            bool writer = (pCur->pBtree && pCur->pBtree->is_writer);
-            if (writer) {
-               pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-                  pCur->pgnoRoot, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
-            } else {
-               // Reader: buffered mode (RO + Tri).  Freshness bounded
-               // by max_flush_delay.  Use fresh mode at the application
-               // level for guaranteed-latest reads.
-               pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-                  pCur->pgnoRoot, psitri::dwal::read_mode::buffered));
-            }
+         // All tables share root 0.  Use the active write transaction's
+         // cursor if one exists (sees uncommitted writes), otherwise
+         // create a database-level cursor.
+         if (pCur->pBtree && pCur->pBtree->active_tx
+             && !pCur->pBtree->active_tx->is_committed()) {
+            pCur->cursor.emplace(pCur->pBtree->active_tx->create_cursor());
+         } else if (pCur->pBtree && pCur->pBtree->is_writer) {
+            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+               0, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
+         } else {
+            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+               0, psitri::dwal::read_mode::buffered));
          }
       } catch (...) {
          pCur->cursor.reset();
@@ -830,11 +829,10 @@ int sqlite3BtreeTableMoveto(BtCursor* pCur, i64 intKey, int bias, int* pRes) {
    }
    auto& mc = pCur->cursor->cursor();
 
-   auto key = encode_rowid(intKey);
-   mc.seek_begin();
+   auto key = make_prefixed_key(pCur->pgnoRoot, encode_rowid(intKey));
    mc.lower_bound(key);
 
-   if (mc.is_end()) {
+   if (mc.is_end() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       *pRes = -1;
       pCur->eState = CURSOR_INVALID;
       pCur->is_valid = false;
@@ -842,8 +840,8 @@ int sqlite3BtreeTableMoveto(BtCursor* pCur, i64 intKey, int bias, int* pRes) {
    }
 
    auto cur_key = mc.key();
-   if (cur_key.size() >= 8) {
-      i64 found = decode_rowid(cur_key.data());
+   if (cur_key.size() >= 4 + 8) {
+      i64 found = decode_rowid(cur_key.data() + 4);  // skip prefix
       if (found == intKey) {
          *pRes = 0;
       } else if (found > intKey) {
@@ -874,10 +872,11 @@ int sqlite3BtreeIndexMoveto(BtCursor* pCur, UnpackedRecord* pUnKey, int* pRes) {
    // Build a byte-comparable search key from the UnpackedRecord.
    // Index entries are stored with comparable keys (see sqlite3BtreeInsert),
    // so lower_bound works correctly with byte comparison.
-   auto comp_key = make_comparable_from_unpacked(pUnKey);
+   auto comp_key = make_prefixed_key(pCur->pgnoRoot,
+      make_comparable_from_unpacked(pUnKey));
    mc.lower_bound(std::string_view(comp_key.data(), comp_key.size()));
 
-   if (mc.is_end()) {
+   if (mc.is_end() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       *pRes = -1;
       pCur->eState = CURSOR_INVALID;
       pCur->is_valid = false;
@@ -915,9 +914,10 @@ int sqlite3BtreeFirst(BtCursor* pCur, int* pRes) {
       return SQLITE_OK;
    }
    auto& mc = pCur->cursor->cursor();
-   mc.seek_begin();
+   // Seek to first key with this table's prefix
+   mc.lower_bound(make_prefix(pCur->pgnoRoot));
 
-   if (mc.is_end()) {
+   if (mc.is_end() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       *pRes = 1;
       pCur->eState = CURSOR_INVALID;
       pCur->is_valid = false;
@@ -937,8 +937,8 @@ int sqlite3BtreeIsEmpty(BtCursor* pCur, int* pRes) {
       return SQLITE_OK;
    }
    auto& mc = pCur->cursor->cursor();
-   mc.seek_begin();
-   *pRes = mc.is_end() ? 1 : 0;
+   mc.lower_bound(make_prefix(pCur->pgnoRoot));
+   *pRes = (mc.is_end() || !has_prefix(mc.key(), pCur->pgnoRoot)) ? 1 : 0;
    return SQLITE_OK;
 }
 
@@ -951,9 +951,11 @@ int sqlite3BtreeLast(BtCursor* pCur, int* pRes) {
       return SQLITE_OK;
    }
    auto& mc = pCur->cursor->cursor();
-   mc.seek_last();
+   // Seek past this table's prefix range, then back up one
+   mc.lower_bound(make_prefix(pCur->pgnoRoot + 1));
+   mc.prev();
 
-   if (mc.is_rend()) {
+   if (mc.is_rend() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       *pRes = 1;
       pCur->eState = CURSOR_INVALID;
       pCur->is_valid = false;
@@ -968,7 +970,7 @@ int sqlite3BtreeNext(BtCursor* pCur, int) {
    if (!pCur->cursor || !pCur->is_valid) return SQLITE_DONE;
    auto& mc = pCur->cursor->cursor();
    mc.next();
-   if (mc.is_end()) {
+   if (mc.is_end() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       pCur->eState = CURSOR_INVALID;
       pCur->is_valid = false;
       return SQLITE_DONE;
@@ -985,7 +987,7 @@ int sqlite3BtreePrevious(BtCursor* pCur, int) {
    if (!pCur->cursor || !pCur->is_valid) return SQLITE_DONE;
    auto& mc = pCur->cursor->cursor();
    mc.prev();
-   if (mc.is_rend()) {
+   if (mc.is_rend() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       pCur->eState = CURSOR_INVALID;
       pCur->is_valid = false;
       return SQLITE_DONE;
@@ -1048,7 +1050,7 @@ int sqlite3BtreeInsert(
    std::string key, value;
 
    if (pCur->curIntKey) {
-      key = encode_rowid(pPayload->nKey);
+      key = make_prefixed_key(pCur->pgnoRoot, encode_rowid(pPayload->nKey));
       if (pPayload->pData && pPayload->nData > 0) {
          value.assign((const char*)pPayload->pData, pPayload->nData);
          if (pPayload->nZero > 0) {
@@ -1056,18 +1058,16 @@ int sqlite3BtreeInsert(
          }
       }
    } else {
-      // BLOBKEY (index): store a byte-comparable encoding as the DWAL key
-      // and the original packed record as the value, so that cache_cursor_value
-      // can return the packed record to SQLite for sqlite3BtreePayload().
       if (pPayload->pKey) {
-         key = make_comparable_from_packed(
-            (const char*)pPayload->pKey, (int)pPayload->nKey);
+         key = make_prefixed_key(pCur->pgnoRoot,
+            make_comparable_from_packed(
+               (const char*)pPayload->pKey, (int)pPayload->nKey));
          value.assign((const char*)pPayload->pKey, pPayload->nKey);
       }
    }
 
    try {
-      auto& tx = pCur->pBtree->get_tx(pCur->pgnoRoot);
+      auto& tx = pCur->pBtree->get_tx();
       tx.upsert(key, value);
    } catch (...) {
       return SQLITE_ERROR;
@@ -1080,12 +1080,9 @@ int sqlite3BtreeInsert(
    // (shared_ptr copies + tri cursor creation) is expensive.
    // The next seek (lower_bound, seek_begin) reinitializes the ART
    // iterator from the root, which is safe after structural changes.
-   for (auto* c = pCur->pBt->pCursor; c; c = c->pNext) {
-      if (c->pgnoRoot == pCur->pgnoRoot) {
-         c->is_valid = false;
-         c->eState = CURSOR_INVALID;
-      }
-   }
+   // Single ART map — any mutation invalidates all cursor positions
+   pCur->is_valid = false;
+   pCur->eState = CURSOR_INVALID;
 
    return SQLITE_OK;
 }
@@ -1095,10 +1092,10 @@ int sqlite3BtreeDelete(BtCursor* pCur, u8 flags) {
 
    auto* psitri = pCur->psitri_db;
    auto& mc = pCur->cursor->cursor();
-   auto key = std::string(mc.key());
+   auto key = std::string(mc.key());  // already prefixed (from the cursor)
 
    try {
-      auto& tx = pCur->pBtree->get_tx(pCur->pgnoRoot);
+      auto& tx = pCur->pBtree->get_tx();
       tx.remove(key);
    } catch (...) {
       return SQLITE_ERROR;
@@ -1141,17 +1138,15 @@ int sqlite3BtreeCount(sqlite3*, BtCursor* pCur, i64* pnEntry) {
 
 i64 sqlite3BtreeRowCountEst(BtCursor* pCur) {
    if (!pCur->psitri_db || !pCur->psitri_db->dwal_db) return 1000;
+   // With single-root prefix design, counting keys within a prefix
+   // requires a range scan.  Return an estimate for query planning.
    try {
-      if (pCur->pBtree) {
-         auto it = pCur->pBtree->open_tx.find(pCur->pgnoRoot);
-         if (it != pCur->pBtree->open_tx.end() && !it->second.is_committed()) {
-            auto cursor = it->second.create_cursor();
-            return (i64)cursor.cursor().count_keys();
-         }
-      }
-      auto cursor = pCur->psitri_db->dwal_db->create_cursor(
-         pCur->pgnoRoot, psitri::dwal::read_mode::latest);
-      return (i64)cursor.cursor().count_keys();
+      ensure_cursor(pCur);
+      if (!pCur->cursor) return 1000;
+      auto& mc = pCur->cursor->cursor();
+      auto low = make_prefix(pCur->pgnoRoot);
+      auto high = make_prefix(pCur->pgnoRoot + 1);
+      return (i64)mc.count_keys(low, high);
    } catch (...) {
       return 1000;
    }
