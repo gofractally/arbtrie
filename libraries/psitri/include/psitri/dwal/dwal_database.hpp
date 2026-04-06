@@ -142,7 +142,7 @@ namespace psitri::dwal
 
       std::shared_ptr<psitri::database>& underlying_db() noexcept { return _db; }
       const dwal_config&                 config() const noexcept { return _cfg; }
-      dwal_root&                         root(uint32_t index) { return *_roots[index]; }
+      dwal_root&                         root(uint32_t index) { return ensure_root(index); }
 
       /// Access the epoch registry (for session lock allocation).
       epoch_registry& epochs() noexcept { return _epochs; }
