@@ -10,7 +10,8 @@ hide:
 
 <div class="hero-tagline" markdown>
 A persistent, transactional key-value store with drop-in compatibility for RocksDB, MDBX, and SQLite.
-Up to 46x faster than SQLite. 2.3x faster than RocksDB at scale. Node-level COW eliminates page-level write amplification.
+A persistent, transactional key-value store with drop-in compatibility for RocksDB, MDBX, and SQLite.
+2.4x faster concurrent reads than SQLite. 2.3x faster than RocksDB at scale. Node-level COW eliminates page-level write amplification.
 </div>
 
 <div class="stat-row" markdown>
@@ -19,8 +20,8 @@ Up to 46x faster than SQLite. 2.3x faster than RocksDB at scale. Node-level COW 
 <span class="stat-label">ops/sec (bank benchmark)</span>
 </div>
 <div class="stat" markdown>
-<span class="stat-value">46x</span>
-<span class="stat-label">faster than SQLite (TATP)</span>
+<span class="stat-value">2.4x</span>
+<span class="stat-label">faster reads than SQLite</span>
 </div>
 <div class="stat" markdown>
 <span class="stat-value">2.3x</span>
@@ -90,7 +91,7 @@ Migrate existing libmdbx applications with a compatibility shim. 12x faster writ
 
 <div class="feature-card" markdown>
 ### SQLite Drop-in Replacement
-Replace SQLite's B-tree with PsiTri's DWAL -- same `sqlite3_*` API, up to 46x faster on TATP workloads. [Migration guide :material-arrow-right:](getting-started/sqlite-migration.md)
+Replace SQLite's B-tree with PsiTri's DWAL -- same `sqlite3_*` API, 2.4x faster concurrent reads, 8x faster autocommit. [Migration guide :material-arrow-right:](getting-started/sqlite-migration.md)
 </div>
 
 <div class="feature-card" markdown>
@@ -153,16 +154,19 @@ MDBX hit MAP_FULL after only 20M keys (10x space amplification from page-level C
 
 [Random upsert benchmark :material-arrow-right:](benchmarks/random-upsert.md){ .md-button }
 
-### SQLite TATP (Telecom Workload)
+### SQLite Bank Benchmark (Same API, Different Engine)
 
-PsiTri-SQLite replaces SQLite's btree.c with PsiTri's DWAL -- same `sqlite3_*` API:
+PsiTri-SQLite replaces SQLite's btree.c with PsiTri's DWAL -- same `sqlite3_*` API, same workload:
 
-| Configuration | PsiTri-SQLite | System SQLite | Speedup |
+| Metric | PsiTri-SQLite | System SQLite | Ratio |
 |---|---:|---:|---:|
-| sync=off | 970,000 TPS | 21,000 TPS | **46x** |
-| sync=full | 19,000 TPS | 5,000 TPS | **3.8x** |
+| Write-only | 449K ops/sec | 421K ops/sec | **1.07x** |
+| Write + concurrent reader | 342K ops/sec | 232K ops/sec | **1.47x** |
+| Reader throughput | 402K reads/sec | 165K reads/sec | **2.4x** |
+| Autocommit INSERT | 709K ops/sec | 86K ops/sec | **8.2x** |
 
-[SQLite migration guide :material-arrow-right:](getting-started/sqlite-migration.md){ .md-button }
+[SQLite benchmark :material-arrow-right:](benchmarks/sqlite-api.md){ .md-button }
+[Migration guide :material-arrow-right:](getting-started/sqlite-migration.md){ .md-button }
 
 ---
 
@@ -188,7 +192,7 @@ Relink against `psitrimdbx` -- same `mdbx_*` C API, **12x faster** writes. Three
 
 <div class="feature-card" markdown>
 ### Coming from SQLite?
-Relink against `psitri-sqlite` -- same `sqlite3_*` API, **up to 46x faster** on TATP. Your SQL, prepared statements, and application code work unchanged. PRAGMA synchronous maps to PsiTri sync levels.
+Relink against `psitri-sqlite` -- same `sqlite3_*` API, **2.4x faster concurrent reads**, **8x faster autocommit**. Your SQL, prepared statements, and application code work unchanged.
 
 [SQLite migration :material-arrow-right:](getting-started/sqlite-migration.md){ .md-button }
 </div>

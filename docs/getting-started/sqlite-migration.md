@@ -57,14 +57,14 @@ sqlite3Btree* interface (~50 functions)
   |
 btree_psitri.cpp  <-- replaces btree.c
   |
-PsiTri DWAL (adaptive write buffer + COW trie)
+PsiTri DWAL root 0 (all tables in one key space)
 ```
 
-Each SQLite table or index maps to a separate DWAL root:
-
-- **Root 0** -- metadata (schema version, encoding)
-- **Root 1** -- `sqlite_schema` (hardcoded by SQLite)
-- **Roots 2+** -- user tables and indexes
+All SQLite tables, indexes, and metadata share a single DWAL root
+(root 0) with 4-byte table ID key prefixes. This gives atomic
+cross-table snapshot consistency -- a single RW→RO swap freezes all
+tables simultaneously, and readers see a consistent view across all
+tables.
 
 ## PRAGMA Synchronous Mapping
 
@@ -132,39 +132,59 @@ Concurrent writes to the same table serialize at the DWAL level. Multiple connec
 
 ## Performance
 
-### TATP Benchmark (Telecom Workload)
+### Bank Transaction Benchmark
 
-The TATP benchmark models a telecom subscriber database with a realistic mix of reads and writes (80% reads, 20% writes). 10,000 subscribers, single-threaded:
+Each transfer performs **5 KV operations** (2 reads + 2 updates + 1 insert)
+in a single atomic transaction. 10,000 accounts, 100,000 transfers,
+per-transfer commit:
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563EB'}}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#7b1fa2,#1565c0'}}}}%%
 xychart-beta
-    title "TATP Throughput (transactions/sec)"
-    x-axis ["PsiTri sync=off", "System SQLite sync=off", "PsiTri sync=full", "System SQLite sync=full"]
-    y-axis "Transactions per second" 0 --> 1000000
-    bar [970000, 21000, 19000, 5000]
+    title "Bank Benchmark — Write + Concurrent Reader (KV ops/sec)"
+    x-axis ["PsiTri-SQLite", "System SQLite"]
+    y-axis "KV operations per second" 0 --> 400000
+    bar [342445, 232330]
 ```
 
-| Configuration | TPS | vs System SQLite |
-|---|---:|---:|
-| **PsiTri-SQLite sync=off** | **970,000** | **46x faster** |
-| System SQLite sync=off | 21,000 | baseline |
-| **PsiTri-SQLite sync=full** | **19,000** | **3.8x faster** |
-| System SQLite sync=full | 5,000 | baseline |
+| Metric | PsiTri-SQLite | System SQLite | Ratio |
+|---|---:|---:|---:|
+| Write-only | 449K ops/sec | 421K ops/sec | **1.07x** |
+| Write+Read | **342K ops/sec** | 232K ops/sec | **1.47x** |
+| Write impact | -24% | -45% | **2x better** |
+| Reader | **402K reads/sec** | 165K reads/sec | **2.4x** |
 
-The speedup comes from replacing SQLite's page-level B-tree with PsiTri's node-level COW trie and DWAL write buffer. With `sync=off`, PsiTri avoids the WAL journal overhead entirely. With `sync=full`, PsiTri's fsync is applied to DWAL files rather than SQLite's journal, reducing the number of fsyncs per transaction.
+PsiTri-SQLite delivers 1.47x more write throughput under concurrent
+reads because the DWAL's buffered read mode gives readers a consistent
+snapshot without blocking the writer.
+
+### INSERT Micro-Benchmark
+
+Pure INSERT throughput (100K inserts, `PRAGMA synchronous=OFF`):
+
+| Mode | PsiTri-SQLite | System SQLite | Ratio |
+|---|---:|---:|---:|
+| INTKEY autocommit | **709K/sec** | 86K/sec | **8.2x** |
+| TEXT PK autocommit | **574K/sec** | 80K/sec | **7.2x** |
+
+PsiTri-SQLite dominates per-transaction writes because the DWAL's ART
+buffer makes each commit ~100ns vs SQLite's ~12us WAL write overhead.
 
 ### When to Use PsiTri-SQLite vs Native PsiTri
 
-PsiTri-SQLite is ideal when you want **SQL compatibility** and a **familiar API** with better performance. For maximum throughput, the native PsiTri API avoids the SQL parsing and VDBE overhead entirely:
+PsiTri-SQLite is ideal when you want **SQL compatibility** with better
+performance. For maximum throughput, the native PsiTri API bypasses
+the SQL parser and VDBE entirely:
 
 | API | Writes/sec | Use Case |
 |-----|-----------|----------|
-| Native PsiTri | 1.9M ops/sec | New applications, maximum performance |
-| PsiTri-SQLite | 970K TPS | Existing SQLite apps, SQL compatibility |
-| System SQLite | 21K TPS | Baseline |
+| Native PsiTri (DWAL) | 1M+ ops/sec | New applications, maximum performance |
+| PsiTri-SQLite | 449K ops/sec | Existing SQLite apps, SQL compatibility |
+| System SQLite | 421K ops/sec | Baseline |
 
-See the [API Reference](api.md) for the native C++ interface and [Examples](../examples.md) for runnable code.
+See the [API Reference](api.md) for the native C++ interface, the
+[SQLite benchmark](../benchmarks/sqlite-api.md) for detailed results,
+and [Examples](../examples.md) for runnable code.
 
 ## Building
 
