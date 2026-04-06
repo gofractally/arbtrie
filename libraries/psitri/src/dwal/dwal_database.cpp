@@ -507,6 +507,14 @@ namespace psitri::dwal
          return true;
       if (root.wal && root.wal->file_size() >= _cfg.max_wal_bytes)
          return true;
+      // Time-based flush: swap if max_flush_delay has elapsed and
+      // the RW layer has data worth swapping.
+      if (_cfg.max_flush_delay.count() > 0 && !root.rw_layer->empty())
+      {
+         auto elapsed = std::chrono::steady_clock::now() - root.last_swap_time;
+         if (elapsed >= _cfg.max_flush_delay)
+            return true;
+      }
       return false;
    }
 
@@ -539,6 +547,8 @@ namespace psitri::dwal
          }
          root.rw_layer = std::make_shared<btree_layer>();
       }
+
+      root.last_swap_time = std::chrono::steady_clock::now();
 
       // Capture the current PsiTri root as the base for this RO btree.
       uint32_t base = root.tri_root.load(std::memory_order_acquire);

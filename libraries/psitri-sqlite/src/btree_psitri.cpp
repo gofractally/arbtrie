@@ -317,7 +317,7 @@ int sqlite3BtreeOpen(
             path + "/data", psitri::open_mode::create_or_open);
          psitri::dwal::dwal_config cfg;
          cfg.max_rw_entries = 200000;
-         cfg.enable_rw_locking = true;  // allow reader threads to use latest mode
+         cfg.max_flush_delay = std::chrono::milliseconds(1);  // bound reader staleness to 1ms  // allow reader threads to use latest mode
          pdb->dwal_db = std::make_shared<psitri::dwal::dwal_database>(
             pdb->psi_db, path + "/wal", cfg);
 
@@ -797,8 +797,14 @@ static void ensure_cursor(BtCursor* pCur) {
             }
          }
          if (!used_tx_cursor) {
+            // Writer: latest mode, skip rw_lock (single-threaded, no contention)
+            // Reader: buffered mode (RO + Tri only, zero writer contention).
+            //         Data freshness bounded by max_flush_delay config.
+            bool writer = (pCur->pBtree && pCur->pBtree->is_writer);
+            auto mode = writer ? psitri::dwal::read_mode::latest
+                               : psitri::dwal::read_mode::buffered;
             pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-               pCur->pgnoRoot, psitri::dwal::read_mode::latest));
+               pCur->pgnoRoot, mode, /*skip_rw_lock=*/writer));
          }
       } catch (...) {
          pCur->cursor.reset();

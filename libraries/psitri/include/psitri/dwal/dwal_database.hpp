@@ -40,6 +40,13 @@ namespace psitri::dwal
       /// only safe from the writer thread.
       bool enable_rw_locking = false;
 
+      /// Maximum time between RW→RO swaps, regardless of buffer size.
+      /// When non-zero, the writer checks elapsed time since last swap
+      /// on each commit and forces a swap if the interval has elapsed.
+      /// This bounds reader staleness for buffered-mode readers.
+      /// Zero (default) disables time-based flushing.
+      std::chrono::milliseconds max_flush_delay{0};
+
       /// Number of merge threads in the pool.
       uint32_t merge_threads = 2;
 

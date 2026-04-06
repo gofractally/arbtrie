@@ -106,6 +106,9 @@ namespace psitri::dwal
       /// Used by the adjustment algorithm to decide if sleep should increase.
       std::atomic<uint32_t> arena_at_merge_complete{0};
 
+      /// Time of the last RW→RO swap.  Used for time-based flush.
+      std::chrono::steady_clock::time_point last_swap_time{std::chrono::steady_clock::now()};
+
       dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
    };
 
