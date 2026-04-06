@@ -399,7 +399,10 @@ namespace psitri::dwal
    {
       assert(index < max_roots);
       if (!_roots[index])
+      {
          _roots[index] = std::make_unique<dwal_root>();
+         _roots[index]->enable_rw_locking = _cfg.enable_rw_locking;
+      }
       return *_roots[index];
    }
 

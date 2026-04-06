@@ -316,6 +316,7 @@ int sqlite3BtreeOpen(
             path + "/data", psitri::open_mode::create_or_open);
          psitri::dwal::dwal_config cfg;
          cfg.max_rw_entries = 200000;
+         cfg.enable_rw_locking = true;  // allow reader threads to use latest mode
          pdb->dwal_db = std::make_shared<psitri::dwal::dwal_database>(
             pdb->psi_db, path + "/wal", cfg);
 
@@ -506,27 +507,14 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
    if (p && p->pBt && p->pBt->psitri) {
       auto* psitri = p->pBt->psitri;
 
-      // In autocommit mode (no explicit BEGIN), keep DWAL transactions
-      // open across statements.  The DWAL's own swap threshold handles
-      // batching, and the WAL provides crash recovery.  This avoids
-      // creating+committing a DWAL transaction per SQL statement.
-      //
-      // Only commit when:
-      // - Explicit transaction (inTrans was set by user BEGIN, not autocommit)
-      // - Sync mode requires durability guarantee
-      bool explicit_tx = (p->inTrans == TRANS_WRITE);
-      bool needs_sync = (psitri->sync_mode >= sal::sync_type::fsync);
-
-      if (explicit_tx || needs_sync || !p->is_writer) {
-         try {
-            p->commit_all_tx();
-         } catch (const std::exception& e) {
-            PTRACE("CommitPhaseOne: commit_all_tx THREW: %s\n", e.what());
-            return SQLITE_ERROR;
-         }
-         if (needs_sync) {
-            psitri->dwal_db->flush_wal(psitri->sync_mode);
-         }
+      try {
+         p->commit_all_tx();
+      } catch (const std::exception& e) {
+         PTRACE("CommitPhaseOne: commit_all_tx THREW: %s\n", e.what());
+         return SQLITE_ERROR;
+      }
+      if (psitri->sync_mode >= sal::sync_type::fsync) {
+         psitri->dwal_db->flush_wal(psitri->sync_mode);
       }
    }
    return SQLITE_OK;
@@ -805,24 +793,21 @@ static void ensure_cursor(BtCursor* pCur) {
          // transaction's cursor to see uncommitted writes.  Read-only
          // cursors (including those from reader connections) use the
          // database-level cursor which sees all committed data.
-         if (pCur->wrFlag && pCur->pBtree) {
+         // Check if this connection has an open write transaction on this
+         // root.  If so, use the transaction's cursor (sees uncommitted
+         // writes, avoids rw_mutex deadlock since tx holds exclusive lock).
+         bool used_tx_cursor = false;
+         if (pCur->pBtree) {
             auto it = pCur->pBtree->open_tx.find(pCur->pgnoRoot);
             if (it != pCur->pBtree->open_tx.end() && !it->second.is_committed()) {
                pCur->cursor.emplace(it->second.create_cursor());
-            } else {
-               pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-                  pCur->pgnoRoot, psitri::dwal::read_mode::latest));
+               used_tx_cursor = true;
             }
-         } else {
-            // Writer connection uses latest mode (sees RW layer -- safe
-            // because writer is single-threaded, no concurrent ART mutation).
-            // Reader connections use buffered mode (RO + Tri only -- safe
-            // from concurrent ART arena realloc by the writer thread).
-            auto mode = (pCur->pBtree && pCur->pBtree->is_writer)
-               ? psitri::dwal::read_mode::latest
-               : psitri::dwal::read_mode::buffered;
+         }
+         if (!used_tx_cursor) {
+            // No active transaction: safe to acquire shared rw_mutex
             pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-               pCur->pgnoRoot, mode));
+               pCur->pgnoRoot, psitri::dwal::read_mode::latest));
          }
          pCur->cursor->cursor().seek_begin();
       } catch (const std::exception& e) {

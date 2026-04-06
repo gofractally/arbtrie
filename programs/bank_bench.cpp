@@ -1773,6 +1773,7 @@ int main(int argc, char** argv)
       bench::latency_histogram commit_histo;
       std::atomic<bool>  stop_reader{false};
       std::atomic<uint64_t> reader_count{0};
+      std::atomic<uint64_t> reader_found{0};
       Clock::time_point  reader_start, reader_end;
 
       // Launch reader thread if requested
@@ -1786,6 +1787,7 @@ int main(int argc, char** argv)
                 std::mt19937_64 read_rng(seed + 999);  // different seed from writer
                 reader_start = Clock::now();
                 uint64_t local_count = 0;
+                uint64_t local_found = 0;
                 while (!stop_reader.load(std::memory_order_relaxed) && !bench::interrupted())
                 {
                    // Each "read transaction" does N point lookups under one snapshot
@@ -1794,12 +1796,14 @@ int main(int argc, char** argv)
                    {
                       uint64_t idx = pick_account(read_rng, cfg.num_accounts);
                       uint64_t bal;
-                      engine->read_account(accounts[idx], bal);
+                      if (engine->read_account(accounts[idx], bal))
+                         ++local_found;
                       ++local_count;
                    }
                    engine->reader_batch_end();
                 }
                 reader_count.store(local_count, std::memory_order_relaxed);
+                reader_found.store(local_found, std::memory_order_relaxed);
                 reader_end = Clock::now();
                 engine->reader_thread_teardown();
              });
@@ -1867,9 +1871,12 @@ int main(int argc, char** argv)
       if (with_reader)
       {
          uint64_t rc = reader_count.load();
-         printf("  Reader: %s reads in %.3fs (%s reads/sec)\n",
+         uint64_t rf = reader_found.load();
+         printf("  Reader: %s reads in %.3fs (%s reads/sec, %s found = %.1f%%)\n",
                 format_comma(rc).c_str(), reader_secs,
-                reader_secs > 0 ? format_comma((uint64_t)(rc / reader_secs)).c_str() : "N/A");
+                reader_secs > 0 ? format_comma((uint64_t)(rc / reader_secs)).c_str() : "N/A",
+                format_comma(rf).c_str(),
+                rc > 0 ? 100.0 * rf / rc : 0.0);
       }
       engine->report_size(cfg.db_path).print();
       commit_histo.print("commit");

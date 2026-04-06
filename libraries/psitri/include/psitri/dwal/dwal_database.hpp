@@ -34,6 +34,12 @@ namespace psitri::dwal
       /// Zero disables time-based flushing.
       std::chrono::milliseconds idle_flush_interval{1000};
 
+      /// Enable shared_mutex locking on the RW layer so that reader threads
+      /// can safely use read_mode::latest to see uncommitted writes.  When
+      /// false (default), the RW layer is writer-private and latest mode is
+      /// only safe from the writer thread.
+      bool enable_rw_locking = false;
+
       /// Number of merge threads in the pool.
       uint32_t merge_threads = 2;
 
