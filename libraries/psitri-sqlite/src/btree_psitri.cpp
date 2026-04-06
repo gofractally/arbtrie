@@ -58,6 +58,13 @@ struct PsitriDb {
    int ref_count = 0;
    std::atomic<u32> data_version{1};
    sal::sync_type sync_mode = sal::sync_type::none;
+
+   /// Global database-level read/write mutex.
+   /// Writer acquires exclusive in BeginTrans(wrflag=1).
+   /// Readers acquire shared in BeginTrans(wrflag=0).
+   /// Released in CommitPhaseTwo / Rollback.
+   /// Single mutex eliminates deadlock — matches SQLite's model.
+   std::shared_mutex db_mutex;
 };
 
 static std::mutex g_db_mutex;
@@ -95,10 +102,28 @@ struct Btree {
 #endif
 
    // True if this connection has ever done a write transaction.
-   // Used to distinguish the writer connection (safe to use read_mode::latest
-   // which accesses the live RW ART map) from reader connections (must use
-   // read_mode::buffered to avoid heap-use-after-free from ART arena realloc).
    bool         is_writer = false;
+
+   // Database-level lock held for the current transaction.
+   // Writer: exclusive.  Reader: shared.  Released in CommitPhaseTwo.
+   std::optional<std::unique_lock<std::shared_mutex>> write_lock;
+   std::optional<std::shared_lock<std::shared_mutex>> read_lock;
+
+   void acquire_db_write_lock() {
+      if (!write_lock && pBt && pBt->psitri)
+         write_lock.emplace(pBt->psitri->db_mutex);
+   }
+
+   void acquire_db_read_lock() {
+      // Skip if already holding write lock (stronger) or read lock
+      if (!read_lock && !write_lock && !is_writer && pBt && pBt->psitri)
+         read_lock.emplace(pBt->psitri->db_mutex);
+   }
+
+   void release_db_locks() {
+      write_lock.reset();
+      read_lock.reset();
+   }
 
    // Per-connection DWAL transactions for the current SQLite write
    // transaction.  Lazily created per root on first Insert/Delete,
@@ -316,7 +341,6 @@ int sqlite3BtreeOpen(
             path + "/data", psitri::open_mode::create_or_open);
          psitri::dwal::dwal_config cfg;
          cfg.max_rw_entries = 200000;
-         cfg.enable_rw_locking = true;  // allow reader threads to use latest mode
          pdb->dwal_db = std::make_shared<psitri::dwal::dwal_database>(
             pdb->psi_db, path + "/wal", cfg);
 
@@ -488,9 +512,11 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
    PTRACE("BeginTrans: wrflag=%d inTrans=%d open_tx=%zu\n",
           wrflag, (int)p->inTrans, p->open_tx.size());
    if (wrflag) {
+      p->acquire_db_write_lock();
       p->inTrans = TRANS_WRITE;
       p->is_writer = true;
    } else if (p->inTrans == TRANS_NONE) {
+      p->acquire_db_read_lock();
       p->inTrans = TRANS_READ;
    }
    p->pBt->inTransaction = p->inTrans;
@@ -523,6 +549,7 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
 int sqlite3BtreeCommitPhaseTwo(Btree* p, int) {
    PTRACE("CommitPhaseTwo: inTrans=%d\n", p ? (int)p->inTrans : -1);
    if (p) {
+      p->release_db_locks();
       p->inTrans = TRANS_NONE;
       p->pBt->inTransaction = TRANS_NONE;
    }
@@ -539,6 +566,7 @@ int sqlite3BtreeRollback(Btree* p, int, int) {
       p->abort_all_tx();
    }
    if (p) {
+      p->release_db_locks();
       p->inTrans = TRANS_NONE;
       p->pBt->inTransaction = TRANS_NONE;
    }
@@ -805,9 +833,10 @@ static void ensure_cursor(BtCursor* pCur) {
             }
          }
          if (!used_tx_cursor) {
-            // No active transaction: safe to acquire shared rw_mutex
+            // skip_rw_lock=true: coordination is via the global db_mutex
+            // on PsitriDb, not the per-root rw_mutex.
             pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-               pCur->pgnoRoot, psitri::dwal::read_mode::latest));
+               pCur->pgnoRoot, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
          }
          pCur->cursor->cursor().seek_begin();
       } catch (const std::exception& e) {
@@ -1079,15 +1108,14 @@ int sqlite3BtreeInsert(
 
    psitri->data_version.fetch_add(1);
 
-   // ART mutations (node splits, rebalancing) invalidate all iterators
-   // on the same root.  Reset every cursor pointing to this root.
-   for (auto* c = pCur->pBt->pCursor; c; c = c->pNext) {
-      if (c->pgnoRoot == pCur->pgnoRoot) {
-         c->cursor.reset();
-         c->is_valid = false;
-         c->eState = CURSOR_INVALID;
-      }
-   }
+   // Invalidate only this cursor's position.  Other cursors on the same
+   // root are safe: reader cursors hold a shared_lock on rw_mutex (the
+   // writer can't run while they're iterating), and writer cursors from
+   // the same connection's open_tx use the transaction's cursor which
+   // is rebuilt on next ensure_cursor call.
+   pCur->cursor.reset();
+   pCur->is_valid = false;
+   pCur->eState = CURSOR_INVALID;
 
    return SQLITE_OK;
 }
