@@ -171,6 +171,34 @@ int main() {
    sqlite3_finalize(get3);
    sqlite3_exec(db2, "COMMIT", 0, 0, 0);
 
+   // Test 2c: multiple autocommit inserts then read back
+   std::printf("  Test 2c: autocommit insert x3 then read...\n");
+   for (int i = 0; i < 3; i++) {
+      sqlite3_stmt* ins = nullptr;
+      sqlite3_prepare_v2(db2, "INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", -1, &ins, 0);
+      std::string name = "user" + std::to_string(i);
+      uint64_t b = 1000 + i;
+      sqlite3_bind_text(ins, 1, name.c_str(), -1, SQLITE_STATIC);
+      sqlite3_bind_blob(ins, 2, &b, sizeof(b), SQLITE_STATIC);
+      rc = sqlite3_step(ins);
+      std::printf("    INSERT %s: rc=%d\n", name.c_str(), rc);
+      sqlite3_finalize(ins);
+   }
+   sqlite3_stmt* rd = nullptr;
+   sqlite3_prepare_v2(db2, "SELECT v FROM kv WHERE k='user1'", -1, &rd, 0);
+   rc = sqlite3_step(rd);
+   if (rc == SQLITE_ROW) {
+      uint64_t rb3 = 0;
+      std::memcpy(&rb3, sqlite3_column_blob(rd, 0), sizeof(rb3));
+      std::printf("    READ user1 = %lu (expected 1001)\n", (unsigned long)rb3);
+   } else {
+      std::fprintf(stderr, "    FAIL: read user1 rc=%d errmsg=%s\n", rc, sqlite3_errmsg(db2));
+      sqlite3_finalize(rd);
+      sqlite3_close(db2);
+      return 1;
+   }
+   sqlite3_finalize(rd);
+
    sqlite3_close(db2);
 
    fs::remove_all(tmp);

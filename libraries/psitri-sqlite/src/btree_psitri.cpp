@@ -442,7 +442,8 @@ int sqlite3BtreeTxnState(Btree* p) {
 }
 
 int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
-   PTRACE("BeginTrans: wrflag=%d\n", wrflag);
+   PTRACE("BeginTrans: wrflag=%d inTrans=%d open_tx=%zu\n",
+          wrflag, (int)p->inTrans, p->pBt->psitri->open_tx.size());
    if (wrflag) {
       p->inTrans = TRANS_WRITE;
    } else if (p->inTrans == TRANS_NONE) {
@@ -457,10 +458,16 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
 }
 
 int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
+   PTRACE("CommitPhaseOne: open_tx=%zu\n",
+          (p && p->pBt && p->pBt->psitri) ? p->pBt->psitri->open_tx.size() : 0);
    if (p && p->pBt && p->pBt->psitri) {
       auto* psitri = p->pBt->psitri;
-      // Commit all open DWAL transactions for this SQLite transaction
-      psitri->commit_all_tx();
+      try {
+         psitri->commit_all_tx();
+      } catch (const std::exception& e) {
+         PTRACE("CommitPhaseOne: commit_all_tx THREW: %s\n", e.what());
+         return SQLITE_ERROR;
+      }
       // Sync WAL if sync mode requires it
       if (psitri->sync_mode >= sal::sync_type::fsync) {
          psitri->dwal_db->flush_wal(psitri->sync_mode);
@@ -470,6 +477,7 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
 }
 
 int sqlite3BtreeCommitPhaseTwo(Btree* p, int) {
+   PTRACE("CommitPhaseTwo: inTrans=%d\n", p ? (int)p->inTrans : -1);
    if (p) {
       p->inTrans = TRANS_NONE;
       p->pBt->inTransaction = TRANS_NONE;
