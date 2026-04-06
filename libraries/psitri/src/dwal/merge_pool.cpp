@@ -42,11 +42,15 @@ namespace psitri::dwal
       _queue_cv.notify_one();
    }
 
+   void merge_pool::request_stop()
+   {
+      _shutdown.store(true, std::memory_order_relaxed);
+      _queue_cv.notify_all();
+   }
+
    void merge_pool::shutdown()
    {
-      if (_shutdown.exchange(true))
-         return;
-
+      _shutdown.store(true, std::memory_order_relaxed);
       _queue_cv.notify_all();
       for (auto& t : _threads)
       {
@@ -124,8 +128,18 @@ namespace psitri::dwal
       double   sum_top_us    = 0;  // sum of entries >= 1ms
       uint64_t count_top     = 0;
 
+      bool aborted = false;
       for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
       {
+         if (_shutdown.load(std::memory_order_relaxed)) [[unlikely]]
+         {
+            tx.abort();
+            aborted = true;
+            fprintf(stderr, "[MERGE] shutdown requested — aborting after %llu entries\n",
+                    (unsigned long long)entry_count);
+            break;
+         }
+
          auto entry_start = std::chrono::steady_clock::now();
 
          auto  key = it.key();
@@ -155,6 +169,12 @@ namespace psitri::dwal
          else                ++bucket_ge10ms;
          if (us > max_entry_us) max_entry_us = us;
          if (us >= 1000) { sum_top_us += us; ++count_top; }
+      }
+      if (aborted)
+      {
+         root.merge_complete.store(true, std::memory_order_release);
+         root.merge_complete.notify_all();
+         return;
       }
 
       // Apply range tombstones.

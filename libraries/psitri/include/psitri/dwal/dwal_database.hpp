@@ -153,6 +153,10 @@ namespace psitri::dwal
       /// Check if the RW tree has exceeded the backpressure threshold.
       bool should_backpressure(uint32_t root_index) const;
 
+      /// Request graceful shutdown.  Wakes any writer blocked on merge
+      /// backpressure and signals the merge pool to abort in-flight merges.
+      void request_shutdown();
+
       /// Lazily initialize a root's DWAL state (public for transaction).
       dwal_root& ensure_root_public(uint32_t index) { return ensure_root(index); }
 

@@ -732,4 +732,24 @@ namespace psitri::dwal
       return {false, {}};
    }
 
+   void dwal_database::request_shutdown()
+   {
+      // Signal the merge pool to abort in-flight merges (non-blocking —
+      // only sets the shutdown flag and notifies the queue CV).
+      if (_merge_pool)
+      {
+         _merge_pool->request_stop();
+      }
+
+      // Wake any writer blocked on merge backpressure.
+      for (uint32_t i = 0; i < max_roots; ++i)
+      {
+         if (_roots[i])
+         {
+            _roots[i]->merge_complete.store(true, std::memory_order_release);
+            _roots[i]->merge_complete.notify_all();
+         }
+      }
+   }
+
 }  // namespace psitri::dwal

@@ -51,6 +51,11 @@ namespace psitri::dwal
       /// Shut down the pool — waits for all in-flight merges to complete.
       void shutdown();
 
+      /// Signal stop without blocking — safe to call from a signal handler.
+      /// Sets the shutdown flag and notifies the queue CV so workers will
+      /// check _shutdown on their next iteration.
+      void request_stop();
+
       /// Reclaim old RO pools. With shared_ptr this is automatic.
       void try_reclaim();
 

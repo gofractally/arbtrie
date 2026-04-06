@@ -15,6 +15,10 @@
 #include <hash/xxhash.h>
 #include <psitri/database.hpp>
 #include <psitri/dwal/dwal_database.hpp>
+
+// Global pointer for signal handler to trigger graceful DWAL shutdown.
+// Set when a DWAL benchmark phase is active; cleared on exit.
+static std::atomic<psitri::dwal::dwal_database*> g_active_dwal{nullptr};
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/read_session_impl.hpp>
 #include <psitri/write_session_impl.hpp>
@@ -422,6 +426,7 @@ static void write_only_bench(const bench_config& cfg,
       dcfg.merge_threads  = cfg.merge_threads;
       dcfg.max_rw_entries = cfg.max_rw_entries;
       dwal_db = std::make_unique<dwal::dwal_database>(db, db_dir / "wal", dcfg);
+      g_active_dwal.store(dwal_db.get(), std::memory_order_relaxed);
    }
 
    std::vector<char> key;
@@ -499,6 +504,8 @@ static void write_only_bench(const bench_config& cfg,
       check_safety_limits(db_dir, db_bytes, stats.total_free_bytes, initial_alloc + seq, cfg.value_size);
    }
 
+   if (dwal_db)
+      dwal_db->request_shutdown();
    watchdog_stop.store(true, std::memory_order_relaxed);
    watchdog_thread.join();
 
@@ -508,6 +515,7 @@ static void write_only_bench(const bench_config& cfg,
              << "total: " << format_comma(seq) << " upserts in " << std::fixed
              << std::setprecision(3) << overall_secs << " sec  ("
              << format_comma(uint64_t(seq / overall_secs)) << " upserts/sec)\n";
+   g_active_dwal.store(nullptr, std::memory_order_relaxed);
    print_db_stats("close", db, ws);
 }
 
@@ -562,6 +570,7 @@ static void rw_bench(const bench_config& cfg,
       dcfg.merge_threads  = cfg.merge_threads;
       dcfg.max_rw_entries = cfg.max_rw_entries;
       dwal_db = std::make_unique<dwal::dwal_database>(db, db_dir / "wal", dcfg);
+      g_active_dwal.store(dwal_db.get(), std::memory_order_relaxed);
    }
 
    // Seed initial data so readers have something to hit.
@@ -819,6 +828,7 @@ static void rw_bench(const bench_config& cfg,
 
          // Destroy DWAL, write session, database (order matters)
          auto reopen_start = std::chrono::steady_clock::now();
+         g_active_dwal.store(nullptr, std::memory_order_relaxed);
          dwal_db.reset();
          print_db_stats("close (reopen)", db, ws);
          ws.reset();
@@ -835,6 +845,7 @@ static void rw_bench(const bench_config& cfg,
             dcfg.merge_threads  = cfg.merge_threads;
             dcfg.max_rw_entries = cfg.max_rw_entries;
             dwal_db = std::make_unique<dwal::dwal_database>(db, db_dir / "wal", dcfg);
+            g_active_dwal.store(dwal_db.get(), std::memory_order_relaxed);
          }
 
          auto reopen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -929,6 +940,8 @@ static void rw_bench(const bench_config& cfg,
    }
 
    done.store(true, std::memory_order_relaxed);
+   if (dwal_db)
+      dwal_db->request_shutdown();
    watchdog_stop.store(true, std::memory_order_relaxed);
    watchdog_thread.join();
    for (auto& t : readers)
@@ -950,6 +963,7 @@ static void rw_bench(const bench_config& cfg,
              << (total_ops > 0 ? 100.0 * total_found / total_ops : 0.0) << "%)\n";
    if (cfg.validate)
       std::cout << "  validation errors: " << sum_val_errors() << "\n";
+   g_active_dwal.store(nullptr, std::memory_order_relaxed);
    print_db_stats("close", db, ws);
 }
 
@@ -1020,7 +1034,22 @@ int main(int argc, char** argv)
    sa.sa_flags     = SA_SIGINFO;
    sigaction(SIGBUS, &sa, nullptr);
    sigaction(SIGSEGV, &sa, nullptr);
-   bench::install_interrupt_handler();
+   // Custom signal handler: sets interrupted flag AND wakes any blocked
+   // merge backpressure wait so the writer can exit promptly.
+   {
+      struct sigaction isa{};
+      isa.sa_handler = [](int sig)
+      {
+         bench::signal_handler(sig);
+         auto* dwal = g_active_dwal.load(std::memory_order_relaxed);
+         if (dwal)
+            dwal->request_shutdown();
+      };
+      isa.sa_flags = 0;
+      sigemptyset(&isa.sa_mask);
+      sigaction(SIGINT, &isa, nullptr);
+      sigaction(SIGTERM, &isa, nullptr);
+   }
 
    sal::set_current_thread_name("main");
    reshuffle_random_buf();
