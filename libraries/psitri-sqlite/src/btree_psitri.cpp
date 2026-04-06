@@ -236,13 +236,11 @@ static std::string pack_index_key(UnpackedRecord* pRec) {
 static std::string make_comparable_from_packed(const char* data, int len) {
    int sz = psitri_make_comparable_key(
       (const unsigned char*)data, len, nullptr, 0);
-   std::fprintf(stderr, "[psitri-btree] make_comparable: input_len=%d sz=%d\n", len, sz);
    if (sz <= 0) return {};
    std::string result(sz, '\0');
    int written = psitri_make_comparable_key(
       (const unsigned char*)data, len,
       (unsigned char*)result.data(), sz);
-   std::fprintf(stderr, "[psitri-btree] make_comparable: written=%d\n", written);
    if (written > 0) result.resize(written);
    return result;
 }
@@ -784,18 +782,10 @@ static void ensure_cursor(BtCursor* pCur) {
          if (it != pCur->psitri_db->open_tx.end()) {
             pCur->cursor.emplace(it->second.create_cursor());
          } else {
-            // No open transaction -- use database-level cursor with latest
-            // mode so we see all committed data including recent writes
-            // that haven't been merged to the RO layer yet.
             pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
                pCur->pgnoRoot, psitri::dwal::read_mode::latest));
          }
-         PTRACE("  ensure_cursor: created, counting keys\n");
-         auto key_count = pCur->cursor->cursor().count_keys();
-         PTRACE("  ensure_cursor: count=%zu, calling seek_begin\n", key_count);
          pCur->cursor->cursor().seek_begin();
-         PTRACE("  ensure_cursor: done, is_end=%d\n",
-                (int)pCur->cursor->cursor().is_end());
       } catch (const std::exception& e) {
          PTRACE("  ensure_cursor: exception: %s\n", e.what());
          pCur->cursor.reset();
@@ -865,20 +855,6 @@ int sqlite3BtreeIndexMoveto(BtCursor* pCur, UnpackedRecord* pUnKey, int* pRes) {
    // Index entries are stored with comparable keys (see sqlite3BtreeInsert),
    // so lower_bound works correctly with byte comparison.
    auto comp_key = make_comparable_from_unpacked(pUnKey);
-
-   mc.seek_begin();
-   PTRACE("IndexMoveto: comp_key size=%zu hex:", comp_key.size());
-   for (size_t xi = 0; xi < comp_key.size() && xi < 30; xi++)
-      std::fprintf(stderr, " %02x", (unsigned char)comp_key[xi]);
-   std::fprintf(stderr, "\n");
-   // Also dump the first entry in the cursor
-   if (!mc.is_end()) {
-      auto fk = mc.key();
-      PTRACE("IndexMoveto: first_entry size=%zu hex:", fk.size());
-      for (size_t xi = 0; xi < fk.size() && xi < 30; xi++)
-         std::fprintf(stderr, " %02x", (unsigned char)fk[xi]);
-      std::fprintf(stderr, "\n");
-   }
    mc.lower_bound(std::string_view(comp_key.data(), comp_key.size()));
 
    if (mc.is_end()) {
@@ -1067,11 +1043,6 @@ int sqlite3BtreeInsert(
          key = make_comparable_from_packed(
             (const char*)pPayload->pKey, (int)pPayload->nKey);
          value.assign((const char*)pPayload->pKey, pPayload->nKey);
-         PTRACE("Insert BLOBKEY: packed_key_size=%d comp_key_size=%zu comp_hex:",
-                (int)pPayload->nKey, key.size());
-         for (size_t xi = 0; xi < key.size() && xi < 30; xi++)
-            std::fprintf(stderr, " %02x", (unsigned char)key[xi]);
-         std::fprintf(stderr, "\n");
       }
    }
 

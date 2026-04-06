@@ -1301,19 +1301,9 @@ class SqliteEngine : public BankEngine
    }
 
    void begin_batch() override {
-      if (sqlite3_exec(_db, "BEGIN", 0, 0, 0) != SQLITE_OK) {
-         // If BEGIN fails (e.g., already in a transaction), continue in
-         // autocommit mode.  PsiTri-SQLite's implicit autocommit after
-         // DDL can leave the connection in a state where explicit BEGIN
-         // fails; operating in autocommit mode still provides correct
-         // semantics for batch_size=1.
-         _in_explicit_tx = false;
-      } else {
-         _in_explicit_tx = true;
-      }
+      sqlite3_exec(_db, "BEGIN", 0, 0, 0);
    }
 
-   bool _in_explicit_tx = false;
 
    bool transfer(const std::string& src,
                  const std::string& dst,
@@ -1365,10 +1355,7 @@ class SqliteEngine : public BankEngine
    }
 
    void commit_batch() override {
-      if (_in_explicit_tx) {
-         exec("COMMIT");
-         _in_explicit_tx = false;
-      }
+      sqlite3_exec(_db, "COMMIT", 0, 0, 0);
    }
 
    void sync() override
