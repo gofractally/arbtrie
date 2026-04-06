@@ -309,6 +309,7 @@ int sqlite3BtreeOpen(
    if (it != g_databases.end()) {
       pBt->psitri = it->second.get();
       it->second->ref_count++;
+      pBtree->is_writer = false;  // subsequent connections are readers
    } else {
       auto pdb = std::make_shared<PsitriDb>();
       try {
@@ -350,6 +351,7 @@ int sqlite3BtreeOpen(
       pdb->ref_count = 1;
       g_databases[path] = pdb;
       pBt->psitri = pdb.get();
+      pBtree->is_writer = true;  // first connection is the writer
    }
 
    PTRACE("BtreeOpen: path=%s pBtree=%p pBt=%p psitri=%p\n",
@@ -490,7 +492,6 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
           wrflag, (int)p->inTrans, p->open_tx.size());
    if (wrflag) {
       p->inTrans = TRANS_WRITE;
-      p->is_writer = true;
    } else if (p->inTrans == TRANS_NONE) {
       p->inTrans = TRANS_READ;
    }
@@ -802,9 +803,9 @@ static void ensure_cursor(BtCursor* pCur) {
                pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
                   pCur->pgnoRoot, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
             } else {
-               // Reader connection: buffered mode (RO + Tri).
-               // For fresher data, use fresh mode at the application level
-               // via dwal_database::create_cursor(fresh) directly.
+               // Reader: buffered mode (RO + Tri).  Freshness bounded
+               // by max_flush_delay.  Use fresh mode at the application
+               // level for guaranteed-latest reads.
                pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
                   pCur->pgnoRoot, psitri::dwal::read_mode::buffered));
             }

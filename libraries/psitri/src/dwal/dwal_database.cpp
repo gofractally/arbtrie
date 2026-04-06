@@ -682,26 +682,21 @@ namespace psitri::dwal
       if (mode == read_mode::fresh && _roots[root_index])
       {
          auto& root = *_roots[root_index];
-         bool need_wait = false;
-
-         if (!root.rw_layer->empty()
-             && root.merge_complete.load(std::memory_order_acquire))
-         {
-            std::shared_lock blk(root.buffered_mutex);
-            if (!root.buffered_ptr)
-               need_wait = true;
-         }
+         // Wait only if there's data in RW to swap and the merge slot is free
+         bool need_wait = !root.rw_layer->empty()
+                       && root.merge_complete.load(std::memory_order_acquire);
 
          if (need_wait)
          {
+            auto gen_before = root.generation.load(std::memory_order_acquire);
             root.readers_want_swap.store(true, std::memory_order_release);
             auto timeout = _cfg.max_flush_delay.count() > 0
                ? _cfg.max_flush_delay
                : std::chrono::milliseconds(10);
             std::shared_lock lk(root.swap_mutex);
             root.swap_cv.wait_for(lk, timeout, [&] {
-               std::shared_lock blk(root.buffered_mutex);
-               return root.buffered_ptr != nullptr;
+               // A swap happened if the generation counter advanced
+               return root.generation.load(std::memory_order_acquire) != gen_before;
             });
          }
 
