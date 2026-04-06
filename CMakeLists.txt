@@ -707,6 +707,26 @@ target_link_libraries(bank-bench-psitrimdbx PRIVATE psitrimdbx Boost::program_op
 set_target_properties(bank-bench-psitrimdbx PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# PsiTri-SQLite bank bench — uses sqlite3 API backed by psitri-sqlite
+if(BUILD_SQLITE)
+    add_executable(bank-bench-psitri-sqlite programs/bank_bench.cpp)
+    target_compile_definitions(bank-bench-psitri-sqlite PRIVATE BANK_ENGINE_SQLITE=1 PSITRI_SQLITE=1)
+    target_link_libraries(bank-bench-psitri-sqlite PRIVATE psitri-sqlite Boost::program_options)
+    target_include_directories(bank-bench-psitri-sqlite PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/libraries/psitri-sqlite/sqlite3)
+    set_target_properties(bank-bench-psitri-sqlite PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
+# System SQLite bank bench — for comparison against psitri-sqlite
+if(SQLite3_FOUND)
+    add_executable(bank-bench-system-sqlite programs/bank_bench.cpp)
+    target_compile_definitions(bank-bench-system-sqlite PRIVATE BANK_ENGINE_SQLITE=1)
+    target_link_libraries(bank-bench-system-sqlite PRIVATE SQLite3::SQLite3 Boost::program_options)
+    set_target_properties(bank-bench-system-sqlite PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+
 if(BUILD_ROCKSDB_BENCH)
     # PsiTriRocks bank bench
     add_executable(bank-bench-psitrirocks programs/bank_bench.cpp)

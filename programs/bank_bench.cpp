@@ -1211,6 +1211,213 @@ class MdbxEngine : public BankEngine
 #endif
 
 // ============================================================
+// SQLite Engine (works with both psitri-sqlite and system sqlite3)
+// ============================================================
+
+#if defined(BANK_ENGINE_SQLITE)
+#include <sqlite3.h>
+
+class SqliteEngine : public BankEngine
+{
+   sqlite3*      _db   = nullptr;
+   sqlite3_stmt* _get  = nullptr;
+   sqlite3_stmt* _put  = nullptr;
+   std::string   _sync_mode;
+
+   void exec(const char* sql)
+   {
+      char* err = nullptr;
+      if (sqlite3_exec(_db, sql, nullptr, nullptr, &err) != SQLITE_OK)
+      {
+         fprintf(stderr, "SQLite error: %s\nSQL: %s\n", err, sql);
+         sqlite3_free(err);
+         std::exit(1);
+      }
+   }
+
+  public:
+   const char* name() const override
+   {
+#if defined(PSITRI_SQLITE)
+      return "PsiTri-SQLite";
+#else
+      return "System-SQLite";
+#endif
+   }
+
+   void open(const std::string& path, const std::string& sync_mode) override
+   {
+      _sync_mode = sync_mode;
+      std::filesystem::remove_all(path);
+      if (sqlite3_open(path.c_str(), &_db) != SQLITE_OK)
+      {
+         fprintf(stderr, "sqlite3_open failed: %s\n", sqlite3_errmsg(_db));
+         std::exit(1);
+      }
+
+      // Set sync mode
+      if (sync_mode == "none")
+         exec("PRAGMA synchronous=OFF");
+      else if (sync_mode == "async")
+         exec("PRAGMA synchronous=NORMAL");
+      else
+         exec("PRAGMA synchronous=FULL");
+
+      exec("PRAGMA journal_mode=WAL");
+      exec("CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v BLOB) WITHOUT ROWID");
+
+      // Prepare statements
+      sqlite3_prepare_v2(_db, "SELECT v FROM kv WHERE k=?", -1, &_get, nullptr);
+      sqlite3_prepare_v2(_db, "INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", -1, &_put, nullptr);
+   }
+
+   void close() override
+   {
+      if (_get) { sqlite3_finalize(_get); _get = nullptr; }
+      if (_put) { sqlite3_finalize(_put); _put = nullptr; }
+      if (_db)  { sqlite3_close(_db); _db = nullptr; }
+   }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      exec("BEGIN");
+      for (auto& acct : accounts)
+      {
+         sqlite3_reset(_put);
+         sqlite3_bind_text(_put, 1, acct.data(), (int)acct.size(), SQLITE_STATIC);
+         sqlite3_bind_blob(_put, 2, &balance, sizeof(balance), SQLITE_STATIC);
+         sqlite3_step(_put);
+      }
+      exec("COMMIT");
+   }
+
+   void begin_batch() override { exec("BEGIN"); }
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      // Read source
+      sqlite3_reset(_get);
+      sqlite3_bind_text(_get, 1, src.data(), (int)src.size(), SQLITE_STATIC);
+      if (sqlite3_step(_get) != SQLITE_ROW)
+         return false;
+      uint64_t src_bal;
+      std::memcpy(&src_bal, sqlite3_column_blob(_get, 0), sizeof(src_bal));
+
+      if (src_bal < amount)
+         return false;
+
+      // Read dest
+      sqlite3_reset(_get);
+      sqlite3_bind_text(_get, 1, dst.data(), (int)dst.size(), SQLITE_STATIC);
+      if (sqlite3_step(_get) != SQLITE_ROW)
+         return false;
+      uint64_t dst_bal;
+      std::memcpy(&dst_bal, sqlite3_column_blob(_get, 0), sizeof(dst_bal));
+
+      // Write updated balances
+      uint64_t new_src = src_bal - amount;
+      uint64_t new_dst = dst_bal + amount;
+
+      sqlite3_reset(_put);
+      sqlite3_bind_text(_put, 1, src.data(), (int)src.size(), SQLITE_STATIC);
+      sqlite3_bind_blob(_put, 2, &new_src, sizeof(new_src), SQLITE_STATIC);
+      sqlite3_step(_put);
+
+      sqlite3_reset(_put);
+      sqlite3_bind_text(_put, 1, dst.data(), (int)dst.size(), SQLITE_STATIC);
+      sqlite3_bind_blob(_put, 2, &new_dst, sizeof(new_dst), SQLITE_STATIC);
+      sqlite3_step(_put);
+
+      // Log entry
+      auto lk = encode_log_key(seq);
+      auto lv = encode_log_value(src, dst, amount);
+      sqlite3_reset(_put);
+      sqlite3_bind_text(_put, 1, lk.data(), (int)lk.size(), SQLITE_STATIC);
+      sqlite3_bind_blob(_put, 2, lv.data(), (int)lv.size(), SQLITE_STATIC);
+      sqlite3_step(_put);
+
+      return true;
+   }
+
+   void commit_batch() override { exec("COMMIT"); }
+
+   void sync() override
+   {
+      // SQLite WAL checkpoint forces data to the main DB file
+      if (_sync_mode != "none")
+         sqlite3_wal_checkpoint_v2(_db, nullptr, SQLITE_CHECKPOINT_PASSIVE, nullptr, nullptr);
+   }
+
+   SizeReport report_size(const std::string& db_path) override
+   {
+      SizeReport r;
+      r.file_size = 0;
+      auto p = std::filesystem::path(db_path);
+      if (std::filesystem::is_directory(p))
+      {
+         for (auto& entry : std::filesystem::recursive_directory_iterator(
+                  p, std::filesystem::directory_options::skip_permission_denied))
+            if (entry.is_regular_file())
+               r.file_size += entry.file_size();
+      }
+      else
+      {
+         // System SQLite: single file + possible WAL/journal files
+         if (std::filesystem::exists(p))
+            r.file_size += std::filesystem::file_size(p);
+         auto wal = p; wal += "-wal";
+         if (std::filesystem::exists(wal))
+            r.file_size += std::filesystem::file_size(wal);
+         auto shm = p; shm += "-shm";
+         if (std::filesystem::exists(shm))
+            r.file_size += std::filesystem::file_size(shm);
+      }
+      r.live_size = r.file_size;
+      r.free_size = 0;
+      return r;
+   }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      // Reader thread uses its own prepared statement
+      // For simplicity, use sqlite3_exec with a callback
+      sqlite3_stmt* stmt = nullptr;
+      sqlite3_prepare_v2(_db, "SELECT v FROM kv WHERE k=?", -1, &stmt, nullptr);
+      sqlite3_bind_text(stmt, 1, key.data(), (int)key.size(), SQLITE_STATIC);
+      bool found = false;
+      if (sqlite3_step(stmt) == SQLITE_ROW)
+      {
+         std::memcpy(&balance_out, sqlite3_column_blob(stmt, 0), sizeof(balance_out));
+         found = true;
+      }
+      sqlite3_finalize(stmt);
+      return found;
+   }
+
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      sqlite3_stmt* stmt = nullptr;
+      sqlite3_prepare_v2(_db, "SELECT k, v FROM kv ORDER BY k", -1, &stmt, nullptr);
+      uint64_t count = 0;
+      while (sqlite3_step(stmt) == SQLITE_ROW)
+      {
+         const char* k = (const char*)sqlite3_column_text(stmt, 0);
+         int         klen = sqlite3_column_bytes(stmt, 0);
+         uint64_t    bal;
+         std::memcpy(&bal, sqlite3_column_blob(stmt, 1), sizeof(bal));
+         visitor(std::string(k, klen), bal);
+         ++count;
+      }
+      sqlite3_finalize(stmt);
+      return count;
+   }
+};
+#endif
+
+// ============================================================
 // TidesDB Engine
 // ============================================================
 
@@ -1467,6 +1674,8 @@ int main(int argc, char** argv)
    }
 #elif defined(BANK_ENGINE_TIDESDB)
    engine = std::make_unique<TidesDbEngine>();
+#elif defined(BANK_ENGINE_SQLITE)
+   engine = std::make_unique<SqliteEngine>();
 #else
 #error "No BANK_ENGINE_* defined"
 #endif
