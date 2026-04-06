@@ -119,6 +119,7 @@ struct UnpackedRecord {
 SQLITE_PRIVATE int sqlite3VdbeRecordCompare(int nKey1, const void *pKey1,
                                             UnpackedRecord *pPKey2);
 SQLITE_PRIVATE int sqlite3PutVarint(unsigned char*, u64);
+SQLITE_PRIVATE u8  sqlite3GetVarint(const unsigned char*, u64*);
 SQLITE_PRIVATE int sqlite3VarintLen(u64 v);
 
 #ifdef __cplusplus

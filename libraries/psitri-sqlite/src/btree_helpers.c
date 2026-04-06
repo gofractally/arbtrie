@@ -150,6 +150,15 @@ int psitri_sizeof_sqlite3_value(void) {
 }
 
 /*
+ * Return KeyInfo.nKeyField for a cursor's pKeyInfo (the number of key columns
+ * in the index, excluding any auxiliary columns for WITHOUT ROWID tables).
+ * Returns 0 if pKeyInfo is NULL.
+ */
+int psitri_keyinfo_nKeyField(struct KeyInfo *pKeyInfo) {
+   return pKeyInfo ? (int)pKeyInfo->nKeyField : 0;
+}
+
+/*
  * Return a pointer to a static Pager configured as an in-memory no-op.
  * psitri doesn't use SQLite's pager, but many amalgamation functions call
  * sqlite3BtreePager() and dereference fields. Key settings:
