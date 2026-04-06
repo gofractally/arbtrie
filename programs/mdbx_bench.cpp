@@ -843,6 +843,8 @@ int main(int argc, char** argv)
       insert_test(cfg, mdb, "dense random insert", rand_key);
       insert_test(cfg, mdb, "string number rand insert", str_rand_key);
    }
+   if (bench == "insert-rand")
+      insert_test(cfg, mdb, "dense random insert", rand_key);
 
    // -- Get --
    if (run_all || bench == "get")
@@ -853,9 +855,9 @@ int main(int argc, char** argv)
 
    // -- Upsert --
    if (run_all || bench == "upsert")
-   {
       upsert_test(cfg, mdb, "big endian seq upsert", be_seq_key);
-   }
+   if (bench == "upsert-rand")
+      upsert_test(cfg, mdb, "dense random upsert", rand_key);
 
    // -- Iterate --
    if (run_all || bench == "iterate")

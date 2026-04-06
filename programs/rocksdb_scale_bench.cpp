@@ -701,6 +701,8 @@ int main(int argc, char** argv)
       insert_test(cfg, db, "dense random insert", rand_key);
       insert_test(cfg, db, "string number rand insert", str_rand_key);
    }
+   if (should_run("insert-rand"))
+      insert_test(cfg, db, "dense random insert", rand_key);
 
    // -- Get --
    if (should_run("get"))
@@ -712,6 +714,8 @@ int main(int argc, char** argv)
    // -- Upsert --
    if (should_run("upsert"))
       upsert_test(cfg, db, "big endian seq upsert", be_seq_key);
+   if (should_run("upsert-rand"))
+      upsert_test(cfg, db, "dense random upsert", rand_key);
 
    // -- Iterate --
    if (should_run("iterate"))
