@@ -802,8 +802,9 @@ static void ensure_cursor(BtCursor* pCur) {
                pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
                   pCur->pgnoRoot, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
             } else {
-               // Reader: buffered mode (RO + Tri).  Freshness bounded
-               // by max_flush_delay — writer swaps RW→RO on timer.
+               // Reader connection: buffered mode (RO + Tri).
+               // For fresher data, use fresh mode at the application level
+               // via dwal_database::create_cursor(fresh) directly.
                pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
                   pCur->pgnoRoot, psitri::dwal::read_mode::buffered));
             }

@@ -279,10 +279,15 @@ namespace psitri::dwal
             _owns_lock = false;
          }
 
-         // If the merge thread has finished and the RW btree is large enough, swap.
+         // Swap RW→RO if: buffer is full, time elapsed, OR readers want fresh data.
          if (_db && _root->merge_complete.load(std::memory_order_acquire)
-             && _db->should_swap(_root_index))
+             && (_db->should_swap(_root_index)
+                 || _root->readers_want_swap.load(std::memory_order_relaxed)))
+         {
             _db->try_swap_rw_to_ro(_root_index);
+            if (_root->readers_want_swap.exchange(false, std::memory_order_relaxed))
+               _root->swap_cv.notify_all();
+         }
 
          // Adaptive throttle: if the merge thread set a non-zero sleep,
          // apply it to smooth out write pressure so the merge can keep up.

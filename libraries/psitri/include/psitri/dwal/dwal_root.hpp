@@ -5,18 +5,48 @@
 #include <sal/numbers.hpp>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <shared_mutex>
 
 namespace psitri::dwal
 {
-   /// Read mode: which layers to include when reading.
+   /**
+    * @brief Read mode: freshness vs cost tradeoff for DWAL readers.
+    *
+    * All modes see only committed data.  The difference is how recent
+    * that data is and what cost the reader imposes on the system.
+    *
+    *     Mode       Layers          Reader waits for   Writer impact
+    *     ---------  --------------  -----------------  ------------------
+    *     trie       Tri only        nothing            none
+    *     buffered   RO + Tri        nothing            none
+    *     fresh      RO + Tri        merge + swap       none (self-imposed)
+    *     latest     RW + RO + Tri   current tx finish  blocks next tx start
+    *
+    * **Choosing a mode:**
+    *
+    * - `trie`: high-throughput reads tolerating seconds of staleness.
+    * - `buffered`: default for external readers.  Staleness bounded by
+    *   `max_flush_delay` or the writer's natural swap frequency.
+    * - `fresh`: reader needs all committed data but can wait.  Sets an
+    *   atomic flag; the writer (on next commit) or the merge thread
+    *   (if writer is idle) swaps RW→RO and wakes waiting readers.
+    *   Reader blocks only itself — zero writer impact.
+    * - `latest`: reader needs the absolute freshest view.  Acquires a
+    *   shared lock on the RW layer, blocking until the writer finishes
+    *   its current transaction.  While held, the writer cannot start a
+    *   new transaction.  Use sparingly — this is the only mode that
+    *   taxes the writer.
+    */
    enum class read_mode
    {
-      latest,      // frozen RW snapshot + Tri (one swap behind writer)
-      buffered,    // same as latest (frozen RW snapshot + Tri)
-      trie,        // Tri only — zero DWAL overhead
+      trie,        ///< Tri only — zero DWAL overhead, most stale
+      buffered,    ///< RO + Tri — no writer interaction, bounded staleness
+      fresh,       ///< RO + Tri after forced swap — reader waits, writer unaffected
+      latest,      ///< RW + RO + Tri — shared lock, blocks writer's next tx
    };
 
    /// Transaction mode: buffered writes vs direct COW.
@@ -108,6 +138,21 @@ namespace psitri::dwal
 
       /// Time of the last RW→RO swap.  Used for time-based flush.
       std::chrono::steady_clock::time_point last_swap_time{std::chrono::steady_clock::now()};
+
+      // ── Swap coordination for fresh-mode readers ──────────────────
+
+      /// Set by readers that want the latest committed data (fresh mode).
+      /// Checked by the writer on commit and by the merge thread after
+      /// drain.  Cleared after swap + notify.
+      std::atomic<bool> readers_want_swap{false};
+
+      /// Condition variable notified after RW→RO swap completes.
+      /// Fresh-mode readers wait on this.
+      std::condition_variable_any swap_cv;
+
+      /// Mutex for swap_cv wait.  Only fresh-mode readers lock this
+      /// (shared) while waiting.  The swapper notifies without holding it.
+      mutable std::shared_mutex swap_mutex;
 
       dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
    };

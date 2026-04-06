@@ -291,6 +291,28 @@ namespace psitri::dwal
       // Signal the writer that it can swap again.
       root.merge_complete.store(true, std::memory_order_release);
       root.merge_complete.notify_all();
+
+      // If readers are waiting for fresh data and the writer is idle,
+      // swap RW→RO now so readers see the latest committed data.
+      // try_lock avoids blocking if the writer is mid-transaction.
+      if (root.readers_want_swap.load(std::memory_order_relaxed)
+          && !root.rw_layer->empty())
+      {
+         std::unique_lock lk(root.rw_mutex, std::try_to_lock);
+         if (lk.owns_lock())
+         {
+            {
+               std::unique_lock blk(root.buffered_mutex);
+               root.buffered_ptr = std::move(root.rw_layer);
+            }
+            root.rw_layer = std::make_shared<btree_layer>();
+            root.last_swap_time = std::chrono::steady_clock::now();
+            // Leave merge_complete=true — the new RO will be merged
+            // on the next swap cycle.  Readers can read it as RO now.
+            root.readers_want_swap.store(false, std::memory_order_relaxed);
+            root.swap_cv.notify_all();
+         }
+      }
    }
 
    void merge_pool::try_reclaim()

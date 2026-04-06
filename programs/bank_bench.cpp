@@ -1784,10 +1784,6 @@ int main(int argc, char** argv)
              [&]()
              {
                 engine->reader_thread_init();
-                // Let the writer run briefly so committed data is
-                // visible to buffered-mode readers (DWAL swap needs
-                // at least one commit cycle + max_flush_delay).
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 std::mt19937_64 read_rng(seed + 999);
                 reader_start = Clock::now();
                 uint64_t local_count = 0;

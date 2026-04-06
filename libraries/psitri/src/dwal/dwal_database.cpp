@@ -675,14 +675,56 @@ namespace psitri::dwal
    {
       assert(root_index < max_roots);
 
+      // Fresh mode: signal desire for swap, wait briefly, then read as buffered.
+      // Falls back to buffered if no swap happens within max_flush_delay.
+      if (mode == read_mode::fresh && _roots[root_index])
+      {
+         auto& root = *_roots[root_index];
+
+         // Check if RO already has data — skip the wait entirely
+         {
+            std::shared_lock blk(root.buffered_mutex);
+            if (root.buffered_ptr)
+            {
+               mode = read_mode::buffered;
+               goto create;
+            }
+         }
+
+         // Can only swap if merge is done (RO slot is free).
+         // If merge is in progress, fall back to buffered — don't wait
+         // for merge, that would be unnecessary delay.
+         if (!root.merge_complete.load(std::memory_order_acquire))
+         {
+            mode = read_mode::buffered;
+            goto create;
+         }
+
+         // Merge is done, RO slot is free.  Signal writer to swap on
+         // its next commit.  Wait briefly for the swap to happen.
+         root.readers_want_swap.store(true, std::memory_order_release);
+         {
+            auto timeout = _cfg.max_flush_delay.count() > 0
+               ? _cfg.max_flush_delay
+               : std::chrono::milliseconds(10);
+            std::shared_lock lk(root.swap_mutex);
+            root.swap_cv.wait_for(lk, timeout, [&] {
+               std::shared_lock blk(root.buffered_mutex);
+               return root.buffered_ptr != nullptr;
+            });
+         }
+         mode = read_mode::buffered;  // read whatever's in RO now
+      }
+
+   create:
+
       std::shared_ptr<btree_layer> rw, ro;
 
       if (_roots[root_index])
       {
          auto& root = *_roots[root_index];
 
-         // RW layer: included for latest mode. Shared lock allows concurrent
-         // readers; copying the shared_ptr gives the cursor a stable snapshot.
+         // RW layer: included for latest mode.
          if (mode == read_mode::latest)
          {
             std::shared_lock lk(root.rw_mutex, std::defer_lock);
