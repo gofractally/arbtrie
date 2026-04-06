@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "bench_signal.hpp"
+#include "bench_histogram.hpp"
 
 #include <boost/program_options/cmdline.hpp>
 #include <boost/program_options/options_description.hpp>
@@ -1522,10 +1523,11 @@ int main(int argc, char** argv)
       std::mt19937_64                         rng(seed);
       std::uniform_int_distribution<uint64_t> amt_dist(1, cfg.initial_balance);
 
-      uint64_t           successful     = 0;
-      uint64_t           skipped        = 0;
-      uint64_t           batch_counter  = 0;
-      uint64_t           commit_counter = 0;
+      uint64_t                successful     = 0;
+      uint64_t                skipped        = 0;
+      uint64_t                batch_counter  = 0;
+      uint64_t                commit_counter = 0;
+      bench::latency_histogram commit_histo;
       std::atomic<bool>  stop_reader{false};
       std::atomic<uint64_t> reader_count{0};
       Clock::time_point  reader_start, reader_end;
@@ -1580,7 +1582,9 @@ int main(int argc, char** argv)
 
          if (++batch_counter >= cfg.batch_size)
          {
+            auto t0 = bench::now_us();
             engine->commit_batch();
+            commit_histo.record(bench::now_us() - t0);
             batch_counter = 0;
             ++commit_counter;
 
@@ -1625,6 +1629,8 @@ int main(int argc, char** argv)
                 reader_secs > 0 ? format_comma((uint64_t)(rc / reader_secs)).c_str() : "N/A");
       }
       engine->report_size(cfg.db_path).print();
+      commit_histo.print("commit");
+      commit_histo.print_detail("commit");
 
       return {p_secs, successful, skipped, reader_count.load(), reader_secs};
    };
