@@ -54,6 +54,32 @@ struct PsitriDb {
    int ref_count = 0;
    std::atomic<u32> data_version{1};
    sal::sync_type sync_mode = sal::sync_type::none;
+
+   // Open DWAL transactions for the current SQLite write transaction.
+   // Lazily created per root on first Insert/Delete, committed together
+   // during sqlite3BtreeCommitPhaseOne, aborted on Rollback.
+   std::map<uint32_t, psitri::dwal::dwal_transaction> open_tx;
+
+   psitri::dwal::dwal_transaction& get_tx(uint32_t root_index) {
+      auto it = open_tx.find(root_index);
+      if (it != open_tx.end())
+         return it->second;
+      auto [inserted, ok] = open_tx.try_emplace(
+         root_index, dwal_db->start_write_transaction(root_index));
+      return inserted->second;
+   }
+
+   void commit_all_tx() {
+      for (auto& [root, tx] : open_tx)
+         tx.commit();
+      open_tx.clear();
+   }
+
+   void abort_all_tx() {
+      for (auto& [root, tx] : open_tx)
+         tx.abort();
+      open_tx.clear();
+   }
 };
 
 static std::mutex g_db_mutex;
@@ -431,10 +457,14 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
 }
 
 int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
-   // Sync WAL at transaction commit if sync mode requires it
-   if (p && p->pBt && p->pBt->psitri &&
-       p->pBt->psitri->sync_mode >= sal::sync_type::fsync) {
-      p->pBt->psitri->dwal_db->flush_wal(p->pBt->psitri->sync_mode);
+   if (p && p->pBt && p->pBt->psitri) {
+      auto* psitri = p->pBt->psitri;
+      // Commit all open DWAL transactions for this SQLite transaction
+      psitri->commit_all_tx();
+      // Sync WAL if sync mode requires it
+      if (psitri->sync_mode >= sal::sync_type::fsync) {
+         psitri->dwal_db->flush_wal(psitri->sync_mode);
+      }
    }
    return SQLITE_OK;
 }
@@ -453,6 +483,9 @@ int sqlite3BtreeCommit(Btree* p) {
 }
 
 int sqlite3BtreeRollback(Btree* p, int, int) {
+   if (p && p->pBt && p->pBt->psitri) {
+      p->pBt->psitri->abort_all_tx();
+   }
    if (p) {
       p->inTrans = TRANS_NONE;
       p->pBt->inTransaction = TRANS_NONE;
@@ -522,14 +555,13 @@ int sqlite3BtreeCreateTable(Btree* p, Pgno* piTable, int flags) {
    *piTable = psitri->next_root++;
 
    try {
-      auto tx = psitri->dwal_db->start_write_transaction(0);
+      auto& tx = psitri->get_tx(0);
       std::string nr(4, '\0');
       std::memcpy(nr.data(), &psitri->next_root, 4);
       tx.upsert("next_root", nr);
       std::string key = "tflags_" + std::to_string(*piTable);
       char f = (char)flags;
       tx.upsert(key, std::string_view(&f, 1));
-      tx.commit();
    } catch (...) {}
 
    return SQLITE_OK;
@@ -555,9 +587,8 @@ int sqlite3BtreeClearTable(Btree* p, int iTable, i64* pnChange) {
          count++;
       }
       if (!keys.empty()) {
-         auto tx = psitri->dwal_db->start_write_transaction((uint32_t)iTable);
+         auto& tx = psitri->get_tx((uint32_t)iTable);
          for (auto& k : keys) tx.remove(k);
-         tx.commit();
       }
       if (pnChange) *pnChange = count;
    } catch (...) {
@@ -957,9 +988,8 @@ int sqlite3BtreeInsert(
    }
 
    try {
-      auto tx = psitri->dwal_db->start_write_transaction(pCur->pgnoRoot);
+      auto& tx = psitri->get_tx(pCur->pgnoRoot);
       tx.upsert(key, value);
-      tx.commit();
    } catch (...) {
       return SQLITE_ERROR;
    }
@@ -982,9 +1012,8 @@ int sqlite3BtreeDelete(BtCursor* pCur, u8 flags) {
    auto key = std::string(mc.key());
 
    try {
-      auto tx = psitri->dwal_db->start_write_transaction(pCur->pgnoRoot);
+      auto& tx = psitri->get_tx(pCur->pgnoRoot);
       tx.remove(key);
-      tx.commit();
    } catch (...) {
       return SQLITE_ERROR;
    }
