@@ -7,29 +7,56 @@ used by all the drop-in compatibility layers (RocksDB, MDBX, SQLite, DuckDB).
 
 ## When to Use Each Mode
 
-| | Direct | DWAL |
-|---|---|---|
-| **Best for** | Large batch transactions, bulk loads, migrations | Many small commits, high-frequency writes |
-| **Commit cost** | O(mutations) COW node clones | O(1) ART insert + WAL append (~100-200 ns) |
-| **Read freshness** | Immediate -- committed data is in the trie | Up to one merge cycle behind (configurable) |
-| **Durability** | Configurable via sync_type | WAL-backed; periodic fsync for durability |
-| **Throughput ceiling** | Limited by COW clone cost per mutation | Limited by merge thread throughput |
-| **Use case** | `write_cursor` for large transactions that touch many keys in one batch | `dwal_database` for OLTP, blockchain state, frequent small transactions |
+DWAL is the default choice for most workloads.  It is never worse than
+direct mode for reads (empty buffer layers are skipped with a single
+branch) and always better for write latency.  Direct mode is an
+optimization for specific access patterns.
 
-**Direct mode** is ideal when you're already batching thousands of mutations
-into a single transaction. The COW cost is amortized across the batch, and
-you get immediate read visibility with no merge lag. Bulk loads, migrations,
-and large analytical writes should use direct mode.
+```
+    Workload                     Best Mode     Why
+    ─────────────────────────    ───────────   ────────────────────────────
+    Many small commits           DWAL          ART buffer amortizes COW
+    (blockchain, OLTP, ledger)                 cost.  ~100 ns commit
+                                               vs ~2 KB of COW clones.
 
-**DWAL mode** is ideal when your workload consists of many small commits
-(1-1000 mutations each). The ART buffer absorbs bursts with sub-microsecond
-commits, and the background merge thread amortizes COW cost across thousands
-of mutations. This is the mode that delivers 1M+ ops/sec on the bank
-benchmark and 46x faster SQLite TATP results.
+    Low-frequency writes that    DWAL          Even at 100 writes/sec,
+    need fast acknowledgement                  sub-microsecond commit lets
+                                               you ack the caller before
+                                               COW work happens.
 
-Both modes are part of the same database -- you can use direct mode for bulk
-operations and switch to DWAL for steady-state traffic. The `transaction_mode`
-enum selects between them:
+    Idle / read-only periods     DWAL (free)   When RW and RO layers are
+                                               empty, the merge cursor
+                                               degenerates to a single Tri
+                                               cursor.  Same speed as
+                                               direct PsiTri.
+
+    Few large batch writes       Direct        COW cost is amortized
+    (bulk load, ETL, migration)                across the batch.  No ART
+                                               buffer or WAL overhead.
+
+    Many readers wanting the     Direct        COW snapshots are O(1).
+    freshest data under heavy                  Every reader gets an instant
+    writes                                     snapshot of the committed
+                                               root.  No RW/RO/Tri
+                                               indirection.
+```
+
+**DWAL mode** is the recommended starting point.  The ART buffer
+absorbs bursts with sub-microsecond commits, and the background merge
+thread amortizes COW cost across thousands of mutations.  When the
+database is idle, the empty buffer layers are free -- reads go straight
+to the COW trie with a single branch check per layer.
+
+**Direct mode** is an optimization for two cases: (1) large batch
+transactions where the COW cost is already amortized by batch size and
+the DWAL's per-op WAL append is pure overhead, and (2) read-dominated
+workloads with many concurrent readers that all need the absolute
+freshest committed state, where the DWAL's three-layer merge cursor
+adds unnecessary indirection compared to a direct COW snapshot.
+
+Both modes are part of the same database -- you can use direct mode for
+bulk operations and switch to DWAL for steady-state traffic.  The
+`transaction_mode` enum selects between them:
 
 ```cpp
 // DWAL mode (default) -- buffered, fast commits
