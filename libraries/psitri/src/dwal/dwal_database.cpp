@@ -670,11 +670,13 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // RW layer: included for latest mode. The caller is responsible for
-         // holding the shared rw_mutex for the duration of iteration (via
-         // read transaction locking), not just during this snapshot copy.
+         // RW layer: included for latest mode. Shared lock allows concurrent
+         // readers; copying the shared_ptr gives the cursor a stable snapshot.
          if (mode == read_mode::latest)
          {
+            std::shared_lock lk(root.rw_mutex, std::defer_lock);
+            if (root.enable_rw_locking && !skip_rw_lock)
+               lk.lock();
             rw = root.rw_layer;
          }
 
