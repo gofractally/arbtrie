@@ -21,6 +21,10 @@
 // C helper functions defined in btree_helpers.c (compiled with full Mem access)
 extern "C" {
 int psitri_pack_record(UnpackedRecord *pRec, unsigned char *buf, int bufSize);
+int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
+                               unsigned char *buf, int bufSize);
+int psitri_make_comparable_key_from_unpacked(UnpackedRecord *pRec,
+                                             unsigned char *buf, int bufSize);
 int psitri_sizeof_sqlite3_value(void);
 struct Pager* psitri_get_dummy_pager(void);
 }
@@ -203,8 +207,12 @@ static void cache_cursor_value(BtCursor* pCur) {
       }
       pCur->cur_value = read_mc_value(mc);
    } else {
-      pCur->nKey = (i64)key_sv.size();
-      pCur->cur_value.assign(key_sv.data(), key_sv.size());
+      // BLOBKEY: the DWAL key is a byte-comparable encoding.
+      // The DWAL value contains the original packed record that SQLite
+      // expects to read back via sqlite3BtreePayload().
+      auto val = read_mc_value(mc);
+      pCur->nKey = (i64)val.size();
+      pCur->cur_value = std::move(val);
    }
    pCur->is_valid = true;
    pCur->eState = CURSOR_VALID;
@@ -221,6 +229,31 @@ static std::string pack_index_key(UnpackedRecord* pRec) {
    std::string result(sz, '\0');
    int actual = psitri_pack_record(pRec, (unsigned char*)result.data(), sz);
    if (actual > 0) result.resize(actual);
+   return result;
+}
+
+// Convert a packed SQLite record to a byte-comparable key
+static std::string make_comparable_from_packed(const char* data, int len) {
+   int sz = psitri_make_comparable_key(
+      (const unsigned char*)data, len, nullptr, 0);
+   std::fprintf(stderr, "[psitri-btree] make_comparable: input_len=%d sz=%d\n", len, sz);
+   if (sz <= 0) return {};
+   std::string result(sz, '\0');
+   int written = psitri_make_comparable_key(
+      (const unsigned char*)data, len,
+      (unsigned char*)result.data(), sz);
+   std::fprintf(stderr, "[psitri-btree] make_comparable: written=%d\n", written);
+   if (written > 0) result.resize(written);
+   return result;
+}
+
+// Convert an UnpackedRecord to a byte-comparable key
+static std::string make_comparable_from_unpacked(UnpackedRecord* pRec) {
+   int sz = psitri_make_comparable_key_from_unpacked(pRec, nullptr, 0);
+   if (sz <= 0) return {};
+   std::string result(sz, '\0');
+   psitri_make_comparable_key_from_unpacked(
+      pRec, (unsigned char*)result.data(), sz);
    return result;
 }
 
@@ -757,7 +790,9 @@ static void ensure_cursor(BtCursor* pCur) {
             pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
                pCur->pgnoRoot, psitri::dwal::read_mode::latest));
          }
-         PTRACE("  ensure_cursor: created, calling seek_begin\n");
+         PTRACE("  ensure_cursor: created, counting keys\n");
+         auto key_count = pCur->cursor->cursor().count_keys();
+         PTRACE("  ensure_cursor: count=%zu, calling seek_begin\n", key_count);
          pCur->cursor->cursor().seek_begin();
          PTRACE("  ensure_cursor: done, is_end=%d\n",
                 (int)pCur->cursor->cursor().is_end());
@@ -815,6 +850,8 @@ int sqlite3BtreeTableMoveto(BtCursor* pCur, i64 intKey, int bias, int* pRes) {
 }
 
 int sqlite3BtreeIndexMoveto(BtCursor* pCur, UnpackedRecord* pUnKey, int* pRes) {
+   PTRACE("IndexMoveto: root=%u nField=%d default_rc=%d\n",
+          pCur->pgnoRoot, pUnKey->nField, pUnKey->default_rc);
    ensure_cursor(pCur);
    if (!pCur->cursor) {
       *pRes = -1;
@@ -824,11 +861,25 @@ int sqlite3BtreeIndexMoveto(BtCursor* pCur, UnpackedRecord* pUnKey, int* pRes) {
    }
    auto& mc = pCur->cursor->cursor();
 
-   // Build a packed record key from the UnpackedRecord
-   auto packed = pack_index_key(pUnKey);
+   // Build a byte-comparable search key from the UnpackedRecord.
+   // Index entries are stored with comparable keys (see sqlite3BtreeInsert),
+   // so lower_bound works correctly with byte comparison.
+   auto comp_key = make_comparable_from_unpacked(pUnKey);
 
    mc.seek_begin();
-   mc.lower_bound(std::string_view(packed.data(), packed.size()));
+   PTRACE("IndexMoveto: comp_key size=%zu hex:", comp_key.size());
+   for (size_t xi = 0; xi < comp_key.size() && xi < 30; xi++)
+      std::fprintf(stderr, " %02x", (unsigned char)comp_key[xi]);
+   std::fprintf(stderr, "\n");
+   // Also dump the first entry in the cursor
+   if (!mc.is_end()) {
+      auto fk = mc.key();
+      PTRACE("IndexMoveto: first_entry size=%zu hex:", fk.size());
+      for (size_t xi = 0; xi < fk.size() && xi < 30; xi++)
+         std::fprintf(stderr, " %02x", (unsigned char)fk[xi]);
+      std::fprintf(stderr, "\n");
+   }
+   mc.lower_bound(std::string_view(comp_key.data(), comp_key.size()));
 
    if (mc.is_end()) {
       *pRes = -1;
@@ -838,11 +889,17 @@ int sqlite3BtreeIndexMoveto(BtCursor* pCur, UnpackedRecord* pUnKey, int* pRes) {
    }
 
    cache_cursor_value(pCur);
-   if (pCur->is_valid) {
+   PTRACE("IndexMoveto: is_valid=%d cur_value.size=%zu\n",
+          (int)pCur->is_valid, pCur->cur_value.size());
+   if (pCur->is_valid && !pCur->cur_value.empty()) {
+      // Compare the stored packed record (in cur_value) against the search key
+      // using SQLite's record comparator, which handles collation and
+      // differing field counts correctly.
       *pRes = sqlite3VdbeRecordCompare(
          (int)pCur->cur_value.size(),
          pCur->cur_value.data(),
          pUnKey);
+      PTRACE("IndexMoveto: *pRes=%d\n", *pRes);
    } else {
       *pRes = -1;
    }
@@ -1003,8 +1060,18 @@ int sqlite3BtreeInsert(
          }
       }
    } else {
+      // BLOBKEY (index): store a byte-comparable encoding as the DWAL key
+      // and the original packed record as the value, so that cache_cursor_value
+      // can return the packed record to SQLite for sqlite3BtreePayload().
       if (pPayload->pKey) {
-         key.assign((const char*)pPayload->pKey, pPayload->nKey);
+         key = make_comparable_from_packed(
+            (const char*)pPayload->pKey, (int)pPayload->nKey);
+         value.assign((const char*)pPayload->pKey, pPayload->nKey);
+         PTRACE("Insert BLOBKEY: packed_key_size=%d comp_key_size=%zu comp_hex:",
+                (int)pPayload->nKey, key.size());
+         for (size_t xi = 0; xi < key.size() && xi < 30; xi++)
+            std::fprintf(stderr, " %02x", (unsigned char)key[xi]);
+         std::fprintf(stderr, "\n");
       }
    }
 

@@ -150,6 +150,188 @@ int psitri_sizeof_sqlite3_value(void) {
 }
 
 /*
+ * Encode a packed SQLite record into a byte-comparable key.
+ *
+ * Each field is encoded as a type tag followed by field-specific comparable
+ * bytes.  Within a given index all records have the same field types, so
+ * the type tags are constant and the ordering is determined by the data.
+ *
+ *   NULL:     0x05
+ *   INTEGER:  0x15 + 8 byte big-endian with sign flip (XOR 0x80 on MSB)
+ *   REAL:     0x25 + 8 byte comparable float
+ *   TEXT:     0x35 + raw bytes + 0x00
+ *   BLOB:     0x45 + raw bytes + 0x00
+ *
+ * If buf is NULL, returns the required buffer size.
+ * Returns bytes written, or -1 on error.
+ */
+int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
+                               unsigned char *buf, int bufSize) {
+   if (nKey < 1) return 0;
+
+   u32 szHdr;
+   u32 idx;
+   idx = getVarint32(pKey, szHdr);
+   if (szHdr > (u32)nKey) return -1;
+
+   u32 d = szHdr; /* data offset */
+   int out = 0;
+
+   while (idx < szHdr) {
+      u32 serial_type;
+      idx += getVarint32(&pKey[idx], serial_type);
+      u32 data_len = sqlite3VdbeSerialTypeLen(serial_type);
+
+      /* Bounds check: ensure data fits within the record */
+      if (d + data_len > (u32)nKey) break;
+
+      if (serial_type == 0) {
+         /* NULL */
+         if (buf) {
+            if (out >= bufSize) return -1;
+            buf[out] = 0x05;
+         }
+         out++;
+      } else if (serial_type >= 1 && serial_type <= 6) {
+         /* Integer: decode, then encode as big-endian with sign flip */
+         i64 val = vdbeRecordDecodeInt(serial_type, &pKey[d]);
+         u64 u = (u64)val ^ ((u64)1 << 63);
+         if (buf) {
+            if (out + 9 > bufSize) return -1;
+            buf[out] = 0x15;
+            int j;
+            for (j = 0; j < 8; j++)
+               buf[out+1+j] = (unsigned char)(u >> (56 - j*8));
+         }
+         out += 9;
+      } else if (serial_type == 7) {
+         /* Real: read as big-endian double, apply sign-magnitude transform */
+         u64 v = 0;
+         int j;
+         for (j = 0; j < 8; j++)
+            v = (v << 8) | pKey[d + j];
+         if (v & ((u64)1 << 63)) {
+            v = ~v;               /* negative: invert all bits */
+         } else {
+            v ^= ((u64)1 << 63);  /* positive: flip sign bit only */
+         }
+         if (buf) {
+            if (out + 9 > bufSize) return -1;
+            buf[out] = 0x25;
+            for (j = 0; j < 8; j++)
+               buf[out+1+j] = (unsigned char)(v >> (56 - j*8));
+         }
+         out += 9;
+      } else if (serial_type >= 8 && serial_type <= 9) {
+         /* Integer 0 or 1 (in-header, no data bytes) */
+         u64 u = (u64)(serial_type - 8) ^ ((u64)1 << 63);
+         if (buf) {
+            if (out + 9 > bufSize) return -1;
+            buf[out] = 0x15;
+            int j;
+            for (j = 0; j < 8; j++)
+               buf[out+1+j] = (unsigned char)(u >> (56 - j*8));
+         }
+         out += 9;
+         /* data_len is 0 for serial types 8 and 9 */
+      } else if (serial_type >= 12) {
+         int n = (int)data_len;
+         int is_text = serial_type & 1;
+         u8 tag = is_text ? 0x35 : 0x45;
+         if (buf) {
+            if (out + 1 + n + 1 > bufSize) return -1;
+            buf[out] = tag;
+            if (n > 0) memcpy(buf + out + 1, &pKey[d], n);
+            buf[out + 1 + n] = 0x00; /* terminator */
+         }
+         out += 1 + n + 1;
+      }
+
+      d += data_len;
+   }
+
+   return out;
+}
+
+/*
+ * Encode an UnpackedRecord into a byte-comparable key.
+ * Same format as psitri_make_comparable_key but from an UnpackedRecord.
+ *
+ * If buf is NULL, returns the required buffer size.
+ */
+int psitri_make_comparable_key_from_unpacked(UnpackedRecord *pRec,
+                                             unsigned char *buf, int bufSize) {
+   int nField = pRec->nField;
+   Mem *aMem = pRec->aMem;
+   int out = 0;
+   int i;
+
+   for (i = 0; i < nField; i++) {
+      Mem *pMem = &aMem[i];
+      int flags = pMem->flags;
+
+      if (flags & MEM_Null) {
+         if (buf) { if (out >= bufSize) return -1; buf[out] = 0x05; }
+         out++;
+      } else if (flags & (MEM_Int | MEM_IntReal)) {
+         u64 u = (u64)pMem->u.i ^ ((u64)1 << 63);
+         if (buf) {
+            int j;
+            if (out + 9 > bufSize) return -1;
+            buf[out] = 0x15;
+            for (j = 0; j < 8; j++)
+               buf[out+1+j] = (unsigned char)(u >> (56 - j*8));
+         }
+         out += 9;
+      } else if (flags & MEM_Real) {
+         /* Convert host-endian double to big-endian comparable */
+         u64 v;
+         int j;
+         memcpy(&v, &pMem->u.r, 8);
+         /* Byte-swap to big-endian */
+         u64 be = 0;
+         for (j = 0; j < 8; j++)
+            be = (be << 8) | ((v >> (j*8)) & 0xFF);
+         if (be & ((u64)1 << 63)) {
+            be = ~be;
+         } else {
+            be ^= ((u64)1 << 63);
+         }
+         if (buf) {
+            if (out + 9 > bufSize) return -1;
+            buf[out] = 0x25;
+            for (j = 0; j < 8; j++)
+               buf[out+1+j] = (unsigned char)(be >> (56 - j*8));
+         }
+         out += 9;
+      } else if (flags & MEM_Str) {
+         int n = pMem->n;
+         if (buf) {
+            if (out + 1 + n + 1 > bufSize) return -1;
+            buf[out] = 0x35;
+            if (n > 0 && pMem->z) memcpy(buf + out + 1, pMem->z, n);
+            buf[out + 1 + n] = 0x00;
+         }
+         out += 1 + n + 1;
+      } else if (flags & MEM_Blob) {
+         int n = pMem->n;
+         if (buf) {
+            if (out + 1 + n + 1 > bufSize) return -1;
+            buf[out] = 0x45;
+            if (n > 0 && pMem->z) memcpy(buf + out + 1, pMem->z, n);
+            buf[out + 1 + n] = 0x00;
+         }
+         out += 1 + n + 1;
+      } else {
+         if (buf) { if (out >= bufSize) return -1; buf[out] = 0x05; }
+         out++;
+      }
+   }
+
+   return out;
+}
+
+/*
  * Return a pointer to a static Pager configured as an in-memory no-op.
  * psitri doesn't use SQLite's pager, but many amalgamation functions call
  * sqlite3BtreePager() and dereference fields. Key settings:
