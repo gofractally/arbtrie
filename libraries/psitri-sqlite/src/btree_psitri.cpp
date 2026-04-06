@@ -1055,7 +1055,6 @@ int sqlite3BtreeInsert(
 
    psitri->data_version.fetch_add(1);
 
-   // Invalidate cursor after mutation
    pCur->cursor.reset();
    pCur->is_valid = false;
    pCur->eState = CURSOR_INVALID;
@@ -1078,12 +1077,10 @@ int sqlite3BtreeDelete(BtCursor* pCur, u8 flags) {
    }
 
    psitri->data_version.fetch_add(1);
-
-   pCur->cursor.reset();
    pCur->is_valid = false;
 
    if (flags & BTREE_SAVEPOSITION) {
-      ensure_cursor(pCur);
+      // Reposition cursor at the deleted key's location
       if (!pCur->cursor) {
          pCur->eState = CURSOR_INVALID;
       } else {
