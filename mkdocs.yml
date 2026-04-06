@@ -96,13 +96,17 @@ nav:
   - Why PsiTri:
       - The Problem: why-psitri/problem.md
       - Design Philosophy: why-psitri/design.md
+      - Tradeoffs & Limitations: why-psitri/tradeoffs.md
   - Getting Started:
       - Quick Start: getting-started/quickstart.md
       - Examples: examples.md
       - RocksDB Migration: getting-started/rocksdb-migration.md
+      - MDBX Migration: getting-started/mdbx-migration.md
+      - SQLite Migration: getting-started/sqlite-migration.md
       - API Reference: getting-started/api.md
   - How It Works:
       - Overview: architecture/overview.md
+      - "DWAL: ART-Buffered Write Path": architecture/dwal.md
       - Control Blocks & Addressing: architecture/control-blocks.md
       - Segment Allocator (SAL): architecture/sal.md
       - Branchless Design: architecture/branchless-design.md
@@ -114,9 +118,13 @@ nav:
       - Recovery: internals/recovery.md
   - Benchmarks:
       - Bank Transaction Benchmark: benchmarks/bank.md
+      - Random Upsert (200M Keys): benchmarks/random-upsert.md
       - Scale Benchmark (419M Keys): benchmarks/scale.md
-      - x86 SIMD Optimizations: benchmarks/x86_simd.md
+      - "Drop-In: RocksDB API": benchmarks/rocksdb-api.md
+      - "Drop-In: SQLite API": benchmarks/sqlite-api.md
+      - "Drop-In: DuckDB Storage": benchmarks/duckdb-api.md
   - Development:
       - Contributing: development/contributing.md
       - Code Coverage: development/coverage.md
+      - x86 SIMD Optimizations: benchmarks/x86_simd.md
       - Known Issues: internals/known-issues.md

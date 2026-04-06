@@ -296,7 +296,7 @@ When running on ZFS, the filesystem provides the equivalent of PsiTri's Levels 1
 | **Object/page checksums** | 16-bit (XXH3-64 truncated) per object | CRC32 per block | Optional per page | Optional per page | CRC32 per 8KB page |
 | **Per-key checksums** | 8-bit (XXH3-64 truncated) per key | -- | -- | -- | -- |
 | **Per-value checksums** | 8-bit (XXH3-64 truncated) per value | -- | -- | -- | -- |
-| **WAL checksums** | N/A (no WAL) | CRC32 per record | -- | CRC32 per frame | CRC32 per record |
+| **WAL checksums** | XXH3-64 per DWAL entry | CRC32 per record | -- | CRC32 per frame | CRC32 per record |
 | **Structural verification** | Full tree walk | Partial (SST-level) | `mdbx_chk` tree walk | `integrity_check` | `amcheck` B-tree walk |
 | **Failure localization** | Per-key + hex prefix | Per-block | Per-page | Per-page | Per-page |
 | **Checksum levels** | 5 | 2-3 | 1-2 | 2-3 | 3 |

@@ -1,16 +1,21 @@
 # The Problem
 
+Some workloads need to **read state, compute on it, and write it back** -- thousands of times per second -- while other threads query the same data concurrently. Blockchain nodes, financial ledgers, game state servers, and event sourcing systems all share this pattern: every state transition is a read-modify-write transaction against a large, actively-queried dataset.
+
+No existing storage engine handles this well. B-trees copy entire pages on each mutation. LSM trees defer write cost into compaction stalls that worsen at scale. Neither provides instant, zero-cost snapshots that don't degrade write throughput.
+
 Every persistent key-value store makes the same set of tradeoffs:
 
 - **B-trees** (LMDB, BoltDB, SQLite, InnoDB) operate on fixed-size pages (4KB-16KB). COW-based B-trees (LMDB, BoltDB) copy entire pages on mutation for snapshot isolation and crash safety -- changing a single byte means copying 4KB-16KB. WAL-based B-trees (InnoDB, SQLite) avoid COW but add write-ahead logging overhead. In both cases, write amplification is proportional to page size, not data size.
 - **LSM trees** (RocksDB, LevelDB, Cassandra) batch writes for throughput but pay for it with read amplification, compaction stalls, and space amplification from tombstones.
 - **Adaptive radix trees** (ART) achieve optimal depth and cache-line efficiency, but only in memory. No persistent ART implementation exists that matches B-tree durability.
 
-PsiTri eliminates these tradeoffs by combining three novel subsystems:
+PsiTri eliminates these tradeoffs by combining four novel subsystems:
 
 1. **A radix/B-tree hybrid with sorted leaf nodes and node-level copy-on-write**
-2. **A relocatable object allocator with lock-free O(1) compaction moves**
-3. **A self-tuning physical data layout that sorts objects by access frequency**
+2. **An ART-buffered write-ahead log (DWAL)** that decouples write latency from COW cost -- writes land in a lock-free in-memory ART buffer, background merge drains to the COW trie in batch
+3. **A relocatable object allocator with lock-free O(1) compaction moves**
+4. **A self-tuning physical data layout that sorts objects by access frequency**
 
 ---
 

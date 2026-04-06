@@ -1,6 +1,8 @@
 # Recovery
 
-PsiTri has no write-ahead log. Recovery is built into the data layout itself.
+PsiTri's core COW engine has no write-ahead log -- recovery is built into the data layout itself. When using the [DWAL layer](../architecture/dwal.md) (the recommended write path), an additional WAL-based recovery step replays any committed transactions that hadn't yet been merged into the COW trie. See the [DWAL recovery section](../architecture/dwal.md#recovery) for details on WAL replay.
+
+This page covers the **base-layer recovery** of the COW trie and segment allocator, which applies regardless of whether DWAL is used.
 
 ## Why Control Blocks Can't Survive a Crash
 

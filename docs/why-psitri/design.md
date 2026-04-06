@@ -54,7 +54,56 @@ Leaf nodes store sorted keys with hash-accelerated lookup, holding ~58 keys each
 
 ---
 
-## 2. The Segment Allocator: Relocatable Persistent Memory
+## 2. ART-Buffered DWAL: Decoupling Write Latency from COW Cost
+
+### The Problem
+
+Node-level COW reduces write amplification by ~9x compared to page-level COW, but each mutation still clones ~5 nodes along the root path (~2 KB). At 1M+ writes/sec, this COW cost dominates. Every write-optimized database faces this tension: how do you buffer writes for throughput without sacrificing read consistency or crash safety?
+
+- **LSM trees** (RocksDB) buffer in a memtable, then flush to sorted files. But background compaction creates unpredictable stalls that worsen as the dataset grows -- the compaction tax is proportional to the total data size.
+- **Page-level COW** (MDBX, LMDB) has no write buffer at all. Every commit copies entire 4KB pages, limiting throughput to ~300K ops/sec on random workloads.
+
+### PsiTri's Solution: The DWAL
+
+The [DWAL (Dynamic Write-Ahead Log)](../architecture/dwal.md) interposes an **in-memory ART (adaptive radix trie) buffer** between the application and the COW trie:
+
+```
+Application writes
+    |
+    v
+ART buffer (writer-private, zero locks, ~100-200 ns/op)
+    |  swap when full (100K entries)
+    v
+Frozen ART snapshot (immutable, readers can access)
+    |  background merge thread
+    v
+PsiTri COW trie (persistent, crash-safe)
+```
+
+**Why this is fast:**
+
+| Property | DWAL | RocksDB Memtable | MDBX |
+|----------|------|-------------------|------|
+| Write buffer | ART (O(k) insert, arena-allocated) | Skip list (O(log n), malloc per entry) | None |
+| Commit cost | Buffered WAL append (~100 ns) | WAL write + group commit (~1-10 us) | 4KB page copies per level |
+| Background cost | O(n log d) merge into COW trie | O(n) compaction per SST level | N/A |
+| Scaling behavior | Merge cost grows logarithmically | Compaction cost grows with total data | Page copy cost grows with tree depth |
+| Write contention | Zero (writer-private buffer) | Group commit mutex | Global write lock |
+
+The ART buffer absorbs burst writes with no I/O and no locks. The background merge thread amortizes COW cost by batching 100K mutations into a single trie transaction. Because the merge target is a trie with O(log n) depth (not a leveled file hierarchy), merge cost scales logarithmically -- this is why PsiTri's advantage over RocksDB **widens** from 1.37x to 2.33x as the dataset grows from 30M to 200M keys.
+
+### Arena-Based Memory Management
+
+Both the ART map and its value pool use bump allocators:
+
+- **ART arena**: 32-bit offset addressing, keys stored alongside trie nodes for spatial locality
+- **PMR pool**: value payloads copied into a `monotonic_buffer_resource`
+
+No per-entry `malloc` or `free`. The entire buffer is freed as a unit when the merge completes. This eliminates heap fragmentation and makes deallocation O(1) regardless of buffer size.
+
+---
+
+## 3. The Segment Allocator: Relocatable Persistent Memory
 
 ### The Problem with Persistent Allocation
 
@@ -102,7 +151,7 @@ One atomic instruction. No pointer updates anywhere in the tree. No tracing. No 
 
 ---
 
-## 3. Self-Organizing Physical Layout: Bitcoin-Inspired Cache Management
+## 4. Self-Organizing Physical Layout: Bitcoin-Inspired Cache Management
 
 ### The Insight
 
@@ -156,7 +205,7 @@ No other database physically relocates individual objects between RAM-guaranteed
 
 ---
 
-## 4. O(log n) Range Operations
+## 5. O(log n) Range Operations
 
 Every inner node maintains a `_descendents` field: the total number of keys in its entire subtree (39-bit counter, up to ~550 billion keys).
 
@@ -176,7 +225,7 @@ Every inner node maintains a `_descendents` field: the total number of keys in i
 
 ---
 
-## 5. Composable Trees: Subtrees as First-Class Values
+## 6. Composable Trees: Subtrees as First-Class Values
 
 PsiTri allows any key's value to be **a pointer to another tree root**. This creates composable, hierarchical data structures:
 
@@ -198,14 +247,80 @@ Root tree
 | Subtree snapshot             | Full table copy       | Full document copy      | Not possible         | O(1) ref count increment         |
 | Subtree deletion             | O(n) row deletes      | Replace document        | O(n) key deletes     | O(1) release + deferred cascade  |
 
+### Subtrees Enable Unlimited Parallel Writers
+
+The 512 top-level roots provide independent DWAL-buffered write paths, but
+subtrees are not limited to those roots. Any key in any tree can hold **a
+pointer to an entire tree** as its value, and that subtree can itself contain
+subtrees -- recursively, without limit. The 512 roots are just the top-level
+entry points; the number of independent trees in the database is unbounded.
+
+This means you can build a tree of trees:
+
+```
+Root 0 (state):
+  "accounts" → [subtree] ──→ Account tree (millions of keys)
+  "orders"   → [subtree] ──→ Order tree
+  "indexes"  → [subtree] ──→ Index tree
+      "by_email" → [subtree] ──→ Email index (subtree within subtree)
+      "by_date"  → [subtree] ──→ Date index
+```
+
+Each subtree is a full PsiTri tree with its own root pointer. Because PsiTri
+uses COW, subtrees share structure with their parent -- storing a subtree as a
+value costs O(1) (one pointer), not O(n) (copying the data). Snapshotting a
+subtree is also O(1): increment the root's reference count.
+
+**Parallel construction:** Different threads can build independent subtrees
+concurrently, each using its own write session. Since the trees are
+independent until composed, there is zero contention between builders:
+
+```
+Thread A: builds account_tree (1M keys)     ← independent write session
+Thread B: builds order_tree (500K keys)      ← independent write session
+Thread C: builds index_tree (2M keys)        ← independent write session
+
+Coordinator: atomically attaches all three to Root 0 via upsert:
+  tx.upsert("accounts", account_tree_root);  ← O(1) pointer swap
+  tx.upsert("orders", order_tree_root);      ← O(1) pointer swap
+  tx.upsert("indexes", index_tree_root);     ← O(1) pointer swap
+  tx.commit();                               ← atomic, all-or-nothing
+```
+
+The coordinator's commit touches only the root-level keys (3 pointer swaps),
+not the millions of keys in the subtrees. The subtrees were already built and
+persisted by their respective threads.
+
+**Implications for blockchain and ledger workloads:**
+
+- **Parallel block building**: Shard state across subtrees. Different
+  transaction groups write to different subtrees concurrently, then compose
+  the final block state via pointer swaps. The number of parallel writers
+  scales with the number of subtrees, not the 512 root limit.
+- **Instant state snapshots**: Snapshot any subtree in O(1) for serving
+  queries while the next block is being built. The snapshot shares structure
+  with the live tree -- no copying, no blocking.
+- **Historical state access**: Keep old subtree root pointers alive (O(1) ref
+  count increment) to serve queries against any historical block state.
+  Multiple versions of the same subtree coexist, sharing common structure.
+- **Atomic state transitions**: Commit a new block by swapping a single root
+  pointer. Rollback by discarding the uncommitted tree (COW -- the old state
+  is untouched).
+- **Hierarchical indexing**: Store indexes as subtrees alongside the data they
+  index. Update both atomically. Query an index without touching the main
+  data tree.
+
+No other embedded database supports this combination of unlimited composable
+trees, parallel writers, instant snapshots, and atomic root swaps.
+
 ---
 
-## 6. Crash Recovery Without a Write-Ahead Log
+## 7. Crash Recovery
 
-PsiTri's core engine has no WAL. The optional DWAL wrapper adds an adaptive
-write buffer with WAL durability for higher throughput (see
-[DWAL architecture](../architecture/dwal.md)), but the base recovery model
-is built into the data layout:
+PsiTri's [DWAL layer](../architecture/dwal.md) provides WAL-based durability with
+an ART-buffered write path for high throughput. The base COW engine also supports
+WAL-free recovery built into the data layout -- segments themselves serve as the
+recovery log:
 
 - **Append-only writes** guarantee committed data is never overwritten
 - **Hardware write protection** (when enabled): Committed data can be marked read-only via `mprotect(PROT_READ)` -- stray writes cause an immediate SIGSEGV, not silent corruption. This is configurable via sync mode; the default (`sync_type::none`) does not call mprotect.

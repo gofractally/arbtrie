@@ -60,10 +60,7 @@ xychart-beta
 
 Each transfer performs 5 key-value operations (2 reads + 2 updates + 1 insert), so the effective KV ops/sec is 5x the transfer rate.
 
-PsiTri uses **memory-mapped copy-on-write nodes** with an arena allocator. A transfer
-touches a small number of nodes already in the page cache. There is no write-ahead log,
-no compaction stalls, and no memtable flush -- writes go directly to the memory-mapped
-data structure.
+PsiTri's [DWAL layer](../architecture/dwal.md) absorbs burst writes in an in-memory ART (adaptive radix trie) buffer, then drains them to the COW trie via background merge threads. This decouples write latency from COW cost -- the writer thread never blocks on trie mutations. There are no compaction stalls and no memtable flushes; the ART buffer provides sub-microsecond commit latency while the merge pipeline sustains throughput.
 
 ### Bulk Load
 
@@ -460,9 +457,9 @@ batches amortize commit overhead and improve throughput, but at the cost of read
 latency: a concurrent reader cannot see any transfer in the batch until the whole batch
 commits.
 
-> **Note:** In PsiTri, uncommitted writes are invisible to readers but are **not at risk** —
-> committing is a single atomic root-pointer advance. There is no WAL replay needed on crash
-> recovery for in-flight batches. In RocksDB, large batches mirror the memtable (up to ~64 MB
+> **Note:** In PsiTri, uncommitted writes are buffered in the DWAL's in-memory ART map and
+> backed by a WAL file for durability. Committing appends to the WAL buffer with no I/O;
+> the background merge thread drains committed data to the COW trie asynchronously. In RocksDB, large batches mirror the memtable (up to ~64 MB
 > for a 1M-transfer batch). TidesDB has a hard limit of **100K ops per transaction**; at 5 ops
 > per transfer that allows at most ~20K transfers per commit, so it is only valid at batch=100
 > and is excluded from the scaling charts.
@@ -601,7 +598,7 @@ PsiTri's file size is not meaningfully affected by batch size because its COW op
 
 ## Results: AMD EPYC-Turin — Five Engines × Four Batch Sizes (April 2026)
 
-This run adds the new **DWAL** (Durable Write-Ahead Log) engine and sweeps four batch sizes
+This run adds PsiTri's **DWAL mode** (buffered writes via ART + WAL) alongside direct mode and sweeps four batch sizes
 on the same Vultr cloud VM used in the prior AMD section above. Workload parameters differ
 from the prior run (100K accounts, 2M transactions, no sync) so absolute numbers are not
 directly comparable to the single-batch results above; use these charts to compare engines
@@ -643,20 +640,18 @@ xychart-beta
     line [525868, 482735, 341122, 344629]
 ```
 
-*Series: PsiTri (blue) · DWAL (green) · PsiTriRocks (purple) · RocksDB (amber) · TidesDB (red)*
+*Series: PsiTri direct (blue) · PsiTri DWAL (green) · PsiTriRocks (purple) · RocksDB (amber) · TidesDB (red)*
 
 | Engine | batch=1 | batch=1K | batch=100K | batch=1M | Peak |
 |--------|--------:|---------:|-----------:|---------:|-----:|
 | **PsiTri** | 101,190 | 416,986 | 1,012,173 | **1,064,827** | 1.06M |
-| **DWAL** | **783,944** | **993,090** | 775,373 | 820,138 | 993K |
+| **PsiTri (DWAL)** | **783,944** | **993,090** | 775,373 | 820,138 | 993K |
 | PsiTriRocks | 727,044 | 803,153 | 624,526 | 856,796 | 857K |
 | TidesDB | 525,868 | 482,735 | 341,122 | 344,629 | 526K |
 | RocksDB | 251,842 | 301,194 | 292,238 | 461,033 | 461K |
 
-PsiTri peaks at **1.06M tx/sec** at large batches — the root-pointer CAS cost is fully amortized.
-DWAL dominates at small batches (batch=1: **7.7× faster than PsiTri**), reflecting its WAL-based
-design that serialises commits without the COW node-chain overhead. Both converge near 820–1,065K
-at batch=1M.
+PsiTri in direct mode peaks at **1.06M tx/sec** at large batches -- the COW cost is fully amortized across the batch.
+PsiTri in DWAL mode dominates at small batches (batch=1: **7.7x faster** than direct mode), because the ART buffer absorbs per-commit COW overhead. Both modes converge near 820-1,065K at batch=1M, where batching already amortizes COW cost.
 
 ### Write+Read Throughput vs Batch Size
 
@@ -673,12 +668,12 @@ xychart-beta
     line [491786, 481292, 333894, 219403]
 ```
 
-*Series: PsiTri (blue) · DWAL (green) · PsiTriRocks (purple) · RocksDB (amber) · TidesDB (red)*
+*Series: PsiTri direct (blue) · PsiTri DWAL (green) · PsiTriRocks (purple) · RocksDB (amber) · TidesDB (red)*
 
 | Engine | batch=1 | batch=1K | batch=100K | batch=1M | Write impact at 1M |
 |--------|--------:|---------:|-----------:|---------:|-------------------:|
 | **PsiTri** | 114,569 | 343,664 | 1,051,946 | **1,074,253** | **+0.9%** |
-| **DWAL** | 733,942 | 863,056 | 698,728 | 826,451 | +0.8% |
+| **PsiTri (DWAL)** | 733,942 | 863,056 | 698,728 | 826,451 | +0.8% |
 | PsiTriRocks | 560,835 | 712,217 | 562,915 | 902,071 | +5.3% |
 | RocksDB | 280,863 | 231,596 | 266,907 | 467,095 | +1.3% |
 | TidesDB† | 491,786 | 481,292 | 333,894 | 219,403 | −36.3% |
@@ -702,19 +697,19 @@ xychart-beta
     line [1561115, 1633270, 1379504, 937190]
 ```
 
-*Series: PsiTri (blue) · DWAL (green) · PsiTriRocks (purple) · RocksDB (amber) · TidesDB (red)*
+*Series: PsiTri direct (blue) · PsiTri DWAL (green) · PsiTriRocks (purple) · RocksDB (amber) · TidesDB (red)*
 
 | Engine | batch=1 | batch=1K | batch=100K | batch=1M |
 |--------|--------:|---------:|-----------:|---------:|
 | PsiTriRocks | 4,334,633 | 4,127,036 | 4,316,397 | **4,878,738** |
 | **PsiTri** | 2,618,658 | 1,611,067 | **4,691,063** | **4,850,451** |
-| **DWAL** | **4,100,122** | **3,935,602** | **4,218,272** | 4,840,387 |
+| **PsiTri (DWAL)** | **4,100,122** | **3,935,602** | **4,218,272** | 4,840,387 |
 | TidesDB | 1,561,115 | 1,633,270 | 1,379,504 | 937,190 |
 | RocksDB | 928,308 | 778,775 | 639,254 | 409,677 |
 
 All three psitri-family engines deliver **4–4.9M reads/sec** at large batches. PsiTri reader
 throughput scales steeply with batch size (2.6M→4.9M) — the writer holds the current root longer
-at larger batches, giving readers more time on a stable, hot snapshot. DWAL reader throughput is
+at larger batches, giving readers more time on a stable, hot snapshot. PsiTri DWAL reader throughput is
 broadly flat (~4M) across batch sizes. RocksDB reader throughput *falls* with batch size, likely
 as write amplification from larger memtables crowds out read I/O.
 
@@ -723,7 +718,7 @@ as write amplification from larger memtables crowds out read I/O.
 | Engine | batch=1 | batch=1K | batch=100K | batch=1M |
 |--------|:-------:|:--------:|:----------:|:--------:|
 | PsiTri | PASS | PASS | PASS | PASS |
-| DWAL | PASS | PASS | PASS | PASS |
+| PsiTri (DWAL) | PASS | PASS | PASS | PASS |
 | PsiTriRocks | PASS | PASS | PASS | PASS |
 | RocksDB | PASS | PASS | PASS | PASS |
 | TidesDB | PASS | **FAIL** | **FAIL** | **FAIL** |
@@ -829,4 +824,4 @@ done
 - **OS**: Ubuntu Linux 6.17.0-14-generic x86_64, 4 KB page size
 - **Compiler**: Clang 20 (LLVM), C++20, `-O3 -flto -march=native`
 - **Engine versions**: RocksDB (built from source), TidesDB (built from source)
-- **April 2026 run**: 5 engines + DWAL; 100K accounts, 2M tx, batch sizes 1/1K/100K/1M, sync=none
+- **April 2026 run**: 5 engines + PsiTri DWAL mode; 100K accounts, 2M tx, batch sizes 1/1K/100K/1M, sync=none

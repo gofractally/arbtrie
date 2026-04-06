@@ -1,10 +1,124 @@
-# DWAL: Dynamic Write-Ahead Log
+# DWAL: Buffered Write Mode
 
-`dwal_database` is an opt-in wrapper around `database` that adds an adaptive
-write buffer with WAL durability. Under low write pressure it passes through
-directly to the COW tree. Under high write pressure it batches writes in an
-in-memory ART (adaptive radix trie) map backed by a WAL file, then drains to
-the COW tree when pressure drops.
+PsiTri offers two write modes: **direct** (COW mutations applied immediately)
+and **DWAL** (writes buffered in an in-memory ART trie, drained to COW in
+background batches). DWAL is the recommended mode for most workloads and is
+used by all the drop-in compatibility layers (RocksDB, MDBX, SQLite, DuckDB).
+
+## When to Use Each Mode
+
+| | Direct | DWAL |
+|---|---|---|
+| **Best for** | Large batch transactions, bulk loads, migrations | Many small commits, high-frequency writes |
+| **Commit cost** | O(mutations) COW node clones | O(1) ART insert + WAL append (~100-200 ns) |
+| **Read freshness** | Immediate -- committed data is in the trie | Up to one merge cycle behind (configurable) |
+| **Durability** | Configurable via sync_type | WAL-backed; periodic fsync for durability |
+| **Throughput ceiling** | Limited by COW clone cost per mutation | Limited by merge thread throughput |
+| **Use case** | `write_cursor` for large transactions that touch many keys in one batch | `dwal_database` for OLTP, blockchain state, frequent small transactions |
+
+**Direct mode** is ideal when you're already batching thousands of mutations
+into a single transaction. The COW cost is amortized across the batch, and
+you get immediate read visibility with no merge lag. Bulk loads, migrations,
+and large analytical writes should use direct mode.
+
+**DWAL mode** is ideal when your workload consists of many small commits
+(1-1000 mutations each). The ART buffer absorbs bursts with sub-microsecond
+commits, and the background merge thread amortizes COW cost across thousands
+of mutations. This is the mode that delivers 1M+ ops/sec on the bank
+benchmark and 46x faster SQLite TATP results.
+
+Both modes are part of the same database -- you can use direct mode for bulk
+operations and switch to DWAL for steady-state traffic. The `transaction_mode`
+enum selects between them:
+
+```cpp
+// DWAL mode (default) -- buffered, fast commits
+auto tx = dwal_db.start_write_transaction(root_index);
+tx.upsert(key, value);
+tx.commit();  // ~100 ns, buffered
+
+// Direct mode -- large batch, immediate COW
+auto tx = dwal_db.start_write_transaction(root_index, transaction_mode::direct);
+// Flushes DWAL buffer first, then writes directly to COW trie
+for (auto& [k, v] : bulk_data)
+    tx.upsert(k, v);
+tx.commit();  // COW commit, immediate visibility
+```
+
+## Why DWAL Mode Is Fast
+
+PsiTri's COW trie is persistent, crash-safe, and supports instant snapshots --
+but every mutation clones nodes along the root path (~2 KB per write). At high
+write rates, this COW cost becomes the bottleneck. The DWAL solves this by
+**decoupling write latency from COW cost**:
+
+1. **The writer never touches the COW trie.** Writes go to a writer-private
+   ART map -- a lock-free, in-memory radix trie with a bump-allocated arena.
+   Commit is a buffered append to the WAL file. No I/O, no locks, no COW
+   cloning on the hot path. A single upsert costs ~100-200 ns.
+
+2. **Background merge amortizes COW cost.** When the ART buffer fills
+   (configurable, default 100K entries), the writer swaps it to a frozen
+   read-only slot and allocates a fresh buffer. A background merge thread
+   drains the frozen buffer into the COW trie in a single batch transaction.
+   Batching amortizes per-key COW overhead: instead of cloning the root path
+   for each of 100K keys, the merge walks the trie once and produces one new
+   root.
+
+3. **Readers never block writers.** The ART buffer is writer-private --
+   external readers never touch it. Readers see committed data through the
+   frozen RO snapshot (one ART map behind) or the COW trie (one merge behind).
+   No shared mutex on the write path means zero contention under concurrent
+   read load.
+
+### Why the Gap with RocksDB Widens at Scale
+
+In the [random upsert benchmark](../benchmarks/random-upsert.md), PsiTri
+starts 1.37x faster than RocksDB and finishes **2.33x faster** after 200M keys.
+The reason is architectural:
+
+- **RocksDB's LSM tree** defers write cost into background compaction. As the
+  dataset grows, compaction must merge increasingly large SST files. Beyond
+  ~100M keys, compaction falls behind write throughput and creates sustained
+  stalls (85-400K ops/sec vs 1.1M ops/sec steady-state).
+
+- **PsiTri's DWAL** defers write cost into background merge, but the merge
+  target is a COW trie with O(log n) depth, not a leveled file hierarchy.
+  Merge cost grows logarithmically with dataset size, not linearly. The ART
+  buffer absorbs burst writes during merge stalls, so the writer thread
+  maintains consistent throughput even as the trie grows.
+
+- **MDBX's page-level COW** has no write buffer at all. Every commit copies
+  4KB pages at every level of the B-tree, causing 10x space amplification on
+  random workloads. MDBX hit MAP_FULL after only 20M keys in the benchmark.
+
+### The ART Buffer: Why Not a std::map or Skip List?
+
+The write buffer is an [adaptive radix trie](https://db.in.tum.de/~leis/papers/ART.pdf)
+(`art::art_map`), not a `std::map` or skip list. This matters for three reasons:
+
+1. **Cache efficiency.** ART nodes are 4-256 bytes depending on fan-out,
+   compared to 40+ bytes per node in a red-black tree. The ART's
+   path-compressed keys eliminate redundant comparisons. Lookups visit
+   fewer cache lines.
+
+2. **Arena allocation.** Keys and trie nodes live in a bump-allocated arena
+   with 32-bit offset addressing. No per-entry `malloc`/`free`. The entire
+   buffer is freed as a unit when the layer is discarded after merge --
+   zero fragmentation, zero deallocation cost.
+
+3. **Sorted iteration for merge.** The merge thread iterates the ART in
+   sorted order to drain into the COW trie. ART provides sorted iteration
+   natively (it's a trie -- keys emerge in lexicographic order). No sort
+   step, no intermediate data structure.
+
+| Buffer | Insert | Sorted Iter | Memory | Dealloc |
+|--------|--------|-------------|--------|---------|
+| `std::map` | O(log n), ~40 B/node, malloc per entry | O(n) | Fragmented heap | Per-node free |
+| Skip list | O(log n), ~40 B/node, malloc per entry | O(n) | Fragmented heap | Per-node free |
+| **ART** | **O(k), 4-256 B/node, arena bump** | **O(n)** | **Contiguous arena** | **Free entire arena** |
+
+Where k = key length. ART insert is O(key length), not O(log n).
 
 ## Three-Layer Architecture
 

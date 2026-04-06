@@ -86,7 +86,7 @@ These RocksDB features have no PsiTri equivalent and are silently ignored:
 - **Statistics / perf context** — `CreateDBStatistics()` returns nullptr.
 - **Compaction tuning** — Options like `level0_file_num_compaction_trigger`, `max_bytes_for_level_base`, etc. are accepted but ignored. PsiTri's compactor is self-tuning.
 - **Compression** — PsiTri does not compress data. Compression options are accepted but ignored.
-- **Write-ahead log** — PsiTri has no WAL. `WriteOptions::disableWAL` is always effectively true.
+- **Write-ahead log** — PsiTriRocks uses PsiTri's DWAL layer, which has its own WAL format. RocksDB's WAL options (`WriteOptions::disableWAL`, `WAL_ttl_seconds`, etc.) are accepted but ignored.
 - **Iterator::Refresh** — Returns `NotSupported`.
 
 ## PsiTri-Specific Properties
