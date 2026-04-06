@@ -2,6 +2,7 @@
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/btree_value.hpp>
 #include <psitri/dwal/dwal_root.hpp>
+#include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/undo_log.hpp>
 #include <psitri/dwal/wal_writer.hpp>
 
@@ -125,6 +126,20 @@ namespace psitri::dwal
       };
 
       lookup_result get(std::string_view key) const;
+
+      // ── Cursor ─────────────────────────────────────────────────────
+
+      /// Create a merge cursor that sees the transaction's uncommitted writes.
+      ///
+      /// The returned cursor merges the live RW layer (including uncommitted
+      /// mutations from this transaction), the frozen RO snapshot, and the
+      /// PsiTri COW trie.  This is the DWAL equivalent of the native
+      /// transaction::read_cursor().
+      ///
+      /// The cursor is only valid on the writer thread (same thread that
+      /// owns this transaction).  Invalidated by subsequent mutations --
+      /// recreate after upsert/remove if you need an updated view.
+      owned_merge_cursor create_cursor() const;
 
       // ── Transaction Control ────────────────────────────────────────
 

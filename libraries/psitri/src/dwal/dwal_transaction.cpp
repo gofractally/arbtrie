@@ -205,6 +205,30 @@ namespace psitri::dwal
       return {false, {}};
    }
 
+   // ── Cursor ────────────────────────────────────────────────────────
+
+   owned_merge_cursor dwal_transaction::create_cursor() const
+   {
+      assert(_root && !_committed && !_aborted);
+
+      // RW: use the live layer directly (same thread owns it, no lock needed)
+      std::shared_ptr<btree_layer> rw = _root->rw_layer;
+
+      // RO: snapshot under buffered_mutex (brief)
+      std::shared_ptr<btree_layer> ro;
+      {
+         std::shared_lock lk(_root->buffered_mutex);
+         ro = _root->buffered_ptr;
+      }
+
+      // Tri: create a cursor via dwal_database's thread-local read session
+      std::optional<psitri::cursor> tri;
+      if (_db)
+         tri.emplace(_db->create_tri_cursor(_root_index));
+
+      return owned_merge_cursor(std::move(rw), std::move(ro), std::move(tri));
+   }
+
    dwal_transaction::lookup_result dwal_transaction::ro_get(std::string_view key) const
    {
       std::shared_ptr<btree_layer> ro;

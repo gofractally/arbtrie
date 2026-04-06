@@ -555,13 +555,14 @@ int sqlite3BtreeCreateTable(Btree* p, Pgno* piTable, int flags) {
    *piTable = psitri->next_root++;
 
    try {
-      auto& tx = psitri->get_tx(0);
+      auto tx = psitri->dwal_db->start_write_transaction(0);
       std::string nr(4, '\0');
       std::memcpy(nr.data(), &psitri->next_root, 4);
       tx.upsert("next_root", nr);
       std::string key = "tflags_" + std::to_string(*piTable);
       char f = (char)flags;
       tx.upsert(key, std::string_view(&f, 1));
+      tx.commit();
    } catch (...) {}
 
    return SQLITE_OK;
@@ -587,8 +588,9 @@ int sqlite3BtreeClearTable(Btree* p, int iTable, i64* pnChange) {
          count++;
       }
       if (!keys.empty()) {
-         auto& tx = psitri->get_tx((uint32_t)iTable);
+         auto tx = psitri->dwal_db->start_write_transaction((uint32_t)iTable);
          for (auto& k : keys) tx.remove(k);
+         tx.commit();
       }
       if (pnChange) *pnChange = count;
    } catch (...) {
@@ -732,10 +734,21 @@ int sqlite3BtreeCursorHasHint(BtCursor* pCur, unsigned mask) {
 
 static void ensure_cursor(BtCursor* pCur) {
    if (!pCur->cursor) {
-      PTRACE("  ensure_cursor: creating for root=%u\n", pCur->pgnoRoot);
+      PTRACE("  ensure_cursor: creating for root=%u wrFlag=%d\n",
+             pCur->pgnoRoot, pCur->wrFlag);
       try {
-         pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-            pCur->pgnoRoot, psitri::dwal::read_mode::latest));
+         // If there's an open write transaction on this root, use its cursor
+         // so we see uncommitted writes within the same SQLite transaction.
+         auto it = pCur->psitri_db->open_tx.find(pCur->pgnoRoot);
+         if (it != pCur->psitri_db->open_tx.end()) {
+            pCur->cursor.emplace(it->second.create_cursor());
+         } else {
+            // No open transaction -- use database-level cursor with latest
+            // mode so we see all committed data including recent writes
+            // that haven't been merged to the RO layer yet.
+            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+               pCur->pgnoRoot, psitri::dwal::read_mode::latest));
+         }
          PTRACE("  ensure_cursor: created, calling seek_begin\n");
          pCur->cursor->cursor().seek_begin();
          PTRACE("  ensure_cursor: done, is_end=%d\n",
@@ -1058,6 +1071,11 @@ int sqlite3BtreeCount(sqlite3*, BtCursor* pCur, i64* pnEntry) {
 i64 sqlite3BtreeRowCountEst(BtCursor* pCur) {
    if (!pCur->psitri_db || !pCur->psitri_db->dwal_db) return 1000;
    try {
+      auto it = pCur->psitri_db->open_tx.find(pCur->pgnoRoot);
+      if (it != pCur->psitri_db->open_tx.end()) {
+         auto cursor = it->second.create_cursor();
+         return (i64)cursor.cursor().count_keys();
+      }
       auto cursor = pCur->psitri_db->dwal_db->create_cursor(
          pCur->pgnoRoot, psitri::dwal::read_mode::latest);
       return (i64)cursor.cursor().count_keys();

@@ -172,6 +172,11 @@ namespace psitri::dwal
       /// Thread-safe: uses a thread-local read session internally.
       dwal_transaction::lookup_result tri_get(uint32_t root_index, std::string_view key);
 
+      /// Create a PsiTri cursor for the tri layer only.
+      /// Used by dwal_transaction::create_cursor() to compose the merge cursor.
+      /// Thread-safe: uses a thread-local read session internally.
+      psitri::cursor create_tri_cursor(uint32_t root_index);
+
       /// Clear thread-local caches (read sessions, cursors) for the calling thread.
       /// Must be called on each thread that used tri_get() or create_cursor()
       /// before the database is destroyed, to avoid dangling shared_ptr references.

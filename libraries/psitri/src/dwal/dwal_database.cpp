@@ -699,6 +699,17 @@ namespace psitri::dwal
       return owned_merge_cursor(std::move(rw), std::move(ro), std::move(tri_cursor));
    }
 
+   psitri::cursor dwal_database::create_tri_cursor(uint32_t root_index)
+   {
+      auto& tlc = s_tl_cache;
+      if (tlc.cursor_db != _db.get())
+      {
+         tlc.cursor_session = _db->start_read_session();
+         tlc.cursor_db      = _db.get();
+      }
+      return tlc.cursor_session->create_cursor(root_index);
+   }
+
    dwal_transaction::lookup_result dwal_database::tri_get(uint32_t         root_index,
                                                          std::string_view key)
    {
