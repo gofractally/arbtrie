@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <new>
+#include <stdexcept>
 #include <utility>
 
 namespace art
@@ -71,11 +73,14 @@ namespace art
 
       /// Allocate `size` bytes, cacheline-rounded and cacheline-aligned.
       /// Returns a byte offset.
-      offset_t allocate(uint32_t size) noexcept
+      /// @throws std::length_error if the arena would exceed its uint32_t address space.
+      offset_t allocate(uint32_t size)
       {
          uint32_t rounded = (size + cacheline_size - 1) & ~(cacheline_size - 1);
          uint32_t off     = _cursor;
          uint32_t end     = off + rounded;
+         if (end < off) [[unlikely]]
+            throw std::length_error("ART arena: cursor + size wraps uint32_t");
          if (end > _capacity) [[unlikely]]
             grow(end);
          _cursor = end;
@@ -108,14 +113,20 @@ namespace art
       uint32_t _cursor;
       uint32_t _capacity;
 
-      void grow(uint32_t needed) noexcept
+      /// @throws std::length_error if the arena would exceed uint32_t max.
+      void grow(uint32_t needed)
       {
-         uint32_t new_cap = _capacity;
+         uint64_t new_cap = _capacity;
+         if (new_cap == 0)
+            new_cap = 1u << 20;
          while (new_cap < needed)
             new_cap *= 2;
-         _base = static_cast<char*>(std::realloc(_base, new_cap));
-         assert(_base);
-         _capacity = new_cap;
+         if (new_cap > UINT32_MAX)
+            throw std::length_error("ART arena: capacity would exceed 4 GB");
+         _capacity = static_cast<uint32_t>(new_cap);
+         _base     = static_cast<char*>(std::realloc(_base, _capacity));
+         if (!_base)
+            throw std::bad_alloc();
       }
    };
 

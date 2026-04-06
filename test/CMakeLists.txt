@@ -10,7 +10,10 @@ set_target_properties(sim-db-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_B
 add_test(NAME sim-db-test COMMAND sim-db-test)
 
 # psitri tests
+# Uses a custom main (test_main.cpp) instead of Catch2WithMain so we can enforce
+# that the binary is always invoked via run_tests.sh (which sets PSITRI_FROM_RUN_TESTS=1).
 add_executable(psitri-tests
+    test_main.cpp
     ../libraries/psitri/tests/leaf_node_test.cpp
     ../libraries/psitri/tests/inner_node_tests.cpp
     ../libraries/psitri/tests/inner_node_util_tests.cpp
@@ -40,7 +43,7 @@ add_executable(psitri-tests
 target_link_libraries(psitri-tests
     PRIVATE
         psitri # psitri library depends on sal
-        Catch2::Catch2WithMain
+        Catch2::Catch2  # custom main in test_main.cpp; do NOT use Catch2WithMain
 )
 target_include_directories(psitri-tests
     PUBLIC

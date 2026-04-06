@@ -4,6 +4,7 @@
 #include <sal/config.hpp>
 #include <sal/control_block.hpp>
 #include <sal/control_block_alloc.hpp>
+#include <sal/debug.hpp>
 #include <sal/location.hpp>
 #include <sal/mapped_memory/read_lock_queue.hpp>
 #include <sal/mapped_memory/segment.hpp>
@@ -11,6 +12,7 @@
 #include <sal/numbers.hpp>
 #include <sal/time.hpp>
 #include "ucc/round.hpp"
+#include <thread>
 
 namespace sal
 {
@@ -281,6 +283,28 @@ namespace sal
       bool                                _alloc_to_pinned = true;
       // Reference to the session read lock from read_lock_queue
       mapped_memory::session_rlock& _session_rlock;
+
+      // Thread-ownership validation (enabled via SAL_THREAD_CHECKS or Debug builds).
+      // Returns true on success; on violation prints diagnostic and aborts.
+      // Usage: assert(check_thread_ownership()) — compiled out in Release
+      // unless SAL_THREAD_CHECKS is defined.
+#if !defined(NDEBUG) || defined(SAL_THREAD_CHECKS)
+      std::thread::id _owning_thread{std::this_thread::get_id()};
+
+      bool check_thread_ownership() const
+      {
+         if (_owning_thread != std::this_thread::get_id()) [[unlikely]]
+         {
+            fprintf(stderr,
+                    "\n!!! SESSION THREAD VIOLATION: session %u accessed from wrong thread\n",
+                    *_session_num);
+            return false;
+         }
+         return true;
+      }
+#else
+      bool check_thread_ownership() const noexcept { return true; }
+#endif
 
       void prepare_alloc(uint32_t size, msec_timestamp vage);
 

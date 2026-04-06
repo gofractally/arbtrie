@@ -36,6 +36,15 @@ namespace psitri::dwal
 
       /// Number of merge threads in the pool.
       uint32_t merge_threads = 2;
+
+      /// Maximum RW arena capacity before the writer blocks waiting for merge.
+      /// The ART arena is a bump allocator with uint32_t offsets (4 GB max)
+      /// that grows by doubling.  When capacity reaches this limit and the
+      /// merge thread hasn't finished, the writer yields until merge completes.
+      /// Default: 1 GB — the next doubling goes to 2 GB (safe), and the arena
+      /// would need to fill the full 2 GB before attempting a 4 GB growth.
+      /// Set to 0 to disable (not recommended).
+      uint64_t max_rw_arena_bytes = 1ULL * 1024 * 1024 * 1024;
    };
 
    /// DWAL database — wraps a PsiTri database with buffered write-ahead logging.
@@ -140,6 +149,9 @@ namespace psitri::dwal
 
       /// Check if a swap should be triggered for a root after a commit.
       bool should_swap(uint32_t root_index) const;
+
+      /// Check if the RW tree has exceeded the backpressure threshold.
+      bool should_backpressure(uint32_t root_index) const;
 
       /// Lazily initialize a root's DWAL state (public for transaction).
       dwal_root& ensure_root_public(uint32_t index) { return ensure_root(index); }

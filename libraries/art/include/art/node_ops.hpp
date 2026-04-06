@@ -426,7 +426,7 @@ namespace art
    {
       /// Try to collapse a single-child setlist into its child (path compression).
       /// Returns the replacement offset, or cur if no collapse needed.
-      inline offset_t try_collapse(arena& a, offset_t cur) noexcept
+      inline offset_t try_collapse(arena& a, offset_t cur)
       {
          auto* hdr = a.as<node_header>(cur);
          if (hdr->num_children != 1 || hdr->value_off != null_offset ||
@@ -453,7 +453,7 @@ namespace art
    }  // namespace detail
 
    template <typename Value>
-   bool erase(arena& a, offset_t& root, std::string_view key) noexcept
+   bool erase(arena& a, offset_t& root, std::string_view key)
    {
       if (root == null_offset)
          return false;

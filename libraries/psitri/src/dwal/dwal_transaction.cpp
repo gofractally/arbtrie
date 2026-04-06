@@ -3,7 +3,9 @@
 #include <psitri/dwal/dwal_database.hpp>
 
 #include <cassert>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -257,6 +259,18 @@ namespace psitri::dwal
          if (_db && _root->merge_complete.load(std::memory_order_acquire)
              && _db->should_swap(_root_index))
             _db->try_swap_rw_to_ro(_root_index);
+
+         // Adaptive throttle: if the merge thread set a non-zero sleep,
+         // apply it to smooth out write pressure so the merge can keep up.
+         // Only throttle when the arena is past the low-water mark (25% of
+         // capacity) to avoid penalizing small/fast transactions.
+         if (uint32_t sleep_ns = _root->throttle_sleep_ns.load(std::memory_order_relaxed))
+         {
+            uint32_t arena_cap = _root->rw_layer->map.arena_capacity();
+            // Low-water mark: don't throttle when arena is small
+            if (arena_cap >= (1u << 20) * 16)  // 16 MB
+               std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+         }
       }
       else
       {

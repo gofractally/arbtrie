@@ -1,9 +1,11 @@
 #include <art/art_map.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace art;
@@ -1354,4 +1356,199 @@ TEST_CASE("art_map const empty and begin/end", "[art_map]")
    const auto&       cm = m;
    REQUIRE(cm.empty());
    REQUIRE(cm.begin() == cm.end());
+}
+
+// ── Stress test matching DWAL benchmark pattern ─────────────────────────
+//
+// Reproduces the conditions that cause prefix corruption in the ART tree:
+// 8-byte random binary keys (hash of sequential counter), 100K+ insertions
+// per cycle, repeated many times.
+
+static uint64_t stress_hash(uint64_t x)
+{
+   // Simple but fast hash (splitmix64)
+   x ^= x >> 30;
+   x *= 0xbf58476d1ce4e5b9ULL;
+   x ^= x >> 27;
+   x *= 0x94d049bb133111ebULL;
+   x ^= x >> 31;
+   return x;
+}
+
+TEST_CASE("art_map stress: random 8-byte binary keys", "[art_map][stress]")
+{
+   constexpr uint32_t ITEMS_PER_CYCLE = 100'000;
+   constexpr uint32_t CYCLES          = 100;
+   constexpr uint32_t VERIFY_EVERY    = 10;
+
+   art_map<uint64_t> m;
+   uint64_t          seq = 0;
+
+   for (uint32_t cycle = 0; cycle < CYCLES; ++cycle)
+   {
+      for (uint32_t i = 0; i < ITEMS_PER_CYCLE; ++i)
+      {
+         uint64_t    h = stress_hash(seq);
+         std::string key(reinterpret_cast<const char*>(&h), sizeof(h));
+         m.upsert(key, seq);
+         ++seq;
+      }
+
+      // Verify a random sample of keys
+      if ((cycle % VERIFY_EVERY) == 0)
+      {
+         uint32_t checked = 0;
+         for (uint64_t s = 0; s < seq; s += seq / 1000 + 1)
+         {
+            uint64_t    h = stress_hash(s);
+            std::string key(reinterpret_cast<const char*>(&h), sizeof(h));
+            auto*       v = m.get(key);
+            // Key may have been overwritten by a later seq with the same hash
+            // but it must exist
+            REQUIRE(v != nullptr);
+            ++checked;
+         }
+         INFO("cycle " << cycle << ": verified " << checked << " keys, "
+                        << "size=" << m.size() << " arena=" << m.arena_bytes_used());
+      }
+   }
+
+   INFO("final: " << seq << " inserts, size=" << m.size()
+                   << " arena=" << m.arena_bytes_used());
+   REQUIRE(m.size() > 0);
+}
+
+TEST_CASE("art_map stress: many cycles with clear (simulates DWAL swap)", "[art_map][stress]")
+{
+   constexpr uint32_t ITEMS_PER_CYCLE = 100'000;
+   constexpr uint32_t CYCLES          = 200;
+
+   uint64_t seq = 0;
+
+   for (uint32_t cycle = 0; cycle < CYCLES; ++cycle)
+   {
+      art_map<uint64_t> m;  // fresh map each cycle (like DWAL swap)
+
+      for (uint32_t i = 0; i < ITEMS_PER_CYCLE; ++i)
+      {
+         uint64_t    h = stress_hash(seq);
+         std::string key(reinterpret_cast<const char*>(&h), sizeof(h));
+         m.upsert(key, seq);
+         ++seq;
+      }
+
+      // Verify all keys in this cycle exist
+      uint64_t cycle_start = seq - ITEMS_PER_CYCLE;
+      uint32_t found       = 0;
+      for (uint64_t s = cycle_start; s < seq; s += 100)
+      {
+         uint64_t    h = stress_hash(s);
+         std::string key(reinterpret_cast<const char*>(&h), sizeof(h));
+         auto*       v = m.get(key);
+         REQUIRE(v != nullptr);
+         ++found;
+      }
+   }
+
+   REQUIRE(seq == uint64_t(ITEMS_PER_CYCLE) * CYCLES);
+}
+
+TEST_CASE("art_map stress: concurrent writer + readers", "[art_map][stress][concurrent]")
+{
+   // Simulates DWAL: one writer thread inserting into the map while
+   // multiple reader threads call get(). The ART map is NOT thread-safe
+   // (arena realloc invalidates all pointers), so this test is expected
+   // to detect corruption if it exists.
+   constexpr uint32_t ITEMS           = 500'000;
+   constexpr uint32_t NUM_READERS     = 4;
+
+   art_map<uint64_t>     m;
+   std::atomic<uint64_t> committed_seq{0};
+   std::atomic<bool>     done{false};
+   std::atomic<uint64_t> read_ops{0};
+   std::atomic<uint64_t> found_count{0};
+
+   // Reader threads
+   std::vector<std::thread> readers;
+   for (uint32_t t = 0; t < NUM_READERS; ++t)
+   {
+      readers.emplace_back(
+          [&, t]()
+          {
+             uint64_t local_ops   = 0;
+             uint64_t local_found = 0;
+             uint64_t salt        = stress_hash(t * 999983ULL + 1);
+
+             while (!done.load(std::memory_order_relaxed))
+             {
+                uint64_t max_seq = committed_seq.load(std::memory_order_relaxed);
+                if (max_seq == 0)
+                   continue;
+
+                for (uint32_t i = 0; i < 100; ++i)
+                {
+                   uint64_t    s = stress_hash(local_ops + salt) % max_seq;
+                   uint64_t    h = stress_hash(s);
+                   std::string key(reinterpret_cast<const char*>(&h), sizeof(h));
+                   auto*       v = m.get(key);
+                   if (v)
+                      ++local_found;
+                   ++local_ops;
+                }
+             }
+             read_ops.fetch_add(local_ops, std::memory_order_relaxed);
+             found_count.fetch_add(local_found, std::memory_order_relaxed);
+          });
+   }
+
+   // Writer thread (main)
+   for (uint64_t i = 0; i < ITEMS; ++i)
+   {
+      uint64_t    h = stress_hash(i);
+      std::string key(reinterpret_cast<const char*>(&h), sizeof(h));
+      m.upsert(key, i);
+      committed_seq.store(i + 1, std::memory_order_relaxed);
+   }
+
+   done.store(true, std::memory_order_relaxed);
+   for (auto& t : readers)
+      t.join();
+
+   INFO("writer: " << ITEMS << " inserts, readers: " << read_ops.load() << " reads ("
+                    << found_count.load() << " found)");
+   REQUIRE(m.size() > 0);
+}
+
+TEST_CASE("art_map stress: large single tree with verification", "[art_map][stress]")
+{
+   // This is the most critical test — grows a single tree to 10M+ entries
+   // with random 8-byte keys, which is where the prefix corruption was observed.
+   constexpr uint64_t N = 10'000'000;
+
+   art_map<uint64_t> m;
+   for (uint64_t i = 0; i < N; ++i)
+   {
+      uint64_t    h = stress_hash(i);
+      std::string key(reinterpret_cast<const char*>(&h), sizeof(h));
+      m.upsert(key, i);
+
+      // Periodic integrity check
+      if (i > 0 && (i % 1'000'000) == 0)
+      {
+         // Verify 1000 random keys
+         for (uint64_t j = 0; j < 1000; ++j)
+         {
+            uint64_t    s  = stress_hash(j * 997 + i) % i;
+            uint64_t    hk = stress_hash(s);
+            std::string k(reinterpret_cast<const char*>(&hk), sizeof(hk));
+            auto*       v = m.get(k);
+            REQUIRE(v != nullptr);
+         }
+         INFO(i << " inserts, size=" << m.size() << " arena=" << m.arena_bytes_used());
+      }
+   }
+
+   REQUIRE(m.size() > 0);
+   INFO("final: " << N << " inserts, size=" << m.size()
+                   << " arena=" << m.arena_bytes_used());
 }

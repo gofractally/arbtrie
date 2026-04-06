@@ -52,7 +52,8 @@ namespace psitri::dwal
       recover();
 
       if (_cfg.merge_threads > 0)
-         _merge_pool = std::make_unique<merge_pool>(_db, _cfg.merge_threads, _epochs, _wal_dir);
+         _merge_pool = std::make_unique<merge_pool>(_db, _cfg.merge_threads, _epochs, _wal_dir,
+                                                    _cfg.max_rw_arena_bytes);
    }
 
    void dwal_database::recover()
@@ -423,6 +424,20 @@ namespace psitri::dwal
          throw std::runtime_error("dwal: direct transaction mode not yet implemented");
 
       auto& root = ensure_root(root_index);
+
+      // Backpressure: if the RW arena capacity is approaching the uint32_t
+      // offset limit, wait for the merge to finish so we can swap to a
+      // fresh tree.  We check capacity (not bytes_used) because the arena
+      // doubles on growth — once capacity reaches the limit, the next
+      // doubling would overflow uint32_t.
+      if (_cfg.max_rw_arena_bytes > 0 &&
+          root.rw_layer->map.arena_capacity() >= _cfg.max_rw_arena_bytes)
+      {
+         while (!root.merge_complete.load(std::memory_order_acquire))
+            std::this_thread::yield();
+         try_swap_rw_to_ro(root_index);
+      }
+
       ensure_wal(root_index);
 
       return dwal_transaction(root, root.wal.get(), root_index, this);
@@ -491,6 +506,14 @@ namespace psitri::dwal
       if (root.wal && root.wal->file_size() >= _cfg.max_wal_bytes)
          return true;
       return false;
+   }
+
+   bool dwal_database::should_backpressure(uint32_t root_index) const
+   {
+      if (_cfg.max_rw_arena_bytes == 0)
+         return false;
+      auto& root = *_roots[root_index];
+      return root.rw_layer->map.arena_capacity() >= _cfg.max_rw_arena_bytes;
    }
 
    void dwal_database::try_swap_rw_to_ro(uint32_t root_index)

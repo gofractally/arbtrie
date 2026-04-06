@@ -5,13 +5,18 @@
 #include <psitri/dwal/dwal_root.hpp>
 #include <psitri/write_session_impl.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 namespace psitri::dwal
 {
    merge_pool::merge_pool(std::shared_ptr<psitri::database> db,
                           uint32_t                           num_threads,
                           epoch_registry&                    epochs,
-                          std::filesystem::path              wal_dir)
-       : _db(std::move(db)), _epochs(epochs), _wal_dir(std::move(wal_dir))
+                          std::filesystem::path              wal_dir,
+                          uint64_t                           target_arena_bytes)
+       : _db(std::move(db)), _epochs(epochs), _wal_dir(std::move(wal_dir)),
+         _target_arena_bytes(target_arena_bytes)
    {
       // Sessions are created lazily on each worker thread (not here) because
       // allocator_sessions are thread-local — a session created on the main
@@ -94,11 +99,11 @@ namespace psitri::dwal
       // Drain all entries from the RO btree into PsiTri.
       for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
       {
-         auto key = it.key();
+         auto  key = it.key();
          auto& val = it.value();
          if (val.is_tombstone())
          {
-            tx.remove(key);
+            tx.remove(key_view(key.data(), key.size()));
          }
          else if (val.is_subtree())
          {
@@ -143,6 +148,38 @@ namespace psitri::dwal
          auto ro_wal = _wal_dir / ("root-" + std::to_string(root_index)) / "wal-ro.dwal";
          std::error_code ec;
          std::filesystem::remove(ro_wal, ec);
+      }
+
+      // ── Adaptive throttle adjustment ──────────────────────────────
+      // Record the current RW arena capacity so the writer can see how
+      // far the arena grew while this merge was running.  Then adjust
+      // the per-commit sleep to target the merge finishing before the
+      // arena reaches max_rw_arena_bytes.
+      {
+         uint32_t arena_cap = root.rw_layer ? root.rw_layer->map.arena_capacity() : 0;
+         root.arena_at_merge_complete.store(arena_cap, std::memory_order_relaxed);
+
+         uint32_t cur_sleep = root.throttle_sleep_ns.load(std::memory_order_relaxed);
+         uint64_t target    = _target_arena_bytes;
+
+         if (target > 0 && arena_cap > 0)
+         {
+            if (arena_cap > target)
+            {
+               // Merge was too slow — increase sleep.
+               // Scale proportionally: 2x over target → 2x sleep increase.
+               uint32_t new_sleep = cur_sleep < 100 ? 100 : cur_sleep;
+               double   ratio     = double(arena_cap) / double(target);
+               new_sleep = uint32_t(std::min(double(new_sleep) * ratio, 100000.0));
+               root.throttle_sleep_ns.store(new_sleep, std::memory_order_relaxed);
+            }
+            else
+            {
+               // Merge kept up — reduce sleep by 10%.
+               uint32_t new_sleep = uint32_t(cur_sleep * 0.9);
+               root.throttle_sleep_ns.store(new_sleep, std::memory_order_relaxed);
+            }
+         }
       }
 
       // Signal the writer that it can swap again.

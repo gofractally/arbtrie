@@ -165,6 +165,12 @@ namespace sal
 
       _mapped_state->_config = cfg;
 
+      // Reset all session read locks — no sessions are active at construction
+      // time.  Stale locks from a previous crash would otherwise block the
+      // segment provider from draining the recycled-segments queue, eventually
+      // causing a circular_buffer overflow in the compactor.
+      _mapped_state->_read_lock_queue.reset_all_session_locks();
+
       mlock_pinned_segments();
 
       provider_populate_pinned_segments();
@@ -648,6 +654,7 @@ namespace sal
       _mapped_state->_segment_provider._next_alloc_seq.store(max_provider_seq + 1,
                                                               std::memory_order_relaxed);
       _mapped_state->clean_exit_flag.store(false);
+      _mapped_state->_read_lock_queue.reset_all_session_locks();
 
       provider_populate_pinned_segments();
       provider_populate_unpinned_segments();
@@ -922,6 +929,7 @@ namespace sal
       _mapped_state->_segment_provider._next_alloc_seq.store(max_provider_seq + 1,
                                                               std::memory_order_relaxed);
       _mapped_state->clean_exit_flag.store(false);
+      _mapped_state->_read_lock_queue.reset_all_session_locks();
 
       provider_populate_pinned_segments();
       provider_populate_unpinned_segments();
@@ -1535,6 +1543,10 @@ namespace sal
       // Control block stats
       result.control_block_zones    = _ptr_alloc.num_allocated_zones();
       result.control_block_capacity = _ptr_alloc.current_max_address_count();
+
+      // Recycled-segments queue state
+      result.recycled_queue_depth    = _mapped_state->_read_lock_queue.recycled_queue_depth();
+      result.recycled_queue_capacity = _mapped_state->_read_lock_queue.recycled_queue_capacity();
 
       return result;
    }

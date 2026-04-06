@@ -18,6 +18,9 @@ PASSED_FILE="$STATE_DIR/passed.txt"
 TIMES_FILE="$STATE_DIR/times.txt"   # format: <seconds_float>\t<test_name>
 BIN="$PROJECT_DIR/build/release/bin"
 
+# Required by psitri-tests custom main — prevents accidental direct invocation.
+export PSITRI_FROM_RUN_TESTS=1
+
 # ── Safety guard ────────────────────────────────────────────────────────────
 _gc="git commi""t"; _gp="git pus""h"
 forbidden=$(grep -nE "($_gc|$_gp)" "$SCRIPT" 2>/dev/null \

@@ -143,6 +143,7 @@ namespace art
       }
 
       uint32_t arena_bytes_used() const noexcept { return _arena.bytes_used(); }
+      uint32_t arena_capacity() const noexcept { return _arena.capacity(); }
 
      private:
       arena     _arena;

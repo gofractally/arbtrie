@@ -4,15 +4,18 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block.hpp>
+#include <sal/debug.hpp>
 #include <sal/mapping.hpp>
 #include <sal/numbers.hpp>
 #include <sal/simd_utils.hpp>
 #include <span>
+#include <thread>
 #include <ucc/typed_int.hpp>
 namespace sal
 {
@@ -192,7 +195,9 @@ namespace sal
          // each thread will look to a different cacheline in the zone minimizing contention
          static std::atomic<uint64_t>     seed(0);
          static thread_local lehmer64_rng rnd(seed.fetch_add(1, std::memory_order_relaxed));
-         int                              attempts = 0;
+         int                              attempts     = 0;
+         int                              empty_scans  = 0;
+         int                              cas_failures = 0;
          do
          {
             // if average allocations is > 50% then we need to add a new zone
@@ -232,37 +237,44 @@ namespace sal
 
             if (free_bytes[most_free_byte] == 0) [[unlikely]]
             {
-               // it is entirely possible that all 64 bytes are already taken and/or another
-               // thread randomly chose the same cacheline and took the last pointer in the cacheline.
-               // so we need to try again... given a 50% capacity target, most of the time there should
-               // be at least 1 free pointer out of the 512 pointers checked by max_pop_cnt8_index64.
-               // this is most likely to happen once you approach max capacity, but could happen
-               // if due to heavy locality in one area of memory that happens to get randomly
-               // chosen.  If 99% of all bits in a zone are allocated, then there is a 0.5% chance that
-               // 512 bits will all be taken... assuming independences; however, since we are
-               // also allowing hints, this would undermine complete independence, in any event,
-               // we can try multiple times across many different zones and are likely to find
-               // a free slot within a few attempts even with 99% of capacity. This is because
-               // we are able to check 512 bits at a time.
-               if (++attempts == 1024 * 1024)
+               ++empty_scans;
+
+               if (++attempts >= 1000 && (attempts % 1000) == 0) [[unlikely]]
                {
-                  throw std::runtime_error("failed to allocate control block after 1M attempts ");
+                  // Exponential backoff: yield after 1K attempts, then
+                  // progressively longer sleeps.
+                  if (attempts < 10000)
+                     std::this_thread::yield();
+                  else
+                     std::this_thread::sleep_for(std::chrono::microseconds(
+                         std::min(attempts / 100, 10000)));  // cap at 10ms
                }
-               /*
-               SAL_WARN("all 512 slots in zone {} starting at {} are taken", min_zone,
-                        start_index * 512);
-               SAL_WARN("most free byte: free_bits[{}] = {:x}", most_free_byte,
-                        uint16_t(((uint8_t*)free_bits)[most_free_byte]));
-               for (int i = 0; i < 64; ++i)
-                  assert(free_bytes[i] == 0);
-               auto most_free_byte = max_pop_cnt8_index64((uint8_t*)free_bits);
-               (void)most_free_byte;
-               SAL_WARN("total alloc: {}",
-                        _header_ptr->total_allocations.load(std::memory_order_relaxed));
-               SAL_WARN("ptrs-per-zone: {}", detail::ptrs_per_zone);
-               SAL_WARN("zone_size_bytes: {}", detail::zone_size_bytes);
-               assert(attempts < 10);
-               */
+
+               if (attempts == 10000 || attempts == 100000 || attempts == 1000000) [[unlikely]]
+               {
+                  auto total  = _header_ptr->total_allocations.load(std::memory_order_relaxed);
+                  auto zones  = _header_ptr->allocated_zones.load(std::memory_order_relaxed);
+                  auto avg    = _header_ptr->average_allocations();
+                  auto mz     = _header_ptr->min_alloc_zone.load(std::memory_order_relaxed);
+                  auto mz_cnt = _header_ptr->zone_alloc_count[mz].load(std::memory_order_relaxed);
+                  SAL_WARN("alloc spinning: {} attempts ({} empty scans, {} CAS fails)  "
+                           "total_alloc={}  zones={}  avg/zone={}  min_zone={} (count={})  "
+                           "capacity={}  utilization={:.1f}%",
+                           attempts, empty_scans, cas_failures,
+                           total, zones, avg, mz, mz_cnt,
+                           uint64_t(zones) * detail::ptrs_per_zone,
+                           100.0 * total / (uint64_t(zones) * detail::ptrs_per_zone));
+               }
+
+               if (attempts >= 1024 * 1024)
+               {
+                  auto total = _header_ptr->total_allocations.load(std::memory_order_relaxed);
+                  auto zones = _header_ptr->allocated_zones.load(std::memory_order_relaxed);
+                  SAL_ERROR("FATAL: failed to allocate control block after 1M attempts. "
+                            "total_alloc={}  zones={}  capacity={}",
+                            total, zones, uint64_t(zones) * detail::ptrs_per_zone);
+                  throw std::runtime_error("failed to allocate control block after 1M attempts");
+               }
                continue;
             }
 
@@ -270,10 +282,9 @@ namespace sal
                                                   start_index * 64 + most_free_byte * 8));
             if (not optalloc) [[unlikely]]
             {
-               SAL_WARN("failed to allocate from hint: {} with cl claiming {} free",
-                        ptr_address(min_zone * detail::ptrs_per_zone + start_index * 64 +
-                                    most_free_byte * 8),
-                        std::popcount(free_bytes[most_free_byte]));
+               ++cas_failures;
+               if (cas_failures >= 1000 && (cas_failures % 1000) == 0)
+                  std::this_thread::yield();
                continue;
             }
 
@@ -320,6 +331,7 @@ namespace sal
          uint64_t flist            = free_list.load();
          uint64_t masked_free_bits = flist & base_clinebits;
 
+         int cas_spins = 0;
          while (masked_free_bits)
          {
             // while there are free bits in the cacheline of the hint
@@ -329,7 +341,12 @@ namespace sal
                                                       std::memory_order_acquire)) [[unlikely]]
             {
                masked_free_bits = flist & base_clinebits;
-               //               SAL_WARN("*contention* attempting to claim address: {} ", flblock * 64 + index);
+               if (++cas_spins > 100)
+               {
+                  // Heavy contention on this cacheline — bail out and let
+                  // the outer loop pick a different one.
+                  return std::nullopt;
+               }
                continue;
             }
             ptr_address    ptr(flblock * 64 + index);

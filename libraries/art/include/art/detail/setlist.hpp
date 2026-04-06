@@ -37,7 +37,7 @@ namespace art::detail
    inline offset_t setlist_add_child(arena&   a,
                                      offset_t node_off,
                                      uint8_t  byte,
-                                     offset_t child_off) noexcept
+                                     offset_t child_off)
    {
       auto*        hdr = a.as<node_header>(node_off);
       setlist_view sv{hdr};
@@ -130,7 +130,7 @@ namespace art::detail
    inline offset_t setlist_grow_to_256(arena&   a,
                                        offset_t node_off,
                                        uint8_t  byte,
-                                       offset_t child_off) noexcept
+                                       offset_t child_off)
    {
       auto*        old_hdr = a.as<node_header>(node_off);
       setlist_view old_sv{old_hdr};

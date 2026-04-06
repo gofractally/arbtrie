@@ -248,6 +248,10 @@ namespace art
                                            char*            buf,
                                            uint32_t         buf_size) noexcept
    {
+      // Prefix length must fit in uint16_t (node_header::partial_len).
+      // A value exceeding this indicates memory corruption.
+      assert(prefix.size() <= 0xFFFF);
+
       const char* p = prefix.data();
       if (p >= a.base() && p < a.base() + a.capacity() && !prefix.empty())
       {
@@ -261,7 +265,7 @@ namespace art
 
    /// Allocate a leaf in the arena, copy key and value. Returns tagged offset.
    template <typename Value>
-   offset_t make_leaf(arena& a, std::string_view key, const Value& value) noexcept
+   offset_t make_leaf(arena& a, std::string_view key, const Value& value)
    {
       uint32_t size = leaf_alloc_size<Value>(key.size());
       offset_t off  = a.allocate(size);
@@ -275,7 +279,7 @@ namespace art
    }
 
    /// Allocate a setlist node with the given prefix. Children/keys are uninitialized.
-   inline offset_t make_setlist(arena& a, uint8_t num_children, std::string_view prefix) noexcept
+   inline offset_t make_setlist(arena& a, uint8_t num_children, std::string_view prefix)
    {
       char         pfx_buf[512];
       const char*  pfx_data = save_prefix_if_arena(a, prefix, pfx_buf, sizeof(pfx_buf));
@@ -311,7 +315,7 @@ namespace art
    }
 
    /// Allocate a node256 with the given prefix. Children initialized to null_offset.
-   inline offset_t make_node256(arena& a, std::string_view prefix) noexcept
+   inline offset_t make_node256(arena& a, std::string_view prefix)
    {
       char         pfx_buf[512];
       const char*  pfx_data = save_prefix_if_arena(a, prefix, pfx_buf, sizeof(pfx_buf));

@@ -37,7 +37,8 @@ namespace psitri::dwal
       merge_pool(std::shared_ptr<psitri::database> db,
                  uint32_t                           num_threads,
                  epoch_registry&                    epochs,
-                 std::filesystem::path              wal_dir = {});
+                 std::filesystem::path              wal_dir              = {},
+                 uint64_t                           target_arena_bytes   = 0);
 
       ~merge_pool();
 
@@ -66,6 +67,7 @@ namespace psitri::dwal
       std::shared_ptr<psitri::database> _db;
       epoch_registry&                   _epochs;
       std::filesystem::path             _wal_dir;
+      uint64_t                          _target_arena_bytes = 0;
 
       // Worker threads and their write sessions.
       std::vector<std::thread>                            _threads;

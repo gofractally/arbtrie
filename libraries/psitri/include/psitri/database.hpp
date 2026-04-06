@@ -72,6 +72,12 @@ namespace psitri
       int64_t  pending_releases       = 0;  ///< Objects queued for deferred deallocation by the compactor.
       ///@}
 
+      /** @name Recycling */
+      ///@{
+      uint64_t recycled_queue_depth   = 0;  ///< Segments waiting for read locks to release before reuse.
+      uint64_t recycled_queue_capacity= 0;  ///< Maximum capacity of the recycled-segments queue.
+      ///@}
+
       /**
        * @brief Format the stats as a human-readable multi-line string.
        */
@@ -252,6 +258,8 @@ namespace psitri
          s.total_promoted_bytes = d.total_promoted_bytes;
          s.active_sessions      = d.active_sessions;
          s.pending_releases     = d.free_release_count;
+         s.recycled_queue_depth    = d.recycled_queue_depth;
+         s.recycled_queue_capacity = d.recycled_queue_capacity;
          return s;
       }
 

@@ -92,6 +92,7 @@ namespace sal
                                                       alloc_hint hint,
                                                       auto&&... args) noexcept
    {
+      assert(check_thread_ownership());
       assert(size >= sizeof(T));
       assert(size % 64 == 0);
       static_assert(std::is_base_of_v<alloc_header, T>, "T must derive from alloc_header");
@@ -154,6 +155,7 @@ namespace sal
    template <typename T>
    [[nodiscard]] T* allocator_session::copy_on_write(smart_ref<T>& ptr)
    {
+      assert(check_thread_ownership());
       assert(not is_read_only(ptr.loc()));
       if (can_modify(ptr.loc()))
          return const_cast<T*>(ptr.obj());
@@ -255,6 +257,7 @@ namespace sal
    }
    inline void allocator_session::release(ptr_address adr) noexcept
    {
+      assert(check_thread_ownership());
       auto& cb      = get(adr);
       auto  cur_ref = cb.ref();
       if (cur_ref == 1 and _release_queue.try_push(adr))
@@ -357,12 +360,14 @@ namespace sal
 
    inline void allocator_session::retain_read_lock() noexcept
    {
+      assert(check_thread_ownership());
       if (_nested_read_lock++)
          return;
       _session_rlock.lock();
    }
    inline void allocator_session::release_read_lock() noexcept
    {
+      assert(check_thread_ownership());
       assert(_nested_read_lock > 0);
       if (--_nested_read_lock)
          return;

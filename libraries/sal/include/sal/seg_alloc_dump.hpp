@@ -76,6 +76,10 @@ namespace sal
       // Free release count
       int64_t free_release_count = 0;
 
+      // Recycled-segments queue state
+      uint64_t recycled_queue_depth    = 0;
+      uint64_t recycled_queue_capacity = 0;
+
       // Control block stats
       uint32_t control_block_zones    = 0;  // Number of allocated control block zones
       uint64_t control_block_capacity = 0;  // Max number of control blocks that can be allocated

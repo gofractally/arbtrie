@@ -88,6 +88,24 @@ namespace psitri::dwal
       /// Base root of the current RO btree — the PsiTri root at swap time.
       std::atomic<uint32_t> ro_base_root{0};
 
+      // ── Adaptive write throttle ───────────────────────────────────
+      //
+      // Self-tuning sleep that keeps the RW arena from growing past the
+      // target by the time merge completes.  Adjusted once per merge cycle:
+      //   - merge finished early (arena < target) → reduce sleep
+      //   - merge finished late  (arena > target) → increase sleep
+      //
+      // Writer checks throttle_sleep_ns on every commit and sleeps if
+      // the arena is above the low-water mark (25% of target).
+
+      /// Current per-commit sleep in nanoseconds.  Starts at 0 (no throttle).
+      /// Adjusted by the merge thread when it finishes draining.
+      std::atomic<uint32_t> throttle_sleep_ns{0};
+
+      /// Arena capacity recorded when the merge thread finishes.
+      /// Used by the adjustment algorithm to decide if sleep should increase.
+      std::atomic<uint32_t> arena_at_merge_complete{0};
+
       dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
    };
 

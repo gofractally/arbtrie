@@ -96,6 +96,22 @@ namespace sal
 
          read_lock_queue();
 
+         /// Reset all session read locks to unlocked (-1).
+         /// Must be called on startup when no sessions are active
+         /// (e.g., after a crash when stale locks from dead processes
+         /// would otherwise block segment recycling forever).
+         void reset_all_session_locks()
+         {
+            for (auto& lock : _session_locks)
+               lock.unlock();
+         }
+
+         /// Current depth of the recycled segments queue.
+         uint64_t recycled_queue_depth() const { return recycled_segments.usage(); }
+
+         /// Capacity of the recycled segments queue.
+         uint64_t recycled_queue_capacity() const { return recycled_segments.capacity(); }
+
         private:
          void broadcast_end_ptr(uint32_t ep);
 
