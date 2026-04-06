@@ -1909,10 +1909,15 @@ int main(int argc, char** argv)
       uint64_t wo_tps = (uint64_t)(cfg.num_transactions / p3a.secs);
       uint64_t wr_tps = (uint64_t)(cfg.num_transactions / p3b.secs);
       double   impact = 100.0 * (1.0 - (double)wr_tps / wo_tps);
+      // Each transfer = 5 KV ops (2 reads + 2 updates + 1 insert)
+      constexpr uint64_t ops_per_tx = 5;
       printf("\n  --- Phase 3 Summary ---\n");
-      printf("  Write-only: %s tx/sec\n", format_comma(wo_tps).c_str());
-      printf("  Write+Read: %s tx/sec  (write impact: %+.1f%%)\n",
-             format_comma(wr_tps).c_str(), -impact);
+      printf("  Write-only: %s tx/sec  (%s KV ops/sec)\n",
+             format_comma(wo_tps).c_str(),
+             format_comma(wo_tps * ops_per_tx).c_str());
+      printf("  Write+Read: %s tx/sec  (%s KV ops/sec, write impact: %+.1f%%)\n",
+             format_comma(wr_tps).c_str(),
+             format_comma(wr_tps * ops_per_tx).c_str(), -impact);
       if (p3b.reader_read_sec > 0)
          printf("  Reader:     %s reads/sec\n",
                 format_comma((uint64_t)(p3b.reader_reads / p3b.reader_read_sec)).c_str());
