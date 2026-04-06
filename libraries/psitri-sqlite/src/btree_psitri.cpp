@@ -107,6 +107,7 @@ struct Btree {
    // reader connections on the same PsitriDb singleton.
    std::map<uint32_t, psitri::dwal::dwal_transaction> open_tx;
 
+
    psitri::dwal::dwal_transaction& get_tx(uint32_t root_index) {
       auto it = open_tx.find(root_index);
       if (it != open_tx.end())
@@ -786,16 +787,7 @@ int sqlite3BtreeCursorHasHint(BtCursor* pCur, unsigned mask) {
 
 static void ensure_cursor(BtCursor* pCur) {
    if (!pCur->cursor) {
-      PTRACE("  ensure_cursor: creating for root=%u wrFlag=%d\n",
-             pCur->pgnoRoot, pCur->wrFlag);
       try {
-         // Write cursors on the writer connection can use the open
-         // transaction's cursor to see uncommitted writes.  Read-only
-         // cursors (including those from reader connections) use the
-         // database-level cursor which sees all committed data.
-         // Check if this connection has an open write transaction on this
-         // root.  If so, use the transaction's cursor (sees uncommitted
-         // writes, avoids rw_mutex deadlock since tx holds exclusive lock).
          bool used_tx_cursor = false;
          if (pCur->pBtree) {
             auto it = pCur->pBtree->open_tx.find(pCur->pgnoRoot);
@@ -805,16 +797,10 @@ static void ensure_cursor(BtCursor* pCur) {
             }
          }
          if (!used_tx_cursor) {
-            // No active transaction: safe to acquire shared rw_mutex
             pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
                pCur->pgnoRoot, psitri::dwal::read_mode::latest));
          }
-         pCur->cursor->cursor().seek_begin();
-      } catch (const std::exception& e) {
-         PTRACE("  ensure_cursor: exception: %s\n", e.what());
-         pCur->cursor.reset();
       } catch (...) {
-         PTRACE("  ensure_cursor: unknown exception\n");
          pCur->cursor.reset();
       }
    }

@@ -1,5 +1,6 @@
 // Minimal smoke test for psitri-backed SQLite
 #include <sqlite3.h>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -200,6 +201,95 @@ int main() {
    sqlite3_finalize(rd);
 
    sqlite3_close(db2);
+
+   // ── Perf Test: raw INSERT throughput ──
+   std::printf("\n--- Perf Test: INSERT throughput ---\n");
+   auto perf_path = (tmp / "perf.db").string();
+   sqlite3* pdb = nullptr;
+   sqlite3_open(perf_path.c_str(), &pdb);
+   sqlite3_exec(pdb, "PRAGMA synchronous=OFF", 0, 0, 0);
+
+   // Test A: INTKEY autocommit
+   sqlite3_exec(pdb, "CREATE TABLE ta(id INTEGER PRIMARY KEY, v BLOB)", 0, 0, 0);
+   {
+      sqlite3_stmt* st = nullptr;
+      sqlite3_prepare_v2(pdb, "INSERT INTO ta VALUES(?,?)", -1, &st, 0);
+      uint64_t v = 42;
+      auto t0 = std::chrono::steady_clock::now();
+      for (int i = 0; i < 100000; i++) {
+         sqlite3_reset(st);
+         sqlite3_bind_int64(st, 1, i);
+         sqlite3_bind_blob(st, 2, &v, sizeof(v), SQLITE_STATIC);
+         sqlite3_step(st);
+      }
+      auto dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      std::printf("  INTKEY autocommit:  %8.0f inserts/sec (%.2f us/op)\n", 100000/dt, dt/100000*1e6);
+      sqlite3_finalize(st);
+   }
+
+   // Test B: INTKEY batched (BEGIN/COMMIT around 100K)
+   sqlite3_exec(pdb, "CREATE TABLE tb(id INTEGER PRIMARY KEY, v BLOB)", 0, 0, 0);
+   {
+      sqlite3_stmt* st = nullptr;
+      sqlite3_prepare_v2(pdb, "INSERT INTO tb VALUES(?,?)", -1, &st, 0);
+      uint64_t v = 42;
+      auto t0 = std::chrono::steady_clock::now();
+      sqlite3_exec(pdb, "BEGIN", 0, 0, 0);
+      for (int i = 0; i < 100000; i++) {
+         sqlite3_reset(st);
+         sqlite3_bind_int64(st, 1, i);
+         sqlite3_bind_blob(st, 2, &v, sizeof(v), SQLITE_STATIC);
+         sqlite3_step(st);
+      }
+      sqlite3_exec(pdb, "COMMIT", 0, 0, 0);
+      auto dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      std::printf("  INTKEY batched:     %8.0f inserts/sec (%.2f us/op)\n", 100000/dt, dt/100000*1e6);
+      sqlite3_finalize(st);
+   }
+
+   // Test C: TEXT PK autocommit
+   sqlite3_exec(pdb, "CREATE TABLE tc(k TEXT PRIMARY KEY, v BLOB)", 0, 0, 0);
+   {
+      sqlite3_stmt* st = nullptr;
+      sqlite3_prepare_v2(pdb, "INSERT INTO tc VALUES(?,?)", -1, &st, 0);
+      uint64_t v = 42;
+      auto t0 = std::chrono::steady_clock::now();
+      for (int i = 0; i < 100000; i++) {
+         char key[32];
+         std::snprintf(key, sizeof(key), "key%08d", i);
+         sqlite3_reset(st);
+         sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
+         sqlite3_bind_blob(st, 2, &v, sizeof(v), SQLITE_STATIC);
+         sqlite3_step(st);
+      }
+      auto dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      std::printf("  TEXT PK autocommit: %8.0f inserts/sec (%.2f us/op)\n", 100000/dt, dt/100000*1e6);
+      sqlite3_finalize(st);
+   }
+
+   // Test D: TEXT PK batched
+   sqlite3_exec(pdb, "CREATE TABLE td(k TEXT PRIMARY KEY, v BLOB)", 0, 0, 0);
+   {
+      sqlite3_stmt* st = nullptr;
+      sqlite3_prepare_v2(pdb, "INSERT INTO td VALUES(?,?)", -1, &st, 0);
+      uint64_t v = 42;
+      auto t0 = std::chrono::steady_clock::now();
+      sqlite3_exec(pdb, "BEGIN", 0, 0, 0);
+      for (int i = 0; i < 100000; i++) {
+         char key[32];
+         std::snprintf(key, sizeof(key), "key%08d", i);
+         sqlite3_reset(st);
+         sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
+         sqlite3_bind_blob(st, 2, &v, sizeof(v), SQLITE_STATIC);
+         sqlite3_step(st);
+      }
+      sqlite3_exec(pdb, "COMMIT", 0, 0, 0);
+      auto dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      std::printf("  TEXT PK batched:    %8.0f inserts/sec (%.2f us/op)\n", 100000/dt, dt/100000*1e6);
+      sqlite3_finalize(st);
+   }
+
+   sqlite3_close(pdb);
 
    fs::remove_all(tmp);
    std::printf("SUCCESS\n");
