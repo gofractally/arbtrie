@@ -365,6 +365,9 @@ int sqlite3BtreeClose(Btree* p) {
       sqlite3BtreeCloseCursor(pBt->pCursor);
    }
 
+   // Commit any lingering DWAL transactions from autocommit mode
+   p->commit_all_tx();
+
    // Persist metadata and release global reference
    if (pBt->psitri && pBt->psitri->dwal_db) {
       try {
@@ -498,19 +501,32 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
 }
 
 int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
-   PTRACE("CommitPhaseOne: open_tx=%zu\n",
-          p ? p->open_tx.size() : 0);
+   PTRACE("CommitPhaseOne: open_tx=%zu inTrans=%d\n",
+          p ? p->open_tx.size() : 0, p ? (int)p->inTrans : -1);
    if (p && p->pBt && p->pBt->psitri) {
-      try {
-         p->commit_all_tx();
-      } catch (const std::exception& e) {
-         PTRACE("CommitPhaseOne: commit_all_tx THREW: %s\n", e.what());
-         return SQLITE_ERROR;
-      }
-      // Sync WAL if sync mode requires it
       auto* psitri = p->pBt->psitri;
-      if (psitri->sync_mode >= sal::sync_type::fsync) {
-         psitri->dwal_db->flush_wal(psitri->sync_mode);
+
+      // In autocommit mode (no explicit BEGIN), keep DWAL transactions
+      // open across statements.  The DWAL's own swap threshold handles
+      // batching, and the WAL provides crash recovery.  This avoids
+      // creating+committing a DWAL transaction per SQL statement.
+      //
+      // Only commit when:
+      // - Explicit transaction (inTrans was set by user BEGIN, not autocommit)
+      // - Sync mode requires durability guarantee
+      bool explicit_tx = (p->inTrans == TRANS_WRITE);
+      bool needs_sync = (psitri->sync_mode >= sal::sync_type::fsync);
+
+      if (explicit_tx || needs_sync || !p->is_writer) {
+         try {
+            p->commit_all_tx();
+         } catch (const std::exception& e) {
+            PTRACE("CommitPhaseOne: commit_all_tx THREW: %s\n", e.what());
+            return SQLITE_ERROR;
+         }
+         if (needs_sync) {
+            psitri->dwal_db->flush_wal(psitri->sync_mode);
+         }
       }
    }
    return SQLITE_OK;
@@ -1078,9 +1094,15 @@ int sqlite3BtreeInsert(
 
    psitri->data_version.fetch_add(1);
 
-   pCur->cursor.reset();
-   pCur->is_valid = false;
-   pCur->eState = CURSOR_INVALID;
+   // ART mutations (node splits, rebalancing) invalidate all iterators
+   // on the same root.  Reset every cursor pointing to this root.
+   for (auto* c = pCur->pBt->pCursor; c; c = c->pNext) {
+      if (c->pgnoRoot == pCur->pgnoRoot) {
+         c->cursor.reset();
+         c->is_valid = false;
+         c->eState = CURSOR_INVALID;
+      }
+   }
 
    return SQLITE_OK;
 }
