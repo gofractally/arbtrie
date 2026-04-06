@@ -1079,11 +1079,13 @@ int sqlite3BtreeInsert(
 
    psitri->data_version.fetch_add(1);
 
-   // ART mutations (node splits, rebalancing) invalidate all iterators
-   // on the same root.  Reset every cursor pointing to this root.
+   // Mark all cursors on this root as needing re-seek.
+   // Don't destroy the cursor objects — rebuilding owned_merge_cursor
+   // (shared_ptr copies + tri cursor creation) is expensive.
+   // The next seek (lower_bound, seek_begin) reinitializes the ART
+   // iterator from the root, which is safe after structural changes.
    for (auto* c = pCur->pBt->pCursor; c; c = c->pNext) {
       if (c->pgnoRoot == pCur->pgnoRoot) {
-         c->cursor.reset();
          c->is_valid = false;
          c->eState = CURSOR_INVALID;
       }
