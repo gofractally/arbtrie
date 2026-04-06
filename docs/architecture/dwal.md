@@ -19,6 +19,12 @@ optimization for specific access patterns.
     (blockchain, OLTP, ledger)                 cost.  ~100 ns commit
                                                vs ~2 KB of COW clones.
 
+    Bursty writes                DWAL          Burst absorbed by ART
+    (event ingestion, logging,                 buffer at memory speed.
+    network message processing)                Merge thread drains to
+                                               COW trie in background
+                                               when pressure drops.
+
     Low-frequency writes that    DWAL          Even at 100 writes/sec,
     need fast acknowledgement                  sub-microsecond commit lets
                                                you ack the caller before
