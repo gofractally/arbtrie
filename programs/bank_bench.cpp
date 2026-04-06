@@ -1248,6 +1248,7 @@ class SqliteEngine : public BankEngine
    void open(const std::string& path, const std::string& sync_mode) override
    {
       _sync_mode = sync_mode;
+      _db_path = path;
       std::filesystem::remove_all(path);
       if (sqlite3_open(path.c_str(), &_db) != SQLITE_OK)
       {
@@ -1264,7 +1265,7 @@ class SqliteEngine : public BankEngine
          exec("PRAGMA synchronous=FULL");
 
       exec("PRAGMA journal_mode=WAL");
-      exec("CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v BLOB) WITHOUT ROWID");
+      exec("CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v BLOB)");
 
       // Prepare statements
       sqlite3_prepare_v2(_db, "SELECT v FROM kv WHERE k=?", -1, &_get, nullptr);
@@ -1280,15 +1281,22 @@ class SqliteEngine : public BankEngine
 
    void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
    {
-      exec("BEGIN");
-      for (auto& acct : accounts)
+      // Batch in chunks to avoid large transaction memory pressure
+      // in psitri-sqlite's DWAL layer
+      constexpr size_t CHUNK = 10000;
+      for (size_t i = 0; i < accounts.size(); i += CHUNK)
       {
-         sqlite3_reset(_put);
-         sqlite3_bind_text(_put, 1, acct.data(), (int)acct.size(), SQLITE_STATIC);
-         sqlite3_bind_blob(_put, 2, &balance, sizeof(balance), SQLITE_STATIC);
-         sqlite3_step(_put);
+         exec("BEGIN");
+         size_t end = std::min(i + CHUNK, accounts.size());
+         for (size_t j = i; j < end; j++)
+         {
+            sqlite3_reset(_put);
+            sqlite3_bind_text(_put, 1, accounts[j].data(), (int)accounts[j].size(), SQLITE_STATIC);
+            sqlite3_bind_blob(_put, 2, &balance, sizeof(balance), SQLITE_STATIC);
+            sqlite3_step(_put);
+         }
+         exec("COMMIT");
       }
-      exec("COMMIT");
    }
 
    void begin_batch() override { exec("BEGIN"); }
@@ -1380,20 +1388,40 @@ class SqliteEngine : public BankEngine
       return r;
    }
 
+   // Separate reader connection -- avoids contention with the writer.
+   // PsiTri-SQLite internally uses DWAL read_mode::latest on every cursor,
+   // which acquires a shared lock on the RW layer. A separate connection
+   // gets its own DWAL read session, reducing lock contention.
+   sqlite3*      _reader_db   = nullptr;
+   sqlite3_stmt* _reader_get  = nullptr;
+   std::string   _db_path;
+
+   void reader_thread_init() override
+   {
+      if (sqlite3_open(_db_path.c_str(), &_reader_db) != SQLITE_OK)
+      {
+         fprintf(stderr, "reader sqlite3_open failed: %s\n", sqlite3_errmsg(_reader_db));
+         return;
+      }
+      sqlite3_prepare_v2(_reader_db, "SELECT v FROM kv WHERE k=?", -1, &_reader_get, nullptr);
+   }
+
+   void reader_thread_teardown() override
+   {
+      if (_reader_get) { sqlite3_finalize(_reader_get); _reader_get = nullptr; }
+      if (_reader_db)  { sqlite3_close(_reader_db); _reader_db = nullptr; }
+   }
+
    bool read_account(const std::string& key, uint64_t& balance_out) override
    {
-      // Reader thread uses its own prepared statement
-      // For simplicity, use sqlite3_exec with a callback
-      sqlite3_stmt* stmt = nullptr;
-      sqlite3_prepare_v2(_db, "SELECT v FROM kv WHERE k=?", -1, &stmt, nullptr);
-      sqlite3_bind_text(stmt, 1, key.data(), (int)key.size(), SQLITE_STATIC);
+      sqlite3_reset(_reader_get);
+      sqlite3_bind_text(_reader_get, 1, key.data(), (int)key.size(), SQLITE_STATIC);
       bool found = false;
-      if (sqlite3_step(stmt) == SQLITE_ROW)
+      if (sqlite3_step(_reader_get) == SQLITE_ROW)
       {
-         std::memcpy(&balance_out, sqlite3_column_blob(stmt, 0), sizeof(balance_out));
+         std::memcpy(&balance_out, sqlite3_column_blob(_reader_get, 0), sizeof(balance_out));
          found = true;
       }
-      sqlite3_finalize(stmt);
       return found;
    }
 
