@@ -1,0 +1,106 @@
+rocksdb-scale-benchmark: db=./rocksdb_benchdb
+rounds=30 items=1,000,000 batch=100 value_size=256
+
+---------------------  big endian seq insert  --------------------------------------------------
+rounds: 30  items: 1,000,000 batch: 100
+-----------------------------------------------------------------------
+0       1,000,000     4,828,792  inserts/sec
+1       2,000,000     4,982,397  inserts/sec
+2       3,000,000     4,736,580  inserts/sec
+3       4,000,000     5,032,199  inserts/sec
+4       5,000,000     4,861,152  inserts/sec
+5       6,000,000     4,819,063  inserts/sec
+6       7,000,000     5,024,124  inserts/sec
+7       8,000,000     5,040,840  inserts/sec
+8       9,000,000     4,780,364  inserts/sec
+9      10,000,000     4,989,214  inserts/sec
+10     11,000,000     4,493,497  inserts/sec
+11     12,000,000     5,153,870  inserts/sec
+12     13,000,000     5,066,069  inserts/sec
+13     14,000,000     4,725,453  inserts/sec
+14     15,000,000     5,141,150  inserts/sec
+15     16,000,000     5,091,512  inserts/sec
+16     17,000,000     4,816,751  inserts/sec
+17     18,000,000     5,094,296  inserts/sec
+18     19,000,000     4,635,054  inserts/sec
+19     20,000,000     5,095,582  inserts/sec
+20     21,000,000     5,078,008  inserts/sec
+21     22,000,000     4,883,032  inserts/sec
+22     23,000,000     5,101,656  inserts/sec
+23     24,000,000     5,064,439  inserts/sec
+24     25,000,000     4,680,670  inserts/sec
+25     26,000,000     5,043,469  inserts/sec
+26     27,000,000     4,707,180  inserts/sec
+27     28,000,000     4,907,258  inserts/sec
+28     29,000,000     4,925,295  inserts/sec
+29     30,000,000     4,613,093  inserts/sec
+---------------------  dense random insert  --------------------------------------------------
+rounds: 30  items: 1,000,000 batch: 100
+-----------------------------------------------------------------------
+0       1,000,000     1,611,727  inserts/sec
+1       2,000,000     1,294,100  inserts/sec
+2       3,000,000     1,392,108  inserts/sec
+3       4,000,000     1,492,253  inserts/sec
+4       5,000,000     1,520,724  inserts/sec
+5       6,000,000     1,625,165  inserts/sec
+6       7,000,000     1,536,438  inserts/sec
+7       8,000,000     1,571,311  inserts/sec
+8       9,000,000     1,489,399  inserts/sec
+9      10,000,000     1,131,501  inserts/sec
+10     11,000,000     1,257,018  inserts/sec
+11     12,000,000       852,064  inserts/sec
+12     13,000,000     1,522,175  inserts/sec
+13     14,000,000       456,328  inserts/sec
+14     15,000,000     1,459,044  inserts/sec
+15     16,000,000     1,497,360  inserts/sec
+16     17,000,000       325,684  inserts/sec
+17     18,000,000     1,198,479  inserts/sec
+18     19,000,000       269,575  inserts/sec
+19     20,000,000     1,103,981  inserts/sec
+20     21,000,000     1,086,710  inserts/sec
+21     22,000,000       246,734  inserts/sec
+22     23,000,000     1,187,700  inserts/sec
+23     24,000,000     1,478,263  inserts/sec
+24     25,000,000       248,839  inserts/sec
+25     26,000,000     1,131,582  inserts/sec
+26     27,000,000     1,166,573  inserts/sec
+27     28,000,000       297,839  inserts/sec
+28     29,000,000     1,165,846  inserts/sec
+29     30,000,000     1,221,868  inserts/sec
+---------------------  string number rand insert  --------------------------------------------------
+rounds: 30  items: 1,000,000 batch: 100
+-----------------------------------------------------------------------
+0       1,000,000       237,396  inserts/sec
+1       2,000,000     1,309,896  inserts/sec
+2       3,000,000     1,296,177  inserts/sec
+3       4,000,000     1,313,859  inserts/sec
+4       5,000,000     1,221,257  inserts/sec
+5       6,000,000     1,168,001  inserts/sec
+6       7,000,000     1,118,790  inserts/sec
+7       8,000,000     1,088,352  inserts/sec
+8       9,000,000     1,145,942  inserts/sec
+9      10,000,000     1,469,077  inserts/sec
+10     11,000,000     1,518,182  inserts/sec
+11     12,000,000       633,259  inserts/sec
+12     13,000,000     1,484,624  inserts/sec
+13     14,000,000     1,514,708  inserts/sec
+14     15,000,000       444,474  inserts/sec
+15     16,000,000     1,074,185  inserts/sec
+16     17,000,000     1,327,615  inserts/sec
+17     18,000,000       425,063  inserts/sec
+18     19,000,000     1,170,001  inserts/sec
+19     20,000,000     1,183,505  inserts/sec
+20     21,000,000       397,729  inserts/sec
+21     22,000,000     1,192,845  inserts/sec
+22     23,000,000     1,104,709  inserts/sec
+23     24,000,000       340,679  inserts/sec
+24     25,000,000     1,514,116  inserts/sec
+25     26,000,000     1,428,497  inserts/sec
+26     27,000,000       301,092  inserts/sec
+27     28,000,000     1,154,179  inserts/sec
+28     29,000,000     1,143,566  inserts/sec
+29     30,000,000       318,564  inserts/sec
+
+DB size on disk: 23.33 GB
+
+done.
