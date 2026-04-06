@@ -58,32 +58,6 @@ struct PsitriDb {
    int ref_count = 0;
    std::atomic<u32> data_version{1};
    sal::sync_type sync_mode = sal::sync_type::none;
-
-   // Open DWAL transactions for the current SQLite write transaction.
-   // Lazily created per root on first Insert/Delete, committed together
-   // during sqlite3BtreeCommitPhaseOne, aborted on Rollback.
-   std::map<uint32_t, psitri::dwal::dwal_transaction> open_tx;
-
-   psitri::dwal::dwal_transaction& get_tx(uint32_t root_index) {
-      auto it = open_tx.find(root_index);
-      if (it != open_tx.end())
-         return it->second;
-      auto [inserted, ok] = open_tx.try_emplace(
-         root_index, dwal_db->start_write_transaction(root_index));
-      return inserted->second;
-   }
-
-   void commit_all_tx() {
-      for (auto& [root, tx] : open_tx)
-         tx.commit();
-      open_tx.clear();
-   }
-
-   void abort_all_tx() {
-      for (auto& [root, tx] : open_tx)
-         tx.abort();
-      open_tx.clear();
-   }
 };
 
 static std::mutex g_db_mutex;
@@ -119,6 +93,40 @@ struct Btree {
 #ifdef SQLITE_DEBUG
    u64          nSeek = 0;
 #endif
+
+   // True if this connection has ever done a write transaction.
+   // Used to distinguish the writer connection (safe to use read_mode::latest
+   // which accesses the live RW ART map) from reader connections (must use
+   // read_mode::buffered to avoid heap-use-after-free from ART arena realloc).
+   bool         is_writer = false;
+
+   // Per-connection DWAL transactions for the current SQLite write
+   // transaction.  Lazily created per root on first Insert/Delete,
+   // committed together during CommitPhaseOne, aborted on Rollback.
+   // Per-connection (not shared) to avoid cross-thread access from
+   // reader connections on the same PsitriDb singleton.
+   std::map<uint32_t, psitri::dwal::dwal_transaction> open_tx;
+
+   psitri::dwal::dwal_transaction& get_tx(uint32_t root_index) {
+      auto it = open_tx.find(root_index);
+      if (it != open_tx.end())
+         return it->second;
+      auto [inserted, ok] = open_tx.try_emplace(
+         root_index, pBt->psitri->dwal_db->start_write_transaction(root_index));
+      return inserted->second;
+   }
+
+   void commit_all_tx() {
+      for (auto& [root, tx] : open_tx)
+         tx.commit();
+      open_tx.clear();
+   }
+
+   void abort_all_tx() {
+      for (auto& [root, tx] : open_tx)
+         tx.abort();
+      open_tx.clear();
+   }
 };
 
 // ============================================================================
@@ -474,9 +482,10 @@ int sqlite3BtreeTxnState(Btree* p) {
 
 int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
    PTRACE("BeginTrans: wrflag=%d inTrans=%d open_tx=%zu\n",
-          wrflag, (int)p->inTrans, p->pBt->psitri->open_tx.size());
+          wrflag, (int)p->inTrans, p->open_tx.size());
    if (wrflag) {
       p->inTrans = TRANS_WRITE;
+      p->is_writer = true;
    } else if (p->inTrans == TRANS_NONE) {
       p->inTrans = TRANS_READ;
    }
@@ -490,16 +499,16 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
 
 int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
    PTRACE("CommitPhaseOne: open_tx=%zu\n",
-          (p && p->pBt && p->pBt->psitri) ? p->pBt->psitri->open_tx.size() : 0);
+          p ? p->open_tx.size() : 0);
    if (p && p->pBt && p->pBt->psitri) {
-      auto* psitri = p->pBt->psitri;
       try {
-         psitri->commit_all_tx();
+         p->commit_all_tx();
       } catch (const std::exception& e) {
          PTRACE("CommitPhaseOne: commit_all_tx THREW: %s\n", e.what());
          return SQLITE_ERROR;
       }
       // Sync WAL if sync mode requires it
+      auto* psitri = p->pBt->psitri;
       if (psitri->sync_mode >= sal::sync_type::fsync) {
          psitri->dwal_db->flush_wal(psitri->sync_mode);
       }
@@ -523,7 +532,7 @@ int sqlite3BtreeCommit(Btree* p) {
 
 int sqlite3BtreeRollback(Btree* p, int, int) {
    if (p && p->pBt && p->pBt->psitri) {
-      p->pBt->psitri->abort_all_tx();
+      p->abort_all_tx();
    }
    if (p) {
       p->inTrans = TRANS_NONE;
@@ -776,14 +785,28 @@ static void ensure_cursor(BtCursor* pCur) {
       PTRACE("  ensure_cursor: creating for root=%u wrFlag=%d\n",
              pCur->pgnoRoot, pCur->wrFlag);
       try {
-         // If there's an open write transaction on this root, use its cursor
-         // so we see uncommitted writes within the same SQLite transaction.
-         auto it = pCur->psitri_db->open_tx.find(pCur->pgnoRoot);
-         if (it != pCur->psitri_db->open_tx.end()) {
-            pCur->cursor.emplace(it->second.create_cursor());
+         // Write cursors on the writer connection can use the open
+         // transaction's cursor to see uncommitted writes.  Read-only
+         // cursors (including those from reader connections) use the
+         // database-level cursor which sees all committed data.
+         if (pCur->wrFlag && pCur->pBtree) {
+            auto it = pCur->pBtree->open_tx.find(pCur->pgnoRoot);
+            if (it != pCur->pBtree->open_tx.end() && !it->second.is_committed()) {
+               pCur->cursor.emplace(it->second.create_cursor());
+            } else {
+               pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+                  pCur->pgnoRoot, psitri::dwal::read_mode::latest));
+            }
          } else {
+            // Writer connection uses latest mode (sees RW layer -- safe
+            // because writer is single-threaded, no concurrent ART mutation).
+            // Reader connections use buffered mode (RO + Tri only -- safe
+            // from concurrent ART arena realloc by the writer thread).
+            auto mode = (pCur->pBtree && pCur->pBtree->is_writer)
+               ? psitri::dwal::read_mode::latest
+               : psitri::dwal::read_mode::buffered;
             pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-               pCur->pgnoRoot, psitri::dwal::read_mode::latest));
+               pCur->pgnoRoot, mode));
          }
          pCur->cursor->cursor().seek_begin();
       } catch (const std::exception& e) {
@@ -1047,7 +1070,7 @@ int sqlite3BtreeInsert(
    }
 
    try {
-      auto& tx = psitri->get_tx(pCur->pgnoRoot);
+      auto& tx = pCur->pBtree->get_tx(pCur->pgnoRoot);
       tx.upsert(key, value);
    } catch (...) {
       return SQLITE_ERROR;
@@ -1070,7 +1093,7 @@ int sqlite3BtreeDelete(BtCursor* pCur, u8 flags) {
    auto key = std::string(mc.key());
 
    try {
-      auto& tx = psitri->get_tx(pCur->pgnoRoot);
+      auto& tx = pCur->pBtree->get_tx(pCur->pgnoRoot);
       tx.remove(key);
    } catch (...) {
       return SQLITE_ERROR;
@@ -1114,10 +1137,12 @@ int sqlite3BtreeCount(sqlite3*, BtCursor* pCur, i64* pnEntry) {
 i64 sqlite3BtreeRowCountEst(BtCursor* pCur) {
    if (!pCur->psitri_db || !pCur->psitri_db->dwal_db) return 1000;
    try {
-      auto it = pCur->psitri_db->open_tx.find(pCur->pgnoRoot);
-      if (it != pCur->psitri_db->open_tx.end()) {
-         auto cursor = it->second.create_cursor();
-         return (i64)cursor.cursor().count_keys();
+      if (pCur->pBtree) {
+         auto it = pCur->pBtree->open_tx.find(pCur->pgnoRoot);
+         if (it != pCur->pBtree->open_tx.end() && !it->second.is_committed()) {
+            auto cursor = it->second.create_cursor();
+            return (i64)cursor.cursor().count_keys();
+         }
       }
       auto cursor = pCur->psitri_db->dwal_db->create_cursor(
          pCur->pgnoRoot, psitri::dwal::read_mode::latest);
