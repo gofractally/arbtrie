@@ -50,6 +50,11 @@ namespace sal
       uint64_t get_total_allocated_objects() const noexcept;
       uint64_t get_pending_release_count() const noexcept;
 
+      /// Segment allocation stats (for profiling).
+      uint64_t seg_alloc_count() const noexcept { return _seg_alloc_count; }
+      uint64_t seg_alloc_ns() const noexcept { return _seg_alloc_ns; }
+
+
       /// DEBUG: Call visitor(ptr_address, ref_count, alloc_header*) for each live object
       template <typename Visitor>
       void for_each_live_object(Visitor&& visitor) const noexcept;
@@ -152,6 +157,7 @@ namespace sal
       template <typename T = alloc_header>
       [[nodiscard]] smart_ref<T> get_ref(ptr_address adr) noexcept;
 
+      inline void prefetch(ptr_address adr) const noexcept;
       inline bool is_read_only(ptr_address adr) const noexcept;
 
       template <typename UserData>
@@ -281,6 +287,10 @@ namespace sal
       mapped_memory::dirty_segment_queue& _dirty_segments;
       segment_number                      _alloc_seg_num   = segment_number(-1);
       bool                                _alloc_to_pinned = true;
+
+      // ── Segment allocation stats (for profiling merge drain) ───────
+      uint64_t _seg_alloc_count   = 0;  ///< Number of init_active_segment() calls.
+      uint64_t _seg_alloc_ns      = 0;  ///< Cumulative nanoseconds in init_active_segment().
       // Reference to the session read lock from read_lock_queue
       mapped_memory::session_rlock& _session_rlock;
 

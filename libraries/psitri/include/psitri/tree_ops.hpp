@@ -1124,6 +1124,16 @@ namespace psitri
 
       branch_number br   = in->lower_bound(key);
       auto          badr = in->get_branch(br);
+
+      // In sorted mode, prefetch the next sibling's node.  Sorted keys exhaust
+      // the current subtree then move to the next branch — warming it early
+      // hides page-fault latency for any linear scan beyond RAM.
+      if constexpr (mode.is_sorted())
+      {
+         if (branch_number(uint32_t(*br) + 1) < in->num_branches())
+            _session.prefetch(in->get_branch(branch_number(uint32_t(*br) + 1)));
+      }
+
       auto          bref = _session.get_ref(badr);
 
       //SAL_INFO("in before updating branch '{}' address {} ptr: {}", br, badr, in.obj());

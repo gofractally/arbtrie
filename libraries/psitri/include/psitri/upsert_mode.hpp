@@ -12,6 +12,7 @@ namespace psitri
          update             = 4,  // fail if key doesn't exist
          remove             = 16,
          must_remove_f      = 32,
+         sorted_f           = 64,  // hint: keys arrive in sorted order (enables sibling prefetch)
          upsert             = insert | update,
          unique_upsert      = unique | upsert,
          unique_insert      = unique | insert,
@@ -40,6 +41,9 @@ namespace psitri
       constexpr bool        is_remove() const { return flags & remove; }
       constexpr bool        is_update() const { return flags & update; }
       constexpr bool        must_remove() const { return flags & must_remove_f; }
+      constexpr bool        is_sorted() const { return flags & sorted_f; }
+      constexpr upsert_mode make_sorted() const { return {flags | sorted_f}; }
+      constexpr upsert_mode make_unsorted() const { return {flags & ~sorted_f}; }
 
       // private: structural types cannot have private members,
       // but the flags field is not meant to be used directly

@@ -194,6 +194,20 @@ namespace sal
       return smart_ref<T>(get_session_ptr(), ptr, cb, cread);
    }
 
+   /// Issue a hardware prefetch for the node at the given address.
+   /// Resolves the control block → offset → mmap pointer, then prefetches
+   /// the first cache line without constructing a smart_ref or touching
+   /// the ref count.  Use this to pipeline page faults during sorted merges.
+   inline void allocator_session::prefetch(ptr_address adr) const noexcept
+   {
+      if (adr == null_ptr_address) [[unlikely]]
+         return;
+      auto& cb    = _ptr_alloc.get(adr);
+      auto  cread = cb.load(std::memory_order_relaxed);
+      auto  ptr   = _block_base_ptr + *cread.loc().offset();
+      __builtin_prefetch(ptr, 0, 3);
+   }
+
    inline bool allocator_session::is_read_only(ptr_address adr) const noexcept
    {
       assert(adr != null_ptr_address);

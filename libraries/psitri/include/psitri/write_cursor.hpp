@@ -42,12 +42,27 @@ namespace psitri
          _ctx.upsert<upsert_mode::unique_upsert>(key, value_type(value));
       }
 
+      /// Insert or update with sorted-key hint.  Enables sibling prefetch
+      /// so pages needed by the next key are warmed before they are touched.
+      /// Caller must guarantee keys arrive in ascending order.
+      void upsert_sorted(key_view key, value_view value)
+      {
+         _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type(value));
+      }
+
       /// Store a subtree as the value for a key.
       /// Takes ownership of the smart_ptr's reference count (the smart_ptr is consumed).
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          auto addr = subtree_root.take();  // extract address without releasing ref
          _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(addr));
+      }
+
+      /// Sorted variant of subtree upsert.
+      void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
+      {
+         auto addr = subtree_root.take();
+         _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type::make_subtree(addr));
       }
 
       /// Remove key. Returns size of removed value, or -1 if not found.

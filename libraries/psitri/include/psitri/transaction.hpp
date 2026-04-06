@@ -34,9 +34,14 @@ namespace psitri
       void insert(key_view key, value_view value) { _cursor->insert(key, value); }
       void update(key_view key, value_view value) { _cursor->update(key, value); }
       void upsert(key_view key, value_view value) { _cursor->upsert(key, value); }
+      void upsert_sorted(key_view key, value_view value) { _cursor->upsert_sorted(key, value); }
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          _cursor->upsert(key, std::move(subtree_root));
+      }
+      void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
+      {
+         _cursor->upsert_sorted(key, std::move(subtree_root));
       }
       int      remove(key_view key) { return _cursor->remove(key); }
       uint64_t remove_range(key_view lower, key_view upper)

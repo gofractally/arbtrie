@@ -433,8 +433,7 @@ namespace psitri::dwal
       if (_cfg.max_rw_arena_bytes > 0 &&
           root.rw_layer->map.arena_capacity() >= _cfg.max_rw_arena_bytes)
       {
-         while (!root.merge_complete.load(std::memory_order_acquire))
-            std::this_thread::yield();
+         root.merge_complete.wait(false, std::memory_order_acquire);
          try_swap_rw_to_ro(root_index);
       }
 

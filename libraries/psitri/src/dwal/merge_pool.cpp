@@ -6,7 +6,10 @@
 #include <psitri/write_session_impl.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 
 namespace psitri::dwal
 {
@@ -93,12 +96,38 @@ namespace psitri::dwal
       if (!ro)
          return;
 
-      auto& ws = *_sessions[thread_index];
+      auto wall_start = std::chrono::steady_clock::now();
+      struct timespec cpu_start_ts;
+      clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start_ts);
+
+      auto& ws  = *_sessions[thread_index];
+      auto  as  = ws.allocator_session();
+      auto  seg_count_before = as->seg_alloc_count();
+      auto  seg_ns_before    = as->seg_alloc_ns();
       auto  tx = ws.start_transaction(root_index);
 
       // Drain all entries from the RO btree into PsiTri.
+      // Keys arrive in sorted order — use upsert_sorted to enable sibling
+      // prefetch, warming pages the next key will need.
+      //
+      // Per-entry timing: bucket each upsert into latency ranges to identify
+      // whether stalls come from a few very slow ops (segment alloc) or many
+      // moderately slow ones (page fault reads).
+      uint64_t entry_count = 0;
+      uint64_t bucket_lt1us  = 0;  // < 1 us
+      uint64_t bucket_lt10us = 0;  // 1-10 us
+      uint64_t bucket_lt100us = 0; // 10-100 us
+      uint64_t bucket_lt1ms  = 0;  // 100us-1ms
+      uint64_t bucket_lt10ms = 0;  // 1-10 ms
+      uint64_t bucket_ge10ms = 0;  // >= 10 ms
+      double   max_entry_us  = 0;
+      double   sum_top_us    = 0;  // sum of entries >= 1ms
+      uint64_t count_top     = 0;
+
       for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
       {
+         auto entry_start = std::chrono::steady_clock::now();
+
          auto  key = it.key();
          auto& val = it.value();
          if (val.is_tombstone())
@@ -109,19 +138,76 @@ namespace psitri::dwal
          {
             auto subtree = ws.make_ptr(val.subtree_root, /*retain=*/true);
             if (subtree)
-               tx.upsert(key, std::move(subtree));
+               tx.upsert_sorted(key, std::move(subtree));
          }
          else
          {
-            tx.upsert(key, val.data);
+            tx.upsert_sorted(key, val.data);
          }
+         ++entry_count;
+         double us = std::chrono::duration<double, std::micro>(
+                         std::chrono::steady_clock::now() - entry_start).count();
+         if (us < 1)        ++bucket_lt1us;
+         else if (us < 10)  ++bucket_lt10us;
+         else if (us < 100) ++bucket_lt100us;
+         else if (us < 1000) ++bucket_lt1ms;
+         else if (us < 10000) ++bucket_lt10ms;
+         else                ++bucket_ge10ms;
+         if (us > max_entry_us) max_entry_us = us;
+         if (us >= 1000) { sum_top_us += us; ++count_top; }
       }
 
       // Apply range tombstones.
       for (const auto& range : ro->tombstones.ranges())
          tx.remove_range(range.low, range.high);
 
+      auto wall_pre_commit = std::chrono::steady_clock::now();
+      struct timespec cpu_pre_commit_ts;
+      clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_pre_commit_ts);
+
       tx.commit();
+
+      auto wall_end = std::chrono::steady_clock::now();
+      struct timespec cpu_end_ts;
+      clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_end_ts);
+
+      auto to_ms = [](struct timespec& a, struct timespec& b) -> double {
+         return (b.tv_sec - a.tv_sec) * 1000.0 + (b.tv_nsec - a.tv_nsec) / 1e6;
+      };
+
+      double wall_drain_ms  = std::chrono::duration<double, std::milli>(wall_pre_commit - wall_start).count();
+      double wall_commit_ms = std::chrono::duration<double, std::milli>(wall_end - wall_pre_commit).count();
+      double wall_total_ms  = wall_drain_ms + wall_commit_ms;
+      double cpu_drain_ms   = to_ms(cpu_start_ts, cpu_pre_commit_ts);
+      double cpu_commit_ms  = to_ms(cpu_pre_commit_ts, cpu_end_ts);
+      double cpu_total_ms   = cpu_drain_ms + cpu_commit_ms;
+      double syscall_pct    = wall_total_ms > 0 ? 100.0 * (1.0 - cpu_total_ms / wall_total_ms) : 0;
+
+      double entries_per_sec = wall_total_ms > 0 ? entry_count / (wall_total_ms / 1000.0) : 0;
+      double us_per_entry   = entry_count > 0 ? (wall_total_ms * 1000.0) / entry_count : 0;
+      double top_total_ms   = sum_top_us / 1000.0;
+
+      uint64_t seg_count = as->seg_alloc_count() - seg_count_before;
+      double   seg_ms    = (as->seg_alloc_ns() - seg_ns_before) / 1e6;
+
+      fprintf(stderr,
+              "[MERGE] root=%u entries=%llu  %.0f ms wall / %.0f ms cpu  "
+              "syscall=%.0f%%  %.0f entries/sec  %.2f us/entry  max=%.1f ms\n"
+              "        latency: <1us=%llu  <10us=%llu  <100us=%llu  <1ms=%llu  "
+              "<10ms=%llu  >=10ms=%llu  |  stalls(>=1ms): %llu entries, %.0f ms total (%.0f%% of wall)\n"
+              "        segments: %llu new segs, %.0f ms total (%.0f%% of wall)  "
+              "%.1f ms/seg\n",
+              root_index, (unsigned long long)entry_count,
+              wall_total_ms, cpu_total_ms, syscall_pct,
+              entries_per_sec, us_per_entry, max_entry_us / 1000.0,
+              (unsigned long long)bucket_lt1us, (unsigned long long)bucket_lt10us,
+              (unsigned long long)bucket_lt100us, (unsigned long long)bucket_lt1ms,
+              (unsigned long long)bucket_lt10ms, (unsigned long long)bucket_ge10ms,
+              (unsigned long long)count_top, top_total_ms,
+              wall_total_ms > 0 ? 100.0 * top_total_ms / wall_total_ms : 0,
+              (unsigned long long)seg_count, seg_ms,
+              wall_total_ms > 0 ? 100.0 * seg_ms / wall_total_ms : 0,
+              seg_count > 0 ? seg_ms / seg_count : 0);
 
       // Update the DWAL root's tri_root to reflect the new PsiTri root.
       auto new_root = ws.get_root(root_index);
@@ -184,6 +270,7 @@ namespace psitri::dwal
 
       // Signal the writer that it can swap again.
       root.merge_complete.store(true, std::memory_order_release);
+      root.merge_complete.notify_all();
    }
 
    void merge_pool::try_reclaim()

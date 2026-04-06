@@ -5,6 +5,7 @@
 #include <sal/mapped_memory/segment_impl.hpp>
 #include <sal/time.hpp>
 #include <ucc/round.hpp>
+#include <chrono>
 
 namespace sal
 {
@@ -52,6 +53,8 @@ namespace sal
 
    void allocator_session::init_active_segment()
    {
+      auto t0 = std::chrono::steady_clock::now();
+
       auto [num, ptr] = _sega.get_new_segment(_alloc_to_pinned);
       _alloc_seg_num  = num;
       _alloc_seg_ptr  = ptr;
@@ -62,6 +65,10 @@ namespace sal
           _sega._mapped_state->_session_data.next_session_segment_seq(_session_num);
       _alloc_seg_ptr->_open_time_usec  = sal::get_current_time_msec();
       _alloc_seg_ptr->_close_time_usec = msec_timestamp(0);  // Will be set when segment is closed
+
+      ++_seg_alloc_count;
+      _seg_alloc_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - t0).count();
    }
 
    /**
