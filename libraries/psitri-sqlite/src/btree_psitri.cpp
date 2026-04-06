@@ -22,7 +22,6 @@
 extern "C" {
 int psitri_pack_record(UnpackedRecord *pRec, unsigned char *buf, int bufSize);
 int psitri_sizeof_sqlite3_value(void);
-int psitri_keyinfo_nKeyField(struct KeyInfo *pKeyInfo);
 struct Pager* psitri_get_dummy_pager(void);
 }
 
@@ -178,16 +177,8 @@ static void cache_cursor_value(BtCursor* pCur) {
       }
       pCur->cur_value = read_mc_value(mc);
    } else {
-      // For BLOBKEY (index / WITHOUT ROWID) tables, the full packed record is
-      // stored as the psitri *value*, while the psitri key holds only the
-      // primary-key prefix.  Retrieve the full record from the value so that
-      // sqlite3BtreePayload* returns all columns.
-      pCur->cur_value = read_mc_value(mc);
-      if (pCur->cur_value.empty()) {
-         // Fallback for legacy data or empty-value entries: use the key
-         pCur->cur_value.assign(key_sv.data(), key_sv.size());
-      }
-      pCur->nKey = (i64)pCur->cur_value.size();
+      pCur->nKey = (i64)key_sv.size();
+      pCur->cur_value.assign(key_sv.data(), key_sv.size());
    }
    pCur->is_valid = true;
    pCur->eState = CURSOR_VALID;
@@ -204,94 +195,6 @@ static std::string pack_index_key(UnpackedRecord* pRec) {
    std::string result(sz, '\0');
    int actual = psitri_pack_record(pRec, (unsigned char*)result.data(), sz);
    if (actual > 0) result.resize(actual);
-   return result;
-}
-
-// ============================================================================
-// Index key prefix extraction
-// ============================================================================
-
-/**
- * Extract the first nKeyField fields from a packed SQLite record and re-pack
- * them as a new record.  For WITHOUT ROWID tables, the full packed record
- * contains all columns (primary key + auxiliary).  When storing in psitri we
- * keep only the primary key fields as the psitri key so that lower_bound()
- * with a packed search key (which also has nKeyField fields) uses the same
- * binary layout and compares correctly.
- *
- * Returns the prefix record, or the original record if nKeyField covers all
- * fields already.
- */
-static std::string extract_record_prefix(const char* rec, int recLen, int nKeyField) {
-   if (recLen <= 0 || nKeyField <= 0) return {};
-
-   const unsigned char* a = (const unsigned char*)rec;
-   int pos = 0;
-
-   // Parse header length (varint)
-   u64 rawHdr;
-   pos = sqlite3GetVarint(a, &rawHdr);
-   u32 nHdr = (u32)rawHdr;
-
-   if ((u32)pos >= nHdr || nHdr > (u32)recLen) {
-      // Malformed record — return as-is
-      return std::string(rec, recLen);
-   }
-
-   // Parse serial types from the header (each is a varint)
-   std::vector<u32> serialTypes;
-   while ((u32)pos < nHdr) {
-      u64 st64;
-      pos += sqlite3GetVarint(a + pos, &st64);
-      serialTypes.push_back((u32)st64);
-   }
-
-   int totalFields = (int)serialTypes.size();
-   if (nKeyField >= totalFields) {
-      // Already has only key fields — return as-is
-      return std::string(rec, recLen);
-   }
-
-   // Compute data sizes for each field using SQLite serial type sizes
-   auto serialTypeLen = [](u32 st) -> u32 {
-      if (st <= 9) {
-         static const u32 sizes[] = {0, 1, 2, 3, 4, 6, 8, 8, 0, 0};
-         return sizes[st];
-      }
-      return (st - 12) / 2;  // blob or text
-   };
-
-   // Compute the data offset for the first nKeyField fields
-   u32 keyDataLen = 0;
-   for (int i = 0; i < nKeyField; i++) {
-      keyDataLen += serialTypeLen(serialTypes[i]);
-   }
-
-   // Build the new prefix record: new header + first nKeyField data bytes
-   // New header: header-length varint + nKeyField serial type varints
-   u32 newHdrContent = 0;
-   for (int i = 0; i < nKeyField; i++) {
-      newHdrContent += sqlite3VarintLen(serialTypes[i]);
-   }
-   // Header length includes itself
-   u32 newHdrLen = sqlite3VarintLen(newHdrContent + 1) + newHdrContent;
-   // Recheck if the header length varint grew
-   if (sqlite3VarintLen(newHdrLen) > sqlite3VarintLen(newHdrContent + 1)) {
-      newHdrLen++;
-   }
-
-   std::string result;
-   result.resize(newHdrLen + keyDataLen);
-   unsigned char* out = (unsigned char*)result.data();
-
-   int idx = sqlite3PutVarint(out, newHdrLen);
-   for (int i = 0; i < nKeyField; i++) {
-      idx += sqlite3PutVarint(out + idx, serialTypes[i]);
-   }
-
-   // Copy data bytes for the first nKeyField fields from the original record
-   std::memcpy(out + idx, a + nHdr, keyDataLen);
-
    return result;
 }
 
@@ -1049,20 +952,7 @@ int sqlite3BtreeInsert(
       }
    } else {
       if (pPayload->pKey) {
-         // For BLOBKEY (index / WITHOUT ROWID) tables, the full packed record
-         // is in pKey.  We store only the primary-key fields as the psitri
-         // key so that lower_bound() binary comparison matches the packed
-         // search key layout used by sqlite3BtreeIndexMoveto().  The full
-         // record goes into the psitri value so that payload reads return all
-         // columns.
-         int nKeyField = psitri_keyinfo_nKeyField(pCur->pKeyInfo);
-         std::string full_record((const char*)pPayload->pKey, pPayload->nKey);
-         if (nKeyField > 0) {
-            key = extract_record_prefix(full_record.data(), (int)full_record.size(), nKeyField);
-            value = std::move(full_record);
-         } else {
-            key = std::move(full_record);
-         }
+         key.assign((const char*)pPayload->pKey, pPayload->nKey);
       }
    }
 
