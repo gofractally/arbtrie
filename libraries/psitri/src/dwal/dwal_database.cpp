@@ -535,8 +535,9 @@ namespace psitri::dwal
          return;
 
       // Freeze current RW as the new buffered RO.
-      // Exclusive rw_mutex blocks readers from the RW layer during swap;
-      // buffered_mutex publishes the frozen snapshot to RO readers.
+      // Caller must ensure no concurrent mutation of rw_layer.
+      // When called from dwal_transaction::commit(), the writer has
+      // finished mutations and released any locks.
       {
          std::unique_lock rw_lk(root.rw_mutex, std::defer_lock);
          if (root.enable_rw_locking)

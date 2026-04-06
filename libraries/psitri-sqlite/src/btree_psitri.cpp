@@ -797,14 +797,16 @@ static void ensure_cursor(BtCursor* pCur) {
             }
          }
          if (!used_tx_cursor) {
-            // Writer: latest mode, skip rw_lock (single-threaded, no contention)
-            // Reader: buffered mode (RO + Tri only, zero writer contention).
-            //         Data freshness bounded by max_flush_delay config.
             bool writer = (pCur->pBtree && pCur->pBtree->is_writer);
-            auto mode = writer ? psitri::dwal::read_mode::latest
-                               : psitri::dwal::read_mode::buffered;
-            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-               pCur->pgnoRoot, mode, /*skip_rw_lock=*/writer));
+            if (writer) {
+               pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+                  pCur->pgnoRoot, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
+            } else {
+               // Reader: buffered mode (RO + Tri).  Freshness bounded
+               // by max_flush_delay — writer swaps RW→RO on timer.
+               pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+                  pCur->pgnoRoot, psitri::dwal::read_mode::buffered));
+            }
          }
       } catch (...) {
          pCur->cursor.reset();
