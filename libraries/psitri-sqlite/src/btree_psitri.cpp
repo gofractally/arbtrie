@@ -336,7 +336,7 @@ int sqlite3BtreeOpen(
             path + "/data", psitri::open_mode::create_or_open);
          psitri::dwal::dwal_config cfg;
          cfg.max_rw_entries = 200000;
-         cfg.max_flush_delay = std::chrono::milliseconds(1);  // bound reader staleness to 1ms  // allow reader threads to use latest mode
+         cfg.max_flush_delay = std::chrono::milliseconds(1000);  // swap RW→RO at most once per second
          pdb->dwal_db = std::make_shared<psitri::dwal::dwal_database>(
             pdb->psi_db, path + "/wal", cfg);
 
