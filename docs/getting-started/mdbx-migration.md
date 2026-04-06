@@ -123,13 +123,14 @@ mdbx_env_set_read_mode(env, PSITRI_READ_MODE_BUFFERED);
 
 ### Available Modes
 
-| Mode | Constant | Layers Searched | Locking | Behavior |
-|------|----------|----------------|---------|----------|
-| **Trie** | `PSITRI_READ_MODE_TRIE` | Tri only | None | Reads only data that has been merged into the COW trie. Fastest reads, but may not see recently committed data that is still in the WAL btree layers. |
-| **Buffered** | `PSITRI_READ_MODE_BUFFERED` | RO snapshot + Tri | None | Reads from a cached RO btree snapshot plus the COW trie. The snapshot is refreshed automatically when the DWAL generation counter advances (after a writer swaps RW→RO). No lock contention with writers. |
-| **Latest** | `PSITRI_READ_MODE_LATEST` | RW + RO + Tri | Shared lock on RW layer | Sees all committed data including writes not yet swapped to the RO layer. Acquires a shared lock on the RW btree, which can contend with the writer's exclusive lock during commits. |
+| Mode | Constant | Layers | Writer Impact | Behavior |
+|------|----------|--------|---------------|----------|
+| **Trie** | `PSITRI_READ_MODE_TRIE` | Tri only | None | Reads only data merged into the COW trie. Fastest, most stale. |
+| **Buffered** | `PSITRI_READ_MODE_BUFFERED` | RO + Tri | None | Reads the frozen RO snapshot plus trie. Staleness bounded by flush interval. No writer interaction. |
+| **Fresh** | `PSITRI_READ_MODE_FRESH` | RO + Tri (after forced swap) | None | Reader waits for the next RW→RO swap, then reads. Blocks only itself — the writer and other readers are unaffected. Best when you need all committed data without impacting write throughput. |
+| **Latest** | `PSITRI_READ_MODE_LATEST` | RW + RO + Tri | Blocks next tx | Reader acquires shared lock on the RW layer, blocking until the writer finishes its current transaction. While held, the writer cannot start a new transaction. Sees all committed data. |
 
-The default mode is **Latest**, which matches native MDBX semantics (readers see the most recently committed data).
+The default mode is **Latest**, which matches native MDBX semantics (readers see the most recently committed data). For workloads where write throughput matters more than read freshness, **Buffered** or **Fresh** avoid writer contention entirely.
 
 ### How It Works
 

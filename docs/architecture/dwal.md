@@ -760,39 +760,79 @@ The merge cursor checks layers in priority order: RW map > RO map
 > PsiTri. Tombstones and range tombstones in higher layers shadow lower
 layers.
 
-#### Layer Selection: Latency vs Freshness
+#### Read Modes: Freshness vs Cost
 
-The caller chooses which layers to include when starting a read
-transaction, trading freshness for latency:
+The caller chooses a read mode that trades freshness for cost.  All
+modes see only committed data.  The difference is how recent that
+committed data is and what cost the reader imposes.
 
-| Mode | Layers | Lock | Staleness | Use case |
-|------|--------|------|-----------|----------|
-| **latest** | RW + RO + Tri | `buffered_mutex` (shared, brief) | none — sees all committed writes | writer thread reading its own writes |
-| **buffered** | RO + Tri | `buffered_mutex` (shared, brief) | up to one swap behind | external readers, low contention |
-| **trie** | Tri only | none | up to one merge behind | cheapest read, no DWAL overhead |
-
-```cpp
-enum class read_mode { latest, buffered, trie };
-
-// create_cursor handles all locking internally
-auto mc = dwal.create_cursor(root_index, read_mode::buffered);
-mc->seek_begin();  // iterate over RO + Tri, no locks held during iteration
+```
+    Mode       Layers          Reader waits for   Writer impact
+    ─────────  ──────────────  ─────────────────  ──────────────────
+    trie       Tri only        nothing            none
+    buffered   RO + Tri        nothing            none
+    fresh      RO + Tri        merge + swap       none (self-imposed)
+    latest     RW + RO + Tri   current tx finish  blocks next tx start
 ```
 
-All three modes see only committed data. The difference is recency:
-`latest` includes the RW map (writer-thread only — the RW map is not
-thread-safe for concurrent access), `buffered` lags by at most one swap
-interval, and `trie` lags by at most one merge cycle.
+**`trie`** — reads only the persistent COW trie.  Zero DWAL overhead.
+Staleness bounded by the merge cycle (how long it takes the merge
+thread to drain RO into Tri).  Best for read-heavy workloads that
+tolerate seconds of lag.
 
-**`latest` is writer-thread only.** The RW map has no lock — it is
-writer-private. Only the single writer thread may use `latest` mode.
-External reader threads must use `buffered` or `trie`.
+**`buffered`** — reads the frozen RO snapshot plus Tri.  No writer
+interaction.  Staleness bounded by `max_flush_delay` (configurable) or
+the writer's natural commit-driven swap frequency.  Best for most
+external readers.
 
-The `trie` mode is equivalent to reading PsiTri directly — the
-DWAL layer is invisible and there is zero DWAL overhead. This is the
-**default** — most reads don't need sub-swap-interval freshness. The
-`buffered` mode acquires `buffered_mutex` only briefly to copy a
-`shared_ptr`, then iterates lock-free over the frozen snapshot.
+**`fresh`** — reader signals that it wants the latest committed data by
+setting an atomic flag (`readers_want_swap`), then waits on a condition
+variable.  The writer (on its next commit) or the merge thread (if the
+writer is idle) sees the flag, swaps RW→RO, and wakes all waiting
+readers.  The reader then reads from the freshly frozen RO + Tri.
+**The reader blocks only itself — the writer and other readers are
+completely unaffected.**  Best for readers that need guaranteed-fresh
+data but can tolerate a brief wait (up to one merge cycle + one
+commit).
+
+**`latest`** — reader acquires a shared lock on `rw_mutex`, blocking
+until the writer's current transaction finishes.  Reads from the live
+RW map + RO + Tri via a three-way merge cursor.  While the reader holds
+the shared lock, the writer cannot start a new transaction (exclusive
+lock blocked).  **This is the only mode that imposes cost on the
+writer.**  Best for same-connection reads (writer reading its own
+writes within a transaction) or when the reader needs the absolute
+freshest view and accepts the writer impact.
+
+```cpp
+enum class read_mode { trie, buffered, fresh, latest };
+
+// Reader thread — zero writer impact, brief self-imposed wait
+auto mc = dwal.create_cursor(root_index, read_mode::fresh);
+
+// Writer thread — reading own writes, no lock needed
+auto mc = dwal.create_cursor(root_index, read_mode::latest, skip_rw_lock);
+```
+
+#### Swap Coordination
+
+The RW→RO swap can be triggered by two actors:
+
+- **Writer in `commit()`** — checks `should_swap()` (buffer full, WAL
+  full, or `max_flush_delay` elapsed) and also checks
+  `readers_want_swap`.  The writer already holds exclusive `rw_mutex`
+  (if enabled) or is between mutations, so the swap has zero additional
+  lock cost.  This is the preferred path.
+
+- **Merge thread** — after completing an RO→Tri drain, checks
+  `readers_want_swap`.  If set and the writer is idle (`try_lock`
+  succeeds), the merge thread performs the swap.  If the writer is
+  active (`try_lock` fails), the merge thread skips and lets the writer
+  handle it on the next commit.
+
+After a swap, `swap_cv.notify_all()` wakes all readers waiting in
+`fresh` mode.  The freshly frozen RO snapshot is immediately available
+to `buffered` and `fresh` readers.
 
 ### Why Three Layers
 
