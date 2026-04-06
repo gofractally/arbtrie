@@ -1,0 +1,505 @@
+
+╔═══════════════════════════════════════════════════════════════╗
+║              PsiTri Stress Benchmark                         ║
+╚═══════════════════════════════════════════════════════════════╝
+
+config:
+  rounds=200 items=1,000,000 batch=100 value_size=256
+  readers=0 merge_threads=2 max_rw=100,000
+  pinned_cache=256.0 MB mlock=on validate=no
+  db_dir=./dwal_bench_db csv=./dwal_bench_results.csv
+  modes: rw | backends: dwal
+
+mapping.cpp:84             main       mapping               [33mOpened empty file: ./dwal_bench_db_dwal_rw/ptrs/header.bin[0m
+mapping.cpp:132            main       resize                [33mResizing mapping: current=0, new=4120[0m
+mapping.cpp:192            main       resize                [33mRemapped to new location: old_addr=0, new_addr=139782865600512, size=4120[0m
+control_block_alloc.cpp:30  main       control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:84  main       ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+allocator.cpp:126          main       cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (899 GB) — capping[0m
+mapping.cpp:84             main       mapping               [33mOpened empty file: ./dwal_bench_db_dwal_rw/header[0m
+mapping.cpp:84             main       mapping               [33mOpened empty file: ./dwal_bench_db_dwal_rw/roots[0m
+mapping.cpp:132            main       resize                [33mResizing mapping: current=0, new=93618176[0m
+mapping.cpp:192            main       resize                [33mRemapped to new location: old_addr=0, new_addr=138782003167232, size=93618176[0m
+mapping.cpp:132            main       resize                [33mResizing mapping: current=0, new=4096[0m
+mapping.cpp:192            main       resize                [33mRemapped to new location: old_addr=0, new_addr=139782865596416, size=4096[0m
+mapping.cpp:84             main       mapping               [33mOpened empty file: ./dwal_bench_db_dwal_rw/dbfile.bin[0m
+mapping.cpp:132            main       resize                [33mResizing mapping: current=0, new=4160[0m
+mapping.cpp:192            main       resize                [33mRemapped to new location: old_addr=0, new_addr=139782865588224, size=4160[0m
+[MERGE] root=0 entries=100000  58 ms wall / 58 ms cpu  syscall=0%  1717017 entries/sec  0.58 us/entry  max=0.0 ms
+        latency: <1us=92219  <10us=7758  <100us=23  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 2 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=143700  95 ms wall / 95 ms cpu  syscall=0%  1506066 entries/sec  0.66 us/entry  max=0.5 ms
+        latency: <1us=130661  <10us=12997  <100us=41  <1ms=1  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 2 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=205900  139 ms wall / 138 ms cpu  syscall=0%  1485353 entries/sec  0.67 us/entry  max=0.5 ms
+        latency: <1us=186656  <10us=19169  <100us=74  <1ms=1  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 2 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+── open ──
+  file size:     64.0 MB
+  free space:    0.0 MB
+  alloc objects: 0
+  pinned:        32.0 MB (1 segs)
+  pending rel:   0
+  recycle queue: 0/1024
+═══════════════════════════════════════════════════════════════
+  rw_dwal — write + 0 trie readers (concurrent)
+  rounds=200 items=1,000,000 batch=100 val_size=256 validate=no
+  merge_threads=2 max_rw_entries=100,000
+═══════════════════════════════════════════════════════════════
+seeded 100,000 keys
+0       2,077,140  writes/sec             0  reads/sec  found=0.0%  db=731.2 MB  rq=0/1024
+[MERGE] root=0 entries=376500  262 ms wall / 262 ms cpu  syscall=0%  1435665 entries/sec  0.70 us/entry  max=0.3 ms
+        latency: <1us=340924  <10us=35421  <100us=153  <1ms=2  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 4 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+1       2,102,340  writes/sec             0  reads/sec  found=0.0%  db=992.1 MB  rq=0/1024
+[MERGE] root=0 entries=642600  475 ms wall / 475 ms cpu  syscall=0%  1351574 entries/sec  0.74 us/entry  max=0.2 ms
+        latency: <1us=580357  <10us=61994  <100us=248  <1ms=1  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 7 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+2       1,829,184  writes/sec             0  reads/sec  found=0.0%  db=1.26 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 1 [0m
+3       2,334,318  writes/sec             0  reads/sec  found=0.0%  db=1.51 GB  rq=0/1024
+[MERGE] root=0 entries=1169700  870 ms wall / 862 ms cpu  syscall=1%  1344068 entries/sec  0.74 us/entry  max=13.1 ms
+        latency: <1us=1053968  <10us=115464  <100us=261  <1ms=4  <10ms=2  >=10ms=1  |  stalls(>=1ms): 3 entries, 19 ms total (2% of wall)
+        segments: 14 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+4       1,437,071  writes/sec             0  reads/sec  found=0.0%  db=1.90 GB  rq=0/1024
+5       2,309,131  writes/sec             0  reads/sec  found=0.0%  db=2.09 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 2 [0m
+6       1,779,684  writes/sec             0  reads/sec  found=0.0%  db=2.37 GB  rq=0/1024
+[MERGE] root=0 entries=1849200  1551 ms wall / 1546 ms cpu  syscall=0%  1192424 entries/sec  0.84 us/entry  max=16.6 ms
+        latency: <1us=1657676  <10us=190475  <100us=1038  <1ms=10  <10ms=0  >=10ms=1  |  stalls(>=1ms): 1 entries, 17 ms total (1% of wall)
+        segments: 22 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+7         989,085  writes/sec             0  reads/sec  found=0.0%  db=2.89 GB  rq=0/1024
+8       2,028,779  writes/sec             0  reads/sec  found=0.0%  db=3.01 GB  rq=0/1024
+9       1,804,431  writes/sec             0  reads/sec  found=0.0%  db=3.23 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 3 [0m
+10      1,447,862  writes/sec             0  reads/sec  found=0.0%  db=3.57 GB  rq=0/1024
+11      1,890,325  writes/sec             0  reads/sec  found=0.0%  db=3.82 GB  rq=0/1024
+[MERGE] root=0 entries=3276900  2594 ms wall / 2562 ms cpu  syscall=1%  1263362 entries/sec  0.79 us/entry  max=13.3 ms
+        latency: <1us=2959049  <10us=316233  <100us=1589  <1ms=20  <10ms=8  >=10ms=1  |  stalls(>=1ms): 9 entries, 41 ms total (2% of wall)
+        segments: 37 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+12      1,007,844  writes/sec             0  reads/sec  found=0.0%  db=4.39 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 4 [0m
+13      1,535,655  writes/sec             0  reads/sec  found=0.0%  db=4.71 GB  rq=0/1024
+14      1,745,477  writes/sec             0  reads/sec  found=0.0%  db=4.96 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 5 [0m
+15      1,328,603  writes/sec             0  reads/sec  found=0.0%  db=5.30 GB  rq=0/1024
+16      1,879,502  writes/sec             0  reads/sec  found=0.0%  db=5.52 GB  rq=0/1024
+17      1,938,231  writes/sec             0  reads/sec  found=0.0%  db=5.74 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 6 [0m
+[MERGE] root=0 entries=4662500  4107 ms wall / 4105 ms cpu  syscall=0%  1135238 entries/sec  0.88 us/entry  max=16.4 ms
+        latency: <1us=4175224  <10us=483726  <100us=3528  <1ms=19  <10ms=0  >=10ms=3  |  stalls(>=1ms): 3 entries, 42 ms total (1% of wall)
+        segments: 57 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+18        523,890  writes/sec             0  reads/sec  found=0.0%  db=6.37 GB  rq=1/1024
+19      1,642,427  writes/sec             0  reads/sec  found=0.0%  db=6.37 GB  rq=0/1024
+20      1,738,414  writes/sec             0  reads/sec  found=0.0%  db=6.53 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 7 [0m
+21      1,293,020  writes/sec             0  reads/sec  found=0.0%  db=6.84 GB  rq=0/1024
+22      1,887,108  writes/sec             0  reads/sec  found=0.0%  db=7.09 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 8 [0m
+[MERGE] root=0 entries=5809000  5554 ms wall / 5276 ms cpu  syscall=5%  1045992 entries/sec  0.96 us/entry  max=20.3 ms
+        latency: <1us=5159880  <10us=646386  <100us=2600  <1ms=52  <10ms=77  >=10ms=5  |  stalls(>=1ms): 82 entries, 274 ms total (5% of wall)
+        segments: 71 new segs, 37 ms total (1% of wall)  0.5 ms/seg
+23        307,872  writes/sec             0  reads/sec  found=0.0%  db=8.28 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 9 [0m
+24      1,739,017  writes/sec             0  reads/sec  found=0.0%  db=8.31 GB  rq=0/1024
+25      1,574,875  writes/sec             0  reads/sec  found=0.0%  db=8.53 GB  rq=0/1024
+26      1,786,347  writes/sec             0  reads/sec  found=0.0%  db=8.78 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 10 [0m
+27      1,340,509  writes/sec             0  reads/sec  found=0.0%  db=9.15 GB  rq=0/1024
+28      2,049,413  writes/sec             0  reads/sec  found=0.0%  db=9.37 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 11 [0m
+[MERGE] root=0 entries=5809400  5543 ms wall / 5394 ms cpu  syscall=3%  1048067 entries/sec  0.95 us/entry  max=14.4 ms
+        latency: <1us=5110757  <10us=694432  <100us=4127  <1ms=47  <10ms=34  >=10ms=3  |  stalls(>=1ms): 37 entries, 168 ms total (3% of wall)
+        segments: 75 new segs, 2 ms total (0% of wall)  0.0 ms/seg
+29        302,055  writes/sec             0  reads/sec  found=0.0%  db=10.50 GB  rq=0/1024
+30      1,679,303  writes/sec             0  reads/sec  found=0.0%  db=10.50 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 12 [0m
+31      1,531,449  writes/sec             0  reads/sec  found=0.0%  db=10.53 GB  rq=0/1024
+32      1,794,642  writes/sec             0  reads/sec  found=0.0%  db=10.66 GB  rq=0/1024
+33      1,397,120  writes/sec             0  reads/sec  found=0.0%  db=10.97 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 13 [0m
+34      1,981,540  writes/sec             0  reads/sec  found=0.0%  db=11.25 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 14 [0m
+[MERGE] root=0 entries=5808600  6180 ms wall / 5783 ms cpu  syscall=6%  939965 entries/sec  1.06 us/entry  max=38.2 ms
+        latency: <1us=5037710  <10us=765817  <100us=4929  <1ms=64  <10ms=70  >=10ms=10  |  stalls(>=1ms): 80 entries, 399 ms total (6% of wall)
+        segments: 81 new segs, 142 ms total (2% of wall)  1.8 ms/seg
+35        241,544  writes/sec             0  reads/sec  found=0.0%  db=12.59 GB  rq=0/1024
+36      1,685,942  writes/sec             0  reads/sec  found=0.0%  db=12.59 GB  rq=0/1024
+37      1,526,697  writes/sec             0  reads/sec  found=0.0%  db=12.59 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 15 [0m
+38      1,356,849  writes/sec             0  reads/sec  found=0.0%  db=12.81 GB  rq=0/1024
+39      1,879,545  writes/sec             0  reads/sec  found=0.0%  db=13.06 GB  rq=0/1024
+40      1,605,365  writes/sec             0  reads/sec  found=0.0%  db=13.28 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 16 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 17 [0m
+[MERGE] root=0 entries=5809600  8997 ms wall / 8746 ms cpu  syscall=3%  645698 entries/sec  1.55 us/entry  max=23.7 ms
+        latency: <1us=4387906  <10us=1365850  <100us=55471  <1ms=285  <10ms=85  >=10ms=3  |  stalls(>=1ms): 88 entries, 291 ms total (3% of wall)
+        segments: 87 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+41        145,716  writes/sec             0  reads/sec  found=0.0%  db=14.78 GB  rq=0/1024
+42      1,209,888  writes/sec             0  reads/sec  found=0.0%  db=14.78 GB  rq=1/1024
+43      1,030,805  writes/sec             0  reads/sec  found=0.0%  db=14.78 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 18 [0m
+44        875,794  writes/sec             0  reads/sec  found=0.0%  db=14.94 GB  rq=0/1024
+45      1,214,931  writes/sec             0  reads/sec  found=0.0%  db=15.13 GB  rq=0/1024
+46      1,235,302  writes/sec             0  reads/sec  found=0.0%  db=15.35 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 19 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 20 [0m
+[MERGE] root=0 entries=5809400  11292 ms wall / 10949 ms cpu  syscall=3%  514493 entries/sec  1.94 us/entry  max=31.1 ms
+        latency: <1us=4085684  <10us=1618220  <100us=104936  <1ms=461  <10ms=95  >=10ms=4  |  stalls(>=1ms): 99 entries, 362 ms total (3% of wall)
+        segments: 94 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+47        134,080  writes/sec             0  reads/sec  found=0.0%  db=16.97 GB  rq=0/1024
+48      1,259,606  writes/sec             0  reads/sec  found=0.0%  db=16.97 GB  rq=0/1024
+49      1,770,780  writes/sec             0  reads/sec  found=0.0%  db=16.97 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 21 [0m
+50      1,405,913  writes/sec             0  reads/sec  found=0.0%  db=17.16 GB  rq=0/1024
+51      2,205,016  writes/sec             0  reads/sec  found=0.0%  db=17.35 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 22 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 23 [0m
+[MERGE] root=0 entries=5808700  8402 ms wall / 8164 ms cpu  syscall=3%  691366 entries/sec  1.45 us/entry  max=23.5 ms
+        latency: <1us=4443763  <10us=1332600  <100us=32003  <1ms=249  <10ms=82  >=10ms=3  |  stalls(>=1ms): 85 entries, 230 ms total (3% of wall)
+        segments: 100 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+52        163,620  writes/sec             0  reads/sec  found=0.0%  db=19.19 GB  rq=2/1024
+53      1,385,018  writes/sec             0  reads/sec  found=0.0%  db=19.19 GB  rq=1/1024
+54      1,286,889  writes/sec             0  reads/sec  found=0.0%  db=19.19 GB  rq=0/1024
+55      1,353,151  writes/sec             0  reads/sec  found=0.0%  db=19.19 GB  rq=0/1024
+56      1,038,474  writes/sec             0  reads/sec  found=0.0%  db=19.19 GB  rq=0/1024
+57      1,512,056  writes/sec             0  reads/sec  found=0.0%  db=19.19 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 24 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 25 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 26 [0m
+[MERGE] root=0 entries=5809900  10269 ms wall / 9875 ms cpu  syscall=4%  565784 entries/sec  1.77 us/entry  max=23.3 ms
+        latency: <1us=4306168  <10us=1408201  <100us=94865  <1ms=485  <10ms=178  >=10ms=3  |  stalls(>=1ms): 181 entries, 498 ms total (5% of wall)
+        segments: 108 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+58        139,100  writes/sec             0  reads/sec  found=0.0%  db=21.47 GB  rq=0/1024
+59      1,675,352  writes/sec             0  reads/sec  found=0.0%  db=21.47 GB  rq=1/1024
+60      1,353,430  writes/sec             0  reads/sec  found=0.0%  db=21.47 GB  rq=0/1024
+61      1,121,399  writes/sec             0  reads/sec  found=0.0%  db=21.47 GB  rq=0/1024
+62        748,209  writes/sec             0  reads/sec  found=0.0%  db=21.47 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 27 [0m
+63      1,153,693  writes/sec             0  reads/sec  found=0.0%  db=21.66 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 28 [0m
+[MERGE] root=0 entries=5810200  11246 ms wall / 10957 ms cpu  syscall=3%  516632 entries/sec  1.94 us/entry  max=26.1 ms
+        latency: <1us=3652999  <10us=2088786  <100us=68023  <1ms=280  <10ms=109  >=10ms=3  |  stalls(>=1ms): 112 entries, 286 ms total (3% of wall)
+        segments: 118 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+64        132,022  writes/sec             0  reads/sec  found=0.0%  db=23.82 GB  rq=0/1024
+65      1,662,062  writes/sec             0  reads/sec  found=0.0%  db=23.82 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 29 [0m
+66      1,244,590  writes/sec             0  reads/sec  found=0.0%  db=23.85 GB  rq=0/1024
+67      1,333,077  writes/sec             0  reads/sec  found=0.0%  db=23.85 GB  rq=0/1024
+68      1,932,235  writes/sec             0  reads/sec  found=0.0%  db=23.85 GB  rq=0/1024
+69      1,927,057  writes/sec             0  reads/sec  found=0.0%  db=23.85 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 30 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 31 [0m
+[MERGE] root=0 entries=5809000  12650 ms wall / 12318 ms cpu  syscall=3%  459225 entries/sec  2.18 us/entry  max=31.0 ms
+        latency: <1us=3781404  <10us=1879173  <100us=147822  <1ms=491  <10ms=106  >=10ms=4  |  stalls(>=1ms): 110 entries, 334 ms total (3% of wall)
+        segments: 129 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+70         97,469  writes/sec             0  reads/sec  found=0.0%  db=26.29 GB  rq=1/1024
+71      1,769,728  writes/sec             0  reads/sec  found=0.0%  db=26.29 GB  rq=1/1024
+72      1,353,228  writes/sec             0  reads/sec  found=0.0%  db=26.29 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 32 [0m
+73      1,384,850  writes/sec             0  reads/sec  found=0.0%  db=26.32 GB  rq=0/1024
+74      1,945,352  writes/sec             0  reads/sec  found=0.0%  db=26.32 GB  rq=0/1024
+75      2,122,543  writes/sec             0  reads/sec  found=0.0%  db=26.32 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 33 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 34 [0m
+[MERGE] root=0 entries=5808700  12691 ms wall / 12349 ms cpu  syscall=3%  457707 entries/sec  2.18 us/entry  max=28.3 ms
+        latency: <1us=3852819  <10us=1804965  <100us=150151  <1ms=629  <10ms=133  >=10ms=3  |  stalls(>=1ms): 136 entries, 363 ms total (3% of wall)
+        segments: 141 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+76         95,839  writes/sec             0  reads/sec  found=0.0%  db=28.82 GB  rq=1/1024
+77      1,475,358  writes/sec             0  reads/sec  found=0.0%  db=28.82 GB  rq=0/1024
+78      1,788,528  writes/sec             0  reads/sec  found=0.0%  db=28.82 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 35 [0m
+79      1,352,557  writes/sec             0  reads/sec  found=0.0%  db=28.85 GB  rq=0/1024
+80      1,385,367  writes/sec             0  reads/sec  found=0.0%  db=28.85 GB  rq=0/1024
+81      1,357,425  writes/sec             0  reads/sec  found=0.0%  db=28.85 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 36 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 37 [0m
+[MERGE] root=0 entries=5809900  13997 ms wall / 13554 ms cpu  syscall=3%  415078 entries/sec  2.41 us/entry  max=26.2 ms
+        latency: <1us=3494552  <10us=2184924  <100us=129808  <1ms=479  <10ms=133  >=10ms=4  |  stalls(>=1ms): 137 entries, 442 ms total (3% of wall)
+        segments: 154 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+82         87,761  writes/sec             0  reads/sec  found=0.0%  db=31.42 GB  rq=0/1024
+83      1,469,519  writes/sec             0  reads/sec  found=0.0%  db=31.42 GB  rq=0/1024
+84      1,665,856  writes/sec             0  reads/sec  found=0.0%  db=31.42 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 38 [0m
+85      1,300,179  writes/sec             0  reads/sec  found=0.0%  db=31.45 GB  rq=0/1024
+86      1,870,213  writes/sec             0  reads/sec  found=0.0%  db=31.45 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 39 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 40 [0m
+[MERGE] root=0 entries=5808700  14566 ms wall / 14180 ms cpu  syscall=3%  398773 entries/sec  2.51 us/entry  max=33.9 ms
+        latency: <1us=3327352  <10us=2327194  <100us=153628  <1ms=378  <10ms=145  >=10ms=3  |  stalls(>=1ms): 148 entries, 388 ms total (3% of wall)
+        segments: 168 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+87         82,574  writes/sec             0  reads/sec  found=0.0%  db=34.14 GB  rq=0/1024
+88      1,369,958  writes/sec             0  reads/sec  found=0.0%  db=34.14 GB  rq=1/1024
+89      1,364,600  writes/sec             0  reads/sec  found=0.0%  db=34.14 GB  rq=1/1024
+90      1,378,716  writes/sec             0  reads/sec  found=0.0%  db=34.14 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 41 [0m
+91        967,847  writes/sec             0  reads/sec  found=0.0%  db=34.17 GB  rq=0/1024
+92        880,709  writes/sec             0  reads/sec  found=0.0%  db=34.17 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 42 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 43 [0m
+[MERGE] root=0 entries=5808800  15853 ms wall / 15285 ms cpu  syscall=4%  366410 entries/sec  2.73 us/entry  max=35.5 ms
+        latency: <1us=3327212  <10us=2264624  <100us=215982  <1ms=756  <10ms=223  >=10ms=3  |  stalls(>=1ms): 226 entries, 586 ms total (4% of wall)
+        segments: 182 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+93         79,757  writes/sec             0  reads/sec  found=0.0%  db=36.86 GB  rq=0/1024
+94        766,214  writes/sec             0  reads/sec  found=0.0%  db=36.86 GB  rq=1/1024
+95        722,638  writes/sec             0  reads/sec  found=0.0%  db=36.86 GB  rq=0/1024
+96        598,494  writes/sec             0  reads/sec  found=0.0%  db=36.86 GB  rq=0/1024
+97      1,100,262  writes/sec             0  reads/sec  found=0.0%  db=36.86 GB  rq=0/1024
+98      1,274,535  writes/sec             0  reads/sec  found=0.0%  db=36.86 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 44 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 45 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 46 [0m
+[WATCHDOG] STALL in rw_dwal round 99: 99565900 ops, alloc=97804450 free=502.5 MB pending=0 recycle=0/1024 db=36.25 GB
+[MERGE] root=0 entries=5809100  23106 ms wall / 22041 ms cpu  syscall=5%  251412 entries/sec  3.98 us/entry  max=35.7 ms
+        latency: <1us=2928585  <10us=2407967  <100us=470138  <1ms=1982  <10ms=425  >=10ms=3  |  stalls(>=1ms): 428 entries, 1201 ms total (5% of wall)
+        segments: 196 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+99         55,355  writes/sec             0  reads/sec  found=0.0%  db=39.64 GB  rq=1/1024
+100     1,205,992  writes/sec             0  reads/sec  found=0.0%  db=39.64 GB  rq=0/1024
+101       894,347  writes/sec             0  reads/sec  found=0.0%  db=39.64 GB  rq=1/1024
+102       834,464  writes/sec             0  reads/sec  found=0.0%  db=39.64 GB  rq=0/1024
+103     1,406,247  writes/sec             0  reads/sec  found=0.0%  db=39.64 GB  rq=0/1024
+104     1,494,331  writes/sec             0  reads/sec  found=0.0%  db=39.64 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 47 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 48 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 49 [0m
+[MERGE] root=0 entries=5809900  16896 ms wall / 15988 ms cpu  syscall=5%  343859 entries/sec  2.91 us/entry  max=25.8 ms
+        latency: <1us=2931868  <10us=2671406  <100us=205404  <1ms=903  <10ms=316  >=10ms=3  |  stalls(>=1ms): 319 entries, 1006 ms total (6% of wall)
+        segments: 209 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[WATCHDOG] STALL in rw_dwal round 105: 105375800 ops, alloc=104506782 free=706.2 MB pending=0 recycle=1/1024 db=39.50 GB
+105        74,719  writes/sec             0  reads/sec  found=0.0%  db=42.64 GB  rq=1/1024
+106     1,099,321  writes/sec             0  reads/sec  found=0.0%  db=42.64 GB  rq=0/1024
+107     1,110,999  writes/sec             0  reads/sec  found=0.0%  db=42.64 GB  rq=2/1024
+108       845,732  writes/sec             0  reads/sec  found=0.0%  db=42.64 GB  rq=0/1024
+109     1,234,922  writes/sec             0  reads/sec  found=0.0%  db=42.64 GB  rq=0/1024
+110     1,348,262  writes/sec             0  reads/sec  found=0.0%  db=42.64 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 50 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 51 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 52 [0m
+[WATCHDOG] STALL in rw_dwal round 111: 111185100 ops, alloc=110078044 free=638.9 MB pending=0 recycle=0/1024 db=41.47 GB
+[MERGE] root=0 entries=5809900  21578 ms wall / 20455 ms cpu  syscall=5%  269254 entries/sec  3.71 us/entry  max=21.1 ms
+        latency: <1us=2585570  <10us=2870833  <100us=351554  <1ms=1560  <10ms=376  >=10ms=7  |  stalls(>=1ms): 383 entries, 1246 ms total (6% of wall)
+        segments: 221 new segs, 11 ms total (0% of wall)  0.0 ms/seg
+111        55,513  writes/sec             0  reads/sec  found=0.0%  db=45.42 GB  rq=0/1024
+112     1,223,510  writes/sec             0  reads/sec  found=0.0%  db=45.42 GB  rq=0/1024
+113     1,193,754  writes/sec             0  reads/sec  found=0.0%  db=45.42 GB  rq=0/1024
+114       964,118  writes/sec             0  reads/sec  found=0.0%  db=45.42 GB  rq=0/1024
+115     1,438,187  writes/sec             0  reads/sec  found=0.0%  db=45.42 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 53 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 54 [0m
+[WATCHDOG] STALL in rw_dwal round 116: 116995200 ops, alloc=114483411 free=689.1 MB pending=0 recycle=0/1024 db=42.47 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 55 [0m
+[MERGE] root=0 entries=5809300  23180 ms wall / 22071 ms cpu  syscall=5%  250620 entries/sec  3.99 us/entry  max=28.9 ms
+        latency: <1us=2447332  <10us=2929670  <100us=430171  <1ms=1653  <10ms=471  >=10ms=3  |  stalls(>=1ms): 474 entries, 1323 ms total (6% of wall)
+        segments: 232 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+116        50,133  writes/sec             0  reads/sec  found=0.0%  db=48.08 GB  rq=2/1024
+117     1,251,081  writes/sec             0  reads/sec  found=0.0%  db=48.08 GB  rq=1/1024
+118       939,832  writes/sec             0  reads/sec  found=0.0%  db=48.08 GB  rq=0/1024
+119     1,068,697  writes/sec             0  reads/sec  found=0.0%  db=48.08 GB  rq=0/1024
+120       926,003  writes/sec             0  reads/sec  found=0.0%  db=48.08 GB  rq=0/1024
+121     1,277,748  writes/sec             0  reads/sec  found=0.0%  db=48.08 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 56 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 57 [0m
+[WATCHDOG] STALL in rw_dwal round 122: 122804800 ops, alloc=120870323 free=632.0 MB pending=0 recycle=0/1024 db=44.88 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 58 [0m
+[MERGE] root=0 entries=5810100  28652 ms wall / 26595 ms cpu  syscall=7%  202779 entries/sec  4.93 us/entry  max=27.5 ms
+        latency: <1us=2222172  <10us=2998190  <100us=586901  <1ms=2128  <10ms=704  >=10ms=5  |  stalls(>=1ms): 709 entries, 2242 ms total (8% of wall)
+        segments: 243 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+122        40,409  writes/sec             0  reads/sec  found=0.0%  db=50.58 GB  rq=1/1024
+123     1,577,185  writes/sec             0  reads/sec  found=0.0%  db=50.58 GB  rq=0/1024
+124     1,160,944  writes/sec             0  reads/sec  found=0.0%  db=50.58 GB  rq=0/1024
+125       964,968  writes/sec             0  reads/sec  found=0.0%  db=50.58 GB  rq=0/1024
+126     1,330,285  writes/sec             0  reads/sec  found=0.0%  db=50.58 GB  rq=0/1024
+127     1,171,831  writes/sec             0  reads/sec  found=0.0%  db=50.58 GB  rq=1/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 59 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 60 [0m
+[WATCHDOG] STALL in rw_dwal round 128: 128613900 ops, alloc=127650550 free=625.1 MB pending=0 recycle=0/1024 db=47.72 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 61 [0m
+[WATCHDOG] STALL in rw_dwal round 128: 128613900 ops, alloc=129814964 free=659.6 MB pending=0 recycle=0/1024 db=49.59 GB
+[MERGE] root=0 entries=5809600  33791 ms wall / 32352 ms cpu  syscall=4%  171930 entries/sec  5.82 us/entry  max=29.5 ms
+        latency: <1us=2045254  <10us=2910186  <100us=850202  <1ms=3322  <10ms=631  >=10ms=5  |  stalls(>=1ms): 636 entries, 1665 ms total (5% of wall)
+        segments: 253 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+128        32,550  writes/sec             0  reads/sec  found=0.0%  db=53.18 GB  rq=3/1024
+129     1,732,485  writes/sec             0  reads/sec  found=0.0%  db=53.18 GB  rq=0/1024
+130     1,420,317  writes/sec             0  reads/sec  found=0.0%  db=53.18 GB  rq=1/1024
+131     1,242,117  writes/sec             0  reads/sec  found=0.0%  db=53.18 GB  rq=0/1024
+132     1,248,414  writes/sec             0  reads/sec  found=0.0%  db=53.18 GB  rq=0/1024
+133     1,171,402  writes/sec             0  reads/sec  found=0.0%  db=53.18 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 62 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 63 [0m
+[WATCHDOG] STALL in rw_dwal round 134: 134423100 ops, alloc=133800865 free=662.4 MB pending=0 recycle=0/1024 db=49.97 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 64 [0m
+[MERGE] root=0 entries=5809100  28924 ms wall / 27644 ms cpu  syscall=4%  200839 entries/sec  4.98 us/entry  max=33.8 ms
+        latency: <1us=2048753  <10us=3115206  <100us=641976  <1ms=2611  <10ms=551  >=10ms=3  |  stalls(>=1ms): 554 entries, 1470 ms total (5% of wall)
+        segments: 262 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[WATCHDOG] STALL in rw_dwal round 134: 134423100 ops, alloc=136146797 free=700.9 MB pending=0 recycle=0/1024 db=52.06 GB
+134        38,195  writes/sec             0  reads/sec  found=0.0%  db=55.71 GB  rq=1/1024
+135       902,413  writes/sec             0  reads/sec  found=0.0%  db=55.71 GB  rq=0/1024
+136       997,008  writes/sec             0  reads/sec  found=0.0%  db=55.71 GB  rq=1/1024
+137       727,482  writes/sec             0  reads/sec  found=0.0%  db=55.71 GB  rq=0/1024
+138     1,167,984  writes/sec             0  reads/sec  found=0.0%  db=55.71 GB  rq=2/1024
+139     1,437,890  writes/sec             0  reads/sec  found=0.0%  db=55.71 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 65 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 66 [0m
+[WATCHDOG] STALL in rw_dwal round 140: 140233400 ops, alloc=139259054 free=1.35 GB pending=0 recycle=0/1024 db=52.09 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 67 [0m
+[WATCHDOG] STALL in rw_dwal round 140: 140233400 ops, alloc=142018789 free=719.4 MB pending=0 recycle=0/1024 db=54.06 GB
+[MERGE] root=0 entries=5809200  30458 ms wall / 28656 ms cpu  syscall=6%  190731 entries/sec  5.24 us/entry  max=25.0 ms
+        latency: <1us=1887728  <10us=3292339  <100us=626025  <1ms=2404  <10ms=700  >=10ms=4  |  stalls(>=1ms): 704 entries, 2044 ms total (7% of wall)
+        segments: 269 new segs, 1 ms total (0% of wall)  0.0 ms/seg
+140        37,840  writes/sec             0  reads/sec  found=0.0%  db=58.15 GB  rq=1/1024
+141     1,233,064  writes/sec             0  reads/sec  found=0.0%  db=58.15 GB  rq=1/1024
+142     1,356,575  writes/sec             0  reads/sec  found=0.0%  db=58.15 GB  rq=0/1024
+143       963,578  writes/sec             0  reads/sec  found=0.0%  db=58.15 GB  rq=0/1024
+144     1,098,399  writes/sec             0  reads/sec  found=0.0%  db=58.15 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 68 [0m
+[WATCHDOG] STALL in rw_dwal round 145: 146042000 ops, alloc=143971704 free=2.89 GB pending=0 recycle=0/1024 db=54.44 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 69 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 70 [0m
+[WATCHDOG] STALL in rw_dwal round 145: 146042000 ops, alloc=147247767 free=763.4 MB pending=0 recycle=0/1024 db=55.41 GB
+[MERGE] root=0 entries=5810300  33076 ms wall / 30965 ms cpu  syscall=6%  175665 entries/sec  5.69 us/entry  max=29.9 ms
+        latency: <1us=1746015  <10us=3321471  <100us=739629  <1ms=2428  <10ms=752  >=10ms=5  |  stalls(>=1ms): 757 entries, 2312 ms total (7% of wall)
+        segments: 277 new segs, 18 ms total (0% of wall)  0.1 ms/seg
+145        33,690  writes/sec             0  reads/sec  found=0.0%  db=60.65 GB  rq=0/1024
+146     1,095,136  writes/sec             0  reads/sec  found=0.0%  db=60.65 GB  rq=1/1024
+147       970,906  writes/sec             0  reads/sec  found=0.0%  db=60.65 GB  rq=1/1024
+148     1,183,454  writes/sec             0  reads/sec  found=0.0%  db=60.65 GB  rq=0/1024
+149       903,253  writes/sec             0  reads/sec  found=0.0%  db=60.65 GB  rq=0/1024
+150     1,296,730  writes/sec             0  reads/sec  found=0.0%  db=60.65 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 71 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 72 [0m
+[WATCHDOG] STALL in rw_dwal round 151: 151851500 ops, alloc=152619227 free=889.5 MB pending=0 recycle=0/1024 db=56.94 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 73 [0m
+[WATCHDOG] STALL in rw_dwal round 151: 151851500 ops, alloc=154341524 free=845.8 MB pending=0 recycle=0/1024 db=58.53 GB
+[MERGE] root=0 entries=5808600  37049 ms wall / 34912 ms cpu  syscall=6%  156783 entries/sec  6.38 us/entry  max=33.1 ms
+        latency: <1us=1632705  <10us=3270184  <100us=901258  <1ms=3683  <10ms=766  >=10ms=4  |  stalls(>=1ms): 770 entries, 2467 ms total (7% of wall)
+        segments: 284 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+151        29,918  writes/sec             0  reads/sec  found=0.0%  db=63.09 GB  rq=2/1024
+152     1,039,080  writes/sec             0  reads/sec  found=0.0%  db=63.09 GB  rq=0/1024
+153       867,859  writes/sec             0  reads/sec  found=0.0%  db=63.09 GB  rq=0/1024
+154     1,064,598  writes/sec             0  reads/sec  found=0.0%  db=63.09 GB  rq=1/1024
+155       999,693  writes/sec             0  reads/sec  found=0.0%  db=63.09 GB  rq=1/1024
+156     1,430,212  writes/sec             0  reads/sec  found=0.0%  db=63.09 GB  rq=2/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 74 [0m
+[WATCHDOG] STALL in rw_dwal round 157: 157660400 ops, alloc=156382642 free=3.33 GB pending=0 recycle=0/1024 db=59.19 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 75 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 76 [0m
+[WATCHDOG] STALL in rw_dwal round 157: 157660400 ops, alloc=159584765 free=922.1 MB pending=0 recycle=0/1024 db=59.88 GB
+[MERGE] root=0 entries=5809500  31321 ms wall / 28843 ms cpu  syscall=8%  185481 entries/sec  5.39 us/entry  max=53.3 ms
+        latency: <1us=1594952  <10us=3604243  <100us=607486  <1ms=2115  <10ms=680  >=10ms=24  |  stalls(>=1ms): 704 entries, 2679 ms total (9% of wall)
+        segments: 289 new segs, 538 ms total (2% of wall)  1.9 ms/seg
+157        36,345  writes/sec             0  reads/sec  found=0.0%  db=65.47 GB  rq=0/1024
+158     1,405,478  writes/sec             0  reads/sec  found=0.0%  db=65.47 GB  rq=2/1024
+159     1,136,919  writes/sec             0  reads/sec  found=0.0%  db=65.47 GB  rq=3/1024
+160       913,191  writes/sec             0  reads/sec  found=0.0%  db=65.47 GB  rq=0/1024
+161     1,348,209  writes/sec             0  reads/sec  found=0.0%  db=65.47 GB  rq=0/1024
+162     1,351,742  writes/sec             0  reads/sec  found=0.0%  db=65.47 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 77 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 78 [0m
+[WATCHDOG] STALL in rw_dwal round 163: 163469500 ops, alloc=165553792 free=1.02 GB pending=0 recycle=0/1024 db=61.88 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 79 [0m
+[MERGE] root=0 entries=5808900  32893 ms wall / 30842 ms cpu  syscall=6%  176601 entries/sec  5.66 us/entry  max=24.5 ms
+        latency: <1us=1499457  <10us=3615756  <100us=690139  <1ms=2805  <10ms=740  >=10ms=3  |  stalls(>=1ms): 743 entries, 2284 ms total (7% of wall)
+        segments: 296 new segs, 1 ms total (0% of wall)  0.0 ms/seg
+163        33,487  writes/sec             0  reads/sec  found=0.0%  db=67.91 GB  rq=1/1024
+164     1,162,279  writes/sec             0  reads/sec  found=0.0%  db=67.91 GB  rq=0/1024
+165       967,651  writes/sec             0  reads/sec  found=0.0%  db=67.91 GB  rq=0/1024
+166       823,514  writes/sec             0  reads/sec  found=0.0%  db=67.91 GB  rq=0/1024
+167     1,144,081  writes/sec             0  reads/sec  found=0.0%  db=67.91 GB  rq=0/1024
+168     1,177,958  writes/sec             0  reads/sec  found=0.0%  db=67.91 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 80 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 81 [0m
+[WATCHDOG] STALL in rw_dwal round 169: 169279800 ops, alloc=170266583 free=2.41 GB pending=0 recycle=0/1024 db=63.81 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 82 [0m
+[WATCHDOG] STALL in rw_dwal round 169: 169279800 ops, alloc=173098995 free=1.00 GB pending=0 recycle=0/1024 db=65.25 GB
+[MERGE] root=0 entries=5809100  33813 ms wall / 31431 ms cpu  syscall=7%  171799 entries/sec  5.82 us/entry  max=29.2 ms
+        latency: <1us=1505386  <10us=3579586  <100us=720462  <1ms=2782  <10ms=880  >=10ms=4  |  stalls(>=1ms): 884 entries, 2664 ms total (8% of wall)
+        segments: 301 new segs, 1 ms total (0% of wall)  0.0 ms/seg
+169        33,377  writes/sec             0  reads/sec  found=0.0%  db=70.16 GB  rq=1/1024
+170     1,136,986  writes/sec             0  reads/sec  found=0.0%  db=70.16 GB  rq=0/1024
+171     1,207,212  writes/sec             0  reads/sec  found=0.0%  db=70.16 GB  rq=1/1024
+172       878,727  writes/sec             0  reads/sec  found=0.0%  db=70.16 GB  rq=0/1024
+173     1,262,339  writes/sec             0  reads/sec  found=0.0%  db=70.16 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 83 [0m
+[WATCHDOG] STALL in rw_dwal round 174: 175089400 ops, alloc=175086251 free=3.84 GB pending=0 recycle=0/1024 db=65.97 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 84 [0m
+[WATCHDOG] STALL in rw_dwal round 174: 175089400 ops, alloc=178020315 free=1.06 GB pending=0 recycle=0/1024 db=66.03 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 85 [0m
+[WATCHDOG] STALL in rw_dwal round 174: 175089400 ops, alloc=179995956 free=1008.4 MB pending=0 recycle=0/1024 db=67.94 GB
+[MERGE] root=0 entries=5810300  35922 ms wall / 33604 ms cpu  syscall=6%  161748 entries/sec  6.18 us/entry  max=32.9 ms
+        latency: <1us=1428821  <10us=3540187  <100us=837476  <1ms=2949  <10ms=863  >=10ms=4  |  stalls(>=1ms): 867 entries, 2585 ms total (7% of wall)
+        segments: 305 new segs, 22 ms total (0% of wall)  0.1 ms/seg
+174        30,608  writes/sec             0  reads/sec  found=0.0%  db=72.38 GB  rq=0/1024
+175     1,271,279  writes/sec             0  reads/sec  found=0.0%  db=72.38 GB  rq=0/1024
+176     1,116,959  writes/sec             0  reads/sec  found=0.0%  db=72.38 GB  rq=1/1024
+177     1,142,332  writes/sec             0  reads/sec  found=0.0%  db=72.38 GB  rq=0/1024
+178       965,065  writes/sec             0  reads/sec  found=0.0%  db=72.38 GB  rq=1/1024
+179     1,355,558  writes/sec             0  reads/sec  found=0.0%  db=72.38 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 86 [0m
+[WATCHDOG] STALL in rw_dwal round 180: 180897800 ops, alloc=181930453 free=3.29 GB pending=0 recycle=0/1024 db=68.09 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 87 [0m
+[WATCHDOG] STALL in rw_dwal round 180: 180897800 ops, alloc=184471915 free=994.6 MB pending=0 recycle=0/1024 db=68.34 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 88 [0m
+[WATCHDOG] STALL in rw_dwal round 180: 180897800 ops, alloc=185751181 free=1006.7 MB pending=0 recycle=0/1024 db=69.59 GB
+[MERGE] root=0 entries=5809600  43621 ms wall / 40058 ms cpu  syscall=8%  133182 entries/sec  7.51 us/entry  max=239.6 ms
+        latency: <1us=1298869  <10us=3477584  <100us=1028171  <1ms=4101  <10ms=840  >=10ms=35  |  stalls(>=1ms): 875 entries, 3795 ms total (9% of wall)
+        segments: 310 new segs, 327 ms total (1% of wall)  1.1 ms/seg
+180        24,791  writes/sec             0  reads/sec  found=0.0%  db=74.57 GB  rq=0/1024
+181     1,065,237  writes/sec             0  reads/sec  found=0.0%  db=74.57 GB  rq=1/1024
+182     1,074,462  writes/sec             0  reads/sec  found=0.0%  db=74.57 GB  rq=2/1024
+183     1,170,506  writes/sec             0  reads/sec  found=0.0%  db=74.57 GB  rq=0/1024
+184       945,520  writes/sec             0  reads/sec  found=0.0%  db=74.57 GB  rq=0/1024
+185     1,377,555  writes/sec             0  reads/sec  found=0.0%  db=74.57 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 89 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 90 [0m
+[WATCHDOG] STALL in rw_dwal round 186: 186707400 ops, alloc=190410007 free=1.17 GB pending=0 recycle=0/1024 db=70.22 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 91 [0m
+[MERGE] root=0 entries=5808400  32805 ms wall / 29974 ms cpu  syscall=9%  177059 entries/sec  5.65 us/entry  max=24.9 ms
+        latency: <1us=1292749  <10us=3923424  <100us=589565  <1ms=1832  <10ms=825  >=10ms=5  |  stalls(>=1ms): 830 entries, 2939 ms total (9% of wall)
+        segments: 314 new segs, 1 ms total (0% of wall)  0.0 ms/seg
+186        34,158  writes/sec             0  reads/sec  found=0.0%  db=76.85 GB  rq=0/1024
+187     1,181,772  writes/sec             0  reads/sec  found=0.0%  db=76.85 GB  rq=1/1024
+188     1,027,620  writes/sec             0  reads/sec  found=0.0%  db=76.85 GB  rq=0/1024
+189       804,248  writes/sec             0  reads/sec  found=0.0%  db=76.85 GB  rq=0/1024
+190       987,468  writes/sec             0  reads/sec  found=0.0%  db=76.85 GB  rq=0/1024
+191     1,099,273  writes/sec             0  reads/sec  found=0.0%  db=76.85 GB  rq=1/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 92 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 93 [0m
+[WATCHDOG] STALL in rw_dwal round 192: 192517700 ops, alloc=195262141 free=2.62 GB pending=0 recycle=0/1024 db=72.38 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 94 [0m
+[WATCHDOG] STALL in rw_dwal round 192: 192517700 ops, alloc=197806247 free=1.08 GB pending=0 recycle=0/1024 db=73.44 GB
+[MERGE] root=0 entries=5809600  34649 ms wall / 31625 ms cpu  syscall=9%  167671 entries/sec  5.96 us/entry  max=29.4 ms
+        latency: <1us=1249886  <10us=3883731  <100us=672885  <1ms=2250  <10ms=834  >=10ms=14  |  stalls(>=1ms): 848 entries, 3238 ms total (9% of wall)
+        segments: 318 new segs, 186 ms total (1% of wall)  0.6 ms/seg
+192        32,226  writes/sec             0  reads/sec  found=0.0%  db=79.04 GB  rq=0/1024
+193     1,088,849  writes/sec             0  reads/sec  found=0.0%  db=79.04 GB  rq=1/1024
+194       905,051  writes/sec             0  reads/sec  found=0.0%  db=79.04 GB  rq=1/1024
+195       780,831  writes/sec             0  reads/sec  found=0.0%  db=79.04 GB  rq=1/1024
+196     1,108,818  writes/sec             0  reads/sec  found=0.0%  db=79.04 GB  rq=2/1024
+197     1,140,589  writes/sec             0  reads/sec  found=0.0%  db=79.04 GB  rq=0/1024
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 95 [0m
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 96 [0m
+[WATCHDOG] STALL in rw_dwal round 198: 198327100 ops, alloc=202109496 free=2.10 GB pending=0 recycle=0/1024 db=74.47 GB
+control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 97 [0m
+[WATCHDOG] STALL in rw_dwal round 198: 198327100 ops, alloc=204314057 free=1.18 GB pending=0 recycle=0/1024 db=75.84 GB
+[MERGE] root=0 entries=5810300  38328 ms wall / 35449 ms cpu  syscall=8%  151595 entries/sec  6.60 us/entry  max=70.5 ms
+        latency: <1us=1175568  <10us=3720678  <100us=910327  <1ms=2825  <10ms=882  >=10ms=20  |  stalls(>=1ms): 902 entries, 3183 ms total (8% of wall)
+        segments: 322 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+198        28,352  writes/sec             0  reads/sec  found=0.0%  db=81.35 GB  rq=0/1024
+199     1,036,992  writes/sec             0  reads/sec  found=0.0%  db=81.35 GB  rq=2/1024
+[MERGE] shutdown requested — aborting after 160499 entries
+───────────────────────────────────────────────────────────────
+total: 200,100,000 writes, 0 reads in 740.004 sec
+  writes: 270,404/sec
+  reads:  0/sec  (0 found / 0 = 0.0%)
+── close ──
+  file size:     76.69 GB
+  free space:    6.63 GB
+  alloc objects: 202,496,309
+  pinned:        256.0 MB (8 segs)
+  pending rel:   0
+  recycle queue: 0/1024
+control_block_alloc.cpp:84  main       ensure_capacity       [33mgrowing control_block capacity: 98 [0m
+control_block_alloc.cpp:84  main       ensure_capacity       [33mgrowing control_block capacity: 99 [0m
+control_block_alloc.cpp:84  main       ensure_capacity       [33mgrowing control_block capacity: 100 [0m
+
+done.
