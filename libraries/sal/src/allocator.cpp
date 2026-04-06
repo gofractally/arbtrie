@@ -110,11 +110,31 @@ namespace sal
    }  // namespace mapped_memory
    static_assert(__cplusplus >= 202002L, "C++20 or later required");
 
+   static int64_t cap_to_disk_space(const std::filesystem::path& dir, int64_t requested)
+   {
+      std::error_code ec;
+      auto            si = std::filesystem::space(dir, ec);
+      if (ec || si.capacity == static_cast<std::uintmax_t>(-1))
+         return requested;  // can't determine — leave as-is
+
+      // Cap to total filesystem capacity (not just free space, since the
+      // database file already occupies some of it).
+      int64_t disk_cap = static_cast<int64_t>(si.capacity);
+      if (requested > disk_cap)
+      {
+         SAL_WARN("max_database_size ({} GB) exceeds filesystem capacity ({} GB) — capping",
+                  requested / (1024 * 1024 * 1024), disk_cap / (1024 * 1024 * 1024));
+         return disk_cap;
+      }
+      return requested;
+   }
+
    allocator::allocator(std::filesystem::path dir, runtime_config cfg)
        : _ptr_alloc(dir / "ptrs"),
          _block_alloc(dir / "segs", segment_size,
                       static_cast<uint32_t>(
-                          std::min<int64_t>(cfg.max_database_size, sal::max_database_size) /
+                          cap_to_disk_space(dir,
+                              std::min<int64_t>(cfg.max_database_size, sal::max_database_size)) /
                           segment_size)),
          _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
          _root_object_file(dir / "roots", access_mode::read_write, true)
@@ -1568,9 +1588,12 @@ namespace sal
       {
          segment_number segs[available];
          int popped = _mapped_state->_read_lock_queue.pop_recycled_segments(segs, available);
-         // Set the recycled segment in the free_segments bitset
+         // Set the recycled segment in the free_segments bitset and punch
+         // holes to release disk space and commit charge immediately.
          for (int i = 0; i < popped; ++i)
          {
+            _block_alloc.punch_hole(
+                block_allocator::block_number(*segs[i]));
             provider_state.free_segments.set(*segs[i]);
             _mapped_state->_segment_data.added_to_free_segments(segs[i]);
          }

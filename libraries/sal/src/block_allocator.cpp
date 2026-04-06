@@ -3,6 +3,17 @@
 #include <sal/block_allocator.hpp>
 #include <sal/debug.hpp>
 
+#ifdef __linux__
+#include <linux/falloc.h>  // FALLOC_FL_PUNCH_HOLE, FALLOC_FL_KEEP_SIZE
+#endif
+
+// MAP_NORESERVE prevents file-backed MAP_SHARED mappings from consuming
+// kernel commit charge (swap reservation).  macOS doesn't need it — its
+// unified buffer cache doesn't account commit charge the same way.
+#ifndef MAP_NORESERVE
+#define MAP_NORESERVE 0
+#endif
+
 namespace sal
 {
    uint64_t block_allocator::find_max_reservation_size(uint64_t block_size)
@@ -243,9 +254,12 @@ namespace sal
             // Continue anyway, trying to map
          }
 
-         // Map the file at the exact address of our reserved space
+         // Map the file at the exact address of our reserved space.
+         // MAP_NORESERVE: the file on disk is the backing store, so there is no
+         // need to reserve swap — avoids exhausting the kernel's commit charge
+         // and destabilising the OS on repeated runs.
          _mapped_base = ::mmap(_reserved_base, _file_size.load(std::memory_order_relaxed), prot,
-                               MAP_SHARED | MAP_FIXED, _fd, 0);
+                               MAP_SHARED | MAP_FIXED | MAP_NORESERVE, _fd, 0);
 
          if (_mapped_base != MAP_FAILED)
          {
@@ -375,8 +389,9 @@ namespace sal
          // Continue anyway, trying to map
       }
 
-      // Map the file at the specified address
-      void* addr = ::mmap(map_addr, map_size, prot, MAP_SHARED | MAP_FIXED, _fd, map_offset);
+      // Map the file at the specified address.
+      // MAP_NORESERVE: file-backed mapping doesn't need swap reservation.
+      void* addr = ::mmap(map_addr, map_size, prot, MAP_SHARED | MAP_FIXED | MAP_NORESERVE, _fd, map_offset);
 
       if (addr != MAP_FAILED)
       {
@@ -543,7 +558,7 @@ namespace sal
          // If truncation fails, we need to remap the unmapped portion
          int   prot = PROT_READ | PROT_WRITE;
          void* remapped =
-             ::mmap(unmap_start, unmap_size, prot, MAP_SHARED | MAP_FIXED, _fd, new_size);
+             ::mmap(unmap_start, unmap_size, prot, MAP_SHARED | MAP_FIXED | MAP_NORESERVE, _fd, new_size);
 
          if (remapped == MAP_FAILED)
          {
@@ -581,5 +596,35 @@ namespace sal
       }
 
       sal_debug("Truncated file to {} blocks ({} bytes)", nblocks, new_size);
+   }
+
+   bool block_allocator::punch_hole(block_number block, uint32_t count) noexcept
+   {
+#ifdef __linux__
+      if (!_fd || count == 0)
+         return false;
+
+      off_t  offset = static_cast<off_t>(*block) * _block_size;
+      off_t  len    = static_cast<off_t>(count) * _block_size;
+
+      // FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE deallocates the disk
+      // blocks backing [offset, offset+len) without changing file size.
+      // The virtual mapping stays valid; reads return zeroes.
+      if (::fallocate(_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, len) == 0)
+      {
+         // Also tell the kernel to drop the page cache for this range
+         void* addr = static_cast<char*>(_mapped_base) + offset;
+         ::madvise(addr, len, MADV_DONTNEED);
+         return true;
+      }
+
+      // EOPNOTSUPP on filesystems that don't support hole punching (e.g. tmpfs)
+      sal_debug("fallocate PUNCH_HOLE failed for block {}: {}", *block, strerror(errno));
+      return false;
+#else
+      (void)block;
+      (void)count;
+      return false;
+#endif
    }
 }  // namespace sal

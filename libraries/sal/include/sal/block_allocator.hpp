@@ -186,6 +186,19 @@ namespace sal
       uint64_t mlock_limit_bytes() const noexcept { return _mlock_limit_bytes; }
 
       /**
+       * Punch a hole in the backing file for the given block range, releasing
+       * disk space and commit charge without unmapping the virtual address.
+       * Subsequent reads of the hole return zeroes.
+       *
+       * No-op on platforms that don't support FALLOC_FL_PUNCH_HOLE.
+       *
+       * @param block  The starting block number
+       * @param count  Number of blocks to punch (default 1)
+       * @return true if the hole was punched, false if unsupported or failed
+       */
+      bool punch_hole(block_number block, uint32_t count = 1) noexcept;
+
+      /**
        * Helper method to determine if a value is a power of 2
        *
        * @param x The value to check
