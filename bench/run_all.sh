@@ -52,7 +52,7 @@ echo ""
 
 # Default: run all available suites
 if [ ${#SUITES[@]} -eq 0 ]; then
-    SUITES=(bank_tpcb random_upsert rocksdb_api tatp)
+    SUITES=(bank_tpcb rocksdb_api kv_suite random_upsert tatp)
 fi
 
 echo "=== PsiTri Benchmark Runner ==="

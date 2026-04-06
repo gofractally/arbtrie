@@ -7,6 +7,7 @@ ROUNDS=${BENCH_ROUNDS:-200}
 BATCH=${BENCH_BATCH:-100}
 VALUE_SIZE=${BENCH_VALUE_SIZE:-256}
 PINNED_CACHE=${BENCH_PINNED_CACHE:-256}
+TIMEOUT=${BENCH_TIMEOUT:-1800}  # 30 minute cap per engine
 
 if [ "${HAVE_DWAL_BENCH:-0}" != 1 ]; then
     echo "  SKIP random_upsert: dwal-bench not available"

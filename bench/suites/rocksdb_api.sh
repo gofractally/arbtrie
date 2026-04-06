@@ -5,6 +5,7 @@ set -euo pipefail
 
 NUM=${BENCH_NUM:-1000000}
 BATCH=${BENCH_BATCH_ROCKS:-1}
+TIMEOUT=${BENCH_TIMEOUT:-1800}
 WORKLOADS="fillrandom,readrandom,readseq,overwrite,seekrandom,deleteseq,deleterandom"
 
 run_rocks_bench() {

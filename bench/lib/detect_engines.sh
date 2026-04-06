@@ -15,6 +15,8 @@ HAVE_TIDESDB=0;    [ -x "$BIN/bank-bench-tidesdb" ]      && HAVE_TIDESDB=1
 HAVE_TATP=0;       [ -x "$BIN/tatp-bench" ]              && HAVE_TATP=1
 HAVE_TATP_SQLITE=0;[ -x "$BIN/tatp-bench-system-sqlite" ] && HAVE_TATP_SQLITE=1
 HAVE_DWAL_BENCH=0; [ -x "$BIN/dwal-bench" ]             && HAVE_DWAL_BENCH=1
+HAVE_PSITRI_SQLITE=0; [ -x "$BIN/bank-bench-psitri-sqlite" ] && HAVE_PSITRI_SQLITE=1
+HAVE_SYSTEM_SQLITE=0; [ -x "$BIN/bank-bench-system-sqlite" ] && HAVE_SYSTEM_SQLITE=1
 HAVE_KV_PSITRI=0;  [ -x "$BIN/kv-bench-psitri" ]        && HAVE_KV_PSITRI=1
 HAVE_KV_ROCKS=0;   [ -x "$BIN/kv-bench-rocksdb" ]       && HAVE_KV_ROCKS=1
 HAVE_KV_MDBX=0;    [ -x "$BIN/kv-bench-mdbx" ]          && HAVE_KV_MDBX=1
@@ -27,6 +29,8 @@ echo "  RocksDB:          $HAVE_ROCKSDB"
 echo "  PsiTriMDBX:       $HAVE_PSITRIMDBX"
 echo "  MDBX:             $HAVE_MDBX"
 echo "  TidesDB:          $HAVE_TIDESDB"
+echo "  PsiTri-SQLite:    $HAVE_PSITRI_SQLITE"
+echo "  System SQLite:    $HAVE_SYSTEM_SQLITE"
 echo "  TATP:             $HAVE_TATP"
 echo "  TATP (sys SQLite):$HAVE_TATP_SQLITE"
 echo "  DWAL bench:       $HAVE_DWAL_BENCH"
