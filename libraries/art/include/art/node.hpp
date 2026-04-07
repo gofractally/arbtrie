@@ -242,9 +242,10 @@ namespace art
    struct leaf_header
    {
       uint32_t key_len;
+      uint32_t cow_seq;  // COW generation — skip allocation if leaf already owned by writer
    };
 
-   static_assert(sizeof(leaf_header) == 4);
+   static_assert(sizeof(leaf_header) == 8);
 
    /// Compute value offset within a leaf (after key + padding).
    inline uint32_t leaf_value_offset(uint32_t key_len) noexcept
@@ -305,7 +306,8 @@ namespace art
    offset_t make_leaf_with_inline_data(arena&           a,
                                        std::string_view key,
                                        const Value&     value,
-                                       std::string_view inline_data)
+                                       std::string_view inline_data,
+                                       uint32_t         cow_seq = 0)
    {
       uint32_t val_off  = leaf_value_offset(key.size());
       uint32_t total    = val_off + sizeof(Value) + inline_data.size();
@@ -313,6 +315,7 @@ namespace art
       offset_t off      = a.allocate(total);
       auto*    lh       = a.as<leaf_header>(off);
       lh->key_len       = key.size();
+      lh->cow_seq       = cow_seq;
       std::memcpy(reinterpret_cast<char*>(lh) + sizeof(leaf_header),
                   key.data(), key.size());
       auto* val = reinterpret_cast<Value*>(
@@ -352,12 +355,14 @@ namespace art
 
    /// Allocate a leaf in the arena, copy key and value. Returns tagged offset.
    template <typename Value>
-   offset_t make_leaf(arena& a, std::string_view key, const Value& value)
+   offset_t make_leaf(arena& a, std::string_view key, const Value& value,
+                      uint32_t cow_seq = 0)
    {
       uint32_t size = leaf_alloc_size<Value>(key.size());
       offset_t off  = a.allocate(size);
       auto*    lh   = a.as<leaf_header>(off);
       lh->key_len   = key.size();
+      lh->cow_seq   = cow_seq;
       std::memcpy(reinterpret_cast<char*>(lh) + sizeof(leaf_header), key.data(), key.size());
       auto* val = reinterpret_cast<Value*>(reinterpret_cast<uint8_t*>(lh) +
                                            leaf_value_offset(key.size()));

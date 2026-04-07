@@ -278,12 +278,12 @@ namespace art
    {
       template <typename Value>
       offset_t alloc_leaf(arena& a, std::string_view key, const Value& value,
-                          std::string_view inline_data)
+                          std::string_view inline_data, uint32_t cow_seq = 0)
       {
          if (inline_data.empty())
-            return make_leaf<Value>(a, key, value);
+            return make_leaf<Value>(a, key, value, cow_seq);
          else
-            return make_leaf_with_inline_data<Value>(a, key, value, inline_data);
+            return make_leaf_with_inline_data<Value>(a, key, value, inline_data, cow_seq);
       }
    }
 
@@ -318,7 +318,7 @@ namespace art
       // ── Empty tree ─────────────────────────────────────────────────────
       if (root == null_offset)
       {
-         root    = detail::alloc_leaf(a, key, value, inline_data);
+         root    = detail::alloc_leaf(a, key, value, inline_data, cow_seq);
          auto lv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(root))};
          return {lv.value(), true};
       }
@@ -338,11 +338,12 @@ namespace art
             // Exact match — overwrite
             if (lv.key() == key)
             {
-               if (cow_seq > 0 || !inline_data.empty())
+               auto* lh = a.as<leaf_header>(untag_leaf(cur));
+               if (lh->cow_seq < cow_seq || !inline_data.empty())
                {
                   // Allocate a new leaf: COW requires it (shared with snapshot),
                   // or inline_data requires it (old leaf may have different size).
-                  offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
+                  offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data, cow_seq);
                   if (path_len == 0)
                      root = new_leaf;
                   else
@@ -371,7 +372,7 @@ namespace art
             std::string_view shared_prefix(key.data() + depth, common - depth);
 
             // Create new leaf (may realloc arena)
-            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data, cow_seq);
 
             // Build split node
             uint8_t  child_count = 0;
@@ -450,7 +451,7 @@ namespace art
             std::string remaining_prefix(reinterpret_cast<const char*>(pdata) + mismatch + 1,
                                          plen - mismatch - 1);
 
-            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data, cow_seq);
 
             uint8_t  child_count = 0;
             uint8_t  kbuf[2];
@@ -501,10 +502,11 @@ namespace art
             hdr = a.as<node_header>(cur);
             if (hdr->value_off != null_offset)
             {
-               if (cow_seq > 0)
+               auto* lh = a.as<leaf_header>(untag_leaf(hdr->value_off));
+               if (lh->cow_seq < cow_seq)
                {
                   // Under COW: allocate new leaf for the overwrite
-                  offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
+                  offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data, cow_seq);
                   a.as<node_header>(cur)->value_off = new_leaf;
                   auto nlv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(new_leaf))};
                   return {nlv.value(), false};
@@ -513,7 +515,7 @@ namespace art
                *lv.value() = value;
                return {lv.value(), false};
             }
-            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data, cow_seq);
             a.as<node_header>(cur)->value_off = new_leaf;
             auto lv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(new_leaf))};
             return {lv.value(), true};
@@ -545,7 +547,7 @@ namespace art
          if (!found)
          {
             // Add new leaf as child
-            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data, cow_seq);
             offset_t new_cur  = detail::add_child(a, cur, byte, new_leaf);
             if (new_cur != cur)
             {
