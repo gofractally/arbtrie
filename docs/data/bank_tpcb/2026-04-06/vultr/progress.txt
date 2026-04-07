@@ -1,8 +1,8 @@
-Engine 1: PsiTri (direct) — CRASH (FPE during allocator init)
-Engine 2: DWAL — PASS (427K tx/sec, 100% found)
-Engine 3: PsiTriRocks — PASS (369K tx/sec, 100% found)
-Engine 4: RocksDB — PASS (158K tx/sec, 100% found)
-Engine 5: PsiTriMDBX — CRASH (free(): invalid size during init)
-Engine 6: MDBX — PARTIAL (3K tx/sec write-only, crashed in Phase 3b: I/O error at 37GB)
-Engine 7: PsiTri-SQLite — PASS (53K tx/sec, -0.5% impact, 100% found)
-Engine 8: System SQLite — FAIL validation (49K tx/sec, -69% impact, 16K reader)
+Engine 1: PsiTri (direct) — INTERMITTENT FPE (passes with 10 tx, crashes with 1M tx, likely race with background threads)
+Engine 2: DWAL — PASS 427K tx/sec (2.14M KV ops/sec) reader=1.45M -18% impact
+Engine 3: PsiTriRocks — PASS 369K tx/sec (1.85M KV ops/sec) reader=1.42M -5% impact
+Engine 4: RocksDB — PASS 158K tx/sec (788K KV ops/sec) reader=290K -27% impact
+Engine 5: PsiTriMDBX — CRASH (same FPE bug as PsiTri direct)
+Engine 6: MDBX — PARTIAL 3K tx/sec (15K KV ops/sec) 37GB file, I/O error in Phase 3b
+Engine 7: PsiTri-SQLite — PASS 53K tx/sec (264K KV ops/sec) reader=215K -0.5% impact
+Engine 8: System SQLite — FAIL validation 50K tx/sec (249K KV ops/sec) reader=16K -69% impact

@@ -6,25 +6,10 @@
   Sync mode:    none
   Seed:         12345
   Read mode:    latest
-  DB path:      /tmp/bench_bank_psitri
+  DB path:      /tmp/bench_crash
 
 Phase 1: Account Generation
   Loaded 104,334 dictionary words
-  Account generation              0.048 sec      20,692,166 ops/sec
+  Account generation              0.069 sec      14,529,763 ops/sec
 
 Phase 2: Bulk Load
-mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bench_bank_psitri/ptrs/header.bin[0m
-mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4120[0m
-mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=137602110214144, size=4120[0m
-control_block_alloc.cpp:30  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
-control_block_alloc.cpp:84  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
-allocator.cpp:126          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
-mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bench_bank_psitri/header[0m
-mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bench_bank_psitri/roots[0m
-mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
-mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=137501847814144, size=93618176[0m
-mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4096[0m
-mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=137602110210048, size=4096[0m
-mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bench_bank_psitri/dbfile.bin[0m
-mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4160[0m
-mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=137602110201856, size=4160[0m
