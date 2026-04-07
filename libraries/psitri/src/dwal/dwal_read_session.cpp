@@ -106,7 +106,7 @@ namespace psitri::dwal
             });
          }
 
-         // Check the COW snapshot (last_root)
+         // Check the COW snapshot (last_root) if one has been published
          art::offset_t snap = cow.last_root.load(std::memory_order_acquire);
          if (snap != art::null_offset && root.rw_layer)
          {
@@ -118,13 +118,51 @@ namespace psitri::dwal
                   return {false, {}};
                return {true, std::string(v->data)};
             }
-            // Check tombstones in the RW layer (they apply to the snapshot too)
+            if (root.rw_layer->tombstones.is_deleted(key))
+               return {false, {}};
+         }
+
+         // Fallback: no COW snapshot yet, read RW directly (safe when no writer active)
+         if (snap == art::null_offset && root.rw_layer)
+         {
+            std::shared_lock lk(root.rw_mutex, std::defer_lock);
+            if (root.enable_rw_locking)
+               lk.lock();
+            auto* v = root.rw_layer->map.get(key);
+            if (v)
+            {
+               if (v->is_tombstone())
+                  return {false, {}};
+               return {true, std::string(v->data)};
+            }
             if (root.rw_layer->tombstones.is_deleted(key))
                return {false, {}};
          }
       }
 
-      // Buffered/latest: search cached RO snapshot.
+      // Fresh mode: check COW snapshot (non-blocking), then RO + Tri.
+      // Fresh reads whatever snapshot exists without waiting.
+      if (mode == read_mode::fresh)
+      {
+         auto& root = _db.root(root_index);
+         auto& cow  = root.cow;
+         art::offset_t snap = cow.last_root.load(std::memory_order_acquire);
+         if (snap != art::null_offset && root.rw_layer)
+         {
+            auto& arena = root.rw_layer->map.get_arena();
+            auto* v = art::get<btree_value>(arena, snap, key);
+            if (v)
+            {
+               if (v->is_tombstone())
+                  return {false, {}};
+               return {true, std::string(v->data)};
+            }
+            if (root.rw_layer->tombstones.is_deleted(key))
+               return {false, {}};
+         }
+      }
+
+      // Buffered/fresh/latest: search cached RO snapshot (frozen arena).
       if (cache.snapshot)
       {
          auto* v = cache.snapshot->map.get(key);

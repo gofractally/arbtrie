@@ -369,6 +369,18 @@ namespace psitri::dwal
 
       _undo.discard();
 
+      // Clear writer_active in cowart_state
+      {
+         auto& cow = _root->cow;
+         uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
+         auto f = cowart_flags{flags};
+         uint64_t new_flags = cowart_flags::make(
+             f.root_offset(), f.reader_waiting(), false, f.cow_seq());
+         cow.root_and_flags.store(new_flags, std::memory_order_release);
+         if (f.reader_waiting())
+            cow.writer_done_cv.notify_all();
+      }
+
       if (_owns_lock)
       {
          _root->rw_mutex.unlock();
@@ -387,6 +399,18 @@ namespace psitri::dwal
 
       if (!_nested)
       {
+         // Clear writer_active in cowart_state
+         {
+            auto& cow = _root->cow;
+            uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
+            auto f = cowart_flags{flags};
+            uint64_t new_flags = cowart_flags::make(
+                f.root_offset(), f.reader_waiting(), false, f.cow_seq());
+            cow.root_and_flags.store(new_flags, std::memory_order_release);
+            if (f.reader_waiting())
+               cow.writer_done_cv.notify_all();
+         }
+
          // Discard the in-progress WAL entry.
          if (_wal && _wal->entry_in_progress())
             _wal->discard_entry();
