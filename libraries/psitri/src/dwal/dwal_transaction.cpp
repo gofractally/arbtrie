@@ -36,15 +36,41 @@ namespace psitri::dwal
             _owns_lock = true;
          }
 
-         // Set writer_active flag in cowart_state
+         // COWART: set writer_active via CAS (readers may be concurrently
+         // incrementing reader_count via fetch_add).
          if (!_nested)
          {
             auto& cow = _root->cow;
-            uint64_t old_flags = cow.root_and_flags.load(std::memory_order_acquire);
-            auto f = cowart_flags{old_flags};
-            uint64_t new_flags = cowart_flags::make(
-                f.root_offset(), f.reader_waiting(), true, f.cow_seq());
-            cow.root_and_flags.store(new_flags, std::memory_order_release);
+            uint64_t expected = cow.root_and_flags.load(std::memory_order_acquire);
+            for (;;)
+            {
+               auto f = cowart_flags{expected};
+
+               uint32_t new_seq = f.cow_seq();
+               if (f.reader_count() > 0)
+               {
+                  // Readers are traversing head — must COW to protect them.
+                  new_seq = (f.cow_seq() + 1) & cowart_flags::cow_seq_mask;
+                  // Publish head → prev for fresh readers
+                  cow.prev_root.store(f.root_offset(), std::memory_order_release);
+               }
+
+               uint64_t desired = cowart_flags::make(
+                   f.root_offset(), /*wa=*/true, /*rw=*/false,
+                   f.reader_count(), new_seq);
+
+               if (cow.root_and_flags.compare_exchange_weak(
+                       expected, desired, std::memory_order_acq_rel))
+               {
+                  // Bump art_map's cow_seq to match if readers forced COW
+                  if (new_seq != f.cow_seq())
+                  {
+                     _root->rw_layer->map.bump_cow_seq();
+                  }
+                  break;
+               }
+               // CAS failed — reader_count changed, retry with updated expected
+            }
          }
 
          _undo.push_frame();
@@ -282,44 +308,43 @@ namespace psitri::dwal
 
          _undo.discard();
 
-         // ── COWART snapshot publication ────────────────────────────
-         // Check if readers need a snapshot (reader_waiting flag or
-         // freshness timer). If so, publish the current root as a
-         // COW snapshot: store last_root and bump cow_seq on the map.
+         // ── COWART commit ────────────────────────────────────────
+         // Update head root, handle reader coordination via CAS.
          {
             auto& cow = _root->cow;
-            uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
-            auto f = cowart_flags{flags};
+            auto new_root = _root->rw_layer->map.snapshot_root();
+            uint64_t expected = cow.root_and_flags.load(std::memory_order_acquire);
+            bool     did_notify = false;
 
-            bool needs_snapshot = f.reader_waiting();
-            // TODO: add freshness timer check here
-
-            if (needs_snapshot)
+            for (;;)
             {
-               // Publish the current ART root as a snapshot
-               auto snap_root = _root->rw_layer->map.snapshot_root();
-               cow.last_root.store(snap_root, std::memory_order_release);
+               auto f = cowart_flags{expected};
+               bool has_readers = f.reader_waiting() || f.reader_count() > 0;
+               uint32_t new_seq = f.cow_seq();
 
-               // Bump cow_seq — future writes will COW shared nodes
-               _root->rw_layer->map.bump_cow_seq();
+               if (has_readers)
+               {
+                  // Readers are active or waiting — protect this root.
+                  // Bump cow_seq so next tx COWs shared nodes.
+                  new_seq = (f.cow_seq() + 1) & cowart_flags::cow_seq_mask;
+                  cow.prev_root.store(new_root, std::memory_order_release);
+                  _root->rw_layer->map.bump_cow_seq();
+               }
 
-               // Update root_and_flags: clear reader_waiting, new cow_seq
-               uint32_t new_seq = f.cow_seq() + 1;
-               uint64_t new_flags = cowart_flags::make(
-                   snap_root, false, false, new_seq);
-               cow.root_and_flags.store(new_flags, std::memory_order_release);
+               uint64_t desired = cowart_flags::make(
+                   new_root, /*wa=*/false, /*rw=*/false,
+                   f.reader_count(), new_seq);
 
-               // Wake any readers waiting for a fresh snapshot
+               if (cow.root_and_flags.compare_exchange_weak(
+                       expected, desired, std::memory_order_acq_rel))
+               {
+                  did_notify = has_readers;
+                  break;
+               }
+            }
+
+            if (did_notify)
                cow.writer_done_cv.notify_all();
-            }
-            else
-            {
-               // No snapshot needed — just update root offset, clear writer_active
-               auto snap_root = _root->rw_layer->map.snapshot_root();
-               uint64_t new_flags = cowart_flags::make(
-                   snap_root, false, false, f.cow_seq());
-               cow.root_and_flags.store(new_flags, std::memory_order_release);
-            }
          }
 
          // Release the RW mutex before swap — readers can now see
@@ -369,15 +394,39 @@ namespace psitri::dwal
 
       _undo.discard();
 
-      // Clear writer_active in cowart_state
+      // COWART: same as commit — update head, handle reader coordination
       {
          auto& cow = _root->cow;
-         uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
-         auto f = cowart_flags{flags};
-         uint64_t new_flags = cowart_flags::make(
-             f.root_offset(), f.reader_waiting(), false, f.cow_seq());
-         cow.root_and_flags.store(new_flags, std::memory_order_release);
-         if (f.reader_waiting())
+         auto new_root = _root->rw_layer->map.snapshot_root();
+         uint64_t expected = cow.root_and_flags.load(std::memory_order_acquire);
+         bool     did_notify = false;
+
+         for (;;)
+         {
+            auto f = cowart_flags{expected};
+            bool has_readers = f.reader_waiting() || f.reader_count() > 0;
+            uint32_t new_seq = f.cow_seq();
+
+            if (has_readers)
+            {
+               new_seq = (f.cow_seq() + 1) & cowart_flags::cow_seq_mask;
+               cow.prev_root.store(new_root, std::memory_order_release);
+               _root->rw_layer->map.bump_cow_seq();
+            }
+
+            uint64_t desired = cowart_flags::make(
+                new_root, /*wa=*/false, /*rw=*/false,
+                f.reader_count(), new_seq);
+
+            if (cow.root_and_flags.compare_exchange_weak(
+                    expected, desired, std::memory_order_acq_rel))
+            {
+               did_notify = has_readers;
+               break;
+            }
+         }
+
+         if (did_notify)
             cow.writer_done_cv.notify_all();
       }
 
@@ -399,26 +448,13 @@ namespace psitri::dwal
 
       if (!_nested)
       {
-         // Clear writer_active in cowart_state
-         {
-            auto& cow = _root->cow;
-            uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
-            auto f = cowart_flags{flags};
-            uint64_t new_flags = cowart_flags::make(
-                f.root_offset(), f.reader_waiting(), false, f.cow_seq());
-            cow.root_and_flags.store(new_flags, std::memory_order_release);
-            if (f.reader_waiting())
-               cow.writer_done_cv.notify_all();
-         }
-
          // Discard the in-progress WAL entry.
          if (_wal && _wal->entry_in_progress())
             _wal->discard_entry();
 
-         // Replay all undo entries to restore the btree.
-         // String data in undo entries points into the undo_log's arena,
-         // which is freed when this transaction is destroyed. Copy restored
-         // values into the btree_layer's pool so they outlive the undo_log.
+         // Replay all undo entries FIRST — restores the btree to pre-tx state.
+         // This must happen before clearing writer_active, because readers
+         // will see the root as soon as writer_active is cleared.
          _undo.replay_all(
              [this](const undo_entry& entry)
              {
@@ -456,6 +492,43 @@ namespace psitri::dwal
                       break;
                 }
              });
+
+         // COWART: now clear writer_active via CAS (same protocol as commit).
+         // Root is restored to pre-tx state by undo replay above.
+         {
+            auto& cow = _root->cow;
+            auto restored_root = _root->rw_layer->map.snapshot_root();
+            uint64_t expected = cow.root_and_flags.load(std::memory_order_acquire);
+            bool     did_notify = false;
+
+            for (;;)
+            {
+               auto f = cowart_flags{expected};
+               bool has_readers = f.reader_waiting() || f.reader_count() > 0;
+               uint32_t new_seq = f.cow_seq();
+
+               if (has_readers)
+               {
+                  new_seq = (f.cow_seq() + 1) & cowart_flags::cow_seq_mask;
+                  cow.prev_root.store(restored_root, std::memory_order_release);
+                  _root->rw_layer->map.bump_cow_seq();
+               }
+
+               uint64_t desired = cowart_flags::make(
+                   restored_root, /*wa=*/false, /*rw=*/false,
+                   f.reader_count(), new_seq);
+
+               if (cow.root_and_flags.compare_exchange_weak(
+                       expected, desired, std::memory_order_acq_rel))
+               {
+                  did_notify = has_readers;
+                  break;
+               }
+            }
+
+            if (did_notify)
+               cow.writer_done_cv.notify_all();
+         }
 
          if (_owns_lock)
          {

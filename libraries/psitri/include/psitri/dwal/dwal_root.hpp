@@ -59,55 +59,81 @@ namespace psitri::dwal
    // ── COWART shared state ────────────────────────────────────────────────
    //
    // Packed 64-bit atomic for lock-free reader/writer coordination.
-   // Bits 63-32: root_offset (current RW root in arena)
-   // Bit  31:    reader_waiting (a reader wants a snapshot)
-   // Bit  30:    writer_active (a write transaction is in progress)
-   // Bits 29-0:  cow_seq (COW generation counter, ~1 billion generations)
+   //
+   //   Bits    Field              Width
+   //   ──────  ─────────────────  ─────
+   //   63–32   root_offset        32 bits  (head root in arena)
+   //   31      writer_active       1 bit
+   //   30      reader_waiting       1 bit   (blocked latest reader, waiting for notify)
+   //   29–24   reader_count         6 bits  (0–63 readers actively traversing head)
+   //   23–0    cow_seq             24 bits  (up to 16M COW generations)
+   //
+   // reader_count is modified via fetch_add/fetch_sub (no CAS needed).
+   // writer fields are modified via CAS (to avoid clobbering concurrent
+   // reader_count changes).
 
    struct cowart_flags
    {
       uint64_t packed;
 
-      static constexpr uint64_t reader_waiting_bit = uint64_t(1) << 31;
-      static constexpr uint64_t writer_active_bit  = uint64_t(1) << 30;
-      static constexpr uint64_t cow_seq_mask       = (uint64_t(1) << 30) - 1;
       static constexpr uint64_t root_shift         = 32;
+      static constexpr uint64_t writer_active_bit  = uint64_t(1) << 31;
+      static constexpr uint64_t reader_waiting_bit = uint64_t(1) << 30;
+      static constexpr uint64_t reader_count_shift = 24;
+      static constexpr uint64_t reader_count_mask  = uint64_t(0x3F) << reader_count_shift;
+      static constexpr uint64_t reader_count_one   = uint64_t(1) << reader_count_shift;
+      static constexpr uint64_t cow_seq_mask       = (uint64_t(1) << 24) - 1;
 
-      uint32_t root_offset() const noexcept { return static_cast<uint32_t>(packed >> root_shift); }
-      bool     reader_waiting() const noexcept { return packed & reader_waiting_bit; }
-      bool     writer_active() const noexcept { return packed & writer_active_bit; }
-      uint32_t cow_seq() const noexcept { return static_cast<uint32_t>(packed & cow_seq_mask); }
+      uint32_t root_offset() const noexcept
+      {
+         return static_cast<uint32_t>(packed >> root_shift);
+      }
+      bool writer_active() const noexcept
+      {
+         return packed & writer_active_bit;
+      }
+      bool reader_waiting() const noexcept
+      {
+         return packed & reader_waiting_bit;
+      }
+      uint8_t reader_count() const noexcept
+      {
+         return static_cast<uint8_t>((packed & reader_count_mask) >> reader_count_shift);
+      }
+      uint32_t cow_seq() const noexcept
+      {
+         return static_cast<uint32_t>(packed & cow_seq_mask);
+      }
 
-      static uint64_t make(uint32_t root, bool rw, bool wa, uint32_t seq) noexcept
+      /// Build a packed flags value.
+      static uint64_t make(uint32_t root, bool wa, bool rw,
+                           uint8_t rc, uint32_t seq) noexcept
       {
          return (uint64_t(root) << root_shift) |
-                (rw ? reader_waiting_bit : 0) |
                 (wa ? writer_active_bit : 0) |
+                (rw ? reader_waiting_bit : 0) |
+                (uint64_t(rc & 0x3F) << reader_count_shift) |
                 (seq & cow_seq_mask);
       }
    };
 
    /// COWART coordination state — lives alongside legacy dwal_root fields.
-   /// Used when the COW-based snapshot protocol is active.
    struct cowart_state
    {
       /// Packed root offset + flags for lock-free reader/writer handoff.
-      std::atomic<uint64_t> root_and_flags{0};
+      /// Initialized with null_offset as root so get_latest skips empty arenas.
+      std::atomic<uint64_t> root_and_flags{
+          uint64_t(art::null_offset) << cowart_flags::root_shift};
 
-      /// Last published snapshot root (for buffered/fresh readers).
-      std::atomic<uint32_t> last_root{art::null_offset};
+      /// Previous committed root — always safe for fresh reads.
+      /// Updated by writer at begin_transaction (copies head → prev)
+      /// or at commit/abort when reader_waiting is set.
+      std::atomic<uint32_t> prev_root{art::null_offset};
 
-      /// Readers waiting for a fresh snapshot.
+      /// Condition variable for latest readers waiting for writer to finish.
+      /// Writer notifies on commit/abort when reader_waiting was set.
       std::mutex              notify_mutex;
       std::condition_variable writer_done_cv;
-
-      /// Reader epoch tracking for arena reclamation.
-      static constexpr uint32_t max_reader_slots = 64;
-      struct reader_slot
-      {
-         std::atomic<uint32_t> held_cow_seq{0};  // 0 = idle
-      };
-      reader_slot reader_slots[max_reader_slots];
    };
 
    /// Per-root DWAL state.

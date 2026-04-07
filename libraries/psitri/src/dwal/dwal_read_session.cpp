@@ -79,78 +79,76 @@ namespace psitri::dwal
          return {false, {}};
       }
 
-      // Latest mode: use COW snapshot if available, falling back to RW lock.
+      // Latest mode: wait for writer_active==false, read head directly.
+      // Increment reader_count so the writer knows to COW if it starts.
       if (mode == read_mode::latest)
       {
          auto& root = _db.root(root_index);
          auto& cow  = root.cow;
 
-         // Try COW path first: signal reader_waiting if writer is active,
-         // then wait for the writer to publish a snapshot.
+         // Increment reader_count (atomic, no CAS needed)
+         cow.root_and_flags.fetch_add(cowart_flags::reader_count_one,
+                                       std::memory_order_acquire);
+
+         // Check if writer is active — if so, set reader_waiting and wait
          uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
-         auto f = cowart_flags{flags};
-
-         if (f.writer_active())
+         if (cowart_flags{flags}.writer_active())
          {
-            // Writer is mid-transaction. Set reader_waiting and wait.
-            uint64_t desired = cowart_flags::make(
-                f.root_offset(), true, true, f.cow_seq());
+            // Set reader_waiting bit via CAS (preserve reader_count)
+            uint64_t expected = flags;
+            uint64_t desired  = expected | cowart_flags::reader_waiting_bit;
             cow.root_and_flags.compare_exchange_strong(
-                flags, desired, std::memory_order_acq_rel);
+                expected, desired, std::memory_order_acq_rel);
 
-            // Wait for writer to finish and publish snapshot
+            // Wait for writer to finish
             std::unique_lock lk(cow.notify_mutex);
             cow.writer_done_cv.wait(lk, [&]() {
-               uint64_t cur = cow.root_and_flags.load(std::memory_order_acquire);
-               return !cowart_flags{cur}.writer_active();
+               return !cowart_flags{cow.root_and_flags.load(
+                   std::memory_order_acquire)}.writer_active();
             });
          }
 
-         // Check the COW snapshot (last_root) if one has been published
-         art::offset_t snap = cow.last_root.load(std::memory_order_acquire);
-         if (snap != art::null_offset && root.rw_layer)
+         // Read head root (writer_active is now false, head is committed)
+         flags = cow.root_and_flags.load(std::memory_order_acquire);
+         art::offset_t head = cowart_flags{flags}.root_offset();
+
+         // Lookup in the RW arena using head root
+         if (head != art::null_offset && root.rw_layer)
          {
             auto& arena = root.rw_layer->map.get_arena();
-            auto* v = art::get<btree_value>(arena, snap, key);
+            auto* v = art::get<btree_value>(arena, head, key);
             if (v)
             {
+               // Decrement reader_count before returning
+               cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
+                                             std::memory_order_release);
                if (v->is_tombstone())
                   return {false, {}};
                return {true, std::string(v->data)};
             }
             if (root.rw_layer->tombstones.is_deleted(key))
+            {
+               cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
+                                             std::memory_order_release);
                return {false, {}};
+            }
          }
 
-         // Fallback: no COW snapshot yet, read RW directly (safe when no writer active)
-         if (snap == art::null_offset && root.rw_layer)
-         {
-            std::shared_lock lk(root.rw_mutex, std::defer_lock);
-            if (root.enable_rw_locking)
-               lk.lock();
-            auto* v = root.rw_layer->map.get(key);
-            if (v)
-            {
-               if (v->is_tombstone())
-                  return {false, {}};
-               return {true, std::string(v->data)};
-            }
-            if (root.rw_layer->tombstones.is_deleted(key))
-               return {false, {}};
-         }
+         // Decrement reader_count — not found in RW, fall through to RO + Tri
+         cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
+                                       std::memory_order_release);
       }
 
-      // Fresh mode: check COW snapshot (non-blocking), then RO + Tri.
-      // Fresh reads whatever snapshot exists without waiting.
+      // Fresh mode: read prev_root (always safe, zero coordination).
       if (mode == read_mode::fresh)
       {
          auto& root = _db.root(root_index);
          auto& cow  = root.cow;
-         art::offset_t snap = cow.last_root.load(std::memory_order_acquire);
-         if (snap != art::null_offset && root.rw_layer)
+         art::offset_t prev = cow.prev_root.load(std::memory_order_acquire);
+         if (prev != art::null_offset && root.rw_layer)
          {
             auto& arena = root.rw_layer->map.get_arena();
-            auto* v = art::get<btree_value>(arena, snap, key);
+            auto* v = art::get<btree_value>(arena, prev, key);
             if (v)
             {
                if (v->is_tombstone())
