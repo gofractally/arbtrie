@@ -517,10 +517,12 @@ namespace
             it = _oracle.erase(it);
          }
 
-         // Verify tree is empty
+         // Verify tree is empty (avoid Catch2 macros — cleanup()
+         // may run on worker threads where Catch2 is not thread-safe)
          {
             auto rc = _cur->read_cursor();
-            CHECK_FALSE(rc.seek_begin());
+            if (rc.seek_begin())
+               throw std::runtime_error("tree not empty after cleanup");
          }
 
          // Set root to null to release all memory
