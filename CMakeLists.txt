@@ -791,6 +791,12 @@ target_link_libraries(kv-bench-psitri PRIVATE psitri hash Boost::program_options
 set_target_properties(kv-bench-psitri PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(kv-bench-dwal programs/kv_bench.cpp)
+target_compile_definitions(kv-bench-dwal PRIVATE KV_ENGINE_DWAL=1)
+target_link_libraries(kv-bench-dwal PRIVATE psitri hash Boost::program_options)
+set_target_properties(kv-bench-dwal PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 if(BUILD_ROCKSDB_BENCH)
     # PsiTriRocks kv bench
     add_executable(kv-bench-psitrirocks programs/kv_bench.cpp)

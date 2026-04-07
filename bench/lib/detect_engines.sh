@@ -18,6 +18,7 @@ HAVE_DWAL_BENCH=0; [ -x "$BIN/dwal-bench" ]             && HAVE_DWAL_BENCH=1
 HAVE_PSITRI_SQLITE=0; [ -x "$BIN/bank-bench-psitri-sqlite" ] && HAVE_PSITRI_SQLITE=1
 HAVE_SYSTEM_SQLITE=0; [ -x "$BIN/bank-bench-system-sqlite" ] && HAVE_SYSTEM_SQLITE=1
 HAVE_KV_PSITRI=0;  [ -x "$BIN/kv-bench-psitri" ]        && HAVE_KV_PSITRI=1
+HAVE_KV_DWAL=0;    [ -x "$BIN/kv-bench-dwal" ]          && HAVE_KV_DWAL=1
 HAVE_KV_ROCKS=0;   [ -x "$BIN/kv-bench-rocksdb" ]       && HAVE_KV_ROCKS=1
 HAVE_KV_MDBX=0;    [ -x "$BIN/kv-bench-mdbx" ]          && HAVE_KV_MDBX=1
 

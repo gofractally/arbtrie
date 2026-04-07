@@ -41,6 +41,13 @@
 #include <psitri/write_session_impl.hpp>
 #endif
 
+#if defined(KV_ENGINE_DWAL)
+#include <psitri/database.hpp>
+#include <psitri/dwal/dwal_database.hpp>
+#include <psitri/dwal/dwal_transaction.hpp>
+#include <psitri/dwal/merge_cursor.hpp>
+#endif
+
 #if defined(KV_ENGINE_ROCKSDB)
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
@@ -366,6 +373,176 @@ class PsiTriEngine : public KVEngine
    }
 };
 #endif  // KV_ENGINE_PSITRI
+
+// ============================================================
+// PsiTri DWAL Engine (buffered writes via ART + WAL)
+// ============================================================
+
+#if defined(KV_ENGINE_DWAL)
+
+class DwalIterator : public KVIterator
+{
+   psitri::dwal::owned_merge_cursor _mc;
+
+  public:
+   DwalIterator(psitri::dwal::owned_merge_cursor mc) : _mc(std::move(mc)) {}
+   void seek_first() override { _mc.cursor().seek_begin(); }
+   bool seek(const char* key, size_t klen) override
+   {
+      return _mc.cursor().lower_bound(std::string_view(key, klen));
+   }
+   void next() override { _mc.cursor().next(); }
+   bool valid() override { return !_mc.cursor().is_end(); }
+   std::pair<const char*, size_t> key() override
+   {
+      auto k = _mc.cursor().key();
+      return {k.data(), k.size()};
+   }
+   std::pair<const char*, size_t> value() override
+   {
+      auto& v = _mc.cursor().current_value();
+      return {v.data.data(), v.data.size()};
+   }
+};
+
+class DwalEngine : public KVEngine
+{
+   std::shared_ptr<psitri::database>            _db;
+   std::shared_ptr<psitri::dwal::dwal_database> _dwal;
+   std::optional<psitri::dwal::dwal_transaction> _tx;
+   uint32_t _root_index = 0;
+   bool _owns_db = true;
+
+  public:
+   const char* name() const override { return "PsiTri-DWAL"; }
+
+   void open(const std::string& path, const benchmark_config& bcfg) override
+   {
+      psitri::runtime_config rcfg;
+      if (bcfg.sync_mode == "safe")
+         rcfg.sync_mode = sal::sync_type::fsync;
+      else if (bcfg.sync_mode == "full")
+         rcfg.sync_mode = sal::sync_type::full;
+      else
+         rcfg.sync_mode = sal::sync_type::none;
+      _db = psitri::database::create(path + "/data", rcfg);
+
+      psitri::dwal::dwal_config dcfg;
+      dcfg.max_rw_entries = 100000;
+      dcfg.merge_threads  = 2;
+      _dwal = std::make_shared<psitri::dwal::dwal_database>(
+          _db, path + "/wal", dcfg);
+   }
+
+   void close() override
+   {
+      _tx.reset();
+      if (_dwal)
+      {
+         _dwal->request_shutdown();
+         _dwal.reset();
+      }
+      if (_db && _owns_db)
+      {
+         _db->compact_and_truncate();
+         _db.reset();
+      }
+   }
+
+   void begin_batch() override
+   {
+      _tx.emplace(_dwal->start_write_transaction(_root_index));
+   }
+
+   void commit_batch() override
+   {
+      _tx->commit();
+      _tx.reset();
+   }
+
+   void sync() override
+   {
+      _dwal->flush_wal(sal::sync_type::fsync);
+   }
+
+   void put(const char* key, size_t klen, const char* val, size_t vlen) override
+   {
+      _tx->upsert(std::string_view(key, klen), std::string_view(val, vlen));
+   }
+
+   void insert(const char* key, size_t klen, const char* val, size_t vlen) override
+   {
+      _tx->upsert(std::string_view(key, klen), std::string_view(val, vlen));
+   }
+
+   bool get(const char* key, size_t klen, std::string& val_out) override
+   {
+      auto r = _dwal->get_latest(_root_index, std::string_view(key, klen));
+      if (!r.found)
+         return false;
+      val_out.assign(r.value.data.data(), r.value.data.size());
+      return true;
+   }
+
+   void del(const char* key, size_t klen) override
+   {
+      _tx->remove(std::string_view(key, klen));
+   }
+
+   std::unique_ptr<KVIterator> new_iterator() override
+   {
+      return std::make_unique<DwalIterator>(
+          _dwal->create_cursor(_root_index, psitri::dwal::read_mode::latest,
+                               /*skip_rw_lock=*/true));
+   }
+
+   void reader_thread_init() override {}
+   void reader_thread_teardown() override {}
+
+   bool snapshot_get(const char* key, size_t klen, std::string& val_out) override
+   {
+      auto r = _dwal->get(_root_index, std::string_view(key, klen),
+                          psitri::dwal::read_mode::buffered);
+      if (!r.found)
+         return false;
+      val_out.assign(r.value.data.data(), r.value.data.size());
+      return true;
+   }
+
+   std::unique_ptr<KVIterator> snapshot_iterator() override
+   {
+      return std::make_unique<DwalIterator>(
+          _dwal->create_cursor(_root_index, psitri::dwal::read_mode::buffered));
+   }
+
+   void refresh_snapshot() override {}
+
+   std::unique_ptr<KVEngine> clone_for_writer(uint32_t writer_id) override
+   {
+      auto clone = std::make_unique<DwalEngine>();
+      clone->_db         = _db;
+      clone->_dwal       = _dwal;
+      clone->_root_index = writer_id + 1;
+      clone->_owns_db    = false;
+      return clone;
+   }
+
+   std::unique_ptr<KVEngine> clone_for_reader() override
+   {
+      auto clone = std::make_unique<DwalEngine>();
+      clone->_db         = _db;
+      clone->_dwal       = _dwal;
+      clone->_root_index = _root_index;
+      clone->_owns_db    = false;
+      return clone;
+   }
+
+   void print_stats() override
+   {
+      std::cout << "(DWAL — stats not available without direct trie access)\n";
+   }
+};
+#endif  // KV_ENGINE_DWAL
 
 // ============================================================
 // RocksDB Engine (works with both PsiTriRocks shim and real RocksDB)
@@ -994,6 +1171,8 @@ static std::unique_ptr<KVEngine> make_engine()
 {
 #if defined(KV_ENGINE_PSITRI)
    return std::make_unique<PsiTriEngine>();
+#elif defined(KV_ENGINE_DWAL)
+   return std::make_unique<DwalEngine>();
 #elif defined(KV_ENGINE_ROCKSDB)
    return std::make_unique<RocksDbEngine>();
 #elif defined(KV_ENGINE_MDBX)
