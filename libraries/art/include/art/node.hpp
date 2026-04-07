@@ -224,11 +224,20 @@ namespace art
 
    // ── Leaf ──────────────────────────────────────────────────────────────────
    //
-   // Cacheline-rounded arena allocation:
+   // Cacheline-rounded arena allocation. Two modes:
+   //
+   // Fixed-value mode (art_map<T> where T is a fixed-size type):
    //   [key_len: 4 bytes]
    //   [key_data: key_len bytes]
    //   [padding to 8-byte alignment]
    //   [value: sizeof(Value) bytes]
+   //
+   // Inline KV mode (art_map<kv_value> — variable-length key + value):
+   //   [key_len: 4 bytes]
+   //   [val_len: 4 bytes]
+   //   [key_data: key_len bytes]
+   //   [value_data: val_len bytes]
+   //   [pad to cacheline boundary]
 
    struct leaf_header
    {
@@ -250,7 +259,7 @@ namespace art
       return leaf_value_offset(key_len) + sizeof(Value);
    }
 
-   /// Access helpers for leaf fields.
+   /// Access helpers for leaf fields (fixed-value mode).
    template <typename Value>
    struct leaf_view
    {
@@ -277,6 +286,45 @@ namespace art
                                                leaf_value_offset(hdr->key_len));
       }
    };
+
+   // ── Leaf with inline trailing data ──────────────────────────────────────
+   //
+   // For Value types that contain a string_view pointing to variable-length
+   // data, the data can be stored inline in the leaf allocation (right after
+   // the fixed-size Value struct). This avoids a separate allocation.
+   //
+   // Layout: [key_len:4][key_data:N][pad to 8B][Value:sizeof(V)][inline_data:M][pad]
+   //
+   // The caller passes the data to make_leaf_with_inline_data(), which
+   // allocates the leaf with extra space and copies the data inline.
+   // The Value's string_view is then pointed at the inline copy.
+
+   /// Allocate a leaf with extra inline data after the Value struct.
+   /// Returns tagged offset. The inline data starts at value_offset + sizeof(Value).
+   template <typename Value>
+   offset_t make_leaf_with_inline_data(arena&           a,
+                                       std::string_view key,
+                                       const Value&     value,
+                                       std::string_view inline_data)
+   {
+      uint32_t val_off  = leaf_value_offset(key.size());
+      uint32_t total    = val_off + sizeof(Value) + inline_data.size();
+      // Don't cacheline-round here — let arena.allocate() handle it
+      offset_t off      = a.allocate(total);
+      auto*    lh       = a.as<leaf_header>(off);
+      lh->key_len       = key.size();
+      std::memcpy(reinterpret_cast<char*>(lh) + sizeof(leaf_header),
+                  key.data(), key.size());
+      auto* val = reinterpret_cast<Value*>(
+          reinterpret_cast<uint8_t*>(lh) + val_off);
+      *val = value;
+      if (!inline_data.empty())
+      {
+         char* data_dst = reinterpret_cast<char*>(val) + sizeof(Value);
+         std::memcpy(data_dst, inline_data.data(), inline_data.size());
+      }
+      return tag_leaf(off);
+   }
 
    // ── Allocation helpers ────────────────────────────────────────────────────
 

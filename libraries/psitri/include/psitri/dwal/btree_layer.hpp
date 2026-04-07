@@ -4,26 +4,23 @@
 #include <psitri/dwal/range_tombstone_list.hpp>
 
 #include <cstring>
-#include <memory_resource>
-#include <string>
 #include <string_view>
 
 namespace psitri::dwal
 {
-   /// A btree layer: ART map + range tombstones + bump allocator pool.
+   /// A btree layer: ART map + range tombstones.
    ///
    /// Keys are stored in the ART arena. Value data (string_view payloads)
-   /// is stored in the PMR pool for stable pointers. The pool is freed
-   /// as a unit when the layer is discarded.
+   /// is also stored in the ART arena — no separate pool needed.
+   /// The arena is freed as a unit when the layer is discarded.
    struct btree_layer
    {
       using map_type = art::art_map<btree_value>;
       using iterator = map_type::iterator;
 
-      std::pmr::monotonic_buffer_resource pool;
-      map_type                            map;
-      range_tombstone_list                tombstones;
-      uint32_t                            generation = 0;
+      map_type             map;
+      range_tombstone_list tombstones;
+      uint32_t             generation = 0;
 
       btree_layer() : map(1u << 20)
       {
@@ -35,29 +32,39 @@ namespace psitri::dwal
              this);
       }
 
-      // Non-copyable, non-movable (pool addresses must stay stable).
+      // Non-copyable, non-movable (arena addresses must stay stable).
       btree_layer(const btree_layer&)            = delete;
       btree_layer& operator=(const btree_layer&) = delete;
       btree_layer(btree_layer&&)                 = delete;
       btree_layer& operator=(btree_layer&&)      = delete;
 
-      /// Copy a string into the pool, returning a stable string_view.
-      /// Used for value data and range tombstone bounds.
+      /// Copy a string into the ART arena, returning a stable string_view.
+      /// Used for range tombstone bounds (not for value data — that goes inline in leaves).
       std::string_view store_string(std::string_view src)
       {
          if (src.empty())
             return {};
-         auto* buf = static_cast<char*>(pool.allocate(src.size(), 1));
+         auto& arena = map.get_arena();
+         auto  off   = arena.allocate(src.size());
+         auto* buf   = arena.as<char>(off);
          std::memcpy(buf, src.data(), src.size());
          return {buf, src.size()};
       }
 
       /// Store a key/data-value pair into the map.
-      /// Value data is copied to the pool for stable pointers.
+      /// Value data is stored inline in the ART leaf allocation — no separate alloc.
       void store_data(std::string_view key, std::string_view value)
       {
-         auto pool_val = store_string(value);
-         map.upsert(key, btree_value::make_data(pool_val));
+         // upsert_inline stores value bytes right after the btree_value struct
+         // in the leaf. We then fix up the data string_view to point at the
+         // inline copy.
+         auto* bv = map.upsert_inline(key, btree_value::make_data({}), value);
+         if (bv && !value.empty())
+         {
+            // The inline data starts right after the btree_value struct
+            auto* inline_ptr = reinterpret_cast<const char*>(bv) + sizeof(btree_value);
+            bv->data = {inline_ptr, value.size()};
+         }
       }
 
       /// Store a key/subtree pair.

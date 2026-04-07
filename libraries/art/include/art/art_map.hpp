@@ -48,6 +48,19 @@ namespace art
          return vptr;
       }
 
+      /// Insert or overwrite with inline data stored in the leaf.
+      /// The inline_data bytes are appended after the Value struct in the leaf
+      /// allocation. The value's `data` string_view is pointed at the inline copy.
+      Value* upsert_inline(std::string_view key, const Value& value,
+                           std::string_view inline_data)
+      {
+         auto [vptr, inserted] = art::upsert_inline<Value>(
+             _arena, _root, key, value, inline_data, _cow_seq);
+         if (inserted)
+            ++_size;
+         return vptr;
+      }
+
       /// Erase a single key. Returns true if key was found and removed.
       bool erase(std::string_view key)
       {
