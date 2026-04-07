@@ -203,12 +203,9 @@ namespace psitri::dwal
 
          root.next_wal_seq = reader.end_sequence();
 
-         // Sync COWART root_and_flags with the recovered rw_layer root
+         // Sync COWART state with the recovered rw_layer root
          // so that get_latest() can find the recovered data.
-         auto recovered_root = root.rw_layer->map.snapshot_root();
-         root.cow.root_and_flags.store(
-             cowart_flags::make(recovered_root, false, false, 0, 0),
-             std::memory_order_release);
+         root.cow.set_root(root.rw_layer->map.snapshot_root());
 
          // Delete the old RW WAL — a fresh one will be created on first write.
          std::filesystem::remove(ri.rw_wal, ec);
@@ -556,12 +553,7 @@ namespace psitri::dwal
          root.rw_layer = std::make_shared<btree_layer>();
 
          // Reset COWART state for the new empty arena.
-         // The old arena's root is now in buffered_ptr (frozen RO).
-         // Set root_offset to null_offset (0xFFFFFFFF) with all flags cleared.
-         root.cow.root_and_flags.store(
-             uint64_t(art::null_offset) << cowart_flags::root_shift,
-             std::memory_order_release);
-         root.cow.prev_root.store(art::null_offset, std::memory_order_release);
+         root.cow.reset();
       }
 
       root.last_swap_time = std::chrono::steady_clock::now();
@@ -639,33 +631,9 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // ── COWART latest: reader_count + wait if writer active ──────
+         // ── COWART latest: lock-free head read via cow_coordinator ──
          {
-            auto& cow = root.cow;
-
-            // Increment reader_count
-            cow.root_and_flags.fetch_add(cowart_flags::reader_count_one,
-                                          std::memory_order_acquire);
-
-            uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
-            if (cowart_flags{flags}.writer_active())
-            {
-               // Set reader_waiting and wait for writer to finish
-               uint64_t expected = flags;
-               uint64_t desired  = expected | cowart_flags::reader_waiting_bit;
-               cow.root_and_flags.compare_exchange_strong(
-                   expected, desired, std::memory_order_acq_rel);
-
-               std::unique_lock lk(cow.notify_mutex);
-               cow.writer_done_cv.wait(lk, [&]() {
-                  return !cowart_flags{cow.root_and_flags.load(
-                      std::memory_order_acquire)}.writer_active();
-               });
-            }
-
-            // Read head root (committed, safe)
-            flags = cow.root_and_flags.load(std::memory_order_acquire);
-            art::offset_t head = cowart_flags{flags}.root_offset();
+            art::offset_t head = root.cow.begin_read_latest();
 
             if (head != art::null_offset && root.rw_layer)
             {
@@ -673,23 +641,19 @@ namespace psitri::dwal
                auto* v = art::get<btree_value>(arena, head, key);
                if (v)
                {
-                  cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
-                                                std::memory_order_release);
+                  root.cow.end_read_latest();
                   if (v->is_tombstone())
                      return {false, {}};
                   return {true, *v};
                }
                if (root.rw_layer->tombstones.is_deleted(key))
                {
-                  cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
-                                                std::memory_order_release);
+                  root.cow.end_read_latest();
                   return {false, {}};
                }
             }
 
-            // Not found in RW — decrement and fall through to RO + Tri
-            cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
-                                          std::memory_order_release);
+            root.cow.end_read_latest();
          }
 
          // Layer 2: RO btree (frozen snapshot from previous arena)

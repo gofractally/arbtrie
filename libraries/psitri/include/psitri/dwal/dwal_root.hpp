@@ -1,4 +1,5 @@
 #pragma once
+#include <art/cow_coordinator.hpp>
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/undo_log.hpp>
 #include <psitri/dwal/wal_writer.hpp>
@@ -56,85 +57,9 @@ namespace psitri::dwal
       direct,    // Large tx: flush RW, write directly to PsiTri COW
    };
 
-   // ── COWART shared state ────────────────────────────────────────────────
-   //
-   // Packed 64-bit atomic for lock-free reader/writer coordination.
-   //
-   //   Bits    Field              Width
-   //   ──────  ─────────────────  ─────
-   //   63–32   root_offset        32 bits  (head root in arena)
-   //   31      writer_active       1 bit
-   //   30      reader_waiting       1 bit   (blocked latest reader, waiting for notify)
-   //   29–24   reader_count         6 bits  (0–63 readers actively traversing head)
-   //   23–0    cow_seq             24 bits  (up to 16M COW generations)
-   //
-   // reader_count is modified via fetch_add/fetch_sub (no CAS needed).
-   // writer fields are modified via CAS (to avoid clobbering concurrent
-   // reader_count changes).
-
-   struct cowart_flags
-   {
-      uint64_t packed;
-
-      static constexpr uint64_t root_shift         = 32;
-      static constexpr uint64_t writer_active_bit  = uint64_t(1) << 31;
-      static constexpr uint64_t reader_waiting_bit = uint64_t(1) << 30;
-      static constexpr uint64_t reader_count_shift = 24;
-      static constexpr uint64_t reader_count_mask  = uint64_t(0x3F) << reader_count_shift;
-      static constexpr uint64_t reader_count_one   = uint64_t(1) << reader_count_shift;
-      static constexpr uint64_t cow_seq_mask       = (uint64_t(1) << 24) - 1;
-
-      uint32_t root_offset() const noexcept
-      {
-         return static_cast<uint32_t>(packed >> root_shift);
-      }
-      bool writer_active() const noexcept
-      {
-         return packed & writer_active_bit;
-      }
-      bool reader_waiting() const noexcept
-      {
-         return packed & reader_waiting_bit;
-      }
-      uint8_t reader_count() const noexcept
-      {
-         return static_cast<uint8_t>((packed & reader_count_mask) >> reader_count_shift);
-      }
-      uint32_t cow_seq() const noexcept
-      {
-         return static_cast<uint32_t>(packed & cow_seq_mask);
-      }
-
-      /// Build a packed flags value.
-      static uint64_t make(uint32_t root, bool wa, bool rw,
-                           uint8_t rc, uint32_t seq) noexcept
-      {
-         return (uint64_t(root) << root_shift) |
-                (wa ? writer_active_bit : 0) |
-                (rw ? reader_waiting_bit : 0) |
-                (uint64_t(rc & 0x3F) << reader_count_shift) |
-                (seq & cow_seq_mask);
-      }
-   };
-
-   /// COWART coordination state — lives alongside legacy dwal_root fields.
-   struct cowart_state
-   {
-      /// Packed root offset + flags for lock-free reader/writer handoff.
-      /// Initialized with null_offset as root so get_latest skips empty arenas.
-      std::atomic<uint64_t> root_and_flags{
-          uint64_t(art::null_offset) << cowart_flags::root_shift};
-
-      /// Previous committed root — always safe for fresh reads.
-      /// Updated by writer at begin_transaction (copies head → prev)
-      /// or at commit/abort when reader_waiting is set.
-      std::atomic<uint32_t> prev_root{art::null_offset};
-
-      /// Condition variable for latest readers waiting for writer to finish.
-      /// Writer notifies on commit/abort when reader_waiting was set.
-      std::mutex              notify_mutex;
-      std::condition_variable writer_done_cv;
-   };
+   // COWART coordination is handled by art::cow_coordinator.
+   // See art/cow_coordinator.hpp for the packed 64-bit atomic layout
+   // and the lock-free reader/writer protocol.
 
    /// Per-root DWAL state.
    ///
@@ -235,7 +160,7 @@ namespace psitri::dwal
       mutable std::shared_mutex swap_mutex;
 
       // ── COWART state (coexists with legacy fields during migration) ──
-      cowart_state cow;
+      art::cow_coordinator cow;
 
       dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
    };

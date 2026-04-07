@@ -79,72 +79,38 @@ namespace psitri::dwal
          return {false, {}};
       }
 
-      // Latest mode: wait for writer_active==false, read head directly.
-      // Increment reader_count so the writer knows to COW if it starts.
+      // Latest mode: use cow_coordinator for lock-free head read.
       if (mode == read_mode::latest)
       {
          auto& root = _db.root(root_index);
-         auto& cow  = root.cow;
+         art::offset_t head = root.cow.begin_read_latest();
 
-         // Increment reader_count (atomic, no CAS needed)
-         cow.root_and_flags.fetch_add(cowart_flags::reader_count_one,
-                                       std::memory_order_acquire);
-
-         // Check if writer is active — if so, set reader_waiting and wait
-         uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
-         if (cowart_flags{flags}.writer_active())
-         {
-            // Set reader_waiting bit via CAS (preserve reader_count)
-            uint64_t expected = flags;
-            uint64_t desired  = expected | cowart_flags::reader_waiting_bit;
-            cow.root_and_flags.compare_exchange_strong(
-                expected, desired, std::memory_order_acq_rel);
-
-            // Wait for writer to finish
-            std::unique_lock lk(cow.notify_mutex);
-            cow.writer_done_cv.wait(lk, [&]() {
-               return !cowart_flags{cow.root_and_flags.load(
-                   std::memory_order_acquire)}.writer_active();
-            });
-         }
-
-         // Read head root (writer_active is now false, head is committed)
-         flags = cow.root_and_flags.load(std::memory_order_acquire);
-         art::offset_t head = cowart_flags{flags}.root_offset();
-
-         // Lookup in the RW arena using head root
          if (head != art::null_offset && root.rw_layer)
          {
             auto& arena = root.rw_layer->map.get_arena();
             auto* v = art::get<btree_value>(arena, head, key);
             if (v)
             {
-               // Decrement reader_count before returning
-               cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
-                                             std::memory_order_release);
+               root.cow.end_read_latest();
                if (v->is_tombstone())
                   return {false, {}};
                return {true, std::string(v->data)};
             }
             if (root.rw_layer->tombstones.is_deleted(key))
             {
-               cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
-                                             std::memory_order_release);
+               root.cow.end_read_latest();
                return {false, {}};
             }
          }
 
-         // Decrement reader_count — not found in RW, fall through to RO + Tri
-         cow.root_and_flags.fetch_sub(cowart_flags::reader_count_one,
-                                       std::memory_order_release);
+         root.cow.end_read_latest();
       }
 
       // Fresh mode: read prev_root (always safe, zero coordination).
       if (mode == read_mode::fresh)
       {
          auto& root = _db.root(root_index);
-         auto& cow  = root.cow;
-         art::offset_t prev = cow.prev_root.load(std::memory_order_acquire);
+         art::offset_t prev = root.cow.read_prev();
          if (prev != art::null_offset && root.rw_layer)
          {
             auto& arena = root.rw_layer->map.get_arena();

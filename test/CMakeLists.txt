@@ -70,6 +70,7 @@ add_test(NAME mdbx-tests COMMAND mdbx-tests)
 # ART map tests
 add_executable(art-tests
     ../libraries/art/tests/art_map_tests.cpp
+    ../libraries/art/tests/cow_coordinator_tests.cpp
 )
 target_link_libraries(art-tests PRIVATE art Catch2::Catch2WithMain)
 set_target_properties(art-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
