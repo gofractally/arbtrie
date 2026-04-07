@@ -88,6 +88,18 @@ namespace art
          for (;;)
          {
             auto s = state{expected};
+
+            // If a reader is waiting (blocked on CV), yield to let it
+            // wake up and read the committed root before we set writer_active
+            // again. Without this, the writer can starve waiting readers
+            // by immediately re-acquiring writer_active.
+            if (s.reader_waiting())
+            {
+               std::this_thread::yield();
+               expected = _flags.load(std::memory_order_acquire);
+               continue;
+            }
+
             uint32_t new_seq = s.cow_seq();
 
             if (s.reader_count() > 0)
@@ -156,24 +168,34 @@ namespace art
          // Increment reader_count (atomic, no CAS)
          _flags.fetch_add(reader_count_one, std::memory_order_acquire);
 
-         // Check if writer is active
+         // Snapshot cow_seq before checking writer_active.
+         // If cow_seq changes, a transaction committed (even if writer_active
+         // is immediately set again by the next transaction).
          uint64_t flags = _flags.load(std::memory_order_acquire);
-         if (state{flags}.writer_active())
+         auto     s     = state{flags};
+
+         if (s.writer_active())
          {
+            uint32_t seen_seq = s.cow_seq();
+
             // Set reader_waiting via CAS (preserve reader_count)
             uint64_t expected = flags;
             uint64_t desired  = expected | reader_waiting_bit;
             _flags.compare_exchange_strong(
                 expected, desired, std::memory_order_acq_rel);
 
-            // Wait for writer to finish
+            // Wait until cow_seq changes (a transaction committed).
+            // This avoids starvation: even if the writer immediately
+            // starts a new tx, the cow_seq bump proves a commit happened
+            // and our reader_count forced COW, so the root is safe.
             std::unique_lock lk(_notify_mutex);
-            _notify_cv.wait(lk, [this]() {
-               return !state{_flags.load(std::memory_order_acquire)}.writer_active();
+            _notify_cv.wait(lk, [this, seen_seq]() {
+               auto cur = state{_flags.load(std::memory_order_acquire)};
+               return cur.cow_seq() != seen_seq || !cur.writer_active();
             });
          }
 
-         // Head is committed and safe
+         // Head is committed and safe.
          return state{_flags.load(std::memory_order_acquire)}.root_offset();
       }
 
