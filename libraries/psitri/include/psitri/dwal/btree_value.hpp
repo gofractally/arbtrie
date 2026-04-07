@@ -16,7 +16,7 @@ namespace psitri::dwal
       };
 
       kind             type         = kind::data;
-      std::string_view data         = {};       // pool-backed (kind::data only)
+      std::string_view data         = {};       // arena-backed (kind::data only)
       sal::ptr_address subtree_root = {};       // PsiTri subtree address (kind::subtree only)
 
       static btree_value make_data(std::string_view d) noexcept

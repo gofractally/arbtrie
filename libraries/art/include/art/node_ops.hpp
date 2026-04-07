@@ -272,7 +272,30 @@ namespace art
       return nullptr;
    }
 
+   // ── Helper: allocate leaf, possibly with inline data ─────────────────────
+
+   namespace detail
+   {
+      template <typename Value>
+      offset_t alloc_leaf(arena& a, std::string_view key, const Value& value,
+                          std::string_view inline_data)
+      {
+         if (inline_data.empty())
+            return make_leaf<Value>(a, key, value);
+         else
+            return make_leaf_with_inline_data<Value>(a, key, value, inline_data);
+      }
+   }
+
    // ── upsert() — iterative insert or overwrite ─────────────────────────────
+
+   template <typename Value>
+   std::pair<Value*, bool> upsert_inline(arena&           a,
+                                         offset_t&        root,
+                                         std::string_view key,
+                                         const Value&     value,
+                                         std::string_view inline_data,
+                                         uint32_t         cow_seq = 0) noexcept;
 
    template <typename Value>
    std::pair<Value*, bool> upsert(arena&           a,
@@ -281,10 +304,21 @@ namespace art
                                   const Value&     value,
                                   uint32_t         cow_seq = 0) noexcept
    {
+      return upsert_inline<Value>(a, root, key, value, {}, cow_seq);
+   }
+
+   template <typename Value>
+   std::pair<Value*, bool> upsert_inline(arena&           a,
+                                         offset_t&        root,
+                                         std::string_view key,
+                                         const Value&     value,
+                                         std::string_view inline_data,
+                                         uint32_t         cow_seq) noexcept
+   {
       // ── Empty tree ─────────────────────────────────────────────────────
       if (root == null_offset)
       {
-         root    = make_leaf<Value>(a, key, value);
+         root    = detail::alloc_leaf(a, key, value, inline_data);
          auto lv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(root))};
          return {lv.value(), true};
       }
@@ -304,11 +338,11 @@ namespace art
             // Exact match — overwrite
             if (lv.key() == key)
             {
-               if (cow_seq > 0)
+               if (cow_seq > 0 || !inline_data.empty())
                {
-                  // Under COW: leaf may be shared with a snapshot.
-                  // Allocate a new leaf to avoid corrupting the snapshot.
-                  offset_t new_leaf = make_leaf<Value>(a, key, value);
+                  // Allocate a new leaf: COW requires it (shared with snapshot),
+                  // or inline_data requires it (old leaf may have different size).
+                  offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
                   if (path_len == 0)
                      root = new_leaf;
                   else
@@ -337,7 +371,7 @@ namespace art
             std::string_view shared_prefix(key.data() + depth, common - depth);
 
             // Create new leaf (may realloc arena)
-            offset_t new_leaf = make_leaf<Value>(a, key, value);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
 
             // Build split node
             uint8_t  child_count = 0;
@@ -416,7 +450,7 @@ namespace art
             std::string remaining_prefix(reinterpret_cast<const char*>(pdata) + mismatch + 1,
                                          plen - mismatch - 1);
 
-            offset_t new_leaf = make_leaf<Value>(a, key, value);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
 
             uint8_t  child_count = 0;
             uint8_t  kbuf[2];
@@ -470,7 +504,7 @@ namespace art
                if (cow_seq > 0)
                {
                   // Under COW: allocate new leaf for the overwrite
-                  offset_t new_leaf = make_leaf<Value>(a, key, value);
+                  offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
                   a.as<node_header>(cur)->value_off = new_leaf;
                   auto nlv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(new_leaf))};
                   return {nlv.value(), false};
@@ -479,7 +513,7 @@ namespace art
                *lv.value() = value;
                return {lv.value(), false};
             }
-            offset_t new_leaf = make_leaf<Value>(a, key, value);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
             a.as<node_header>(cur)->value_off = new_leaf;
             auto lv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(new_leaf))};
             return {lv.value(), true};
@@ -511,7 +545,7 @@ namespace art
          if (!found)
          {
             // Add new leaf as child
-            offset_t new_leaf = make_leaf<Value>(a, key, value);
+            offset_t new_leaf = detail::alloc_leaf(a, key, value, inline_data);
             offset_t new_cur  = detail::add_child(a, cur, byte, new_leaf);
             if (new_cur != cur)
             {
