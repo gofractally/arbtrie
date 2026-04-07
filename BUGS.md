@@ -2,18 +2,18 @@
 
 ## Open
 
-### 1. Multi-tree parallel fuzz tests: race condition (release-only)
-- **Repro**: `psitri-tests "fuzz multi-tree parallel"` or `"fuzz multi-tree with snapshots"` in release build
-- **Symptom**: SIGABRT from assertion failure. Passes in debug builds.
-- **Likely cause**: Data race in multi-session concurrent access. Timing-dependent — release optimizations change thread scheduling enough to trigger.
-
-### 2. `database::get_stats().total_live_objects` returns 0 after writes
+### 1. `database::get_stats().total_live_objects` returns 0 after writes
 - **Repro**: `psitri-tests "database dump and get_stats"`
 - **File**: `libraries/psitri/tests/coverage_gap_tests.cpp:475`
 - **Symptom**: After inserting 100 keys and committing, `stats.total_live_objects` is 0.
 - **Likely cause**: `get_stats()` doesn't account for objects allocated during the session, or the stat counter isn't wired up.
 
 ## Fixed (recent)
+
+### Multi-tree parallel fuzz tests: Catch2 thread-safety (release-only)
+- **Repro**: `psitri-tests "fuzz multi-tree parallel"` — flaky SIGABRT in release builds
+- **Root cause**: `cleanup()` used `CHECK_FALSE` (Catch2 macro) to verify empty tree. Worker threads calling this raced with the main thread's Catch2 output redirect, triggering an assertion in Catch2's `OutputRedirect::activate()`.
+- **Fix**: Replaced the Catch2 macro with a `throw` so the worker thread's try/catch handles it safely.
 
 ### Shared-mode update heavy: 1 object leak (ptr_alloc bookkeeping)
 - **Repro**: `psitri-tests "fuzz shared mode update heavy"` with seed=1337
