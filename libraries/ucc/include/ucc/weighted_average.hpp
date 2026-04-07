@@ -36,7 +36,7 @@ namespace ucc
       {
          return average() <=> other.average();
       }
-      uint64_t average() const { return sum_age_times_size / sum_size; }
+      uint64_t average() const { return sum_size ? sum_age_times_size / sum_size : 0; }
 
      private:
       uint64_t sum_age_times_size;
