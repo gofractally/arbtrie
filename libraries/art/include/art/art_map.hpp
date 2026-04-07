@@ -29,7 +29,7 @@ namespace art
       /// {iterator_to_existing, false} if key already exists.
       std::pair<iterator, bool> insert(std::string_view key, const Value& value)
       {
-         auto [vptr, inserted] = art::upsert<Value>(_arena, _root, key, value);
+         auto [vptr, inserted] = art::upsert<Value>(_arena, _root, key, value, _cow_seq);
          if (inserted)
             ++_size;
          iterator it;
@@ -42,7 +42,7 @@ namespace art
       /// Insert or overwrite. Always returns pointer to the value.
       Value* upsert(std::string_view key, const Value& value)
       {
-         auto [vptr, inserted] = art::upsert<Value>(_arena, _root, key, value);
+         auto [vptr, inserted] = art::upsert<Value>(_arena, _root, key, value, _cow_seq);
          if (inserted)
             ++_size;
          return vptr;
@@ -51,11 +51,26 @@ namespace art
       /// Erase a single key. Returns true if key was found and removed.
       bool erase(std::string_view key)
       {
-         bool removed = art::erase<Value>(_arena, _root, key);
+         bool removed = art::erase<Value>(_arena, _root, key, _cow_seq);
          if (removed)
             --_size;
          return removed;
       }
+
+      // ── COW Snapshot Support ──────────────────────────────────────────
+
+      /// Get the current root offset for read-only snapshot traversal.
+      offset_t snapshot_root() const noexcept { return _root; }
+
+      /// Increment the COW generation. All current nodes become shared.
+      void bump_cow_seq() noexcept { ++_cow_seq; }
+
+      /// Current COW generation.
+      uint32_t cow_seq() const noexcept { return _cow_seq; }
+
+      /// Access the arena (for snapshot traversal via art::get()).
+      arena&       get_arena() noexcept { return _arena; }
+      const arena& get_arena() const noexcept { return _arena; }
 
       // ── Lookup ────────────────────────────────────────────────────────
 
@@ -143,12 +158,13 @@ namespace art
       }
 
       uint32_t arena_bytes_used() const noexcept { return _arena.bytes_used(); }
-      uint32_t arena_capacity() const noexcept { return _arena.capacity(); }
+      uint32_t arena_capacity() const noexcept { return _arena.bytes_used(); }
 
      private:
       arena     _arena;
-      offset_t  _root = null_offset;
-      size_type _size = 0;
+      offset_t  _root    = null_offset;
+      size_type _size    = 0;
+      uint32_t  _cow_seq = 0;
    };
 
 }  // namespace art

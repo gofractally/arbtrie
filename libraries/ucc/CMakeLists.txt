@@ -10,6 +10,6 @@ target_include_directories(ucc INTERFACE
 # Installation is handled by the top-level CMakeLists.txt psitri export set
 
 # Add tests subdirectory if BUILD_TESTING is enabled
-if(BUILD_TESTING)
+if(BUILD_TESTS)
     add_subdirectory(tests)
 endif() 

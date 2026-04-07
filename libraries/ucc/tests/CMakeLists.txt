@@ -3,9 +3,10 @@ project(ucc-tests LANGUAGES CXX)
 
 find_package(Catch2 3 REQUIRED)
 
-add_executable(ucc-perf-test 
+add_executable(ucc-perf-test
     find_u32x16_perf_test.cpp
     lower_bound_tests.cpp
+    vm_arena_tests.cpp
 )
 
 # Ensure the test executable can find the ucc headers

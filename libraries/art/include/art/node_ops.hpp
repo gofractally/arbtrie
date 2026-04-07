@@ -53,10 +53,13 @@ namespace art
             offset_t new_off = make_setlist(a, n, new_prefix);
             auto*    new_hdr = a.as<node_header>(new_off);
             new_hdr->value_off = old_hdr->value_off;
+            new_hdr->set_cow_seq(old_hdr->cow_seq());
 
+            // Re-read old pointers (arena alloc above may invalidate)
             old_hdr = a.as<node_header>(old_off);
             old_sv  = setlist_view{old_hdr};
 
+            // Copy keys and children into the new (recentered) layout
             setlist_view new_sv{new_hdr};
             std::memcpy(new_sv.keys(), old_sv.keys(), n);
             std::memcpy(new_sv.children(), old_sv.children(), n * sizeof(offset_t));
@@ -72,6 +75,7 @@ namespace art
 
             new_hdr->num_children = old_hdr->num_children;
             new_hdr->value_off    = old_hdr->value_off;
+            new_hdr->set_cow_seq(old_hdr->cow_seq());
 
             node256_view new_nv{new_hdr};
             std::memcpy(new_nv.children(), old_nv.children(), 256 * sizeof(offset_t));
@@ -109,6 +113,59 @@ namespace art
          }
       }
 
+      /// Deep-copy an inner node for COW, recentering children in the new allocation.
+      /// Sets cow_seq on the copy. Returns the new node offset.
+      inline offset_t cow_copy_node(arena&   a,
+                                    offset_t old_off,
+                                    uint32_t new_cow_seq) noexcept
+      {
+         auto* old_hdr = a.as<node_header>(old_off);
+
+         if (old_hdr->type == node_type::setlist)
+         {
+            setlist_view old_sv{old_hdr};
+            uint8_t      n = old_sv.num_children();
+
+            // Save prefix (arena-resident) before allocation
+            std::string saved_prefix(old_sv.prefix());
+
+            // Allocate new node with same child count (recentered by make_setlist)
+            offset_t new_off = make_setlist(a, n, saved_prefix);
+            auto*    new_hdr = a.as<node_header>(new_off);
+
+            // Re-read old pointers
+            old_hdr = a.as<node_header>(old_off);
+            old_sv  = setlist_view{old_hdr};
+
+            new_hdr->value_off = old_hdr->value_off;
+            new_hdr->set_cow_seq(new_cow_seq);
+
+            setlist_view new_sv{new_hdr};
+            std::memcpy(new_sv.keys(), old_sv.keys(), n);
+            std::memcpy(new_sv.children(), old_sv.children(), n * sizeof(offset_t));
+            return new_off;
+         }
+         else
+         {
+            setlist_view dummy{old_hdr};  // just to get prefix
+            std::string saved_prefix(node256_view{old_hdr}.prefix());
+
+            offset_t new_off = make_node256(a, saved_prefix);
+            auto*    new_hdr = a.as<node_header>(new_off);
+
+            old_hdr = a.as<node_header>(old_off);
+
+            new_hdr->num_children = old_hdr->num_children;
+            new_hdr->value_off    = old_hdr->value_off;
+            new_hdr->set_cow_seq(new_cow_seq);
+
+            node256_view new_nv{new_hdr};
+            node256_view old_nv{old_hdr};
+            std::memcpy(new_nv.children(), old_nv.children(), 256 * sizeof(offset_t));
+            return new_off;
+         }
+      }
+
    }  // namespace detail
 
    // ── Path entry for iterative traversal ────────────────────────────────────
@@ -118,6 +175,34 @@ namespace art
       offset_t node_off;
       uint8_t  byte;
    };
+
+   namespace detail
+   {
+      /// Ensure a node is mutable for the current cow_seq. If it's shared
+      /// (cow_seq < current), copy it and update the parent pointer.
+      /// Returns the (possibly new) offset of the mutable node.
+      inline offset_t cow_ensure_mutable(arena&       a,
+                                         offset_t     cur,
+                                         uint32_t     current_cow_seq,
+                                         offset_t&    root,
+                                         path_entry*  path,
+                                         uint8_t      path_len) noexcept
+      {
+         auto* hdr = a.as<node_header>(cur);
+         if (hdr->cow_seq() >= current_cow_seq)
+            return cur;  // already mutable
+
+         offset_t new_off = cow_copy_node(a, cur, current_cow_seq);
+
+         // Update parent's child pointer (or root)
+         if (path_len == 0)
+            root = new_off;
+         else
+            write_child(a, path[path_len - 1].node_off, path[path_len - 1].byte, new_off);
+
+         return new_off;
+      }
+   }  // namespace detail
 
    // ── get() — fast point lookup, inlined dispatch + prefetch ────────────────
 
@@ -193,7 +278,8 @@ namespace art
    std::pair<Value*, bool> upsert(arena&           a,
                                   offset_t&        root,
                                   std::string_view key,
-                                  const Value&     value) noexcept
+                                  const Value&     value,
+                                  uint32_t         cow_seq = 0) noexcept
    {
       // ── Empty tree ─────────────────────────────────────────────────────
       if (root == null_offset)
@@ -218,6 +304,19 @@ namespace art
             // Exact match — overwrite
             if (lv.key() == key)
             {
+               if (cow_seq > 0)
+               {
+                  // Under COW: leaf may be shared with a snapshot.
+                  // Allocate a new leaf to avoid corrupting the snapshot.
+                  offset_t new_leaf = make_leaf<Value>(a, key, value);
+                  if (path_len == 0)
+                     root = new_leaf;
+                  else
+                     detail::write_child(a, path[path_len - 1].node_off,
+                                         path[path_len - 1].byte, new_leaf);
+                  auto nlv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(new_leaf))};
+                  return {nlv.value(), false};
+               }
                *lv.value() = value;
                return {lv.value(), false};
             }
@@ -288,6 +387,11 @@ namespace art
          }
 
          // ── INNER NODE ──────────────────────────────────────────────────
+
+         // COW check: if this node is shared with a snapshot, copy it first
+         if (cow_seq > 0)
+            cur = detail::cow_ensure_mutable(a, cur, cow_seq, root, path, path_len);
+
          auto*    hdr  = a.as<node_header>(cur);
          uint16_t plen = hdr->partial_len;
          bool     is_sl = (hdr->type == node_type::setlist);
@@ -363,6 +467,14 @@ namespace art
             hdr = a.as<node_header>(cur);
             if (hdr->value_off != null_offset)
             {
+               if (cow_seq > 0)
+               {
+                  // Under COW: allocate new leaf for the overwrite
+                  offset_t new_leaf = make_leaf<Value>(a, key, value);
+                  a.as<node_header>(cur)->value_off = new_leaf;
+                  auto nlv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(new_leaf))};
+                  return {nlv.value(), false};
+               }
                auto lv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(hdr->value_off))};
                *lv.value() = value;
                return {lv.value(), false};
@@ -453,7 +565,7 @@ namespace art
    }  // namespace detail
 
    template <typename Value>
-   bool erase(arena& a, offset_t& root, std::string_view key)
+   bool erase(arena& a, offset_t& root, std::string_view key, uint32_t cow_seq = 0)
    {
       if (root == null_offset)
          return false;
@@ -533,7 +645,10 @@ namespace art
             return true;
          }
 
-         // INNER NODE — check prefix
+         // INNER NODE — COW check + prefix
+         if (cow_seq > 0)
+            cur = detail::cow_ensure_mutable(a, cur, cow_seq, root, path, path_len);
+
          auto*    hdr  = a.as<node_header>(cur);
          uint16_t plen = hdr->partial_len;
 

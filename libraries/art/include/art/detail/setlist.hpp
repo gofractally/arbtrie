@@ -30,10 +30,10 @@ namespace art::detail
       return ucc::lower_bound_padded(sv.keys(), sv.num_children(), byte);
    }
 
-   /// Insert a child into a setlist node. The node must not be full (num_children < 48).
-   /// Mutates in-place when capacity allows; reallocates to a larger cacheline-rounded
-   /// block when capacity is exhausted. Returns the node offset (same if in-place,
-   /// new if reallocated). The caller must update its parent pointer if it changed.
+   /// Insert a child into a setlist node using split-growth layout.
+   /// Keys grow rightward from header, children grow leftward from tail.
+   /// The smaller half of the children array is shifted to minimize memmove cost.
+   /// Returns the node offset (same if in-place, new if reallocated).
    inline offset_t setlist_add_child(arena&   a,
                                      offset_t node_off,
                                      uint8_t  byte,
@@ -45,21 +45,44 @@ namespace art::detail
       uint8_t n = sv.num_children();
       assert(n < setlist_max_children);
 
-      // Find insertion position
+      // Find insertion position in sorted keys
       uint16_t pos = ucc::lower_bound_padded(sv.keys(), n, byte);
       assert(pos >= n || sv.keys()[pos] != byte);  // no duplicate
 
-      if (n < sv.capacity())
+      if (sv.free_space() >= 5)  // 1 key byte + 4 child bytes
       {
-         // ── In-place: memmove to make room ──────────────────────────────
+         // ── In-place insert ────────────────────────────────────────────
          uint8_t*  keys     = sv.keys();
          offset_t* children = sv.children();
 
+         // Insert key: shift keys[pos..n-1] right by 1
          std::memmove(keys + pos + 1, keys + pos, n - pos);
          keys[pos] = byte;
 
-         std::memmove(children + pos + 1, children + pos, (n - pos) * sizeof(offset_t));
-         children[pos] = child_off;
+         // Insert child: shift smaller half of children array.
+         // Children are at the tail. We need to grow the array by one slot.
+         // We can either shift children[0..pos-1] left by 4 bytes (into free space)
+         // or shift children[pos..n-1] right by 4 bytes (into tail gap).
+         //
+         // Pick the smaller side to minimize memmove.
+         if (pos <= n / 2 || hdr->tail_gap() == 0)
+         {
+            // Shift left portion left (toward keys) — grow children leftward
+            // New children start 4 bytes earlier
+            offset_t* new_children = children - 1;
+            if (pos > 0)
+               std::memmove(new_children, children, pos * sizeof(offset_t));
+            new_children[pos] = child_off;
+            // tail_gap unchanged (we grew into the left free space)
+         }
+         else
+         {
+            // Shift right portion right (toward prefix) — grow into tail gap
+            if (n - pos > 0)
+               std::memmove(children + pos + 1, children + pos, (n - pos) * sizeof(offset_t));
+            children[pos] = child_off;
+            hdr->set_tail_gap(hdr->tail_gap() - 1);
+         }
 
          hdr->num_children = n + 1;
          return node_off;
@@ -68,17 +91,19 @@ namespace art::detail
       // ── Capacity exhausted: reallocate to larger cacheline-rounded block ──
       uint8_t new_n = n + 1;
 
-      // Save prefix before arena realloc may invalidate it
+      // Save prefix before arena alloc may invalidate pointers
       std::string saved_prefix(sv.prefix());
 
       offset_t new_off = make_setlist(a, new_n, saved_prefix);
       auto*    new_hdr = a.as<node_header>(new_off);
 
-      // Re-read old pointers (arena may have reallocated)
+      // Re-read old pointers (arena may have reallocated... though vm_arena doesn't,
+      // but keep the pattern for safety)
       hdr = a.as<node_header>(node_off);
       sv  = setlist_view{hdr};
 
       new_hdr->value_off = hdr->value_off;
+      new_hdr->set_cow_seq(hdr->cow_seq());
 
       setlist_view new_sv{new_hdr};
 
@@ -89,7 +114,7 @@ namespace art::detail
       new_keys[pos] = byte;
       std::memcpy(new_keys + pos + 1, old_keys + pos, n - pos);
 
-      // Copy children with insertion
+      // Copy children with insertion (centered in new allocation)
       offset_t*       new_children = new_sv.children();
       const offset_t* old_children = sv.children();
       std::memcpy(new_children, old_children, pos * sizeof(offset_t));
@@ -100,7 +125,7 @@ namespace art::detail
    }
 
    /// Remove a child from a setlist node at the given position.
-   /// Mutates in-place (memmove to close gap). Returns node_off, or null_offset
+   /// Shifts the smaller half to close the gap. Returns node_off, or null_offset
    /// if the node becomes empty (caller handles that case).
    inline offset_t setlist_remove_child(arena& a, offset_t node_off, uint16_t pos) noexcept
    {
@@ -114,18 +139,38 @@ namespace art::detail
       if (n == 1)
          return null_offset;  // caller handles empty case
 
-      // In-place: memmove to close gap
       uint8_t*  keys     = sv.keys();
       offset_t* children = sv.children();
 
+      // Remove key: shift keys[pos+1..n-1] left by 1
       std::memmove(keys + pos, keys + pos + 1, n - pos - 1);
-      std::memmove(children + pos, children + pos + 1, (n - pos - 1) * sizeof(offset_t));
+      // Zero the freed key slot for deterministic SIMD reads
+      keys[n - 1] = 0;
+
+      // Remove child: shift smaller half.
+      if (pos < n / 2)
+      {
+         // Shift left portion right (children[0..pos-1] shift right by 4)
+         // This shrinks from the left, increasing left free space
+         if (pos > 0)
+            std::memmove(children + 1, children, pos * sizeof(offset_t));
+         // Children array now starts one slot to the right (don't need to update
+         // tail_gap since we shrank from the left)
+      }
+      else
+      {
+         // Shift right portion left (children[pos+1..n-1] shift left by 4)
+         if (n - pos - 1 > 0)
+            std::memmove(children + pos, children + pos + 1, (n - pos - 1) * sizeof(offset_t));
+         // Freed one slot on the right — increase tail_gap
+         hdr->set_tail_gap(hdr->tail_gap() + 1);
+      }
 
       hdr->num_children = n - 1;
       return node_off;
    }
 
-   /// Grow a full setlist (48 children) into a node256.
+   /// Grow a full setlist into a node256.
    /// Returns the new node256 offset. The byte/child_off is the new child to add.
    inline offset_t setlist_grow_to_256(arena&   a,
                                        offset_t node_off,
@@ -143,6 +188,7 @@ namespace art::detail
       old_sv  = setlist_view{old_hdr};
 
       new_hdr->value_off = old_hdr->value_off;
+      new_hdr->set_cow_seq(old_hdr->cow_seq());
 
       node256_view new_nv{new_hdr};
 
