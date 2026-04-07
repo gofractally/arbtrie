@@ -2,12 +2,10 @@
 
 ## Open
 
-### 1. Shared-mode update heavy: 1 object leak (ptr_alloc bookkeeping)
-- **Repro**: `psitri-tests "fuzz shared mode update heavy" -c "seed=1337"` with 4000 ops
-- **Bisected to**: op #3616 (upsert in shared mode after double commit_reopen)
-- **Symptom**: `get_total_allocated_objects()` returns 1 after full cleanup, but `dump_live_objects()` / `for_each_allocated` finds nothing. The `_ptr_alloc.used()` counter is off by 1 vs actual allocated slots.
-- **Likely cause**: Bookkeeping bug in SAL's ptr_alloc — a release decremented the ref but not the `used()` counter, or a root-table operation created an untracked allocation.
-- **Pattern**: Double `commit_reopen` (making root shared via root table + cursor + snapshot) followed by shared-mode upsert. The upsert triggers COW, and somewhere in the release cascade the counter gets out of sync.
+### 1. Multi-tree parallel fuzz tests: race condition (release-only)
+- **Repro**: `psitri-tests "fuzz multi-tree parallel"` or `"fuzz multi-tree with snapshots"` in release build
+- **Symptom**: SIGABRT from assertion failure. Passes in debug builds.
+- **Likely cause**: Data race in multi-session concurrent access. Timing-dependent — release optimizations change thread scheduling enough to trigger.
 
 ### 2. `database::get_stats().total_live_objects` returns 0 after writes
 - **Repro**: `psitri-tests "database dump and get_stats"`
@@ -16,6 +14,12 @@
 - **Likely cause**: `get_stats()` doesn't account for objects allocated during the session, or the stat counter isn't wired up.
 
 ## Fixed (recent)
+
+### Shared-mode update heavy: 1 object leak (ptr_alloc bookkeeping)
+- **Repro**: `psitri-tests "fuzz shared mode update heavy"` with seed=1337
+- **Symptom**: `get_total_allocated_objects()` returns 1 after full cleanup.
+- **Root cause**: The COW leaf check in `upsert_inline()` used `cow_seq > 0` which unconditionally allocated new leaves when any readers existed, even for writer-owned leaves. This caused unnecessary leaf allocations that led to a ref-count tracking desync during the release cascade.
+- **Fix**: Added `cow_seq` field to ART `leaf_header`. Changed the check to `lh->cow_seq < cow_seq` so writer-owned leaves are mutated in-place, eliminating the spurious allocations that triggered the bookkeeping mismatch.
 
 ### DWAL undo replay leaves dangling pointers in RW layer
 - **Repro**: write→commit→write→abort, then `get_latest()` on the restored key
