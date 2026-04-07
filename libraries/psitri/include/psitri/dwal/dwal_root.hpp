@@ -1,4 +1,5 @@
 #pragma once
+#include <art/cow_coordinator.hpp>
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/undo_log.hpp>
 #include <psitri/dwal/wal_writer.hpp>
@@ -55,6 +56,10 @@ namespace psitri::dwal
       buffered,  // Normal: writes go to RW btree + WAL
       direct,    // Large tx: flush RW, write directly to PsiTri COW
    };
+
+   // COWART coordination is handled by art::cow_coordinator.
+   // See art/cow_coordinator.hpp for the packed 64-bit atomic layout
+   // and the lock-free reader/writer protocol.
 
    /// Per-root DWAL state.
    ///
@@ -153,6 +158,9 @@ namespace psitri::dwal
       /// Mutex for swap_cv wait.  Only fresh-mode readers lock this
       /// (shared) while waiting.  The swapper notifies without holding it.
       mutable std::shared_mutex swap_mutex;
+
+      // ── COWART state (coexists with legacy fields during migration) ──
+      art::cow_coordinator cow;
 
       dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
    };

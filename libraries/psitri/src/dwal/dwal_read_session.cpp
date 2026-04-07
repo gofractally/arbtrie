@@ -79,16 +79,42 @@ namespace psitri::dwal
          return {false, {}};
       }
 
-      // Latest mode: also check RW layer (requires shared lock).
+      // Latest mode: use cow_coordinator for lock-free head read.
       if (mode == read_mode::latest)
       {
          auto& root = _db.root(root_index);
-         std::shared_lock lk(root.rw_mutex, std::defer_lock);
-         if (root.enable_rw_locking)
-            lk.lock();
-         if (root.rw_layer)
+         art::offset_t head = root.cow.begin_read_latest();
+
+         if (head != art::null_offset && root.rw_layer)
          {
-            auto* v = root.rw_layer->map.get(key);
+            auto& arena = root.rw_layer->map.get_arena();
+            auto* v = art::get<btree_value>(arena, head, key);
+            if (v)
+            {
+               root.cow.end_read_latest();
+               if (v->is_tombstone())
+                  return {false, {}};
+               return {true, std::string(v->data)};
+            }
+            if (root.rw_layer->tombstones.is_deleted(key))
+            {
+               root.cow.end_read_latest();
+               return {false, {}};
+            }
+         }
+
+         root.cow.end_read_latest();
+      }
+
+      // Fresh mode: read prev_root (always safe, zero coordination).
+      if (mode == read_mode::fresh)
+      {
+         auto& root = _db.root(root_index);
+         art::offset_t prev = root.cow.read_prev();
+         if (prev != art::null_offset && root.rw_layer)
+         {
+            auto& arena = root.rw_layer->map.get_arena();
+            auto* v = art::get<btree_value>(arena, prev, key);
             if (v)
             {
                if (v->is_tombstone())
@@ -100,7 +126,7 @@ namespace psitri::dwal
          }
       }
 
-      // Buffered/latest: search cached RO snapshot.
+      // Buffered/fresh/latest: search cached RO snapshot (frozen arena).
       if (cache.snapshot)
       {
          auto* v = cache.snapshot->map.get(key);

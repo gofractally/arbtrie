@@ -36,6 +36,15 @@ namespace psitri::dwal
             _owns_lock = true;
          }
 
+         // COWART: begin write — sets writer_active, bumps cow_seq if readers active
+         if (!_nested)
+         {
+            uint32_t old_seq = _root->cow.load_state().cow_seq();
+            uint32_t new_seq = _root->cow.begin_write();
+            if (new_seq != old_seq)
+               _root->rw_layer->map.bump_cow_seq();
+         }
+
          _undo.push_frame();
 
          if (!_nested && _wal)
@@ -271,6 +280,15 @@ namespace psitri::dwal
 
          _undo.discard();
 
+         // COWART: end write — update head, notify readers if needed
+         {
+            auto new_root = _root->rw_layer->map.snapshot_root();
+            uint32_t cur_seq = _root->cow.load_state().cow_seq();
+            bool notified = _root->cow.end_write(new_root, cur_seq);
+            if (notified)
+               _root->rw_layer->map.bump_cow_seq();
+         }
+
          // Release the RW mutex before swap — readers can now see
          // the committed state. Swap may re-acquire briefly.
          if (_owns_lock)
@@ -318,6 +336,15 @@ namespace psitri::dwal
 
       _undo.discard();
 
+      // COWART: end write
+      {
+         auto new_root = _root->rw_layer->map.snapshot_root();
+         uint32_t cur_seq = _root->cow.load_state().cow_seq();
+         bool notified = _root->cow.end_write(new_root, cur_seq);
+         if (notified)
+            _root->rw_layer->map.bump_cow_seq();
+      }
+
       if (_owns_lock)
       {
          _root->rw_mutex.unlock();
@@ -340,10 +367,9 @@ namespace psitri::dwal
          if (_wal && _wal->entry_in_progress())
             _wal->discard_entry();
 
-         // Replay all undo entries to restore the btree.
-         // String data in undo entries points into the undo_log's arena,
-         // which is freed when this transaction is destroyed. Copy restored
-         // values into the btree_layer's pool so they outlive the undo_log.
+         // Replay all undo entries FIRST — restores the btree to pre-tx state.
+         // This must happen before clearing writer_active, because readers
+         // will see the root as soon as writer_active is cleared.
          _undo.replay_all(
              [this](const undo_entry& entry)
              {
@@ -381,6 +407,15 @@ namespace psitri::dwal
                       break;
                 }
              });
+
+         // COWART: end write with restored root
+         {
+            auto restored_root = _root->rw_layer->map.snapshot_root();
+            uint32_t cur_seq = _root->cow.load_state().cow_seq();
+            bool notified = _root->cow.end_write(restored_root, cur_seq);
+            if (notified)
+               _root->rw_layer->map.bump_cow_seq();
+         }
 
          if (_owns_lock)
          {

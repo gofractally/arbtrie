@@ -158,6 +158,9 @@ struct bench_config
 
    std::string db_dir   = "./dwal_bench_db";
    std::string csv_path = "./dwal_bench_results.csv";
+
+   /// Read mode for DWAL reader threads (trie, buffered, fresh, latest).
+   psitri::dwal::read_mode reader_mode = psitri::dwal::read_mode::trie;
 };
 
 // ── CSV Logger ──────────────────────────────────────────────────
@@ -554,7 +557,10 @@ static void rw_bench(const bench_config& cfg,
 
    std::cout << "═══════════════════════════════════════════════════════════════\n"
              << "  " << phase_name << " — write + " << cfg.readers
-             << " trie readers (concurrent)\n"
+             << " " << (cfg.reader_mode == dwal::read_mode::trie ? "trie" :
+                         cfg.reader_mode == dwal::read_mode::buffered ? "buffered" :
+                         cfg.reader_mode == dwal::read_mode::fresh ? "fresh" : "latest")
+             << " readers (concurrent)\n"
              << "  rounds=" << cfg.rounds << " items=" << format_comma(cfg.items)
              << " batch=" << cfg.batch_size << " val_size=" << cfg.value_size
              << " validate=" << (cfg.validate ? "yes" : "no") << "\n";
@@ -677,7 +683,7 @@ static void rw_bench(const bench_config& cfg,
                    {
                       auto result =
                           dwal_reader->get(0, std::string_view(key.data(), key.size()),
-                                          dwal::read_mode::trie);
+                                          cfg.reader_mode);
                       found   = result.found;
                       val_buf = std::move(result.value);
                    }
@@ -907,7 +913,7 @@ static void rw_bench(const bench_config& cfg,
                          {
                             auto result = dwal_reader->get(
                                 0, std::string_view(lkey.data(), lkey.size()),
-                                dwal::read_mode::trie);
+                                cfg.reader_mode);
                             found   = result.found;
                             val_buf = std::move(result.value);
                          }
@@ -1097,6 +1103,23 @@ int main(int argc, char** argv)
          cfg.run_direct = true;
       else if (arg == "--dwal")
          cfg.run_dwal = true;
+      else if (arg == "--read-mode")
+      {
+         auto mode = next();
+         if (mode == "trie")
+            cfg.reader_mode = psitri::dwal::read_mode::trie;
+         else if (mode == "buffered")
+            cfg.reader_mode = psitri::dwal::read_mode::buffered;
+         else if (mode == "fresh")
+            cfg.reader_mode = psitri::dwal::read_mode::fresh;
+         else if (mode == "latest")
+            cfg.reader_mode = psitri::dwal::read_mode::latest;
+         else
+         {
+            std::cerr << "Unknown read mode: " << mode << "\n";
+            return 1;
+         }
+      }
       else if (arg == "--all")
       {
          cfg.run_write_only = true;

@@ -18,13 +18,17 @@ namespace art
       node256 = 1,
    };
 
-   // ── Node header (8 bytes) ─────────────────────────────────────────────────
+   // ── Node header (12 bytes) ────────────────────────────────────────────────
    //
    // Offset  Size  Field
    // 0       1     type            (node_type: setlist or node256)
    // 1       1     num_children
    // 2       2     partial_len     (uint16_t)
    // 4       4     value_off       (offset_t to leaf for prefix-keys, or null_offset)
+   // 8       4     cow_seq_gap     packed: cow_seq (25 bits) | tail_gap (7 bits)
+   //
+   // cow_seq: COW generation — nodes with cow_seq < current must be copied before mutation
+   // tail_gap: free 4-byte slots between children[n-1] and prefix (setlist split-growth)
 
    struct node_header
    {
@@ -32,57 +36,71 @@ namespace art
       uint8_t   num_children;
       uint16_t  partial_len;
       offset_t  value_off;
+      uint32_t  cow_seq_gap;  // bits 31-7: cow_seq (25 bits), bits 6-0: tail_gap (7 bits)
+
+      uint32_t cow_seq() const noexcept { return cow_seq_gap >> 7; }
+      uint8_t  tail_gap() const noexcept { return cow_seq_gap & 0x7F; }
+
+      void set_cow_seq(uint32_t seq) noexcept
+      {
+         cow_seq_gap = (seq << 7) | (cow_seq_gap & 0x7F);
+      }
+      void set_tail_gap(uint8_t gap) noexcept
+      {
+         cow_seq_gap = (cow_seq_gap & ~uint32_t(0x7F)) | (gap & 0x7F);
+      }
+      void set_cow_seq_gap(uint32_t seq, uint8_t gap) noexcept
+      {
+         cow_seq_gap = (seq << 7) | (gap & 0x7F);
+      }
    };
 
-   static_assert(sizeof(node_header) == 8);
+   static_assert(sizeof(node_header) == 12);
 
-   // ── Setlist node ──────────────────────────────────────────────────────────
+   // ── Setlist node (split-growth layout) ───────────────────────────────────
    //
    // Cacheline-rounded. Layout in arena:
-   //   [node_header: 8 bytes]
-   //   [capacity: 1 byte]
-   //   [keys[capacity]: capacity bytes, sorted (num_children used)]
-   //   [padding to 4-byte alignment]
-   //   [children[capacity]: capacity * 4 bytes, offset_t (tagged)]
-   //   [partial[partial_len]: variable]
+   //   [node_header: 16 bytes]
+   //   [alloc_cachelines: 1 byte]   (allocation size / cacheline_size)
+   //   [keys[0..n-1]: n bytes]      grows rightward →
+   //   [... free space ...]         shared between keys and children
+   //   [children[0..n-1]: n*4 B]    grows leftward ← (children centered, drift tracked by tail_gap)
+   //   [partial[partial_len]]       fixed at tail of allocation
    //   [pad to cacheline boundary]
    //
-   // capacity >= num_children. In-place memmove mutation when capacity allows.
+   // Keys and children are in the same logical order: keys[i] corresponds to
+   // children[i]. Children are physically stored before the prefix, growing
+   // leftward. The free space between keys and children absorbs growth from
+   // both sides.
+   //
+   // tail_gap (in node_header) = number of free 4-byte slots between
+   // children[n-1] and the prefix. Used to locate the children block.
+   //
+   // On insert, the smaller half of the children array is shifted (toward the
+   // nearer edge), reducing average memmove cost by ~40% vs packed layout.
+   // On COW copy, children are recentered in the free space.
 
-   static constexpr uint8_t setlist_max_children = 48;
+   static constexpr uint8_t setlist_max_children = 128;
 
-   /// Byte offset of children[] within a setlist node, given capacity.
-   inline uint32_t setlist_children_offset(uint8_t capacity) noexcept
-   {
-      return (sizeof(node_header) + 1u + capacity + 3u) & ~3u;
-   }
+   /// Offset where keys begin within a setlist node.
+   static constexpr uint32_t setlist_keys_offset = sizeof(node_header) + 1;
 
-   /// Compute total allocation size for a setlist node (rounded up to cacheline).
+   /// Compute minimum allocation size for a setlist node (rounded up to cacheline).
    inline uint32_t setlist_alloc_size(uint8_t num_children, uint16_t prefix_len) noexcept
    {
-      uint32_t total =
-          setlist_children_offset(num_children) + uint32_t(num_children) * sizeof(offset_t) + prefix_len;
+      // header + alloc_cachelines byte + keys + children + prefix
+      uint32_t total = setlist_keys_offset + num_children + uint32_t(num_children) * sizeof(offset_t) + prefix_len;
       return (total + cacheline_size - 1) & ~(cacheline_size - 1);
    }
 
-   /// Compute max children capacity that fits in a given allocation size.
+   /// Compute max children that fit in a given allocation size.
    inline uint8_t compute_setlist_capacity(uint32_t alloc_size, uint16_t prefix_len) noexcept
    {
-      if (alloc_size <= sizeof(node_header) + 1 + prefix_len)
+      if (alloc_size <= setlist_keys_offset + prefix_len)
          return 0;
-      // Each child ≈ 5 bytes (1 key + 4 offset) + ~1 byte alignment overhead
-      uint8_t cap =
-          static_cast<uint8_t>(std::min<uint32_t>((alloc_size - sizeof(node_header) - 1 - prefix_len) / 5,
-                                                   setlist_max_children));
-      // Adjust down if alignment padding makes it not fit
-      while (cap > 0)
-      {
-         uint32_t needed = setlist_children_offset(cap) + uint32_t(cap) * sizeof(offset_t) + prefix_len;
-         if (needed <= alloc_size)
-            return cap;
-         --cap;
-      }
-      return 0;
+      // Each child needs 5 bytes (1 key + 4 offset)
+      uint32_t available = alloc_size - setlist_keys_offset - prefix_len;
+      return static_cast<uint8_t>(std::min<uint32_t>(available / 5, setlist_max_children));
    }
 
    /// Access helpers for setlist fields given a pointer to the node_header.
@@ -93,43 +111,64 @@ namespace art
       uint8_t  num_children() const noexcept { return hdr->num_children; }
       uint16_t partial_len() const noexcept { return hdr->partial_len; }
 
+      /// Allocation size in bytes, derived from the alloc_cachelines byte.
+      uint32_t alloc_size() const noexcept
+      {
+         return uint32_t(reinterpret_cast<const uint8_t*>(hdr)[sizeof(node_header)]) * cacheline_size;
+      }
+
+      /// Max children this allocation can hold.
       uint8_t capacity() const noexcept
       {
-         return reinterpret_cast<const uint8_t*>(hdr)[sizeof(node_header)];
+         return compute_setlist_capacity(alloc_size(), hdr->partial_len);
       }
 
       uint8_t* keys() noexcept
       {
-         return reinterpret_cast<uint8_t*>(hdr) + sizeof(node_header) + 1;
+         return reinterpret_cast<uint8_t*>(hdr) + setlist_keys_offset;
       }
       const uint8_t* keys() const noexcept
       {
-         return reinterpret_cast<const uint8_t*>(hdr) + sizeof(node_header) + 1;
+         return reinterpret_cast<const uint8_t*>(hdr) + setlist_keys_offset;
       }
 
+      /// Children array: located from the tail via tail_gap.
+      /// children[0] is at children_start, children[n-1] is closest to prefix.
       offset_t* children() noexcept
       {
-         return reinterpret_cast<offset_t*>(reinterpret_cast<uint8_t*>(hdr) +
-                                            setlist_children_offset(capacity()));
+         uint32_t children_end = alloc_size() - hdr->partial_len - uint32_t(hdr->tail_gap()) * 4;
+         uint32_t children_start = children_end - uint32_t(hdr->num_children) * sizeof(offset_t);
+         return reinterpret_cast<offset_t*>(reinterpret_cast<uint8_t*>(hdr) + children_start);
       }
       const offset_t* children() const noexcept
       {
-         return reinterpret_cast<const offset_t*>(reinterpret_cast<const uint8_t*>(hdr) +
-                                                  setlist_children_offset(capacity()));
+         uint32_t children_end = alloc_size() - hdr->partial_len - uint32_t(hdr->tail_gap()) * 4;
+         uint32_t children_start = children_end - uint32_t(hdr->num_children) * sizeof(offset_t);
+         return reinterpret_cast<const offset_t*>(reinterpret_cast<const uint8_t*>(hdr) + children_start);
       }
 
+      /// Prefix is fixed at the tail of the allocation.
       uint8_t* partial() noexcept
       {
-         return reinterpret_cast<uint8_t*>(children() + capacity());
+         return reinterpret_cast<uint8_t*>(hdr) + alloc_size() - hdr->partial_len;
       }
       const uint8_t* partial() const noexcept
       {
-         return reinterpret_cast<const uint8_t*>(children() + capacity());
+         return reinterpret_cast<const uint8_t*>(hdr) + alloc_size() - hdr->partial_len;
       }
 
       std::string_view prefix() const noexcept
       {
          return {reinterpret_cast<const char*>(partial()), hdr->partial_len};
+      }
+
+      /// Free space between keys end and children start (in bytes).
+      uint32_t free_space() const noexcept
+      {
+         uint32_t keys_end = setlist_keys_offset + hdr->num_children;
+         uint32_t children_end = alloc_size() - hdr->partial_len - uint32_t(hdr->tail_gap()) * 4;
+         uint32_t children_start = children_end - uint32_t(hdr->num_children) * sizeof(offset_t);
+         return children_start - keys_end;
       }
    };
 
@@ -253,7 +292,7 @@ namespace art
       assert(prefix.size() <= 0xFFFF);
 
       const char* p = prefix.data();
-      if (p >= a.base() && p < a.base() + a.capacity() && !prefix.empty())
+      if (p >= a.base() && p < a.base() + a.bytes_used() && !prefix.empty())
       {
          assert(prefix.size() <= buf_size);
          (void)buf_size;
@@ -279,6 +318,7 @@ namespace art
    }
 
    /// Allocate a setlist node with the given prefix. Children/keys are uninitialized.
+   /// Children are centered in the free space between keys and prefix.
    inline offset_t make_setlist(arena& a, uint8_t num_children, std::string_view prefix)
    {
       char         pfx_buf[512];
@@ -286,7 +326,10 @@ namespace art
       uint16_t     pfx_len  = prefix.size();
 
       uint32_t size = setlist_alloc_size(num_children, pfx_len);
-      uint8_t  cap  = compute_setlist_capacity(size, pfx_len);
+      assert(size % cacheline_size == 0);
+      assert(size / cacheline_size <= 255);
+
+      uint8_t  cap = compute_setlist_capacity(size, pfx_len);
       assert(cap >= num_children);
 
       offset_t off = a.allocate(size);
@@ -296,19 +339,28 @@ namespace art
       hdr->partial_len  = pfx_len;
       hdr->value_off    = null_offset;
 
-      // Store capacity byte
-      reinterpret_cast<uint8_t*>(hdr)[sizeof(node_header)] = cap;
+      // Store alloc_cachelines byte (replaces old capacity byte)
+      reinterpret_cast<uint8_t*>(hdr)[sizeof(node_header)] =
+          static_cast<uint8_t>(size / cacheline_size);
 
-      // Zero the keys + padding region for deterministic SIMD reads
-      uint8_t* keys_start = reinterpret_cast<uint8_t*>(hdr) + sizeof(node_header) + 1;
-      uint32_t keys_region = setlist_children_offset(cap) - sizeof(node_header) - 1;
-      std::memset(keys_start, 0, keys_region);
+      // Center children in the free space.
+      uint32_t children_region = size - pfx_len - setlist_keys_offset - num_children;
+      uint32_t children_bytes = uint32_t(num_children) * sizeof(offset_t);
+      uint32_t free_bytes = children_region - children_bytes;
+      uint32_t total_free_slots = free_bytes / 4;
+      uint8_t  tg = static_cast<uint8_t>(std::min<uint32_t>(total_free_slots / 2, 0x7F));
+      hdr->set_cow_seq_gap(0, tg);
 
-      // Copy prefix
+      // Zero the keys region for deterministic SIMD reads
+      uint8_t* keys_start = reinterpret_cast<uint8_t*>(hdr) + setlist_keys_offset;
+      // Zero enough for the max capacity to keep SIMD reads clean
+      std::memset(keys_start, 0, cap);
+
+      // Copy prefix at the tail
       if (pfx_len > 0)
       {
-         setlist_view sv{hdr};
-         std::memcpy(sv.partial(), pfx_data, pfx_len);
+         uint8_t* pfx_dst = reinterpret_cast<uint8_t*>(hdr) + size - pfx_len;
+         std::memcpy(pfx_dst, pfx_data, pfx_len);
       }
 
       return off;
@@ -328,6 +380,7 @@ namespace art
       hdr->num_children = 0;
       hdr->partial_len  = pfx_len;
       hdr->value_off    = null_offset;
+      hdr->cow_seq_gap  = 0;
 
       // Initialize all children to null_offset
       node256_view nv{hdr};

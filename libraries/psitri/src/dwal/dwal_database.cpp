@@ -203,6 +203,10 @@ namespace psitri::dwal
 
          root.next_wal_seq = reader.end_sequence();
 
+         // Sync COWART state with the recovered rw_layer root
+         // so that get_latest() can find the recovered data.
+         root.cow.set_root(root.rw_layer->map.snapshot_root());
+
          // Delete the old RW WAL — a fresh one will be created on first write.
          std::filesystem::remove(ri.rw_wal, ec);
       }
@@ -547,6 +551,9 @@ namespace psitri::dwal
             root.buffered_ptr = std::move(root.rw_layer);
          }
          root.rw_layer = std::make_shared<btree_layer>();
+
+         // Reset COWART state for the new empty arena.
+         root.cow.reset();
       }
 
       root.last_swap_time = std::chrono::steady_clock::now();
@@ -624,27 +631,32 @@ namespace psitri::dwal
       {
          auto& root = *_roots[root_index];
 
-         // Layer 1: RW btree — shared lock allows concurrent readers
-         // when rw_locking is enabled.
+         // ── COWART latest: lock-free head read via cow_coordinator ──
          {
-            std::shared_lock lk(root.rw_mutex, std::defer_lock);
-            if (root.enable_rw_locking)
-               lk.lock();
-            if (root.rw_layer)
+            art::offset_t head = root.cow.begin_read_latest();
+
+            if (head != art::null_offset && root.rw_layer)
             {
-               auto* v = root.rw_layer->map.get(key);
+               auto& arena = root.rw_layer->map.get_arena();
+               auto* v = art::get<btree_value>(arena, head, key);
                if (v)
                {
+                  root.cow.end_read_latest();
                   if (v->is_tombstone())
                      return {false, {}};
                   return {true, *v};
                }
                if (root.rw_layer->tombstones.is_deleted(key))
+               {
+                  root.cow.end_read_latest();
                   return {false, {}};
+               }
             }
+
+            root.cow.end_read_latest();
          }
 
-         // Layer 2: RO btree (frozen snapshot)
+         // Layer 2: RO btree (frozen snapshot from previous arena)
          {
             std::shared_ptr<btree_layer> ro;
             {

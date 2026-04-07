@@ -1552,3 +1552,142 @@ TEST_CASE("art_map stress: large single tree with verification", "[art_map][stre
    INFO("final: " << N << " inserts, size=" << m.size()
                    << " arena=" << m.arena_bytes_used());
 }
+
+// ── COW Snapshot Tests ──────────────────────────────────────────────────────
+
+TEST_CASE("art_map COW snapshot basic", "[art_map][cow]")
+{
+   art_map<uint64_t> m;
+
+   // Insert some initial data
+   m.upsert("alpha", 1);
+   m.upsert("beta", 2);
+   m.upsert("gamma", 3);
+
+   // Take a snapshot
+   offset_t snap = m.snapshot_root();
+   m.bump_cow_seq();
+
+   // Modify the live tree
+   m.upsert("alpha", 100);  // overwrite
+   m.upsert("delta", 4);    // new key
+   m.erase("beta");         // remove
+
+   // Live tree reflects changes
+   REQUIRE(*m.get("alpha") == 100);
+   REQUIRE(m.get("beta") == nullptr);
+   REQUIRE(*m.get("delta") == 4);
+   REQUIRE(*m.get("gamma") == 3);
+
+   // Snapshot still sees original data
+   auto& arena = m.get_arena();
+   REQUIRE(*art::get<uint64_t>(arena, snap, "alpha") == 1);
+   REQUIRE(*art::get<uint64_t>(arena, snap, "beta") == 2);
+   REQUIRE(*art::get<uint64_t>(arena, snap, "gamma") == 3);
+   REQUIRE(art::get<uint64_t>(arena, snap, "delta") == nullptr);
+}
+
+TEST_CASE("art_map COW multiple snapshots", "[art_map][cow]")
+{
+   art_map<uint64_t> m;
+
+   for (int i = 0; i < 100; ++i)
+   {
+      char key[16];
+      snprintf(key, sizeof(key), "key%04d", i);
+      m.upsert(key, i);
+   }
+
+   // Snapshot 1
+   offset_t snap1 = m.snapshot_root();
+   m.bump_cow_seq();
+
+   // Add more keys
+   for (int i = 100; i < 200; ++i)
+   {
+      char key[16];
+      snprintf(key, sizeof(key), "key%04d", i);
+      m.upsert(key, i);
+   }
+
+   // Snapshot 2
+   offset_t snap2 = m.snapshot_root();
+   m.bump_cow_seq();
+
+   // Modify some keys
+   m.upsert("key0050", 9999);
+   m.erase("key0150");
+
+   auto& arena = m.get_arena();
+
+   // Snapshot 1: 100 keys, original values
+   REQUIRE(*art::get<uint64_t>(arena, snap1, "key0050") == 50);
+   REQUIRE(art::get<uint64_t>(arena, snap1, "key0150") == nullptr);
+
+   // Snapshot 2: 200 keys, original values
+   REQUIRE(*art::get<uint64_t>(arena, snap2, "key0050") == 50);
+   REQUIRE(*art::get<uint64_t>(arena, snap2, "key0150") == 150);
+
+   // Live tree: modified
+   REQUIRE(*m.get("key0050") == 9999);
+   REQUIRE(m.get("key0150") == nullptr);
+}
+
+TEST_CASE("art_map COW snapshot iteration", "[art_map][cow]")
+{
+   art_map<uint64_t> m;
+
+   m.upsert("aaa", 1);
+   m.upsert("bbb", 2);
+   m.upsert("ccc", 3);
+
+   offset_t snap = m.snapshot_root();
+   m.bump_cow_seq();
+
+   m.upsert("aaa", 99);
+   m.upsert("ddd", 4);
+   m.erase("bbb");
+
+   // Iterate snapshot
+   auto& arena = m.get_arena();
+   auto  it    = make_begin<uint64_t>(arena, snap);
+   auto  end   = make_end<uint64_t>(arena, snap);
+
+   std::map<std::string, uint64_t> snap_data;
+   for (; it != end; ++it)
+      snap_data[std::string(it.key())] = it.value();
+
+   REQUIRE(snap_data.size() == 3);
+   REQUIRE(snap_data["aaa"] == 1);
+   REQUIRE(snap_data["bbb"] == 2);
+   REQUIRE(snap_data["ccc"] == 3);
+}
+
+TEST_CASE("art_map COW no overhead without bump", "[art_map][cow]")
+{
+   art_map<uint64_t> m;
+
+   // Without bump_cow_seq, cow_seq stays 0 and no COW happens
+   uint32_t before = m.arena_bytes_used();
+   for (int i = 0; i < 1000; ++i)
+   {
+      char key[16];
+      snprintf(key, sizeof(key), "k%04d", i);
+      m.upsert(key, i);
+   }
+   uint32_t after_insert = m.arena_bytes_used();
+
+   // Overwrite all keys — should mutate in place (no COW copies)
+   for (int i = 0; i < 1000; ++i)
+   {
+      char key[16];
+      snprintf(key, sizeof(key), "k%04d", i);
+      m.upsert(key, i + 1000);
+   }
+   uint32_t after_overwrite = m.arena_bytes_used();
+
+   // Leaf values are overwritten in place, so arena should not grow
+   // (only inner nodes might allocate new leaves for value changes,
+   //  but upsert overwrites existing leaf values in place)
+   REQUIRE(after_overwrite == after_insert);
+}
