@@ -139,6 +139,38 @@ static i64 decode_rowid(const char* data) {
 // Key prefix: all tables share DWAL root 0, distinguished by 4-byte prefix
 // ============================================================================
 
+/// Stack-allocated prefixed key — avoids heap allocation on every key operation.
+/// Caller provides a buffer (typically on the stack). Returns a string_view
+/// into the buffer. Buffer must be at least 4 + key.size() bytes.
+static std::string_view make_prefixed_key(uint32_t table_id, std::string_view key,
+                                          char* buf, size_t buf_size) {
+   size_t total = 4 + key.size();
+   assert(total <= buf_size);
+   (void)buf_size;
+   buf[0] = (char)((table_id >> 24) & 0xFF);
+   buf[1] = (char)((table_id >> 16) & 0xFF);
+   buf[2] = (char)((table_id >>  8) & 0xFF);
+   buf[3] = (char)((table_id      ) & 0xFF);
+   if (!key.empty())
+      std::memcpy(buf + 4, key.data(), key.size());
+   return {buf, total};
+}
+
+/// Convenience: stack-allocated prefixed key with automatic buffer.
+/// Max supported key size: 4096 - 4 = 4092 bytes.
+struct prefixed_key {
+   char buf[4096];
+   std::string_view sv;
+
+   prefixed_key(uint32_t table_id, std::string_view key)
+       : sv(make_prefixed_key(table_id, key, buf, sizeof(buf))) {}
+
+   operator std::string_view() const noexcept { return sv; }
+   const char* data() const noexcept { return sv.data(); }
+   size_t size() const noexcept { return sv.size(); }
+};
+
+/// Heap-allocated version — only for cases where the key must outlive the scope.
 static std::string make_prefixed_key(uint32_t table_id, std::string_view key) {
    std::string result(4 + key.size(), '\0');
    result[0] = (char)((table_id >> 24) & 0xFF);
@@ -151,7 +183,7 @@ static std::string make_prefixed_key(uint32_t table_id, std::string_view key) {
 }
 
 static std::string make_prefix(uint32_t table_id) {
-   return make_prefixed_key(table_id, {});
+   return make_prefixed_key(table_id, std::string_view{});
 }
 
 static bool has_prefix(std::string_view key, uint32_t table_id) {
@@ -829,8 +861,8 @@ int sqlite3BtreeTableMoveto(BtCursor* pCur, i64 intKey, int bias, int* pRes) {
    }
    auto& mc = pCur->cursor->cursor();
 
-   auto key = make_prefixed_key(pCur->pgnoRoot, encode_rowid(intKey));
-   mc.lower_bound(key);
+   prefixed_key pk(pCur->pgnoRoot, encode_rowid(intKey));
+   mc.lower_bound(pk);
 
    if (mc.is_end() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       *pRes = -1;
@@ -872,9 +904,17 @@ int sqlite3BtreeIndexMoveto(BtCursor* pCur, UnpackedRecord* pUnKey, int* pRes) {
    // Build a byte-comparable search key from the UnpackedRecord.
    // Index entries are stored with comparable keys (see sqlite3BtreeInsert),
    // so lower_bound works correctly with byte comparison.
-   auto comp_key = make_prefixed_key(pCur->pgnoRoot,
-      make_comparable_from_unpacked(pUnKey));
-   mc.lower_bound(std::string_view(comp_key.data(), comp_key.size()));
+   // Build comparable key on stack
+   char comp_buf[4096];
+   int comp_sz = psitri_make_comparable_key_from_unpacked(
+       pUnKey, (unsigned char*)comp_buf + 4, sizeof(comp_buf) - 4);
+   if (comp_sz <= 0) comp_sz = 0;
+   // Prepend table prefix
+   comp_buf[0] = (char)((pCur->pgnoRoot >> 24) & 0xFF);
+   comp_buf[1] = (char)((pCur->pgnoRoot >> 16) & 0xFF);
+   comp_buf[2] = (char)((pCur->pgnoRoot >>  8) & 0xFF);
+   comp_buf[3] = (char)((pCur->pgnoRoot      ) & 0xFF);
+   mc.lower_bound(std::string_view(comp_buf, 4 + comp_sz));
 
    if (mc.is_end() || !has_prefix(mc.key(), pCur->pgnoRoot)) {
       *pRes = -1;
@@ -1047,28 +1087,45 @@ int sqlite3BtreeInsert(
    PTRACE("Insert: root=%u intkey=%d nKey=%lld nData=%d\n",
           pCur->pgnoRoot, pCur->curIntKey, (long long)pPayload->nKey, pPayload->nData);
    auto* psitri = pCur->psitri_db;
-   std::string key, value;
+
+   // Build key and value with minimal allocation.
+   // IntKey tables: key = prefix + big-endian rowid, value = record blob
+   // BlobKey tables: key = prefix + comparable encoding, value = raw key blob
+   char key_buf[4096];
+   std::string_view key_sv;
+   std::string_view value_sv;
+   std::string value_with_zeros;  // only allocated if nZero > 0
 
    if (pCur->curIntKey) {
-      key = make_prefixed_key(pCur->pgnoRoot, encode_rowid(pPayload->nKey));
+      auto rowid = encode_rowid(pPayload->nKey);
+      key_sv = make_prefixed_key(pCur->pgnoRoot, rowid, key_buf, sizeof(key_buf));
       if (pPayload->pData && pPayload->nData > 0) {
-         value.assign((const char*)pPayload->pData, pPayload->nData);
          if (pPayload->nZero > 0) {
-            value.append(pPayload->nZero, '\0');
+            value_with_zeros.assign((const char*)pPayload->pData, pPayload->nData);
+            value_with_zeros.append(pPayload->nZero, '\0');
+            value_sv = value_with_zeros;
+         } else {
+            value_sv = {(const char*)pPayload->pData, (size_t)pPayload->nData};
          }
       }
    } else {
       if (pPayload->pKey) {
-         key = make_prefixed_key(pCur->pgnoRoot,
-            make_comparable_from_packed(
-               (const char*)pPayload->pKey, (int)pPayload->nKey));
-         value.assign((const char*)pPayload->pKey, pPayload->nKey);
+         int comp_sz = psitri_make_comparable_key(
+             (const unsigned char*)pPayload->pKey, (int)pPayload->nKey,
+             (unsigned char*)key_buf + 4, sizeof(key_buf) - 4);
+         if (comp_sz <= 0) comp_sz = 0;
+         key_buf[0] = (char)((pCur->pgnoRoot >> 24) & 0xFF);
+         key_buf[1] = (char)((pCur->pgnoRoot >> 16) & 0xFF);
+         key_buf[2] = (char)((pCur->pgnoRoot >>  8) & 0xFF);
+         key_buf[3] = (char)((pCur->pgnoRoot      ) & 0xFF);
+         key_sv = {key_buf, size_t(4 + comp_sz)};
+         value_sv = {(const char*)pPayload->pKey, (size_t)pPayload->nKey};
       }
    }
 
    try {
       auto& tx = pCur->pBtree->get_tx();
-      tx.upsert(key, value);
+      tx.upsert(key_sv, value_sv);
    } catch (...) {
       return SQLITE_ERROR;
    }
