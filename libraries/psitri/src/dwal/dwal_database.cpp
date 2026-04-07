@@ -357,7 +357,7 @@ namespace psitri::dwal
                   // Drain RO layer.
                   std::shared_ptr<btree_layer> ro;
                   {
-                     std::shared_lock lk(root.buffered_mutex);
+                     std::lock_guard lk(root.buffered_mutex);
                      ro = root.buffered_ptr;
                   }
                   if (ro && !ro->map.empty())
@@ -405,7 +405,7 @@ namespace psitri::dwal
       if (!_roots[index])
       {
          _roots[index] = std::make_unique<dwal_root>();
-         _roots[index]->enable_rw_locking = _cfg.enable_rw_locking;
+         // cow_coordinator handles all reader/writer coordination
       }
       return *_roots[index];
    }
@@ -485,7 +485,7 @@ namespace psitri::dwal
 
       std::shared_ptr<btree_layer> ro;
       {
-         std::shared_lock lk(root.buffered_mutex);
+         std::lock_guard lk(root.buffered_mutex);
          ro = root.buffered_ptr;
       }
       if (ro)
@@ -511,12 +511,12 @@ namespace psitri::dwal
          return true;
       if (root.wal && root.wal->file_size() >= _cfg.max_wal_bytes)
          return true;
-      // Time-based flush: swap if max_flush_delay has elapsed and
+      // Time-based swap: if max_freshness_delay has elapsed and
       // the RW layer has data worth swapping.
-      if (_cfg.max_flush_delay.count() > 0 && !root.rw_layer->empty())
+      if (_cfg.max_freshness_delay.count() > 0 && !root.rw_layer->empty())
       {
-         auto elapsed = std::chrono::steady_clock::now() - root.last_swap_time;
-         if (elapsed >= _cfg.max_flush_delay)
+         auto elapsed = std::chrono::steady_clock::now() - root.last_snapshot_time;
+         if (elapsed >= _cfg.max_freshness_delay)
             return true;
       }
       return false;
@@ -543,11 +543,8 @@ namespace psitri::dwal
       // When called from dwal_transaction::commit(), the writer has
       // finished mutations and released any locks.
       {
-         std::unique_lock rw_lk(root.rw_mutex, std::defer_lock);
-         if (root.enable_rw_locking)
-            rw_lk.lock();
          {
-            std::unique_lock lk(root.buffered_mutex);
+            std::lock_guard lk(root.buffered_mutex);
             root.buffered_ptr = std::move(root.rw_layer);
          }
          root.rw_layer = std::make_shared<btree_layer>();
@@ -556,7 +553,7 @@ namespace psitri::dwal
          root.cow.reset();
       }
 
-      root.last_swap_time = std::chrono::steady_clock::now();
+      root.last_snapshot_time = std::chrono::steady_clock::now();
 
       // Capture the current PsiTri root as the base for this RO btree.
       uint32_t base = root.tri_root.load(std::memory_order_acquire);
@@ -660,7 +657,7 @@ namespace psitri::dwal
          {
             std::shared_ptr<btree_layer> ro;
             {
-               std::shared_lock lk(root.buffered_mutex);
+               std::lock_guard lk(root.buffered_mutex);
                ro = root.buffered_ptr;
             }
             if (ro)
@@ -687,53 +684,21 @@ namespace psitri::dwal
    {
       assert(root_index < max_roots);
 
-      // Fresh mode: if there's swappable data and the merge slot is free,
-      // signal the writer/merge thread to swap RW→RO and wait briefly.
-      // Falls back to buffered in all other cases (RW empty, RO already
-      // has data, merge in progress, or timeout).
-      if (mode == read_mode::fresh && _roots[root_index])
-      {
-         auto& root = *_roots[root_index];
-         // Wait only if there's data in RW to swap and the merge slot is free
-         bool need_wait = !root.rw_layer->empty()
-                       && root.merge_complete.load(std::memory_order_acquire);
-
-         if (need_wait)
-         {
-            auto gen_before = root.generation.load(std::memory_order_acquire);
-            root.readers_want_swap.store(true, std::memory_order_release);
-            auto timeout = _cfg.max_flush_delay.count() > 0
-               ? _cfg.max_flush_delay
-               : std::chrono::milliseconds(10);
-            std::shared_lock lk(root.swap_mutex);
-            root.swap_cv.wait_for(lk, timeout, [&] {
-               // A swap happened if the generation counter advanced
-               return root.generation.load(std::memory_order_acquire) != gen_before;
-            });
-         }
-
-         mode = read_mode::buffered;
-      }
-
       std::shared_ptr<btree_layer> rw, ro;
 
       if (_roots[root_index])
       {
          auto& root = *_roots[root_index];
 
-         // RW layer: included for latest mode.
-         if (mode == read_mode::latest)
-         {
-            std::shared_lock lk(root.rw_mutex, std::defer_lock);
-            if (root.enable_rw_locking && !skip_rw_lock)
-               lk.lock();
+         // Latest/fresh: include RW layer (safe — caller is on writer
+         // thread or writer is idle, cow_coordinator protects the data).
+         if (mode == read_mode::latest || mode == read_mode::fresh)
             rw = root.rw_layer;
-         }
 
-         // RO layer: included for latest and buffered modes
+         // RO layer: included for all non-trie modes
          if (mode != read_mode::trie)
          {
-            std::shared_lock lk(root.buffered_mutex);
+            std::lock_guard lk(root.buffered_mutex);
             ro = root.buffered_ptr;
          }
       }

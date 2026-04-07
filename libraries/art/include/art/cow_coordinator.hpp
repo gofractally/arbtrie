@@ -214,6 +214,31 @@ namespace art
          return _prev.load(std::memory_order_acquire);
       }
 
+      // ── Freshness timer support ─────────────────────────────────────
+
+      /// Force a snapshot publication (prev_root + cow_seq bump) during
+      /// a write transaction, regardless of reader state. Used by the
+      /// freshness timer to bound staleness for fresh-mode readers.
+      /// Must be called while writer_active is set (during a transaction).
+      void force_publish(uint32_t root, uint32_t current_cow_seq) noexcept
+      {
+         uint32_t new_seq = (current_cow_seq + 1) & cow_seq_mask;
+         _prev.store(root, std::memory_order_release);
+
+         // Update cow_seq in flags (writer_active stays set)
+         uint64_t expected = _flags.load(std::memory_order_acquire);
+         for (;;)
+         {
+            auto s = state{expected};
+            uint64_t desired = pack(
+                s.root_offset(), /*wa=*/true, s.reader_waiting(),
+                s.reader_count(), new_seq);
+            if (_flags.compare_exchange_weak(
+                    expected, desired, std::memory_order_acq_rel))
+               break;
+         }
+      }
+
       // ── State queries ─────────────────────────────────────────────────
 
       /// Load the current packed state (for diagnostics/testing).

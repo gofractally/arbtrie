@@ -46,9 +46,9 @@ namespace psitri::dwal
       if (cache.initialized && cur_gen == cache.gen)
          return;
 
-      // Grab the latest DWAL snapshot under a shared lock (readers don't contend).
+      // Grab the latest DWAL snapshot (brief mutex for shared_ptr copy).
       {
-         std::shared_lock lk(root.buffered_mutex);
+         std::lock_guard lk(root.buffered_mutex);
          cache.snapshot = root.buffered_ptr;
       }
 

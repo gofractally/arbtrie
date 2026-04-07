@@ -34,18 +34,12 @@ namespace psitri::dwal
       /// Zero disables time-based flushing.
       std::chrono::milliseconds idle_flush_interval{1000};
 
-      /// Enable shared_mutex locking on the RW layer so that reader threads
-      /// can safely use read_mode::latest to see uncommitted writes.  When
-      /// false (default), the RW layer is writer-private and latest mode is
-      /// only safe from the writer thread.
-      bool enable_rw_locking = false;
-
-      /// Maximum time between RW→RO swaps, regardless of buffer size.
-      /// When non-zero, the writer checks elapsed time since last swap
-      /// on each commit and forces a swap if the interval has elapsed.
-      /// This bounds reader staleness for buffered-mode readers.
-      /// Zero (default) disables time-based flushing.
-      std::chrono::milliseconds max_flush_delay{0};
+      /// Maximum time between COW snapshot publications.
+      /// When non-zero, the writer publishes prev_root on commit if this
+      /// interval has elapsed since the last publication, even if no reader
+      /// requested it. This bounds staleness for fresh-mode readers.
+      /// Zero (default) disables time-based freshness.
+      std::chrono::milliseconds max_freshness_delay{0};
 
       /// Number of merge threads in the pool.
       uint32_t merge_threads = 2;
@@ -133,7 +127,7 @@ namespace psitri::dwal
 
       /// Try to swap the RW btree to RO for a specific root.
       /// Only succeeds if the merge thread has completed (merge_complete == true).
-      /// The caller must hold the exclusive rw_mutex lock.
+      /// Called from commit when buffer thresholds are exceeded.
       void try_swap_rw_to_ro(uint32_t root_index);
 
       /// Legacy entry point — delegates to try_swap_rw_to_ro.

@@ -94,7 +94,7 @@ namespace psitri::dwal
       // Grab a shared_ptr to the RO btree — keeps it alive during merge.
       std::shared_ptr<btree_layer> ro;
       {
-         std::shared_lock lk(root.buffered_mutex);
+         std::lock_guard lk(root.buffered_mutex);
          ro = root.buffered_ptr;
       }
       if (!ro)
@@ -236,7 +236,7 @@ namespace psitri::dwal
 
       // Null the buffered shared_ptr — last reader holding a copy will free it.
       {
-         std::unique_lock lk(root.buffered_mutex);
+         std::lock_guard lk(root.buffered_mutex);
          root.buffered_ptr.reset();
       }
 
@@ -292,27 +292,8 @@ namespace psitri::dwal
       root.merge_complete.store(true, std::memory_order_release);
       root.merge_complete.notify_all();
 
-      // If readers are waiting for fresh data and the writer is idle,
-      // swap RW→RO now so readers see the latest committed data.
-      // try_lock avoids blocking if the writer is mid-transaction.
-      if (root.readers_want_swap.load(std::memory_order_relaxed)
-          && !root.rw_layer->empty())
-      {
-         std::unique_lock lk(root.rw_mutex, std::try_to_lock);
-         if (lk.owns_lock())
-         {
-            {
-               std::unique_lock blk(root.buffered_mutex);
-               root.buffered_ptr = std::move(root.rw_layer);
-            }
-            root.rw_layer = std::make_shared<btree_layer>();
-            root.last_swap_time = std::chrono::steady_clock::now();
-            // Leave merge_complete=true — the new RO will be merged
-            // on the next swap cycle.  Readers can read it as RO now.
-            root.readers_want_swap.store(false, std::memory_order_relaxed);
-            root.swap_cv.notify_all();
-         }
-      }
+      // Under COWART, fresh readers use prev_root (zero coordination).
+      // No need for merge-thread-initiated swaps.
    }
 
    void merge_pool::try_reclaim()

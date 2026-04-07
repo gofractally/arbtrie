@@ -22,20 +22,10 @@ namespace psitri::dwal
          _db(db),
          _root_index(root_index),
          _nested(nested),
-         _owns_lock(false),
          _mode(mode)
    {
       if (_mode == root_mode::read_write)
       {
-         // Outer write transactions hold the RW mutex exclusively so
-         // concurrent readers (get_latest, latest-mode cursors) never
-         // see a torn, partially-applied transaction.
-         if (!_nested && _root->enable_rw_locking)
-         {
-            _root->rw_mutex.lock();
-            _owns_lock = true;
-         }
-
          // COWART: begin write — sets writer_active, bumps cow_seq if readers active
          if (!_nested)
          {
@@ -66,11 +56,9 @@ namespace psitri::dwal
          _committed(other._committed),
          _aborted(other._aborted),
          _nested(other._nested),
-         _owns_lock(other._owns_lock),
          _mode(other._mode)
          , _undo(std::move(other._undo))
    {
-      other._owns_lock = false;
       other._committed = true;  // prevent double-abort in moved-from dtor
    }
 
@@ -226,7 +214,7 @@ namespace psitri::dwal
       // RO: snapshot under buffered_mutex (brief)
       std::shared_ptr<btree_layer> ro;
       {
-         std::shared_lock lk(_root->buffered_mutex);
+         std::lock_guard lk(_root->buffered_mutex);
          ro = _root->buffered_ptr;
       }
 
@@ -242,7 +230,7 @@ namespace psitri::dwal
    {
       std::shared_ptr<btree_layer> ro;
       {
-         std::shared_lock lk(_root->buffered_mutex);
+         std::lock_guard lk(_root->buffered_mutex);
          ro = _root->buffered_ptr;
       }
       if (!ro)
@@ -280,41 +268,47 @@ namespace psitri::dwal
 
          _undo.discard();
 
-         // COWART: end write — update head, notify readers if needed
+         // COWART: end write — update head, notify readers if needed.
+         // Also check freshness timer: if max_freshness_delay has elapsed,
+         // force a snapshot publication (prev_root update + cow_seq bump)
+         // even if no reader requested it.
          {
             auto new_root = _root->rw_layer->map.snapshot_root();
             uint32_t cur_seq = _root->cow.load_state().cow_seq();
+
+            // Freshness timer: publish COW snapshot if interval elapsed.
+            // This bounds staleness for fresh-mode readers.
+            if (_db)
+            {
+               auto delay = _db->config().max_freshness_delay;
+               if (delay.count() > 0)
+               {
+                  auto now = std::chrono::steady_clock::now();
+                  if (now - _root->last_snapshot_time >= delay)
+                  {
+                     _root->cow.force_publish(new_root, cur_seq);
+                     _root->rw_layer->map.bump_cow_seq();
+                     cur_seq = _root->cow.load_state().cow_seq();
+                  }
+               }
+            }
+
             bool notified = _root->cow.end_write(new_root, cur_seq);
             if (notified)
                _root->rw_layer->map.bump_cow_seq();
          }
 
-         // Release the RW mutex before swap — readers can now see
-         // the committed state. Swap may re-acquire briefly.
-         if (_owns_lock)
-         {
-            _root->rw_mutex.unlock();
-            _owns_lock = false;
-         }
-
-         // Swap RW→RO if: buffer is full, time elapsed, OR readers want fresh data.
+         // Swap RW→RO if buffer is full or time elapsed.
          if (_db && _root->merge_complete.load(std::memory_order_acquire)
-             && (_db->should_swap(_root_index)
-                 || _root->readers_want_swap.load(std::memory_order_relaxed)))
+             && _db->should_swap(_root_index))
          {
             _db->try_swap_rw_to_ro(_root_index);
-            if (_root->readers_want_swap.exchange(false, std::memory_order_relaxed))
-               _root->swap_cv.notify_all();
          }
 
-         // Adaptive throttle: if the merge thread set a non-zero sleep,
-         // apply it to smooth out write pressure so the merge can keep up.
-         // Only throttle when the arena is past the low-water mark (25% of
-         // capacity) to avoid penalizing small/fast transactions.
+         // Adaptive throttle
          if (uint32_t sleep_ns = _root->throttle_sleep_ns.load(std::memory_order_relaxed))
          {
             uint32_t arena_cap = _root->rw_layer->map.arena_capacity();
-            // Low-water mark: don't throttle when arena is small
             if (arena_cap >= (1u << 20) * 16)  // 16 MB
                std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
          }
@@ -343,12 +337,6 @@ namespace psitri::dwal
          bool notified = _root->cow.end_write(new_root, cur_seq);
          if (notified)
             _root->rw_layer->map.bump_cow_seq();
-      }
-
-      if (_owns_lock)
-      {
-         _root->rw_mutex.unlock();
-         _owns_lock = false;
       }
    }
 
@@ -415,12 +403,6 @@ namespace psitri::dwal
             bool notified = _root->cow.end_write(restored_root, cur_seq);
             if (notified)
                _root->rw_layer->map.bump_cow_seq();
-         }
-
-         if (_owns_lock)
-         {
-            _root->rw_mutex.unlock();
-            _owns_lock = false;
          }
       }
       else

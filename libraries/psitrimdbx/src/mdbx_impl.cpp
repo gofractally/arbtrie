@@ -86,10 +86,8 @@ struct MDBX_env
       if (!name.empty())
          name_to_dbi[name] = dbi;
 
-      // Enable RW-layer locking so MDBX-style readers (which call get_latest
-      // and latest-mode cursors from non-writer threads) never see torn txns.
-      if (dwal_db)
-         dwal_db->ensure_root_public(root_idx).enable_rw_locking = true;
+      // Under COWART, latest reads are lock-free via cow_coordinator.
+      // No explicit locking setup needed.
 
       return dbi;
    }
@@ -420,10 +418,7 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
 
       env->init_default_dbi();
 
-      // Enable RW-layer locking on default roots so MDBX-style readers
-      // (which use get_latest from non-writer threads) see consistent state.
-      env->dwal_db->ensure_root_public(0).enable_rw_locking = true;
-      env->dwal_db->ensure_root_public(1).enable_rw_locking = true;
+      // Under COWART, latest reads are lock-free via cow_coordinator.
 
       // Restore named DBIs from catalog (PsiTri root 0).
       try

@@ -7,7 +7,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <shared_mutex>
@@ -17,37 +16,19 @@ namespace psitri::dwal
    /**
     * @brief Read mode: freshness vs cost tradeoff for DWAL readers.
     *
-    * All modes see only committed data.  The difference is how recent
-    * that data is and what cost the reader imposes on the system.
-    *
-    *     Mode       Layers          Reader waits for   Writer impact
-    *     ---------  --------------  -----------------  ------------------
-    *     trie       Tri only        nothing            none
-    *     buffered   RO + Tri        nothing            none
-    *     fresh      RO + Tri        merge + swap       none (self-imposed)
-    *     latest     RW + RO + Tri   current tx finish  blocks next tx start
-    *
-    * **Choosing a mode:**
-    *
-    * - `trie`: high-throughput reads tolerating seconds of staleness.
-    * - `buffered`: default for external readers.  Staleness bounded by
-    *   `max_flush_delay` or the writer's natural swap frequency.
-    * - `fresh`: reader needs all committed data but can wait.  Sets an
-    *   atomic flag; the writer (on next commit) or the merge thread
-    *   (if writer is idle) swaps RW→RO and wakes waiting readers.
-    *   Reader blocks only itself — zero writer impact.
-    * - `latest`: reader needs the absolute freshest view.  Acquires a
-    *   shared lock on the RW layer, blocking until the writer finishes
-    *   its current transaction.  While held, the writer cannot start a
-    *   new transaction.  Use sparingly — this is the only mode that
-    *   taxes the writer.
+    *     Mode       Layers              Reader cost            Writer impact
+    *     ---------  ------------------  ---------------------  ─────────────────
+    *     trie       Tri only            none                   none
+    *     buffered   frozen RO + Tri     atomic load            none
+    *     fresh      prev_root + RO+Tri  atomic load            none
+    *     latest     head + RO + Tri     wait ≤1 tx if active   COW if collision
     */
    enum class read_mode
    {
       trie,        ///< Tri only — zero DWAL overhead, most stale
-      buffered,    ///< RO + Tri — no writer interaction, bounded staleness
-      fresh,       ///< RO + Tri after forced swap — reader waits, writer unaffected
-      latest,      ///< RW + RO + Tri — shared lock, blocks writer's next tx
+      buffered,    ///< Frozen RO + Tri — no writer interaction
+      fresh,       ///< prev_root + RO + Tri — zero coordination, slightly stale
+      latest,      ///< Head root + RO + Tri — waits if writer active, forces COW on collision
    };
 
    /// Transaction mode: buffered writes vs direct COW.
@@ -57,39 +38,17 @@ namespace psitri::dwal
       direct,    // Large tx: flush RW, write directly to PsiTri COW
    };
 
-   // COWART coordination is handled by art::cow_coordinator.
-   // See art/cow_coordinator.hpp for the packed 64-bit atomic layout
-   // and the lock-free reader/writer protocol.
-
    /// Per-root DWAL state.
    ///
-   /// Single writer owns the RW btree exclusively (unique_ptr, no sharing).
-   /// On swap, the RW btree is frozen and published as a shared_ptr for readers.
-   /// Readers check an atomic generation counter to avoid locking when nothing
-   /// has changed — the mutex is only acquired once per swap cycle to copy the
-   /// shared_ptr.
-   ///
-   /// Cache-line aligned to prevent false sharing between writer and reader paths.
+   /// Reader/writer coordination is handled lock-free by cow_coordinator.
+   /// The only mutex is tx_mutex for per-root transaction serialization.
    struct dwal_root
    {
-      // ── Writer-private section (only writer touches these) ─────────
+      // ── Writer-private section ────────────────────────────────────
 
-      /// The hot RW btree. Protected by rw_mutex: writer takes exclusive,
-      /// readers (get_latest, latest-mode cursors) take shared.
-      /// Created via make_shared so the control block is co-allocated;
-      /// on swap it moves directly to buffered_ptr with no extra allocation.
+      /// The hot RW btree. Writer-private during transactions.
+      /// Readers access the committed root via cow_coordinator (no mutex).
       std::shared_ptr<btree_layer> rw_layer;
-
-      /// Protects rw_layer for concurrent reader access.
-      /// Writer takes exclusive lock for mutations; readers take shared lock
-      /// for point lookups and cursor snapshot creation.
-      /// Only used when enable_rw_locking is true (opt-in for MDBX-style readers).
-      mutable std::shared_mutex rw_mutex;
-
-      /// When true, writer acquires rw_mutex exclusively around transactions
-      /// and readers acquire it shared. When false (default), no locking —
-      /// the single-writer model assumes no concurrent RW-layer readers.
-      bool enable_rw_locking{false};
 
       /// WAL writer for the current RW btree.
       std::unique_ptr<wal_writer> wal;
@@ -97,8 +56,8 @@ namespace psitri::dwal
       /// Monotonically increasing sequence number for WAL entries.
       uint64_t next_wal_seq = 0;
 
-      /// Set true by merge thread after it finishes draining and nulls buffered_ptr.
-      /// Checked by writer on commit — if true, writer swaps RW→RO.
+      /// Set true by merge thread after it finishes draining the RO btree.
+      /// Checked by writer on commit to decide if a swap is needed.
       std::atomic<bool> merge_complete{true};
 
       /// Per-root transaction-level read/write exclusion.
@@ -106,15 +65,15 @@ namespace psitri::dwal
       /// Acquired in sorted root-index order to prevent deadlocks.
       std::shared_mutex tx_mutex;
 
-      // ── Reader section (separated to avoid false sharing) ──────────
-      alignas(128) std::shared_mutex buffered_mutex;
+      // ── Reader section (cache-line separated) ─────────────────────
 
-      /// The frozen RO btree — published on swap, read by latest/buffered readers.
-      /// Protected by buffered_mutex. Readers copy the shared_ptr then release.
+      /// The frozen RO btree — published on arena swap, read by buffered readers.
+      /// Brief mutex for shared_ptr copy (only held for the copy, not during read).
+      alignas(128) std::mutex buffered_mutex;
       std::shared_ptr<btree_layer> buffered_ptr;
 
-      /// Generation counter — incremented on each swap.
-      /// Readers compare against their cached gen to skip the mutex when unchanged.
+      /// Generation counter — incremented on each arena swap.
+      /// Readers compare against their cached gen to detect new RO snapshots.
       std::atomic<uint32_t> generation{0};
 
       /// The PsiTri root address — updated atomically when merge completes.
@@ -124,42 +83,20 @@ namespace psitri::dwal
       std::atomic<uint32_t> ro_base_root{0};
 
       // ── Adaptive write throttle ───────────────────────────────────
-      //
-      // Self-tuning sleep that keeps the RW arena from growing past the
-      // target by the time merge completes.  Adjusted once per merge cycle:
-      //   - merge finished early (arena < target) → reduce sleep
-      //   - merge finished late  (arena > target) → increase sleep
-      //
-      // Writer checks throttle_sleep_ns on every commit and sleeps if
-      // the arena is above the low-water mark (25% of target).
 
       /// Current per-commit sleep in nanoseconds.  Starts at 0 (no throttle).
-      /// Adjusted by the merge thread when it finishes draining.
       std::atomic<uint32_t> throttle_sleep_ns{0};
 
       /// Arena capacity recorded when the merge thread finishes.
-      /// Used by the adjustment algorithm to decide if sleep should increase.
       std::atomic<uint32_t> arena_at_merge_complete{0};
 
-      /// Time of the last RW→RO swap.  Used for time-based flush.
-      std::chrono::steady_clock::time_point last_swap_time{std::chrono::steady_clock::now()};
+      /// Time of the last snapshot publication or arena swap.
+      std::chrono::steady_clock::time_point last_snapshot_time{std::chrono::steady_clock::now()};
 
-      // ── Swap coordination for fresh-mode readers ──────────────────
+      // ── COWART coordination ───────────────────────────────────────
 
-      /// Set by readers that want the latest committed data (fresh mode).
-      /// Checked by the writer on commit and by the merge thread after
-      /// drain.  Cleared after swap + notify.
-      std::atomic<bool> readers_want_swap{false};
-
-      /// Condition variable notified after RW→RO swap completes.
-      /// Fresh-mode readers wait on this.
-      std::condition_variable_any swap_cv;
-
-      /// Mutex for swap_cv wait.  Only fresh-mode readers lock this
-      /// (shared) while waiting.  The swapper notifies without holding it.
-      mutable std::shared_mutex swap_mutex;
-
-      // ── COWART state (coexists with legacy fields during migration) ──
+      /// Lock-free reader/writer coordination.
+      /// Manages head root, prev_root, reader_count, writer_active, cow_seq.
       art::cow_coordinator cow;
 
       dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}

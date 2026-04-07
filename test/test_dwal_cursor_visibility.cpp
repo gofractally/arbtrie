@@ -200,7 +200,7 @@ TEST_CASE("DWAL time-based swap makes data visible to buffered", "[dwal][cursor]
 {
    psitri::dwal::dwal_config cfg;
    cfg.max_rw_entries = 100000;  // won't trigger by count
-   cfg.max_flush_delay = std::chrono::milliseconds(1);
+   cfg.max_freshness_delay = std::chrono::milliseconds(1);
    cfg.merge_threads = 1;
    auto db = make_test_db("test_dwal_time_swap", cfg);
 
@@ -243,7 +243,7 @@ TEST_CASE("DWAL fresh mode finds committed data via writer swap", "[dwal][cursor
 {
    psitri::dwal::dwal_config cfg;
    cfg.max_rw_entries = 100000;
-   cfg.max_flush_delay = std::chrono::milliseconds(1);
+   cfg.max_freshness_delay = std::chrono::milliseconds(1);
    cfg.merge_threads = 1;
    auto db = make_test_db("test_dwal_fresh", cfg);
 

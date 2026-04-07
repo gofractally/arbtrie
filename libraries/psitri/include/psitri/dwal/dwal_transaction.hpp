@@ -296,7 +296,6 @@ namespace psitri::dwal
       bool        _committed  = false;
       bool        _aborted    = false;
       bool        _nested     = false;
-      bool        _owns_lock  = false;
       root_mode   _mode       = root_mode::read_write;
 
       undo_log    _undo;
