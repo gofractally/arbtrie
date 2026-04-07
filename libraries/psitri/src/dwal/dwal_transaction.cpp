@@ -36,6 +36,17 @@ namespace psitri::dwal
             _owns_lock = true;
          }
 
+         // Set writer_active flag in cowart_state
+         if (!_nested)
+         {
+            auto& cow = _root->cow;
+            uint64_t old_flags = cow.root_and_flags.load(std::memory_order_acquire);
+            auto f = cowart_flags{old_flags};
+            uint64_t new_flags = cowart_flags::make(
+                f.root_offset(), f.reader_waiting(), true, f.cow_seq());
+            cow.root_and_flags.store(new_flags, std::memory_order_release);
+         }
+
          _undo.push_frame();
 
          if (!_nested && _wal)
@@ -270,6 +281,46 @@ namespace psitri::dwal
             _wal->commit_entry();
 
          _undo.discard();
+
+         // ── COWART snapshot publication ────────────────────────────
+         // Check if readers need a snapshot (reader_waiting flag or
+         // freshness timer). If so, publish the current root as a
+         // COW snapshot: store last_root and bump cow_seq on the map.
+         {
+            auto& cow = _root->cow;
+            uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
+            auto f = cowart_flags{flags};
+
+            bool needs_snapshot = f.reader_waiting();
+            // TODO: add freshness timer check here
+
+            if (needs_snapshot)
+            {
+               // Publish the current ART root as a snapshot
+               auto snap_root = _root->rw_layer->map.snapshot_root();
+               cow.last_root.store(snap_root, std::memory_order_release);
+
+               // Bump cow_seq — future writes will COW shared nodes
+               _root->rw_layer->map.bump_cow_seq();
+
+               // Update root_and_flags: clear reader_waiting, new cow_seq
+               uint32_t new_seq = f.cow_seq() + 1;
+               uint64_t new_flags = cowart_flags::make(
+                   snap_root, false, false, new_seq);
+               cow.root_and_flags.store(new_flags, std::memory_order_release);
+
+               // Wake any readers waiting for a fresh snapshot
+               cow.writer_done_cv.notify_all();
+            }
+            else
+            {
+               // No snapshot needed — just update root offset, clear writer_active
+               auto snap_root = _root->rw_layer->map.snapshot_root();
+               uint64_t new_flags = cowart_flags::make(
+                   snap_root, false, false, f.cow_seq());
+               cow.root_and_flags.store(new_flags, std::memory_order_release);
+            }
+         }
 
          // Release the RW mutex before swap — readers can now see
          // the committed state. Swap may re-acquire briefly.

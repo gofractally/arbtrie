@@ -79,22 +79,46 @@ namespace psitri::dwal
          return {false, {}};
       }
 
-      // Latest mode: also check RW layer (requires shared lock).
+      // Latest mode: use COW snapshot if available, falling back to RW lock.
       if (mode == read_mode::latest)
       {
          auto& root = _db.root(root_index);
-         std::shared_lock lk(root.rw_mutex, std::defer_lock);
-         if (root.enable_rw_locking)
-            lk.lock();
-         if (root.rw_layer)
+         auto& cow  = root.cow;
+
+         // Try COW path first: signal reader_waiting if writer is active,
+         // then wait for the writer to publish a snapshot.
+         uint64_t flags = cow.root_and_flags.load(std::memory_order_acquire);
+         auto f = cowart_flags{flags};
+
+         if (f.writer_active())
          {
-            auto* v = root.rw_layer->map.get(key);
+            // Writer is mid-transaction. Set reader_waiting and wait.
+            uint64_t desired = cowart_flags::make(
+                f.root_offset(), true, true, f.cow_seq());
+            cow.root_and_flags.compare_exchange_strong(
+                flags, desired, std::memory_order_acq_rel);
+
+            // Wait for writer to finish and publish snapshot
+            std::unique_lock lk(cow.notify_mutex);
+            cow.writer_done_cv.wait(lk, [&]() {
+               uint64_t cur = cow.root_and_flags.load(std::memory_order_acquire);
+               return !cowart_flags{cur}.writer_active();
+            });
+         }
+
+         // Check the COW snapshot (last_root)
+         art::offset_t snap = cow.last_root.load(std::memory_order_acquire);
+         if (snap != art::null_offset && root.rw_layer)
+         {
+            auto& arena = root.rw_layer->map.get_arena();
+            auto* v = art::get<btree_value>(arena, snap, key);
             if (v)
             {
                if (v->is_tombstone())
                   return {false, {}};
                return {true, std::string(v->data)};
             }
+            // Check tombstones in the RW layer (they apply to the snapshot too)
             if (root.rw_layer->tombstones.is_deleted(key))
                return {false, {}};
          }
