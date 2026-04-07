@@ -824,4 +824,64 @@ done
 - **OS**: Ubuntu Linux 6.17.0-14-generic x86_64, 4 KB page size
 - **Compiler**: Clang 20 (LLVM), C++20, `-O3 -flto -march=native`
 - **Engine versions**: RocksDB (built from source), TidesDB (built from source)
-- **April 2026 run**: 5 engines + PsiTri DWAL mode; 100K accounts, 2M tx, batch sizes 1/1K/100K/1M, sync=none
+- **April 2026 batch-scaling run**: 5 engines + PsiTri DWAL mode; 100K accounts, 2M tx, batch sizes 1/1K/100K/1M, sync=none
+- **April 2026 full comparison**: 6 engines including SQLite; 1M accounts, 1M tx, batch=1, sync=none
+
+---
+
+## Full Engine Comparison (April 2026, AMD EPYC-Turin)
+
+1M accounts, 1M transactions, batch=1 (per-transfer commit), sync=none.
+Each transfer = 5 KV operations (2 reads + 2 updates + 1 insert).
+
+### Write-Only Throughput
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#7b1fa2'}}}}%%
+xychart-beta
+    title "Bank Benchmark — Write-Only (KV ops/sec, 1M accounts)"
+    x-axis ["DWAL", "PsiTriRocks", "RocksDB", "PsiTri-SQLite", "System SQLite"]
+    y-axis "KV operations per second" 0 --> 2500000
+    bar [2138670, 1847230, 787940, 264175, 248690]
+```
+
+| Engine | API | Transfers/sec | KV Ops/sec | vs RocksDB |
+|---|---|---:|---:|---:|
+| **PsiTri (DWAL)** | Native | **427,734** | **2,138,670** | **2.7x** |
+| **PsiTriRocks** | RocksDB | **369,446** | **1,847,230** | **2.3x** |
+| RocksDB | RocksDB | 157,588 | 787,940 | 1.0x |
+| **PsiTri-SQLite** | SQLite | **52,835** | **264,175** | — |
+| System SQLite | SQLite | 49,738 | 248,690 | — |
+
+### Concurrent Read + Write
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#7b1fa2'}}}}%%
+xychart-beta
+    title "Bank Benchmark — Write + Concurrent Reader (KV ops/sec)"
+    x-axis ["DWAL", "PsiTriRocks", "RocksDB", "PsiTri-SQLite", "System SQLite"]
+    y-axis "KV operations per second" 0 --> 2000000
+    bar [1746370, 1748115, 573760, 262740, 77485]
+```
+
+| Engine | API | Write+Read tx/sec | Write Impact | Reader reads/sec |
+|---|---|---:|---:|---:|
+| **PsiTri (DWAL)** | Native | **349,274** | **-18%** | **1,447,979** |
+| **PsiTriRocks** | RocksDB | **349,623** | **-5%** | **1,416,652** |
+| RocksDB | RocksDB | 114,752 | -27% | 289,627 |
+| **PsiTri-SQLite** | SQLite | **52,548** | **-0.5%** | **215,104** |
+| System SQLite | SQLite | 15,497 | -69% | 15,917 |
+
+### Drop-In Replacement Speedups
+
+Same API, same workload — only the storage engine changes:
+
+| Comparison | Write Speedup | Read Speedup | Write Impact |
+|---|---:|---:|---|
+| PsiTriRocks vs RocksDB | **2.3x** | **4.9x** | -5% vs -27% |
+| PsiTri-SQLite vs System SQLite | **1.06x** | **13.5x** | -0.5% vs -69% |
+
+PsiTri-SQLite's **-0.5% write impact** under concurrent reads means
+readers are effectively invisible to the writer — compared to System
+SQLite's -69% degradation where the reader blocks the writer during
+WAL checkpointing.

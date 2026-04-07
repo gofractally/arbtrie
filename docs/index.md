@@ -16,11 +16,11 @@ A persistent, transactional key-value store with drop-in compatibility for Rocks
 
 <div class="stat-row" markdown>
 <div class="stat" markdown>
-<span class="stat-value">1.9M</span>
-<span class="stat-label">ops/sec (bank benchmark)</span>
+<span class="stat-value">2.1M</span>
+<span class="stat-label">KV ops/sec (bank benchmark)</span>
 </div>
 <div class="stat" markdown>
-<span class="stat-value">2.4x</span>
+<span class="stat-value">13.5x</span>
 <span class="stat-label">faster reads than SQLite</span>
 </div>
 <div class="stat" markdown>
@@ -128,15 +128,17 @@ auto val = tx.get<std::string>("user:alice");
 
 ### Bank Transactions (TPC-B)
 
-Each transfer performs **5 key-value operations** (2 reads + 2 updates + 1 insert) in a single atomic transaction:
+Each transfer performs **5 key-value operations** (2 reads + 2 updates + 1 insert) in a single atomic transaction. 1M accounts, per-transfer commit:
 
-| Engine | Transfers/sec | Key-Value Ops/sec | Relative |
-|--------|--------------|-------------------|----------|
-| **PsiTri** | **376,691** | **1,883,455** | **1.00x** |
-| PsiTriRocks | 356,703 | 1,783,515 | 0.95x |
-| TidesDB | 225,937 | 1,129,685 | 0.60x |
-| RocksDB | 126,341 | 631,705 | 0.34x |
-| MDBX | 57,138 | 285,690 | 0.15x |
+| Engine | API | KV Ops/sec | vs RocksDB |
+|--------|-----|-----------|-----------|
+| **PsiTri (DWAL)** | Native | **2,138,670** | **2.7x** |
+| **PsiTriRocks** | RocksDB | **1,847,230** | **2.3x** |
+| RocksDB | RocksDB | 787,940 | 1.0x |
+| **PsiTri-SQLite** | SQLite | **264,175** | — |
+| System SQLite | SQLite | 248,690 | — |
+
+Under concurrent reads, PsiTriRocks shows only **-5% write impact** vs RocksDB's -27%. PsiTri-SQLite shows **-0.5%** vs System SQLite's -69%.
 
 [Bank benchmark details :material-arrow-right:](benchmarks/bank.md){ .md-button }
 
