@@ -258,13 +258,7 @@ namespace sal
    struct shared_smart_ptr_base
    {
      public:
-      shared_smart_ptr_base(smart_ptr_base ptr)
-      {
-         assert(ptr.is_read_only());
-         ptr.retain();
-         _internal = std::make_shared<internal>(ptr.address(),
-                                                ptr.session()->get_allocator().shared_from_this());
-      }
+      shared_smart_ptr_base(smart_ptr_base ptr) noexcept;
       shared_smart_ptr_base(const shared_smart_ptr_base& other) noexcept
           : _internal(other._internal)
       {
@@ -282,21 +276,22 @@ namespace sal
             _internal->_allocator->release(_internal->_ptr);
       }
       operator bool() const noexcept { return _internal != nullptr; }
-      smart_ptr_base get() const noexcept
-      {
-         return smart_ptr_base(_internal->_allocator->get_session(), _internal->_ptr, true);
-      }
+      smart_ptr_base get() const noexcept;
 
       smart_ptr_base operator->() const noexcept { return get(); }
       smart_ptr_base operator*() const noexcept { return get(); }
 
-      shared_smart_ptr_base& operator=(const smart_ptr_base& ptr) noexcept
+      shared_smart_ptr_base& operator=(const smart_ptr_base& ptr) noexcept;
+      shared_smart_ptr_base& operator=(const shared_smart_ptr_base& other) noexcept
       {
-         assert(ptr.is_read_only());
-         if (_internal)
-            _internal->_allocator->release(_internal->_ptr);
-         _internal = std::make_shared<internal>(ptr.address(),
-                                                ptr.session()->get_allocator().shared_from_this());
+         if (this != &other)
+         {
+            if (_internal)
+               _internal->_allocator->release(_internal->_ptr);
+            _internal = other._internal;
+            if (_internal)
+               _internal->_allocator->retain(_internal->_ptr);
+         }
          return *this;
       }
       shared_smart_ptr_base& operator=(shared_smart_ptr_base&& other) noexcept

@@ -156,7 +156,6 @@ namespace sal
    [[nodiscard]] T* allocator_session::copy_on_write(smart_ref<T>& ptr)
    {
       assert(check_thread_ownership());
-      assert(not is_read_only(ptr.loc()));
       if (can_modify(ptr.loc()))
          return const_cast<T*>(ptr.obj());
 

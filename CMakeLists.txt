@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Detect if being included as a subdirectory
+if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(PSITRI_AS_SUBDIRECTORY TRUE)
+endif()
+
 # Set CMake policies
 if(POLICY CMP0144)
     cmake_policy(SET CMP0144 NEW)
@@ -8,51 +13,55 @@ if(POLICY CMP0167)
     cmake_policy(SET CMP0167 NEW)
 endif()
 
-# Enforce build type if not specified - place before project()
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build" FORCE)
-endif()
+if(NOT PSITRI_AS_SUBDIRECTORY)
+    # Enforce build type if not specified - place before project()
+    if(NOT CMAKE_BUILD_TYPE)
+        set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build" FORCE)
+    endif()
 
-# Valid build types
-set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
-    "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+    # Valid build types
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+
+    # Common compiler flags
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension -fdiagnostics-color=always")
+
+    # Set debug flags explicitly - must be before project()
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -UNDEBUG -fno-omit-frame-pointer" CACHE STRING "Flags used by the compiler in Debug builds" FORCE)
+        message(STATUS "Setting Debug flags: ${CMAKE_CXX_FLAGS_DEBUG}")
+    endif()
+
+    # Set the C++ compiler to LLVM clang (required — GCC is not supported)
+    if(APPLE)
+        set(CMAKE_CXX_COMPILER "/opt/homebrew/opt/llvm/bin/clang++")
+    elseif(UNIX AND NOT CMAKE_CXX_COMPILER)
+        find_program(CLANGPP clang++ clang++-20 clang++-19 clang++-18 REQUIRED)
+        set(CMAKE_CXX_COMPILER "${CLANGPP}")
+    endif()
+
+    # Enable compile commands for IDE support
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+    # Create symlink to compile_commands.json in project root, for IDE support
+    if(CMAKE_EXPORT_COMPILE_COMMANDS)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+            ${CMAKE_BINARY_DIR}/compile_commands.json
+            ${CMAKE_SOURCE_DIR}/compile_commands.json)
+    endif()
+endif()
 
 # Print build type for debugging
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-# Common compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-vla-extension -fdiagnostics-color=always")
-
-# Set debug flags explicitly - must be before project()
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -UNDEBUG -fno-omit-frame-pointer" CACHE STRING "Flags used by the compiler in Debug builds" FORCE)
-    message(STATUS "Setting Debug flags: ${CMAKE_CXX_FLAGS_DEBUG}")
-endif()
-
-# Set the C++ compiler to LLVM clang (required — GCC is not supported)
-if(APPLE)
-    set(CMAKE_CXX_COMPILER "/opt/homebrew/opt/llvm/bin/clang++")
-elseif(UNIX AND NOT CMAKE_CXX_COMPILER)
-    find_program(CLANGPP clang++ clang++-20 clang++-19 clang++-18 REQUIRED)
-    set(CMAKE_CXX_COMPILER "${CLANGPP}")
-endif()
-
-# Enable compile commands for IDE support
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# Create symlink to compile_commands.json in project root, for IDE support
-if(CMAKE_EXPORT_COMPILE_COMMANDS)
-    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
-        ${CMAKE_BINARY_DIR}/compile_commands.json
-        ${CMAKE_SOURCE_DIR}/compile_commands.json)
-endif()
-
 project(arbtrie VERSION 0.1.0 LANGUAGES CXX C)
 
-# Set global properties
-set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard" FORCE)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+if(NOT PSITRI_AS_SUBDIRECTORY)
+    # Set global properties (only when standalone — parent sets its own standard)
+    set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard" FORCE)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
 
 # Enable Link-Time Optimization (LTO) for release builds
 if(CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel|RelWithDebInfo)$")
@@ -138,29 +147,32 @@ else()
     message(STATUS "SQLite3 not found -- sqlite-arb-test benchmark will be skipped")
 endif()
 
-# Find Boost
-set(Boost_NO_WARN_NEW_VERSIONS ON)
-find_package(Boost REQUIRED COMPONENTS program_options)
+if(NOT PSITRI_AS_SUBDIRECTORY)
+    # Find Boost
+    set(Boost_NO_WARN_NEW_VERSIONS ON)
+    find_package(Boost REQUIRED COMPONENTS program_options)
 
-# Only find Catch2 if we're building tests
-if(BUILD_TESTS)
-    find_package(Catch2 3 REQUIRED)
-    enable_testing()
+    # Only find Catch2 if we're building tests
+    if(BUILD_TESTS)
+        find_package(Catch2 3 REQUIRED)
+        enable_testing()
+    endif()
+
+    # Abseil (needed by cow-amort-bench for btree_map comparison)
+    include(FetchContent)
+    FetchContent_Declare(
+        abseil
+        GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+        GIT_TAG        20240722.0
+        GIT_SHALLOW    TRUE
+    )
+    set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+    set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(abseil)
 endif()
 
-# Abseil (needed by cow-amort-bench for btree_map comparison)
-include(FetchContent)
-FetchContent_Declare(
-    abseil
-    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG        20240722.0
-    GIT_SHALLOW    TRUE
-)
-set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
-set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(abseil)
-
+if(NOT PSITRI_AS_SUBDIRECTORY)
 # DuckDB (query engine for psitri-duckdb)
 option(BUILD_DUCKDB "Build DuckDB storage extension" OFF)
 option(BUILD_SQLITE "Build psitri-sqlite (SQLite API backed by psitri DWAL)" OFF)
@@ -245,10 +257,15 @@ if(BUILD_DUCKDB)
         message(STATUS "Patched DuckDB GetDatabaseType to check storage_extensions first")
     endif()
 endif()
+endif() # NOT PSITRI_AS_SUBDIRECTORY (DuckDB/SQLite/abseil)
 
 # SAL library setup
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
-option(SAL_BUILD_TESTS "Build SAL test suite" ${BUILD_TESTS})
+if(PSITRI_AS_SUBDIRECTORY)
+    set(SAL_BUILD_TESTS OFF)
+else()
+    set(SAL_BUILD_TESTS ${BUILD_TESTS})
+endif()
 
 add_subdirectory(libraries/sal)
 add_subdirectory(libraries/psitri)
@@ -256,20 +273,23 @@ add_subdirectory(libraries/hash)
 add_subdirectory(libraries/ucc)
 add_subdirectory(libraries/art)
 
-# PsiTriRocks: RocksDB-compatible wrapper around psitri
-add_subdirectory(libraries/psitrirocks)
+if(NOT PSITRI_AS_SUBDIRECTORY)
+    # PsiTriRocks: RocksDB-compatible wrapper around psitri
+    add_subdirectory(libraries/psitrirocks)
 
-# PsiTri SQL layers (independently optional)
-if(BUILD_SQLITE)
-    add_subdirectory(libraries/psitri-sqlite)
-endif()
-if(BUILD_DUCKDB)
-    add_subdirectory(libraries/psitri-duckdb)
-endif()
+    # PsiTri SQL layers (independently optional)
+    if(BUILD_SQLITE)
+        add_subdirectory(libraries/psitri-sqlite)
+    endif()
+    if(BUILD_DUCKDB)
+        add_subdirectory(libraries/psitri-duckdb)
+    endif()
 
-# PsiTriMDBX: MDBX-compatible wrapper around psitri
-add_subdirectory(libraries/psitrimdbx)
+    # PsiTriMDBX: MDBX-compatible wrapper around psitri
+    add_subdirectory(libraries/psitrimdbx)
+endif() # NOT PSITRI_AS_SUBDIRECTORY (wrappers/SQL layers)
 
+if(NOT PSITRI_AS_SUBDIRECTORY)
 # Debug specific settings at the global level
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-O0 -g -fno-omit-frame-pointer)
@@ -905,3 +925,4 @@ if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
+endif() # NOT PSITRI_AS_SUBDIRECTORY (benchmarks, tests, install)
