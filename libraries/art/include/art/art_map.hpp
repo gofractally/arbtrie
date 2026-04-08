@@ -4,11 +4,11 @@
 
 namespace art
 {
-   template <typename Value>
+   template <typename Value, typename Arena = arena>
    class art_map
    {
      public:
-      using iterator  = art_iterator<Value>;
+      using iterator  = art_iterator<Value, Arena>;
       using size_type = uint32_t;
 
       explicit art_map(uint32_t initial_arena_bytes = 1u << 20)
@@ -82,8 +82,8 @@ namespace art
       uint32_t cow_seq() const noexcept { return _cow_seq; }
 
       /// Access the arena (for snapshot traversal via art::get()).
-      arena&       get_arena() noexcept { return _arena; }
-      const arena& get_arena() const noexcept { return _arena; }
+      Arena&       get_arena() noexcept { return _arena; }
+      const Arena& get_arena() const noexcept { return _arena; }
 
       // ── Lookup ────────────────────────────────────────────────────────
 
@@ -95,7 +95,7 @@ namespace art
 
       const Value* get(std::string_view key) const noexcept
       {
-         return art::get<Value>(const_cast<arena&>(_arena), _root, key);
+         return art::get<Value>(const_cast<Arena&>(_arena), _root, key);
       }
 
       /// Find exact key. Returns end() if not found.
@@ -112,7 +112,7 @@ namespace art
          const Value* v = get(key);
          if (!v)
             return end();
-         return make_lower_bound<Value>(const_cast<arena&>(_arena), _root, key);
+         return make_lower_bound<Value>(const_cast<Arena&>(_arena), _root, key);
       }
 
       /// First entry with key >= given key.
@@ -123,7 +123,7 @@ namespace art
 
       iterator lower_bound(std::string_view key) const noexcept
       {
-         return make_lower_bound<Value>(const_cast<arena&>(_arena), _root, key);
+         return make_lower_bound<Value>(const_cast<Arena&>(_arena), _root, key);
       }
 
       /// First entry with key > given key.
@@ -148,13 +148,13 @@ namespace art
       iterator begin() noexcept { return make_begin<Value>(_arena, _root); }
       iterator begin() const noexcept
       {
-         return make_begin<Value>(const_cast<arena&>(_arena), _root);
+         return make_begin<Value>(const_cast<Arena&>(_arena), _root);
       }
 
       iterator end() noexcept { return make_end<Value>(_arena, _root); }
       iterator end() const noexcept
       {
-         return make_end<Value>(const_cast<arena&>(_arena), _root);
+         return make_end<Value>(const_cast<Arena&>(_arena), _root);
       }
 
       // ── Capacity ──────────────────────────────────────────────────────
@@ -173,8 +173,15 @@ namespace art
       uint32_t arena_bytes_used() const noexcept { return _arena.bytes_used(); }
       uint32_t arena_capacity() const noexcept { return _arena.bytes_used(); }
 
+      // ── Direct root/size access for write_buffer ──────────────────────
+
+      offset_t& root() noexcept { return _root; }
+      offset_t  root() const noexcept { return _root; }
+
+      void set_size(size_type s) noexcept { _size = s; }
+
      private:
-      arena     _arena;
+      Arena     _arena;
       offset_t  _root    = null_offset;
       size_type _size    = 0;
       uint32_t  _cow_seq = 0;

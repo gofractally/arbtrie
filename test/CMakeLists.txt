@@ -39,6 +39,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/truncate_tests.cpp
     ../libraries/psitri/tests/smart_ptr_tests.cpp
     ../libraries/psitri/tests/dwal_tests.cpp
+    ../libraries/psitri/tests/write_buffer_tests.cpp
     test_dwal_cursor_visibility.cpp
 )
 target_link_libraries(psitri-tests

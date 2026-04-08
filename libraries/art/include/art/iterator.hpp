@@ -6,7 +6,7 @@
 
 namespace art
 {
-   template <typename Value>
+   template <typename Value, typename Arena = arena>
    class art_iterator
    {
      public:
@@ -15,14 +15,14 @@ namespace art
       std::string_view key() const noexcept
       {
          assert(_arena && _leaf_off != null_offset);
-         auto lv = leaf_view<Value>{_arena->as<leaf_header>(untag_leaf(_leaf_off))};
+         auto lv = leaf_view<Value>{_arena->template as<leaf_header>(untag_leaf(_leaf_off))};
          return lv.key();
       }
 
       Value& value() const noexcept
       {
          assert(_arena && _leaf_off != null_offset);
-         auto lv = leaf_view<Value>{_arena->as<leaf_header>(untag_leaf(_leaf_off))};
+         auto lv = leaf_view<Value>{_arena->template as<leaf_header>(untag_leaf(_leaf_off))};
          return *lv.value();
       }
 
@@ -59,17 +59,17 @@ namespace art
       bool operator!=(const art_iterator& o) const noexcept { return !(*this == o); }
 
      private:
-      template <typename V2>
+      template <typename V2, typename A2>
       friend class art_map;  // for construction
 
-      template <typename V>
-      friend art_iterator<V> make_begin(arena& a, offset_t root);
+      template <typename V, typename A>
+      friend art_iterator<V, A> make_begin(A& a, offset_t root);
 
-      template <typename V>
-      friend art_iterator<V> make_end(arena& a, offset_t root);
+      template <typename V, typename A>
+      friend art_iterator<V, A> make_end(A& a, offset_t root);
 
-      template <typename V>
-      friend art_iterator<V> make_lower_bound(arena& a, offset_t root, std::string_view key);
+      template <typename V, typename A>
+      friend art_iterator<V, A> make_lower_bound(A& a, offset_t root, std::string_view key);
 
       struct path_entry
       {
@@ -77,7 +77,7 @@ namespace art
          uint16_t child_index;  // position in setlist, or byte value for node256
       };
 
-      arena*   _arena    = nullptr;
+      Arena*   _arena    = nullptr;
       offset_t _root     = null_offset;
       offset_t _leaf_off = null_offset;
       uint8_t  _depth    = 0;
@@ -95,7 +95,7 @@ namespace art
       {
          while (off != null_offset && !is_leaf(off))
          {
-            auto* hdr = _arena->as<node_header>(off);
+            auto* hdr = _arena->template as<node_header>(off);
 
             // If this node has a value_off, it represents a key that terminates here.
             if (hdr->value_off != null_offset)
@@ -132,7 +132,7 @@ namespace art
       {
          while (off != null_offset && !is_leaf(off))
          {
-            auto* hdr = _arena->as<node_header>(off);
+            auto* hdr = _arena->template as<node_header>(off);
 
             if (hdr->type == node_type::setlist)
             {
@@ -181,7 +181,7 @@ namespace art
          while (_depth > 0)
          {
             auto& top = _stack[_depth - 1];
-            auto* hdr = _arena->as<node_header>(top.node_off);
+            auto* hdr = _arena->template as<node_header>(top.node_off);
 
             if (top.child_index == UINT16_MAX)
             {
@@ -261,7 +261,7 @@ namespace art
          while (_depth > 0)
          {
             auto& top = _stack[_depth - 1];
-            auto* hdr = _arena->as<node_header>(top.node_off);
+            auto* hdr = _arena->template as<node_header>(top.node_off);
 
             if (top.child_index == UINT16_MAX)
             {
@@ -316,10 +316,10 @@ namespace art
    };
 
    /// Create a begin() iterator.
-   template <typename Value>
-   art_iterator<Value> make_begin(arena& a, offset_t root)
+   template <typename Value, typename Arena>
+   art_iterator<Value, Arena> make_begin(Arena& a, offset_t root)
    {
-      art_iterator<Value> it;
+      art_iterator<Value, Arena> it;
       if (root == null_offset)
          return it;
       it._arena = &a;
@@ -329,20 +329,20 @@ namespace art
    }
 
    /// Create an end() iterator that knows the root (for --).
-   template <typename Value>
-   art_iterator<Value> make_end(arena& a, offset_t root)
+   template <typename Value, typename Arena>
+   art_iterator<Value, Arena> make_end(Arena& a, offset_t root)
    {
-      art_iterator<Value> it;
+      art_iterator<Value, Arena> it;
       it._arena = &a;
       it._root  = root;
       return it;
    }
 
    /// Create a lower_bound() iterator.
-   template <typename Value>
-   art_iterator<Value> make_lower_bound(arena& a, offset_t root, std::string_view key)
+   template <typename Value, typename Arena>
+   art_iterator<Value, Arena> make_lower_bound(Arena& a, offset_t root, std::string_view key)
    {
-      art_iterator<Value> it;
+      art_iterator<Value, Arena> it;
       if (root == null_offset)
          return it;
       it._arena = &a;
@@ -355,7 +355,7 @@ namespace art
       {
          if (is_leaf(cur))
          {
-            auto lv = leaf_view<Value>{a.as<leaf_header>(untag_leaf(cur))};
+            auto lv = leaf_view<Value>{a.template as<leaf_header>(untag_leaf(cur))};
             if (lv.key() >= key)
             {
                it._leaf_off = cur;
@@ -367,7 +367,7 @@ namespace art
             return it;
          }
 
-         auto*            hdr    = a.as<node_header>(cur);
+         auto*            hdr    = a.template as<node_header>(cur);
          std::string_view prefix = (hdr->type == node_type::setlist)
                                        ? setlist_view{hdr}.prefix()
                                        : node256_view{hdr}.prefix();

@@ -34,12 +34,13 @@ namespace art::detail
    /// Keys grow rightward from header, children grow leftward from tail.
    /// The smaller half of the children array is shifted to minimize memmove cost.
    /// Returns the node offset (same if in-place, new if reallocated).
-   inline offset_t setlist_add_child(arena&   a,
+   template <typename Arena>
+   inline offset_t setlist_add_child(Arena&   a,
                                      offset_t node_off,
                                      uint8_t  byte,
                                      offset_t child_off)
    {
-      auto*        hdr = a.as<node_header>(node_off);
+      auto*        hdr = a.template as<node_header>(node_off);
       setlist_view sv{hdr};
 
       uint8_t n = sv.num_children();
@@ -95,11 +96,10 @@ namespace art::detail
       std::string saved_prefix(sv.prefix());
 
       offset_t new_off = make_setlist(a, new_n, saved_prefix);
-      auto*    new_hdr = a.as<node_header>(new_off);
+      auto*    new_hdr = a.template as<node_header>(new_off);
 
-      // Re-read old pointers (arena may have reallocated... though vm_arena doesn't,
-      // but keep the pattern for safety)
-      hdr = a.as<node_header>(node_off);
+      // Re-read old pointers (arena may have reallocated)
+      hdr = a.template as<node_header>(node_off);
       sv  = setlist_view{hdr};
 
       new_hdr->value_off = hdr->value_off;
@@ -127,9 +127,10 @@ namespace art::detail
    /// Remove a child from a setlist node at the given position.
    /// Shifts the smaller half to close the gap. Returns node_off, or null_offset
    /// if the node becomes empty (caller handles that case).
-   inline offset_t setlist_remove_child(arena& a, offset_t node_off, uint16_t pos) noexcept
+   template <typename Arena>
+   inline offset_t setlist_remove_child(Arena& a, offset_t node_off, uint16_t pos) noexcept
    {
-      auto*        hdr = a.as<node_header>(node_off);
+      auto*        hdr = a.template as<node_header>(node_off);
       setlist_view sv{hdr};
 
       uint8_t n = sv.num_children();
@@ -172,19 +173,20 @@ namespace art::detail
 
    /// Grow a full setlist into a node256.
    /// Returns the new node256 offset. The byte/child_off is the new child to add.
-   inline offset_t setlist_grow_to_256(arena&   a,
+   template <typename Arena>
+   inline offset_t setlist_grow_to_256(Arena&   a,
                                        offset_t node_off,
                                        uint8_t  byte,
                                        offset_t child_off)
    {
-      auto*        old_hdr = a.as<node_header>(node_off);
+      auto*        old_hdr = a.template as<node_header>(node_off);
       setlist_view old_sv{old_hdr};
 
       offset_t new_off = make_node256(a, old_sv.prefix());
-      auto*    new_hdr = a.as<node_header>(new_off);
+      auto*    new_hdr = a.template as<node_header>(new_off);
 
       // Re-read old pointers (arena may have reallocated)
-      old_hdr = a.as<node_header>(node_off);
+      old_hdr = a.template as<node_header>(node_off);
       old_sv  = setlist_view{old_hdr};
 
       new_hdr->value_off = old_hdr->value_off;

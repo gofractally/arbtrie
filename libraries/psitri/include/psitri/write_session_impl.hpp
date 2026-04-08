@@ -41,7 +41,7 @@ namespace psitri
       return _allocator_session->get_pending_release_count();
    }
 
-   inline transaction write_session::start_transaction(uint32_t root_index)
+   inline transaction write_session::start_transaction(uint32_t root_index, tx_mode mode)
    {
       auto& lock = _db->modify_lock(root_index);
       lock.lock();
@@ -62,7 +62,8 @@ namespace psitri
              lock.unlock();
           },
           // rollback: just unlock
-          [&lock]() { lock.unlock(); });
+          [&lock]() { lock.unlock(); },
+          mode);
    }
 
    inline void write_session::dump_live_objects() const

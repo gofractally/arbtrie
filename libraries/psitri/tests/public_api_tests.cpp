@@ -1582,3 +1582,824 @@ TEST_CASE("leak: interleaved insert and range_remove - no orphans",
    }
    require_empty_no_leaks(t, "after final range_remove all");
 }
+
+// ============================================================
+// micro mode transaction tests
+// ============================================================
+
+TEST_CASE("micro transaction basic upsert and get", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("hello"), to_value("world"));
+   tx.upsert(to_key("foo"), to_value("bar"));
+
+   // Visible within the transaction
+   auto v1 = tx.get<std::string>(to_key("hello"));
+   REQUIRE(v1.has_value());
+   REQUIRE(*v1 == "world");
+
+   auto v2 = tx.get<std::string>(to_key("foo"));
+   REQUIRE(v2.has_value());
+   REQUIRE(*v2 == "bar");
+
+   // Not-found key
+   REQUIRE_FALSE(tx.get<std::string>(to_key("missing")).has_value());
+
+   tx.commit();
+
+   // Persisted
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("hello"), &buf) >= 0);
+   REQUIRE(buf == "world");
+   REQUIRE(c.get(to_key("foo"), &buf) >= 0);
+   REQUIRE(buf == "bar");
+}
+
+TEST_CASE("micro transaction get with Buffer overload", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("key"), to_value("value123"));
+
+   std::string buf;
+   int32_t result = tx.get(to_key("key"), &buf);
+   REQUIRE(result >= 0);
+   REQUIRE(buf == "value123");
+
+   result = tx.get(to_key("nope"), &buf);
+   REQUIRE(result == cursor::value_not_found);
+
+   tx.commit();
+}
+
+TEST_CASE("micro transaction overwrite value", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("key"), to_value("first"));
+
+   auto v = tx.get<std::string>(to_key("key"));
+   REQUIRE(v.has_value());
+   REQUIRE(*v == "first");
+
+   tx.upsert(to_key("key"), to_value("second"));
+   v = tx.get<std::string>(to_key("key"));
+   REQUIRE(*v == "second");
+
+   tx.commit();
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("key"), &buf) >= 0);
+   REQUIRE(buf == "second");
+}
+
+TEST_CASE("micro transaction remove", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate persistent tree
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("a"), to_value("1"));
+      tx.upsert(to_key("b"), to_value("2"));
+      tx.upsert(to_key("c"), to_value("3"));
+      tx.commit();
+   }
+
+   // Micro mode: remove "b"
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+
+      REQUIRE(tx.get<std::string>(to_key("b")).has_value());
+      int removed_size = tx.remove(to_key("b"));
+      REQUIRE(removed_size >= 0);
+
+      // Tombstone shadows the persistent key
+      REQUIRE_FALSE(tx.get<std::string>(to_key("b")).has_value());
+
+      // Other keys still visible
+      REQUIRE(tx.get<std::string>(to_key("a")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("c")).has_value());
+
+      tx.commit();
+   }
+
+   // Verify persistent tree
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("a"), &buf) >= 0);
+   REQUIRE(c.get(to_key("b"), &buf) < 0);  // removed
+   REQUIRE(c.get(to_key("c"), &buf) >= 0);
+}
+
+TEST_CASE("micro transaction remove nonexistent key returns -1", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   int result = tx.remove(to_key("nonexistent"));
+   REQUIRE(result == -1);
+   tx.commit();
+}
+
+TEST_CASE("micro transaction remove then re-insert", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("key"), to_value("original"));
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      tx.remove(to_key("key"));
+      REQUIRE_FALSE(tx.get<std::string>(to_key("key")).has_value());
+
+      tx.upsert(to_key("key"), to_value("resurrected"));
+      auto v = tx.get<std::string>(to_key("key"));
+      REQUIRE(v.has_value());
+      REQUIRE(*v == "resurrected");
+
+      tx.commit();
+   }
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("key"), &buf) >= 0);
+   REQUIRE(buf == "resurrected");
+}
+
+TEST_CASE("micro transaction abort discards all changes", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("existing"), to_value("keep"));
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      tx.upsert(to_key("new_key"), to_value("gone"));
+      tx.remove(to_key("existing"));
+      tx.abort();
+   }
+
+   // Persistent tree unchanged
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("existing"), &buf) >= 0);
+   REQUIRE(buf == "keep");
+   REQUIRE(c.get(to_key("new_key"), &buf) < 0);
+}
+
+TEST_CASE("micro transaction sub_transaction commit", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("outer"), to_value("yes"));
+
+   {
+      auto sub = tx.sub_transaction();
+      sub.upsert(to_key("inner"), to_value("yes"));
+      sub.commit();
+   }
+
+   // Both visible
+   REQUIRE(tx.get<std::string>(to_key("outer")).has_value());
+   REQUIRE(tx.get<std::string>(to_key("inner")).has_value());
+
+   tx.commit();
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("outer"), &buf) >= 0);
+   REQUIRE(c.get(to_key("inner"), &buf) >= 0);
+}
+
+TEST_CASE("micro transaction sub_transaction abort", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("outer"), to_value("yes"));
+
+   {
+      auto sub = tx.sub_transaction();
+      sub.upsert(to_key("inner_lost"), to_value("gone"));
+      sub.abort();
+   }
+
+   REQUIRE(tx.get<std::string>(to_key("outer")).has_value());
+   REQUIRE_FALSE(tx.get<std::string>(to_key("inner_lost")).has_value());
+
+   tx.commit();
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("outer"), &buf) >= 0);
+   REQUIRE(c.get(to_key("inner_lost"), &buf) < 0);
+}
+
+TEST_CASE("micro transaction sub_transaction destructor aborts", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("kept"), to_value("yes"));
+
+   {
+      auto sub = tx.sub_transaction();
+      sub.upsert(to_key("temp"), to_value("gone"));
+      // ~sub fires, auto-aborts
+   }
+
+   REQUIRE(tx.get<std::string>(to_key("kept")).has_value());
+   REQUIRE_FALSE(tx.get<std::string>(to_key("temp")).has_value());
+
+   tx.commit();
+}
+
+TEST_CASE("micro transaction nested sub_transactions two levels", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("L0"), to_value("zero"));
+
+   {
+      auto sub1 = tx.sub_transaction();
+      sub1.upsert(to_key("L1"), to_value("one"));
+
+      {
+         auto sub2 = sub1.sub_transaction();
+         sub2.upsert(to_key("L2"), to_value("two"));
+         sub2.commit();
+      }
+
+      // L2 visible after sub2 commit
+      REQUIRE(sub1.get<std::string>(to_key("L2")).has_value());
+
+      sub1.commit();
+   }
+
+   REQUIRE(tx.get<std::string>(to_key("L0")).has_value());
+   REQUIRE(tx.get<std::string>(to_key("L1")).has_value());
+   REQUIRE(tx.get<std::string>(to_key("L2")).has_value());
+
+   tx.commit();
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("L0"), &buf) >= 0);
+   REQUIRE(c.get(to_key("L1"), &buf) >= 0);
+   REQUIRE(c.get(to_key("L2"), &buf) >= 0);
+}
+
+TEST_CASE("micro transaction nested abort inner preserves outer", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   tx.upsert(to_key("L0"), to_value("zero"));
+
+   {
+      auto sub1 = tx.sub_transaction();
+      sub1.upsert(to_key("L1"), to_value("one"));
+
+      {
+         auto sub2 = sub1.sub_transaction();
+         sub2.upsert(to_key("L2_lost"), to_value("gone"));
+         sub2.abort();
+      }
+
+      // L2_lost not visible
+      REQUIRE_FALSE(sub1.get<std::string>(to_key("L2_lost")).has_value());
+      // L1 still visible
+      REQUIRE(sub1.get<std::string>(to_key("L1")).has_value());
+
+      sub1.commit();
+   }
+
+   REQUIRE(tx.get<std::string>(to_key("L0")).has_value());
+   REQUIRE(tx.get<std::string>(to_key("L1")).has_value());
+   REQUIRE_FALSE(tx.get<std::string>(to_key("L2_lost")).has_value());
+
+   tx.commit();
+}
+
+TEST_CASE("micro transaction sub_transaction abort after remove restores", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("k1"), to_value("v1"));
+      tx.upsert(to_key("k2"), to_value("v2"));
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+
+      {
+         auto sub = tx.sub_transaction();
+         sub.remove(to_key("k1"));
+         REQUIRE_FALSE(sub.get<std::string>(to_key("k1")).has_value());
+         sub.abort();
+      }
+
+      // k1 restored after sub abort
+      auto v = tx.get<std::string>(to_key("k1"));
+      REQUIRE(v.has_value());
+      REQUIRE(*v == "v1");
+
+      tx.commit();
+   }
+}
+
+TEST_CASE("micro transaction many keys merge to persistent tree", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   constexpr int N = 200;
+
+   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   for (int i = 0; i < N; ++i)
+   {
+      auto k = "key_" + std::to_string(i);
+      auto v = "val_" + std::to_string(i);
+      tx.upsert(to_key_view(k), to_value_view(v));
+   }
+   tx.commit();
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   for (int i = 0; i < N; ++i)
+   {
+      auto k = "key_" + std::to_string(i);
+      auto v = "val_" + std::to_string(i);
+      REQUIRE(c.get(to_key_view(k), &buf) >= 0);
+      REQUIRE(buf == v);
+   }
+}
+
+TEST_CASE("micro transaction with pre-existing persistent data", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 50; ++i)
+      {
+         auto k = "p_" + std::to_string(i);
+         auto v = "persistent_" + std::to_string(i);
+         tx.upsert(to_key_view(k), to_value_view(v));
+      }
+      tx.commit();
+   }
+
+   // Micro mode: add new, update existing, remove some
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+
+      // Add new keys
+      for (int i = 50; i < 75; ++i)
+      {
+         auto k = "p_" + std::to_string(i);
+         auto v = "new_" + std::to_string(i);
+         tx.upsert(to_key_view(k), to_value_view(v));
+      }
+
+      // Update existing keys
+      for (int i = 0; i < 10; ++i)
+      {
+         auto k = "p_" + std::to_string(i);
+         auto v = "updated_" + std::to_string(i);
+         tx.upsert(to_key_view(k), to_value_view(v));
+      }
+
+      // Remove some keys
+      for (int i = 40; i < 50; ++i)
+      {
+         auto k = "p_" + std::to_string(i);
+         tx.remove(to_key_view(k));
+      }
+
+      // Verify within transaction
+      for (int i = 0; i < 10; ++i)
+      {
+         auto k = "p_" + std::to_string(i);
+         auto v = tx.get<std::string>(to_key_view(k));
+         REQUIRE(v.has_value());
+         REQUIRE(*v == "updated_" + std::to_string(i));
+      }
+
+      for (int i = 40; i < 50; ++i)
+      {
+         auto k = "p_" + std::to_string(i);
+         REQUIRE_FALSE(tx.get<std::string>(to_key_view(k)).has_value());
+      }
+
+      tx.commit();
+   }
+
+   // Verify persistent tree
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+
+   // Updated keys
+   for (int i = 0; i < 10; ++i)
+   {
+      auto k = "p_" + std::to_string(i);
+      REQUIRE(c.get(to_key_view(k), &buf) >= 0);
+      REQUIRE(buf == "updated_" + std::to_string(i));
+   }
+
+   // Untouched keys
+   for (int i = 10; i < 40; ++i)
+   {
+      auto k = "p_" + std::to_string(i);
+      REQUIRE(c.get(to_key_view(k), &buf) >= 0);
+      REQUIRE(buf == "persistent_" + std::to_string(i));
+   }
+
+   // Removed keys
+   for (int i = 40; i < 50; ++i)
+   {
+      auto k = "p_" + std::to_string(i);
+      REQUIRE(c.get(to_key_view(k), &buf) < 0);
+   }
+
+   // New keys
+   for (int i = 50; i < 75; ++i)
+   {
+      auto k = "p_" + std::to_string(i);
+      REQUIRE(c.get(to_key_view(k), &buf) >= 0);
+      REQUIRE(buf == "new_" + std::to_string(i));
+   }
+}
+
+TEST_CASE("batch sub_transaction still works via frame_ref", "[public-api][transaction]")
+{
+   test_db t;
+
+   // Batch mode (default) sub_transaction now returns frame_ref — verify it works
+   auto tx = t.ses->start_transaction(0);
+   tx.upsert(to_key("batch_outer"), to_value("yes"));
+
+   {
+      auto sub = tx.sub_transaction();
+      sub.upsert(to_key("batch_inner"), to_value("yes"));
+
+      {
+         auto sub2 = sub.sub_transaction();
+         sub2.upsert(to_key("batch_L2"), to_value("yes"));
+         sub2.commit();
+      }
+
+      sub.commit();
+   }
+
+   REQUIRE(tx.get<std::string>(to_key("batch_outer")).has_value());
+   REQUIRE(tx.get<std::string>(to_key("batch_inner")).has_value());
+   REQUIRE(tx.get<std::string>(to_key("batch_L2")).has_value());
+
+   tx.commit();
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("batch_outer"), &buf) >= 0);
+   REQUIRE(c.get(to_key("batch_inner"), &buf) >= 0);
+   REQUIRE(c.get(to_key("batch_L2"), &buf) >= 0);
+}
+
+TEST_CASE("batch sub_transaction abort via frame_ref", "[public-api][transaction]")
+{
+   test_db t;
+
+   auto tx = t.ses->start_transaction(0);
+   tx.upsert(to_key("kept"), to_value("yes"));
+
+   {
+      auto sub = tx.sub_transaction();
+      sub.upsert(to_key("discarded"), to_value("gone"));
+      sub.abort();
+   }
+
+   REQUIRE(tx.get<std::string>(to_key("kept")).has_value());
+   REQUIRE_FALSE(tx.get<std::string>(to_key("discarded")).has_value());
+
+   tx.commit();
+}
+
+TEST_CASE("micro remove_range small uses tombstones", "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate with keys a..z
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (char c = 'a'; c <= 'z'; ++c)
+      {
+         std::string k(1, c);
+         tx.upsert(to_key_view(k), to_value_view(k));
+      }
+      tx.commit();
+   }
+
+   // Micro mode: remove range [e, u) — 16 keys, well under tombstone threshold
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      tx.upsert(to_key("new1"), to_value("added"));
+
+      uint64_t removed = tx.remove_range(to_key("e"), to_key("u"));
+      REQUIRE(removed == 17);  // e,f,g,...,t (16 persistent) + "new1" (1 buffer insert)
+
+      // Removed keys not visible
+      REQUIRE_FALSE(tx.get<std::string>(to_key("e")).has_value());
+      REQUIRE_FALSE(tx.get<std::string>(to_key("t")).has_value());
+
+      // Keys outside range still visible
+      REQUIRE(tx.get<std::string>(to_key("a")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("d")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("u")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("z")).has_value());
+
+      // "new1" was in range [e,u) — also removed
+      REQUIRE_FALSE(tx.get<std::string>(to_key("new1")).has_value());
+
+      tx.commit();
+   }
+
+   // Verify persistent tree
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("a"), &buf) >= 0);
+   REQUIRE(c.get(to_key("d"), &buf) >= 0);
+   REQUIRE(c.get(to_key("e"), &buf) < 0);
+   REQUIRE(c.get(to_key("t"), &buf) < 0);
+   REQUIRE(c.get(to_key("u"), &buf) >= 0);
+   REQUIRE(c.get(to_key("z"), &buf) >= 0);
+   REQUIRE(c.get(to_key("new1"), &buf) < 0);  // was in range [e,u)
+}
+
+TEST_CASE("micro remove_range also removes buffer inserts in range",
+          "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+
+      // Insert keys into buffer (no persistent data)
+      for (char c = 'a'; c <= 'z'; ++c)
+      {
+         std::string k(1, c);
+         tx.upsert(to_key_view(k), to_value_view(k));
+      }
+
+      // Remove range of buffer-only inserts
+      uint64_t removed = tx.remove_range(to_key("f"), to_key("n"));
+      REQUIRE(removed == 8);  // f,g,h,i,j,k,l,m
+
+      REQUIRE_FALSE(tx.get<std::string>(to_key("f")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("e")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("n")).has_value());
+
+      tx.commit();
+   }
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("e"), &buf) >= 0);
+   REQUIRE(c.get(to_key("f"), &buf) < 0);
+   REQUIRE(c.get(to_key("m"), &buf) < 0);
+   REQUIRE(c.get(to_key("n"), &buf) >= 0);
+}
+
+TEST_CASE("micro remove_range large triggers merge-then-delegate",
+          "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Build a dictionary-like dataset: 2000 words
+   std::vector<std::string> words;
+   words.reserve(2000);
+   for (int i = 0; i < 2000; ++i)
+   {
+      // Generate words like "word_0000" .. "word_1999" (sorted)
+      char buf[16];
+      snprintf(buf, sizeof(buf), "word_%04d", i);
+      words.emplace_back(buf);
+   }
+
+   // Pre-populate persistent tree
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (auto& w : words)
+         tx.upsert(to_key_view(w), to_value_view(w));
+      tx.commit();
+   }
+
+   // Micro mode: some writes, then large range deletion
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+
+      // Buffer some writes
+      tx.upsert(to_key("aaa_before_range"), to_value("kept"));
+      tx.upsert(to_key("zzz_after_range"), to_value("kept"));
+      tx.upsert(to_key("word_0500"), to_value("updated_500"));  // update within range
+
+      // Remove a large range — over tombstone_threshold (256)
+      // word_0300 .. word_0899 = 600 words
+      uint64_t removed = tx.remove_range(to_key("word_0300"), to_key("word_0900"));
+
+      // Should have triggered merge-then-delegate
+      REQUIRE(removed >= 599);  // 600 persistent keys minus 1 that was updated to buffer
+
+      // Keys outside range still visible
+      REQUIRE(tx.get<std::string>(to_key("word_0000")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("word_0299")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("word_0900")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("word_1999")).has_value());
+
+      // Buffered keys outside range survived the merge
+      REQUIRE(tx.get<std::string>(to_key("aaa_before_range")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("zzz_after_range")).has_value());
+
+      // Keys inside range removed
+      REQUIRE_FALSE(tx.get<std::string>(to_key("word_0300")).has_value());
+      REQUIRE_FALSE(tx.get<std::string>(to_key("word_0500")).has_value());
+      REQUIRE_FALSE(tx.get<std::string>(to_key("word_0899")).has_value());
+
+      // Can still write after merge
+      tx.upsert(to_key("word_0500"), to_value("re-added"));
+      REQUIRE(tx.get<std::string>(to_key("word_0500")).has_value());
+
+      tx.commit();
+   }
+
+   // Verify persistent tree
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("word_0000"), &buf) >= 0);
+   REQUIRE(c.get(to_key("word_0299"), &buf) >= 0);
+   REQUIRE(c.get(to_key("word_0300"), &buf) < 0);
+   REQUIRE(c.get(to_key("word_0500"), &buf) >= 0);
+   REQUIRE(buf == "re-added");
+   REQUIRE(c.get(to_key("word_0899"), &buf) < 0);
+   REQUIRE(c.get(to_key("word_0900"), &buf) >= 0);
+   REQUIRE(c.get(to_key("aaa_before_range"), &buf) >= 0);
+   REQUIRE(c.get(to_key("zzz_after_range"), &buf) >= 0);
+}
+
+TEST_CASE("micro sub_transaction with large range remove then abort",
+          "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate with 500 keys
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         char buf[16];
+         snprintf(buf, sizeof(buf), "k_%04d", i);
+         tx.upsert(to_key_view(std::string(buf)), to_value_view(std::string(buf)));
+      }
+      tx.commit();
+   }
+
+   // Micro mode: writes, then sub-tx with large range remove, then abort sub-tx
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+
+      // Parent writes
+      tx.upsert(to_key("parent_key"), to_value("parent_val"));
+
+      {
+         auto sub = tx.sub_transaction();
+
+         // Sub-tx writes
+         sub.upsert(to_key("sub_key"), to_value("sub_val"));
+
+         // Large range remove triggers merge-then-delegate within sub-tx
+         uint64_t removed = sub.remove_range(to_key("k_0100"), to_key("k_0400"));
+         REQUIRE(removed >= 299);
+
+         // Sub-tx sees the removal
+         REQUIRE_FALSE(sub.get<std::string>(to_key("k_0200")).has_value());
+
+         // Abort the sub-transaction
+         sub.abort();
+      }
+
+      // After abort: parent should see original persistent data restored
+      // k_0200 should be visible again
+      REQUIRE(tx.get<std::string>(to_key("k_0200")).has_value());
+
+      // Parent's own write is still there
+      REQUIRE(tx.get<std::string>(to_key("parent_key")).has_value());
+
+      // Sub-tx's write should be gone
+      REQUIRE_FALSE(tx.get<std::string>(to_key("sub_key")).has_value());
+
+      tx.commit();
+   }
+
+   // Verify: all original keys intact, plus parent_key
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("k_0200"), &buf) >= 0);
+   REQUIRE(c.get(to_key("parent_key"), &buf) >= 0);
+   REQUIRE(c.get(to_key("sub_key"), &buf) < 0);
+}
+
+TEST_CASE("micro nested sub_transaction: inner merge, outer abort",
+          "[public-api][transaction][micro]")
+{
+   test_db t;
+
+   // Pre-populate with 500 keys
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         char buf[16];
+         snprintf(buf, sizeof(buf), "n_%04d", i);
+         tx.upsert(to_key_view(std::string(buf)), to_value_view(std::string(buf)));
+      }
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      tx.upsert(to_key("L0_key"), to_value("L0_val"));
+
+      {
+         auto sub1 = tx.sub_transaction();
+         sub1.upsert(to_key("L1_key"), to_value("L1_val"));
+
+         {
+            auto sub2 = sub1.sub_transaction();
+            sub2.upsert(to_key("L2_key"), to_value("L2_val"));
+
+            // Large range remove inside L2 triggers merge
+            sub2.remove_range(to_key("n_0100"), to_key("n_0400"));
+
+            sub2.commit();  // L2 commits into L1
+         }
+
+         // L1 sees L2's changes
+         REQUIRE_FALSE(sub1.get<std::string>(to_key("n_0200")).has_value());
+         REQUIRE(sub1.get<std::string>(to_key("L2_key")).has_value());
+
+         sub1.abort();  // Abort L1 — should restore pre-L1 state
+      }
+
+      // After L1 abort: persistent data restored, L0_key still buffered
+      REQUIRE(tx.get<std::string>(to_key("n_0200")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("L0_key")).has_value());
+      REQUIRE_FALSE(tx.get<std::string>(to_key("L1_key")).has_value());
+      REQUIRE_FALSE(tx.get<std::string>(to_key("L2_key")).has_value());
+
+      tx.commit();
+   }
+
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("n_0200"), &buf) >= 0);
+   REQUIRE(c.get(to_key("L0_key"), &buf) >= 0);
+   REQUIRE(c.get(to_key("L1_key"), &buf) < 0);
+}

@@ -302,8 +302,8 @@ namespace art
 
    /// Allocate a leaf with extra inline data after the Value struct.
    /// Returns tagged offset. The inline data starts at value_offset + sizeof(Value).
-   template <typename Value>
-   offset_t make_leaf_with_inline_data(arena&           a,
+   template <typename Value, typename Arena>
+   offset_t make_leaf_with_inline_data(Arena&           a,
                                        std::string_view key,
                                        const Value&     value,
                                        std::string_view inline_data,
@@ -313,13 +313,12 @@ namespace art
       uint32_t total    = val_off + sizeof(Value) + inline_data.size();
       // Don't cacheline-round here — let arena.allocate() handle it
       offset_t off      = a.allocate(total);
-      auto*    lh       = a.as<leaf_header>(off);
+      auto*    lh       = a.template as<leaf_header>(off);
       lh->key_len       = key.size();
       lh->cow_seq       = cow_seq;
       std::memcpy(reinterpret_cast<char*>(lh) + sizeof(leaf_header),
                   key.data(), key.size());
-      auto* val = reinterpret_cast<Value*>(
-          reinterpret_cast<uint8_t*>(lh) + val_off);
+      auto* val = reinterpret_cast<Value*>(reinterpret_cast<uint8_t*>(lh) + val_off);
       *val = value;
       if (!inline_data.empty())
       {
@@ -333,10 +332,11 @@ namespace art
 
    /// Save prefix to stack buffer if it points into the arena.
    /// Returns the (possibly relocated) data pointer.
-   inline const char* save_prefix_if_arena(const arena&     a,
-                                           std::string_view prefix,
-                                           char*            buf,
-                                           uint32_t         buf_size) noexcept
+   template <typename Arena>
+   const char* save_prefix_if_arena(const Arena&     a,
+                                    std::string_view prefix,
+                                    char*            buf,
+                                    uint32_t         buf_size) noexcept
    {
       // Prefix length must fit in uint16_t (node_header::partial_len).
       // A value exceeding this indicates memory corruption.
@@ -354,13 +354,13 @@ namespace art
    }
 
    /// Allocate a leaf in the arena, copy key and value. Returns tagged offset.
-   template <typename Value>
-   offset_t make_leaf(arena& a, std::string_view key, const Value& value,
+   template <typename Value, typename Arena>
+   offset_t make_leaf(Arena& a, std::string_view key, const Value& value,
                       uint32_t cow_seq = 0)
    {
       uint32_t size = leaf_alloc_size<Value>(key.size());
       offset_t off  = a.allocate(size);
-      auto*    lh   = a.as<leaf_header>(off);
+      auto*    lh   = a.template as<leaf_header>(off);
       lh->key_len   = key.size();
       lh->cow_seq   = cow_seq;
       std::memcpy(reinterpret_cast<char*>(lh) + sizeof(leaf_header), key.data(), key.size());
@@ -372,7 +372,8 @@ namespace art
 
    /// Allocate a setlist node with the given prefix. Children/keys are uninitialized.
    /// Children are centered in the free space between keys and prefix.
-   inline offset_t make_setlist(arena& a, uint8_t num_children, std::string_view prefix)
+   template <typename Arena>
+   offset_t make_setlist(Arena& a, uint8_t num_children, std::string_view prefix)
    {
       char         pfx_buf[512];
       const char*  pfx_data = save_prefix_if_arena(a, prefix, pfx_buf, sizeof(pfx_buf));
@@ -386,7 +387,7 @@ namespace art
       assert(cap >= num_children);
 
       offset_t off = a.allocate(size);
-      auto*    hdr = a.as<node_header>(off);
+      auto*    hdr = a.template as<node_header>(off);
       hdr->type         = node_type::setlist;
       hdr->num_children = num_children;
       hdr->partial_len  = pfx_len;
@@ -420,7 +421,8 @@ namespace art
    }
 
    /// Allocate a node256 with the given prefix. Children initialized to null_offset.
-   inline offset_t make_node256(arena& a, std::string_view prefix)
+   template <typename Arena>
+   offset_t make_node256(Arena& a, std::string_view prefix)
    {
       char         pfx_buf[512];
       const char*  pfx_data = save_prefix_if_arena(a, prefix, pfx_buf, sizeof(pfx_buf));
@@ -428,7 +430,7 @@ namespace art
 
       uint32_t size = node256_alloc_size(pfx_len);
       offset_t off  = a.allocate(size);
-      auto*    hdr  = a.as<node_header>(off);
+      auto*    hdr  = a.template as<node_header>(off);
       hdr->type         = node_type::node256;
       hdr->num_children = 0;
       hdr->partial_len  = pfx_len;

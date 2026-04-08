@@ -1,5 +1,6 @@
 #pragma once
 #include <psitri/read_session.hpp>
+#include <psitri/tx_mode.hpp>
 #include <psitri/write_cursor.hpp>
 
 namespace psitri
@@ -71,12 +72,15 @@ namespace psitri
        * same root from another thread will block until the first completes.
        *
        * @param root_index Index into the 512 top-level roots (0-511).
+       * @param mode Transaction mode: batch (default, direct COW) or micro
+       *        (buffered writes, O(1) sub-transaction abort).
        * @return A transaction that provides insert/update/upsert/remove/get.
        *
        * @warning The returned transaction captures a pointer to this session.
        *          The session must outlive the transaction.
        */
-      transaction start_transaction(uint32_t root_index);
+      transaction start_transaction(uint32_t root_index,
+                                    tx_mode  mode = tx_mode::batch);
 
       ///@}
 
