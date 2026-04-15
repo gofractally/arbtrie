@@ -7,6 +7,8 @@ namespace psitri
 {
    class transaction;
    class write_session;
+   struct read_set;
+   namespace detail { class write_buffer; }
    using write_session_ptr = std::shared_ptr<write_session>;
 
    /**
@@ -288,6 +290,20 @@ namespace psitri
 
       /// Fast-path version-CB swap under lightweight per-root ver lock.
       void swap_root_ver(uint32_t root_index, uint64_t ver_num);
+
+      /// Return a reference to the per-root modify_lock for multi-root locking.
+      std::mutex& root_modify_lock(uint32_t root_index);
+
+      /// Allocate a global version CB and publish a new root at root_index.
+      void publish_root(uint32_t root_index, sal::smart_ptr<sal::alloc_header> new_root);
+
+      /// Create a tree_context for a root with dead-version and epoch info set.
+      tree_context make_tree_context(uint32_t root_index);
+
+      /// OCC commit: lock, validate read-set, apply writes, publish.
+      void occ_commit(uint32_t                     root_index,
+                      const detail::write_buffer*  buffer,
+                      const read_set&              reads);
 
       sal::sync_type _sync = sal::sync_type::none;
    };

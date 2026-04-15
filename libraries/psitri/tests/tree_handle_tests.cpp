@@ -34,13 +34,27 @@ namespace
          }
       }
 
-      void assert_no_leaks(const std::string& context = "")
+      void assert_no_leaks(const std::string&            context = "",
+                           std::initializer_list<uint32_t> roots   = {0})
       {
-         ses->set_root(0, {}, sal::sync_type::none);
+         for (auto ri : roots)
+            ses->set_root(ri, {}, sal::sync_type::none);
          wait_for_compactor();
          uint64_t allocated = ses->get_total_allocated_objects();
          INFO(context << " allocated=" << allocated << " (expected 0)");
          REQUIRE(allocated == 0);
+      }
+
+      void verify_key(uint32_t           root_index,
+                      const std::string& key,
+                      const std::string& expected)
+      {
+         auto root = ses->get_root(root_index);
+         REQUIRE(root);
+         cursor c(root);
+         auto   v = c.get<std::string>(key);
+         REQUIRE(v.has_value());
+         CHECK(*v == expected);
       }
    };
 }  // namespace
@@ -790,4 +804,234 @@ TEST_CASE("tree_handle: multiple subtree write-back on commit", "[tree_handle][s
    }
 
    t.assert_no_leaks("after multiple subtree write-back");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multi-root: open_root basic CRUD
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root: open_root basic CRUD", "[tree_handle][multi_root]")
+{
+   test_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert("primary_key", "primary_val");
+
+      auto root5 = tx.open_root(5);
+      root5.upsert("r5_a", "val_a");
+      root5.upsert("r5_b", "val_b");
+
+      tx.commit();
+   }
+
+   t.verify_key(0, "primary_key", "primary_val");
+   t.verify_key(5, "r5_a", "val_a");
+   t.verify_key(5, "r5_b", "val_b");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multi-root: multiple roots in ascending order
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root: multiple roots in ascending order", "[tree_handle][multi_root]")
+{
+   test_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert("r0", "zero");
+
+      auto r3 = tx.open_root(3);
+      r3.upsert("r3", "three");
+
+      auto r7 = tx.open_root(7);
+      r7.upsert("r7", "seven");
+
+      auto r10 = tx.open_root(10);
+      r10.upsert("r10", "ten");
+
+      tx.commit();
+   }
+
+   t.verify_key(0, "r0", "zero");
+   t.verify_key(3, "r3", "three");
+   t.verify_key(7, "r7", "seven");
+   t.verify_key(10, "r10", "ten");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multi-root: abort releases all locks
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root: abort releases all held locks", "[tree_handle][multi_root]")
+{
+   test_db t;
+
+   // First transaction: populate roots
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert("original", "data");
+      auto r5 = tx.open_root(5);
+      r5.upsert("r5_orig", "data");
+      tx.commit();
+   }
+
+   // Second transaction: modify then abort
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert("should_not_persist", "nope");
+      auto r5 = tx.open_root(5);
+      r5.upsert("r5_should_not_persist", "nope");
+      tx.abort();
+   }
+
+   // Third transaction: should be able to lock same roots (no deadlock)
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto v  = tx.get<std::string>("original");
+      REQUIRE(v.has_value());
+      CHECK(*v == "data");
+
+      // Verify aborted writes did not persist
+      auto v2 = tx.get<std::string>("should_not_persist");
+      CHECK(!v2.has_value());
+
+      auto r5 = tx.open_root(5);
+      auto v3 = r5.get<std::string>("r5_orig");
+      REQUIRE(v3.has_value());
+      CHECK(*v3 == "data");
+
+      auto v4 = r5.get<std::string>("r5_should_not_persist");
+      CHECK(!v4.has_value());
+
+      tx.abort();
+   }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multi-root: destructor abort releases locks
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root: destructor abort releases locks", "[tree_handle][multi_root]")
+{
+   test_db t;
+
+   // Let transaction go out of scope without commit/abort
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto r5 = tx.open_root(5);
+      r5.upsert("temp", "temp");
+      // ~transaction calls abort()
+   }
+
+   // Should be able to reacquire locks
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto r5 = tx.open_root(5);
+      auto v  = r5.get<std::string>("temp");
+      CHECK(!v.has_value());
+      tx.abort();
+   }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multi-root: subtrees within additional roots
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root: subtrees within additional roots", "[tree_handle][multi_root][subtree]")
+{
+   test_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert("primary", "data");
+
+      auto r5 = tx.open_root(5);
+      r5.upsert("top_level", "r5_data");
+
+      auto sub = r5.create_subtree("nested");
+      sub.upsert("inner_key", "inner_val");
+
+      tx.commit();
+   }
+
+   t.verify_key(5, "top_level", "r5_data");
+
+   // Verify subtree within root 5
+   auto root = t.ses->get_root(5);
+   cursor c(root);
+   REQUIRE(c.seek("nested"));
+   REQUIRE(c.is_subtree());
+   cursor sc(c.subtree());
+   auto v = sc.get<std::string>("inner_key");
+   REQUIRE(v.has_value());
+   CHECK(*v == "inner_val");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multi-root: open_root on empty root creates usable tree
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root: open_root on empty root", "[tree_handle][multi_root]")
+{
+   test_db t;
+
+   // Root 42 has never been written to
+   {
+      auto tx  = t.ses->start_transaction(0);
+      auto r42 = tx.open_root(42);
+      r42.upsert("first_key", "first_val");
+      tx.commit();
+   }
+
+   t.verify_key(42, "first_key", "first_val");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Multi-root: read via tree_handle on additional root
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("multi-root: read operations via tree_handle", "[tree_handle][multi_root]")
+{
+   test_db t;
+
+   // Populate root 3
+   {
+      auto tx = t.ses->start_transaction(3);
+      tx.upsert("apple", "1");
+      tx.upsert("banana", "2");
+      tx.upsert("cherry", "3");
+      tx.commit();
+   }
+
+   // Read through multi-root handle
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto r3 = tx.open_root(3);
+
+      auto v = r3.get<std::string>("banana");
+      REQUIRE(v.has_value());
+      CHECK(*v == "2");
+
+      auto lb = r3.lower_bound("b");
+      REQUIRE(!lb.is_end());
+      CHECK(lb.key() == "banana");
+
+      auto ub = r3.upper_bound("banana");
+      REQUIRE(!ub.is_end());
+      CHECK(ub.key() == "cherry");
+
+      auto rc = r3.read_cursor();
+      rc.seek_begin();
+      int count = 0;
+      while (!rc.is_end())
+      {
+         ++count;
+         rc.next();
+      }
+      CHECK(count == 3);
+
+      tx.abort();
+   }
 }

@@ -10,6 +10,11 @@ namespace psitri
 
    inline write_session::write_session(database& db) : read_session(db) {}
 
+   inline std::mutex& write_session::root_modify_lock(uint32_t root_index)
+   {
+      return _db->modify_lock(root_index);
+   }
+
    inline write_cursor_ptr write_session::create_write_cursor()
    {
       return std::make_shared<write_cursor>(_allocator_session);
@@ -42,130 +47,129 @@ namespace psitri
       return _allocator_session->get_pending_release_count();
    }
 
+   inline void write_session::publish_root(uint32_t                          root_index,
+                                            sal::smart_ptr<sal::alloc_header> new_root)
+   {
+      if (new_root)
+      {
+         auto ver_num =
+             _db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
+         auto ver_adr = _allocator_session->alloc_custom_cb(ver_num);
+         new_root.set_ver(ver_adr);
+      }
+      else
+      {
+         new_root.release();
+      }
+      set_root(root_index, std::move(new_root), _sync);
+   }
+
+   inline tree_context write_session::make_tree_context(uint32_t root_index)
+   {
+      tree_context ctx(get_root(root_index));
+      ctx.set_dead_versions(_db->dead_versions().load_snapshot());
+      ctx.set_current_epoch(_db->_dbm->current_epoch());
+      return ctx;
+   }
+
+   inline void write_session::occ_commit(uint32_t                    root_index,
+                                          const detail::write_buffer* buffer,
+                                          const read_set&             reads)
+   {
+      auto& lock = _db->modify_lock(root_index);
+      std::lock_guard guard(lock);
+
+      auto current_root = get_root(root_index);
+
+      // Per-key validation: check each read against the current tree
+      if (!reads.empty())
+      {
+         cursor c(current_root);
+
+         for (const auto& entry : reads.entries)
+         {
+            auto info = c.get_key_info(entry.key);
+            if (info.leaf_addr != entry.leaf_addr || info.version != entry.version)
+               throw occ_conflict{};
+         }
+
+         for (const auto& lb : reads.lower_bounds)
+         {
+            if (lb.is_upper)
+               c.upper_bound(lb.query_key);
+            else
+               c.lower_bound(lb.query_key);
+
+            if (lb.at_end)
+            {
+               if (!c.is_end())
+                  throw occ_conflict{};
+            }
+            else
+            {
+               if (c.is_end() || c.key() != lb.found_key)
+                  throw occ_conflict{};
+            }
+         }
+      }
+
+      // Apply buffered writes to the current tree (not the snapshot)
+      if (buffer && !buffer->empty())
+      {
+         write_cursor wc(std::move(current_root));
+         auto it  = buffer->begin();
+         auto end = buffer->end();
+         for (; it != end; ++it)
+         {
+            auto& e = it.value();
+            auto  k = it.key();
+            if (e.is_data())
+               wc.upsert_sorted(k, e.value());
+            else if (e.type == detail::buffer_entry::tombstone)
+               wc.remove(k);
+         }
+         current_root = wc.root();
+      }
+
+      publish_root(root_index, std::move(current_root));
+   }
+
    inline transaction write_session::start_transaction(uint32_t root_index, tx_mode mode)
    {
+      auto  session = _allocator_session;
+      auto* self    = this;
+
       if (mode == tx_mode::occ)
       {
-         // OCC: snapshot root without locking; per-key validation at commit time
-         auto root    = get_root(root_index);
-         auto session = _allocator_session;
-         auto* self   = this;
-
-         return transaction(
+         auto root = get_root(root_index);
+         auto tx   = transaction(
              session, std::move(root),
-             // occ_commit: lock, validate read set per-key, re-base writes, publish
-             [self, root_index](const detail::write_buffer* buffer,
-                                const read_set&             reads)
-             {
-                auto& lock = self->_db->modify_lock(root_index);
-                std::lock_guard guard(lock);
-
-                // Get current tree state
-                auto current_root = self->get_root(root_index);
-
-                // Per-key validation: check each read against the current tree
-                if (!reads.empty())
-                {
-                   cursor c(current_root);
-
-                   // Point-read validation
-                   for (const auto& entry : reads.entries)
-                   {
-                      auto info = c.get_key_info(entry.key);
-                      if (info.leaf_addr != entry.leaf_addr || info.version != entry.version)
-                         throw occ_conflict{};
-                   }
-
-                   // Bound predicate validation (phantom detection)
-                   for (const auto& lb : reads.lower_bounds)
-                   {
-                      if (lb.is_upper)
-                         c.upper_bound(lb.query_key);
-                      else
-                         c.lower_bound(lb.query_key);
-
-                      if (lb.at_end)
-                      {
-                         if (!c.is_end())
-                            throw occ_conflict{};
-                      }
-                      else
-                      {
-                         if (c.is_end() || c.key() != lb.found_key)
-                            throw occ_conflict{};
-                      }
-                   }
-                }
-
-                // Apply buffered writes to the current tree (not the snapshot)
-                if (buffer && !buffer->empty())
-                {
-                   write_cursor wc(std::move(current_root));
-                   auto it  = buffer->begin();
-                   auto end = buffer->end();
-                   for (; it != end; ++it)
-                   {
-                      auto& e = it.value();
-                      auto  k = it.key();
-                      if (e.is_data())
-                         wc.upsert_sorted(k, e.value());
-                      else if (e.type == detail::buffer_entry::tombstone)
-                         wc.remove(k);
-                   }
-                   current_root = wc.root();
-                }
-
-                // Allocate version and publish
-                if (current_root)
-                {
-                   auto ver_num =
-                       self->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
-                   auto ver_adr = self->_allocator_session->alloc_custom_cb(ver_num);
-                   current_root.set_ver(ver_adr);
-                }
-                else
-                {
-                   current_root.release();
-                }
-                self->set_root(root_index, std::move(current_root), self->_sync);
-             },
-             // rollback: no lock held, nothing to release
+             [self, root_index](const detail::write_buffer* buffer, const read_set& reads)
+             { self->occ_commit(root_index, buffer, reads); },
              []() {});
+         tx._ws                 = self;
+         tx.cs_at(0).root_index = root_index;
+         tx._max_held_root      = root_index;
+         return tx;
       }
 
       auto& lock = _db->modify_lock(root_index);
       lock.lock();
 
-      auto root    = get_root(root_index);
-      auto session = _allocator_session;
-      auto db      = _db;
-
-      // Capture this session for commit/rollback
-      auto* self = this;
-
-      return transaction(
+      auto root = get_root(root_index);
+      auto tx   = transaction(
           session, std::move(root),
-          // commit: allocate version, save root with version, unlock
           [self, root_index, &lock](sal::smart_ptr<sal::alloc_header> new_root)
           {
-             if (new_root)
-             {
-                auto ver_num =
-                    self->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
-                auto ver_adr = self->_allocator_session->alloc_custom_cb(ver_num);
-                new_root.set_ver(ver_adr);
-             }
-             else
-             {
-                // Null root: release any stale ver CB inherited from the snapshot
-                new_root.release();
-             }
-             self->set_root(root_index, std::move(new_root), self->_sync);
+             self->publish_root(root_index, std::move(new_root));
              lock.unlock();
           },
-          // rollback: just unlock
           [&lock]() { lock.unlock(); },
           mode);
+      tx._ws                 = self;
+      tx.cs_at(0).root_index = root_index;
+      tx._max_held_root      = root_index;
+      return tx;
    }
 
    /// Fast-path version-CB swap: allocate new version CB, update root slot ver,
@@ -195,9 +199,7 @@ namespace psitri
       // Handles Cases A (inline promotion), B (value_node append), C (new key).
       // Returns false only on leaf overflow (needs split → COW fallback).
       {
-         tree_context ctx(get_root(root_index));
-         ctx.set_dead_versions(_db->dead_versions().load_snapshot());
-         ctx.set_current_epoch(_db->_dbm->current_epoch());
+         auto ctx = make_tree_context(root_index);
 
          auto target = ctx.mvcc_find_target(key);
          if (target != sal::null_ptr_address)
@@ -244,9 +246,7 @@ namespace psitri
 
       // Fast path: stripe lock on target node (value_node or leaf).
       {
-         tree_context ctx(get_root(root_index));
-         ctx.set_dead_versions(_db->dead_versions().load_snapshot());
-         ctx.set_current_epoch(_db->_dbm->current_epoch());
+         auto ctx = make_tree_context(root_index);
 
          auto target = ctx.mvcc_find_target(key);
          if (target != sal::null_ptr_address)
@@ -324,6 +324,60 @@ namespace psitri
                        << " size=" << obj->size()
                        << std::endl;
           });
+   }
+
+   // ═════════════════════════════════════════════════════════════════════
+   // transaction::open_root — multi-root support
+   // ═════════════════════════════════════════════════════════════════════
+
+   // ═════════════════════════════════════════════════════════════════════
+   // transaction multi-root support (needs write_session access)
+   // ═════════════════════════════════════════════════════════════════════
+
+   inline tree_handle transaction::open_root(uint32_t root_index)
+   {
+      assert(_ws && "open_root requires a transaction created via start_transaction");
+      assert(_mode == tx_mode::batch && "multi-root only supported in batch mode");
+      assert(root_index > _max_held_root && "roots must be opened in ascending index order");
+
+      auto& lock = _ws->root_modify_lock(root_index);
+      lock.lock();
+
+      auto root = _ws->get_root(root_index);
+
+      change_set cs;
+      if (root)
+         cs.cursor.emplace(std::move(root));
+      else
+         cs.cursor.emplace(_session);
+      cs.root_index = root_index;
+
+      uint32_t idx = static_cast<uint32_t>(_change_sets.size());
+      _change_sets.push_back(std::move(cs));
+      _held_locks.push_back({root_index, idx, &lock});
+      _max_held_root = root_index;
+
+      return tree_handle(*this, idx);
+   }
+
+   inline void transaction::commit_additional_roots()
+   {
+      for (auto& hl : _held_locks)
+      {
+         auto& cs = cs_at(hl.cs_index);
+         if (cs.buffer && !cs.buffer->empty())
+            merge_buffer_to_persistent(cs);
+         _ws->publish_root(hl.root_index, cs.cursor->root());
+         hl.lock->unlock();
+      }
+      _held_locks.clear();
+   }
+
+   inline void transaction::abort_additional_roots() noexcept
+   {
+      for (auto it = _held_locks.rbegin(); it != _held_locks.rend(); ++it)
+         it->lock->unlock();
+      _held_locks.clear();
    }
 
 }  // namespace psitri

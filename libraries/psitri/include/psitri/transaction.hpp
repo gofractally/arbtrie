@@ -1,7 +1,6 @@
 #pragma once
 #include <cassert>
 #include <functional>
-#include <memory>
 #include <optional>
 #include <psitri/detail/write_buffer.hpp>
 #include <psitri/tx_mode.hpp>
@@ -233,16 +232,7 @@ namespace psitri
             _rollback_func(std::move(rollback_func)),
             _mode(mode)
       {
-         change_set cs;
-         if (root)
-            cs.cursor.emplace(std::move(root));
-         else
-            cs.cursor.emplace(_session);
-
-         if (uses_buffer())
-            cs.buffer.emplace();
-
-         _change_sets.push_back(std::move(cs));
+         init_primary_cs(std::move(root));
       }
 
       /// OCC-specific constructor: provides an MVCC-aware commit function
@@ -256,15 +246,7 @@ namespace psitri
             _mode(tx_mode::occ)
       {
          _occ_commit_func = std::move(occ_commit);
-
-         change_set cs;
-         if (root)
-            cs.cursor.emplace(std::move(root));
-         else
-            cs.cursor.emplace(_session);
-
-         cs.buffer.emplace();
-         _change_sets.push_back(std::move(cs));
+         init_primary_cs(std::move(root));
       }
 
       transaction(const transaction&)            = delete;
@@ -278,26 +260,30 @@ namespace psitri
 
       tree_handle primary() { return tree_handle(*this, _primary_index); }
 
+      /// Open an additional top-level root for multi-root transactions.
+      /// Batch mode only. Roots must be opened in ascending index order.
+      tree_handle open_root(uint32_t root_index);
+
       // ── Primary tree mutations (backward-compatible API) ──────────────
 
       void insert(key_view key, value_view value)
       {
-         do_insert(_primary_index, key, value);
+         do_write(_primary_index, key, value, &write_cursor::insert);
       }
 
       void update(key_view key, value_view value)
       {
-         do_update(_primary_index, key, value);
+         do_write(_primary_index, key, value, &write_cursor::update);
       }
 
       void upsert(key_view key, value_view value)
       {
-         do_upsert(_primary_index, key, value);
+         do_write(_primary_index, key, value, &write_cursor::upsert);
       }
 
       void upsert_sorted(key_view key, value_view value)
       {
-         do_upsert_sorted(_primary_index, key, value);
+         do_write(_primary_index, key, value, &write_cursor::upsert_sorted);
       }
 
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
@@ -339,15 +325,9 @@ namespace psitri
          return do_get(_primary_index, key, buffer);
       }
 
-      cursor lower_bound(key_view key) const
-      {
-         return do_lower_bound(_primary_index, key);
-      }
+      cursor lower_bound(key_view key) const { return do_bound(_primary_index, key, false); }
 
-      cursor upper_bound(key_view key) const
-      {
-         return do_upper_bound(_primary_index, key);
-      }
+      cursor upper_bound(key_view key) const { return do_bound(_primary_index, key, true); }
 
       bool is_subtree(key_view key) const
       {
@@ -400,6 +380,8 @@ namespace psitri
             _commit_func(pcs.cursor->root());
             _commit_func   = nullptr;
             _rollback_func = nullptr;
+
+            commit_additional_roots();
          }
       }
 
@@ -415,6 +397,7 @@ namespace psitri
             _commit_func     = nullptr;
             _occ_commit_func = nullptr;
          }
+         abort_additional_roots();
       }
 
       [[nodiscard]] transaction_frame_ref sub_transaction() noexcept
@@ -430,6 +413,7 @@ namespace psitri
      private:
       friend class tree_handle;
       friend class transaction_frame_ref;
+      friend class write_session;
 
       // ── Change set storage ────────────────────────────────────────────
 
@@ -439,6 +423,20 @@ namespace psitri
 
       change_set&       cs_at(uint32_t idx) { return _change_sets[idx]; }
       const change_set& cs_at(uint32_t idx) const { return _change_sets[idx]; }
+
+      // ── Change set initialization ───────────────────────────────────
+
+      void init_primary_cs(sal::smart_ptr<sal::alloc_header> root)
+      {
+         change_set cs;
+         if (root)
+            cs.cursor.emplace(std::move(root));
+         else
+            cs.cursor.emplace(_session);
+         if (uses_buffer())
+            cs.buffer.emplace();
+         _change_sets.push_back(std::move(cs));
+      }
 
       // ── Subtree management ────────────────────────────────────────────
 
@@ -455,20 +453,21 @@ namespace psitri
          return std::nullopt;
       }
 
-      /// Open an existing subtree at key in parent's tree.
-      /// Creates a new change_set if not already opened.
-      uint32_t open_subtree_impl(uint32_t parent_idx, key_view key)
+      /// Add a subtree change_set for (parent_idx, key), reusing existing if found.
+      /// If root is provided, uses it; otherwise creates an empty tree.
+      uint32_t add_subtree_cs(uint32_t                                         parent_idx,
+                              key_view                                         key,
+                              std::optional<sal::smart_ptr<sal::alloc_header>> root)
       {
          auto existing = find_subtree_cs(parent_idx, key);
          if (existing)
             return *existing;
 
-         auto& pcs    = cs_at(parent_idx);
-         auto  sub_ptr = pcs.cursor->get_subtree(key);
-         assert(sub_ptr && "key is not a subtree");
-
          change_set cs;
-         cs.cursor.emplace(std::move(sub_ptr));
+         if (root)
+            cs.cursor.emplace(std::move(*root));
+         else
+            cs.cursor.emplace(_session);
          if (uses_buffer())
             cs.buffer.emplace();
          cs.parent = change_set::parent_link{parent_idx, std::string(key)};
@@ -478,23 +477,16 @@ namespace psitri
          return idx;
       }
 
-      /// Create a new empty subtree at key in parent's tree.
-      /// Creates a new change_set backed by an empty tree.
+      uint32_t open_subtree_impl(uint32_t parent_idx, key_view key)
+      {
+         auto sub_ptr = cs_at(parent_idx).cursor->get_subtree(key);
+         assert(sub_ptr && "key is not a subtree");
+         return add_subtree_cs(parent_idx, key, std::move(sub_ptr));
+      }
+
       uint32_t create_subtree_impl(uint32_t parent_idx, key_view key)
       {
-         auto existing = find_subtree_cs(parent_idx, key);
-         if (existing)
-            return *existing;
-
-         change_set cs;
-         cs.cursor.emplace(_session);  // empty tree
-         if (uses_buffer())
-            cs.buffer.emplace();
-         cs.parent = change_set::parent_link{parent_idx, std::string(key)};
-
-         uint32_t idx = static_cast<uint32_t>(_change_sets.size());
-         _change_sets.push_back(std::move(cs));
-         return idx;
+         return add_subtree_cs(parent_idx, key, std::nullopt);
       }
 
       // ── Subtree commit (bottom-up) ────────────────────────────────────
@@ -563,40 +555,15 @@ namespace psitri
 
       // ── Internal mutation methods ─────────────────────────────────────
 
-      void do_insert(uint32_t idx, key_view key, value_view value)
-      {
-         auto& cs = cs_at(idx);
-         if (cs.buffer)
-            micro_put(cs, key, value);
-         else
-            cs.cursor->insert(key, value);
-      }
+      using cursor_write_fn = void (write_cursor::*)(key_view, value_view);
 
-      void do_update(uint32_t idx, key_view key, value_view value)
+      void do_write(uint32_t idx, key_view key, value_view value, cursor_write_fn op)
       {
          auto& cs = cs_at(idx);
          if (cs.buffer)
             micro_put(cs, key, value);
          else
-            cs.cursor->update(key, value);
-      }
-
-      void do_upsert(uint32_t idx, key_view key, value_view value)
-      {
-         auto& cs = cs_at(idx);
-         if (cs.buffer)
-            micro_put(cs, key, value);
-         else
-            cs.cursor->upsert(key, value);
-      }
-
-      void do_upsert_sorted(uint32_t idx, key_view key, value_view value)
-      {
-         auto& cs = cs_at(idx);
-         if (cs.buffer)
-            micro_put(cs, key, value);
-         else
-            cs.cursor->upsert_sorted(key, value);
+            ((*cs.cursor).*op)(key, value);
       }
 
       int do_remove(uint32_t idx, key_view key)
@@ -663,21 +630,15 @@ namespace psitri
          return result;
       }
 
-      cursor do_lower_bound(uint32_t idx, key_view key) const
+      cursor do_bound(uint32_t idx, key_view key, bool is_upper) const
       {
          auto& cs = cs_at(idx);
          cursor c(cs.cursor->root());
-         c.lower_bound(key);
-         track_bound(cs, key, c, false);
-         return c;
-      }
-
-      cursor do_upper_bound(uint32_t idx, key_view key) const
-      {
-         auto& cs = cs_at(idx);
-         cursor c(cs.cursor->root());
-         c.upper_bound(key);
-         track_bound(cs, key, c, true);
+         if (is_upper)
+            c.upper_bound(key);
+         else
+            c.lower_bound(key);
+         track_bound(cs, key, c, is_upper);
          return c;
       }
 
@@ -911,6 +872,23 @@ namespace psitri
       std::function<void()>                                    _rollback_func;
       tx_mode                                                  _mode = tx_mode::batch;
       std::vector<frame>                                       _frames;
+
+      // ── Multi-root support ────────────────────────────────────────────
+
+      write_session* _ws = nullptr;
+
+      struct held_lock
+      {
+         uint32_t    root_index;
+         uint32_t    cs_index;
+         std::mutex* lock;
+      };
+      std::vector<held_lock> _held_locks;
+      uint32_t               _max_held_root = 0;
+
+      // Defined in write_session_impl.hpp (needs write_session access)
+      void commit_additional_roots();
+      void abort_additional_roots() noexcept;
    };
 
    // ═════════════════════════════════════════════════════════════════════
@@ -919,22 +897,22 @@ namespace psitri
 
    inline void tree_handle::insert(key_view key, value_view value)
    {
-      _tx->do_insert(_cs_index, key, value);
+      _tx->do_write(_cs_index, key, value, &write_cursor::insert);
    }
 
    inline void tree_handle::update(key_view key, value_view value)
    {
-      _tx->do_update(_cs_index, key, value);
+      _tx->do_write(_cs_index, key, value, &write_cursor::update);
    }
 
    inline void tree_handle::upsert(key_view key, value_view value)
    {
-      _tx->do_upsert(_cs_index, key, value);
+      _tx->do_write(_cs_index, key, value, &write_cursor::upsert);
    }
 
    inline void tree_handle::upsert_sorted(key_view key, value_view value)
    {
-      _tx->do_upsert_sorted(_cs_index, key, value);
+      _tx->do_write(_cs_index, key, value, &write_cursor::upsert_sorted);
    }
 
    inline int tree_handle::remove(key_view key)
@@ -965,12 +943,12 @@ namespace psitri
 
    inline cursor tree_handle::lower_bound(key_view key) const
    {
-      return _tx->do_lower_bound(_cs_index, key);
+      return _tx->do_bound(_cs_index, key, false);
    }
 
    inline cursor tree_handle::upper_bound(key_view key) const
    {
-      return _tx->do_upper_bound(_cs_index, key);
+      return _tx->do_bound(_cs_index, key, true);
    }
 
    inline bool tree_handle::is_subtree(key_view key) const
