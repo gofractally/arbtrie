@@ -6,13 +6,14 @@
 #include <psitri/detail/write_buffer.hpp>
 #include <psitri/tx_mode.hpp>
 #include <psitri/write_cursor.hpp>
+#include <stdexcept>
 #include <vector>
 
 namespace psitri
 {
    class write_session;
-
    class transaction;
+   class tree_handle;
 
    // ═════════════════════════════════════════════════════════════════════
    // OCC read-set tracking
@@ -61,22 +62,82 @@ namespace psitri
    // ═════════════════════════════════════════════════════════════════════
 
    /// Tracks modifications and reads for a single tree within a transaction.
-   /// Each tree_id opened during a transaction gets its own change_set.
+   /// Each tree opened during a transaction gets its own change_set, indexed
+   /// by position in the transaction's _change_sets vector.
    struct change_set
    {
-      std::optional<write_cursor>       cursor;
+      std::optional<write_cursor>         cursor;
       std::optional<detail::write_buffer> buffer;
-      read_set                          reads;
+      read_set                            reads;
 
-      /// If this tree was obtained from a parent, records how to write
-      /// the new tree_id back on commit.
+      /// If this tree was obtained from a parent tree, records how to write
+      /// the subtree root back into the parent on commit.
       struct parent_link
       {
-         sal::tree_id parent_tid;  ///< tree_id of the parent tree
-         std::string  key;         ///< key in parent where this subtree lives
+         uint32_t    parent_cs_index;  ///< index into transaction::_change_sets
+         std::string key;              ///< key in parent where this subtree lives
       };
       std::optional<parent_link> parent;
+      std::optional<uint32_t>    root_index;  ///< set for top-level roots only
    };
+
+   // ═════════════════════════════════════════════════════════════════════
+   // tree_handle — lightweight targeting scope into a transaction
+   // ═════════════════════════════════════════════════════════════════════
+
+   /// A non-owning reference to a specific tree within a transaction.
+   /// Directs mutations and reads to that tree's change_set. Not a
+   /// sub-transaction — has no commit/abort. The owning transaction
+   /// manages all lifecycle and write-back.
+   ///
+   /// Obtained via transaction::primary(), tree_handle::open_subtree(),
+   /// or tree_handle::create_subtree().
+   class tree_handle
+   {
+     public:
+      tree_handle(tree_handle&&) noexcept            = default;
+      tree_handle& operator=(tree_handle&&) noexcept = default;
+      tree_handle(const tree_handle&)                = delete;
+      tree_handle& operator=(const tree_handle&)     = delete;
+
+      // ── Mutations ─────────────────────────────────────────────────────
+      void     insert(key_view key, value_view value);
+      void     update(key_view key, value_view value);
+      void     upsert(key_view key, value_view value);
+      void     upsert_sorted(key_view key, value_view value);
+      int      remove(key_view key);
+      uint64_t remove_range(key_view lower, key_view upper);
+
+      // ── Reads ─────────────────────────────────────────────────────────
+      cursor read_cursor() const;
+
+      template <ConstructibleBuffer T>
+      std::optional<T> get(key_view key) const;
+
+      int32_t get(key_view key, Buffer auto* buffer) const;
+
+      cursor lower_bound(key_view key) const;
+      cursor upper_bound(key_view key) const;
+      bool   is_subtree(key_view key) const;
+
+      // ── Subtree navigation ────────────────────────────────────────────
+      tree_handle open_subtree(key_view key);
+      tree_handle create_subtree(key_view key);
+
+      // ── Diagnostics ───────────────────────────────────────────────────
+      tree_context::stats get_stats();
+
+     private:
+      friend class transaction;
+      tree_handle(transaction& tx, uint32_t cs_index) : _tx(&tx), _cs_index(cs_index) {}
+
+      transaction* _tx;
+      uint32_t     _cs_index;
+   };
+
+   // ═════════════════════════════════════════════════════════════════════
+   // transaction_frame_ref — RAII sub-transaction guard
+   // ═════════════════════════════════════════════════════════════════════
 
    /// RAII guard for a sub-transaction frame. Movable, not copyable.
    /// Delegates all operations to the owning transaction via dot notation.
@@ -128,6 +189,11 @@ namespace psitri
       sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const;
       write_cursor                      get_subtree_cursor(key_view key) const;
 
+      // ── Subtree navigation ────────────────────────────────────────────
+
+      tree_handle open_subtree(key_view key);
+      tree_handle create_subtree(key_view key);
+
       // ── Transaction control ───────────────────────────────────────────
 
       void                                commit() noexcept;
@@ -162,20 +228,21 @@ namespace psitri
                   std::function<void(sal::smart_ptr<sal::alloc_header>)> commit_func,
                   std::function<void()>                                  rollback_func,
                   tx_mode                                                mode = tx_mode::batch)
-          : _commit_func(std::move(commit_func)),
+          : _session(std::move(session)),
+            _commit_func(std::move(commit_func)),
             _rollback_func(std::move(rollback_func)),
             _mode(mode)
       {
-         _primary_tid = root.get_tree_id();
-
-         auto& cs = get_or_create_change_set(_primary_tid);
+         change_set cs;
          if (root)
             cs.cursor.emplace(std::move(root));
          else
-            cs.cursor.emplace(std::move(session));
+            cs.cursor.emplace(_session);
 
          if (uses_buffer())
             cs.buffer.emplace();
+
+         _change_sets.push_back(std::move(cs));
       }
 
       /// OCC-specific constructor: provides an MVCC-aware commit function
@@ -184,19 +251,20 @@ namespace psitri
                   sal::smart_ptr<sal::alloc_header>   root,
                   occ_commit_fn                       occ_commit,
                   std::function<void()>               rollback_func)
-          : _rollback_func(std::move(rollback_func)),
+          : _session(std::move(session)),
+            _rollback_func(std::move(rollback_func)),
             _mode(tx_mode::occ)
       {
          _occ_commit_func = std::move(occ_commit);
-         _primary_tid = root.get_tree_id();
 
-         auto& cs = get_or_create_change_set(_primary_tid);
+         change_set cs;
          if (root)
             cs.cursor.emplace(std::move(root));
          else
-            cs.cursor.emplace(std::move(session));
+            cs.cursor.emplace(_session);
 
          cs.buffer.emplace();
+         _change_sets.push_back(std::move(cs));
       }
 
       transaction(const transaction&)            = delete;
@@ -206,215 +274,89 @@ namespace psitri
 
       ~transaction() { abort(); }
 
+      // ── Primary handle ────────────────────────────────────────────────
+
+      tree_handle primary() { return tree_handle(*this, _primary_index); }
+
       // ── Primary tree mutations (backward-compatible API) ──────────────
 
       void insert(key_view key, value_view value)
       {
-         insert(_primary_tid, key, value);
+         do_insert(_primary_index, key, value);
       }
 
       void update(key_view key, value_view value)
       {
-         update(_primary_tid, key, value);
+         do_update(_primary_index, key, value);
       }
 
       void upsert(key_view key, value_view value)
       {
-         upsert(_primary_tid, key, value);
+         do_upsert(_primary_index, key, value);
       }
 
       void upsert_sorted(key_view key, value_view value)
       {
-         upsert_sorted(_primary_tid, key, value);
+         do_upsert_sorted(_primary_index, key, value);
       }
 
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         assert_no_child_frame();
-         auto& cs = primary();
+         auto& cs = cs_at(_primary_index);
          assert(_mode == tx_mode::batch && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert(key, std::move(subtree_root));
       }
 
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         assert_no_child_frame();
-         auto& cs = primary();
+         auto& cs = cs_at(_primary_index);
          assert(_mode == tx_mode::batch && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert_sorted(key, std::move(subtree_root));
       }
 
       int remove(key_view key)
       {
-         return remove(_primary_tid, key);
+         return do_remove(_primary_index, key);
       }
 
       uint64_t remove_range(key_view lower, key_view upper)
       {
-         return remove_range(_primary_tid, lower, upper);
-      }
-
-      // ── Multi-tree mutations (tree_id-parameterized) ──────────────────
-
-      void insert(sal::tree_id tid, key_view key, value_view value)
-      {
-         assert_no_child_frame();
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-            micro_put(cs, key, value);
-         else
-            cs.cursor->insert(key, value);
-      }
-
-      void update(sal::tree_id tid, key_view key, value_view value)
-      {
-         assert_no_child_frame();
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-            micro_put(cs, key, value);
-         else
-            cs.cursor->update(key, value);
-      }
-
-      void upsert(sal::tree_id tid, key_view key, value_view value)
-      {
-         assert_no_child_frame();
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-            micro_put(cs, key, value);
-         else
-            cs.cursor->upsert(key, value);
-      }
-
-      void upsert_sorted(sal::tree_id tid, key_view key, value_view value)
-      {
-         assert_no_child_frame();
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-            micro_put(cs, key, value);
-         else
-            cs.cursor->upsert_sorted(key, value);
-      }
-
-      int remove(sal::tree_id tid, key_view key)
-      {
-         assert_no_child_frame();
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-            return micro_remove(cs, key);
-         return cs.cursor->remove(key);
-      }
-
-      uint64_t remove_range(sal::tree_id tid, key_view lower, key_view upper)
-      {
-         assert_no_child_frame();
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-            return micro_remove_range(cs, lower, upper);
-         return cs.cursor->remove_range(lower, upper);
+         return do_remove_range(_primary_index, lower, upper);
       }
 
       // ── Primary tree read access (backward-compatible) ────────────────
 
-      cursor read_cursor() const { return primary().cursor->read_cursor(); }
+      cursor read_cursor() const { return cs_at(_primary_index).cursor->read_cursor(); }
 
       template <ConstructibleBuffer T>
       std::optional<T> get(key_view key) const
       {
-         return get<T>(_primary_tid, key);
+         return do_get<T>(_primary_index, key);
       }
 
       int32_t get(key_view key, Buffer auto* buffer) const
       {
-         return get(_primary_tid, key, buffer);
+         return do_get(_primary_index, key, buffer);
       }
 
       cursor lower_bound(key_view key) const
       {
-         return lower_bound(_primary_tid, key);
+         return do_lower_bound(_primary_index, key);
       }
 
       cursor upper_bound(key_view key) const
       {
-         return upper_bound(_primary_tid, key);
+         return do_upper_bound(_primary_index, key);
       }
 
       bool is_subtree(key_view key) const
       {
-         return is_subtree(_primary_tid, key);
+         return do_is_subtree(_primary_index, key);
       }
 
       sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const
       {
-         return get_subtree(_primary_tid, key);
-      }
-
-      write_cursor get_subtree_cursor(key_view key) const
-      {
-         return primary().cursor->get_subtree_cursor(key);
-      }
-
-      // ── Multi-tree read access ────────────────────────────────────────
-
-      template <ConstructibleBuffer T>
-      std::optional<T> get(sal::tree_id tid, key_view key) const
-      {
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-         {
-            const auto* entry = cs.buffer->get(key);
-            if (entry)
-            {
-               if (entry->is_tombstone())
-                  return std::nullopt;
-               auto val = entry->value();
-               T    result;
-               result.resize(val.size());
-               std::memcpy(result.data(), val.data(), val.size());
-               return result;
-            }
-         }
-         auto result = cs.cursor->get<T>(key);
-         track_read(cs, key);
-         return result;
-      }
-
-      int32_t get(sal::tree_id tid, key_view key, Buffer auto* buffer) const
-      {
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-         {
-            const auto* entry = cs.buffer->get(key);
-            if (entry)
-            {
-               if (entry->is_tombstone())
-                  return cursor::value_not_found;
-               auto val = entry->value();
-               buffer->resize(val.size());
-               std::memcpy(buffer->data(), val.data(), val.size());
-               return static_cast<int32_t>(val.size());
-            }
-         }
-         auto result = cs.cursor->get(key, buffer);
-         track_read(cs, key);
-         return result;
-      }
-
-      bool is_subtree(sal::tree_id tid, key_view key) const
-      {
-         auto& cs = get_change_set(tid);
-         if (cs.buffer)
-         {
-            const auto* entry = cs.buffer->get(key);
-            if (entry)
-               return false;
-         }
-         return cs.cursor->is_subtree(key);
-      }
-
-      sal::smart_ptr<sal::alloc_header> get_subtree(sal::tree_id tid, key_view key) const
-      {
-         auto& cs = get_change_set(tid);
+         auto& cs = cs_at(_primary_index);
          if (cs.buffer)
          {
             const auto* entry = cs.buffer->get(key);
@@ -425,72 +367,9 @@ namespace psitri
          return cs.cursor->get_subtree(key);
       }
 
-      /// Position a cursor at lower_bound on the persistent tree and
-      /// record the predicate for OCC phantom detection.
-      cursor lower_bound(sal::tree_id tid, key_view key) const
+      write_cursor get_subtree_cursor(key_view key) const
       {
-         auto& cs = get_change_set(tid);
-         cursor c(cs.cursor->root());
-         c.lower_bound(key);
-         track_bound(cs, key, c, false);
-         return c;
-      }
-
-      /// Position a cursor at upper_bound on the persistent tree and
-      /// record the predicate for OCC phantom detection.
-      cursor upper_bound(sal::tree_id tid, key_view key) const
-      {
-         auto& cs = get_change_set(tid);
-         cursor c(cs.cursor->root());
-         c.upper_bound(key);
-         track_bound(cs, key, c, true);
-         return c;
-      }
-
-      /// Open a subtree for modification within this transaction.
-      /// Returns the subtree's tree_id. The subtree gets its own change_set
-      /// with a parent link back to (tid, key) so commit can propagate.
-      sal::tree_id open_subtree(sal::tree_id parent_tid, key_view key)
-      {
-         auto& pcs = get_change_set(parent_tid);
-
-         // Read the subtree tree_id from the parent tree
-         auto sub_ptr = pcs.cursor->get_subtree(key);
-         if (!sub_ptr)
-            return sal::null_tree_id;
-
-         auto sub_tid = sub_ptr.get_tree_id();
-
-         // Create change_set for the subtree if it doesn't exist
-         auto it = find_change_set(sub_tid);
-         if (it == _change_sets.end())
-         {
-            change_set cs;
-            cs.cursor.emplace(std::move(sub_ptr));
-            if (uses_buffer())
-               cs.buffer.emplace();
-            cs.parent = change_set::parent_link{parent_tid, std::string(key)};
-            _change_sets.push_back({sub_tid, std::move(cs)});
-         }
-
-         return sub_tid;
-      }
-
-      /// Open a subtree by tree_id directly (no parent link).
-      /// Use when the caller manages the tree_id independently.
-      sal::tree_id open_tree(sal::smart_ptr<sal::alloc_header> root)
-      {
-         auto tid = root.get_tree_id();
-         auto it  = find_change_set(tid);
-         if (it == _change_sets.end())
-         {
-            change_set cs;
-            cs.cursor.emplace(std::move(root));
-            if (uses_buffer())
-               cs.buffer.emplace();
-            _change_sets.push_back({tid, std::move(cs)});
-         }
-         return tid;
+         return cs_at(_primary_index).cursor->get_subtree_cursor(key);
       }
 
       // ── Transaction control ───────────────────────────────────────────
@@ -502,7 +381,7 @@ namespace psitri
             // OCC: commit subtrees bottom-up, then validate+apply primary
             commit_subtrees_bottom_up();
 
-            auto& pcs = primary();
+            auto& pcs = cs_at(_primary_index);
             _occ_commit_func(pcs.buffer ? &*pcs.buffer : nullptr, pcs.reads);
             _occ_commit_func = nullptr;
             _commit_func     = nullptr;
@@ -514,7 +393,7 @@ namespace psitri
             // Batch/micro: commit subtrees bottom-up, then commit primary
             commit_subtrees_bottom_up();
 
-            auto& pcs = primary();
+            auto& pcs = cs_at(_primary_index);
             if (pcs.buffer && !pcs.buffer->empty())
                merge_buffer_to_persistent(pcs);
 
@@ -546,74 +425,91 @@ namespace psitri
 
       // ── Diagnostics ───────────────────────────────────────────────────
 
-      tree_context::stats get_stats() { return primary().cursor->get_stats(); }
+      tree_context::stats get_stats() { return cs_at(_primary_index).cursor->get_stats(); }
 
      private:
+      friend class tree_handle;
       friend class transaction_frame_ref;
 
       // ── Change set storage ────────────────────────────────────────────
 
-      /// Change sets stored as a vector of pairs (tree_id → change_set).
-      /// Small number expected (primary + a few subtrees), so linear scan is fine.
-      using cs_entry = std::pair<sal::tree_id, change_set>;
-      std::vector<cs_entry> _change_sets;
-      sal::tree_id          _primary_tid;
+      sal::allocator_session_ptr _session;
+      std::vector<change_set>   _change_sets;
+      uint32_t                  _primary_index = 0;
 
-      change_set& primary() { return get_change_set(_primary_tid); }
-      const change_set& primary() const { return get_change_set(_primary_tid); }
+      change_set&       cs_at(uint32_t idx) { return _change_sets[idx]; }
+      const change_set& cs_at(uint32_t idx) const { return _change_sets[idx]; }
 
-      typename std::vector<cs_entry>::iterator find_change_set(sal::tree_id tid)
+      // ── Subtree management ────────────────────────────────────────────
+
+      /// Find an existing subtree change_set opened from (parent_idx, key).
+      std::optional<uint32_t> find_subtree_cs(uint32_t parent_idx, key_view key) const
       {
-         return std::find_if(_change_sets.begin(), _change_sets.end(),
-                             [&](const cs_entry& e) { return e.first == tid; });
+         for (uint32_t i = 0; i < _change_sets.size(); ++i)
+         {
+            auto& cs = _change_sets[i];
+            if (cs.parent && cs.parent->parent_cs_index == parent_idx &&
+                cs.parent->key == key)
+               return i;
+         }
+         return std::nullopt;
       }
 
-      typename std::vector<cs_entry>::const_iterator find_change_set(sal::tree_id tid) const
+      /// Open an existing subtree at key in parent's tree.
+      /// Creates a new change_set if not already opened.
+      uint32_t open_subtree_impl(uint32_t parent_idx, key_view key)
       {
-         return std::find_if(_change_sets.begin(), _change_sets.end(),
-                             [&](const cs_entry& e) { return e.first == tid; });
+         auto existing = find_subtree_cs(parent_idx, key);
+         if (existing)
+            return *existing;
+
+         auto& pcs    = cs_at(parent_idx);
+         auto  sub_ptr = pcs.cursor->get_subtree(key);
+         assert(sub_ptr && "key is not a subtree");
+
+         change_set cs;
+         cs.cursor.emplace(std::move(sub_ptr));
+         if (uses_buffer())
+            cs.buffer.emplace();
+         cs.parent = change_set::parent_link{parent_idx, std::string(key)};
+
+         uint32_t idx = static_cast<uint32_t>(_change_sets.size());
+         _change_sets.push_back(std::move(cs));
+         return idx;
       }
 
-      change_set& get_change_set(sal::tree_id tid)
+      /// Create a new empty subtree at key in parent's tree.
+      /// Creates a new change_set backed by an empty tree.
+      uint32_t create_subtree_impl(uint32_t parent_idx, key_view key)
       {
-         auto it = find_change_set(tid);
-         assert(it != _change_sets.end() && "change_set not found for tree_id");
-         return it->second;
-      }
+         auto existing = find_subtree_cs(parent_idx, key);
+         if (existing)
+            return *existing;
 
-      const change_set& get_change_set(sal::tree_id tid) const
-      {
-         auto it = find_change_set(tid);
-         assert(it != _change_sets.end() && "change_set not found for tree_id");
-         return it->second;
-      }
+         change_set cs;
+         cs.cursor.emplace(_session);  // empty tree
+         if (uses_buffer())
+            cs.buffer.emplace();
+         cs.parent = change_set::parent_link{parent_idx, std::string(key)};
 
-      change_set& get_or_create_change_set(sal::tree_id tid)
-      {
-         auto it = find_change_set(tid);
-         if (it != _change_sets.end())
-            return it->second;
-         _change_sets.push_back({tid, change_set{}});
-         return _change_sets.back().second;
+         uint32_t idx = static_cast<uint32_t>(_change_sets.size());
+         _change_sets.push_back(std::move(cs));
+         return idx;
       }
 
       // ── Subtree commit (bottom-up) ────────────────────────────────────
 
-      /// Commit all non-primary change sets bottom-up: children before parents.
+      /// Commit all subtree change sets bottom-up: children before parents.
       /// Each committed subtree produces a new root that is upserted into its
       /// parent's change set under the recorded key.
       void commit_subtrees_bottom_up()
       {
-         // Simple approach: iterate until all subtrees are committed.
-         // A subtree is ready to commit when none of its children are uncommitted.
-         // With typically shallow nesting, this converges quickly.
-
          std::vector<bool> committed(_change_sets.size(), false);
 
-         // Mark primary as not-a-subtree (committed last, separately)
+         // Mark top-level entries (no parent) as not-a-subtree
          for (size_t i = 0; i < _change_sets.size(); ++i)
          {
-            if (_change_sets[i].first == _primary_tid)
+            if (!_change_sets[i].parent)
                committed[i] = true;
          }
 
@@ -626,7 +522,7 @@ namespace psitri
                if (committed[i])
                   continue;
 
-               auto& cs = _change_sets[i].second;
+               auto& cs = _change_sets[i];
 
                // Check if all children of this subtree are committed
                bool children_done = true;
@@ -634,8 +530,9 @@ namespace psitri
                {
                   if (committed[j])
                      continue;
-                  auto& child = _change_sets[j].second;
-                  if (child.parent && child.parent->parent_tid == _change_sets[i].first)
+                  auto& child = _change_sets[j];
+                  if (child.parent &&
+                      child.parent->parent_cs_index == static_cast<uint32_t>(i))
                   {
                      children_done = false;
                      break;
@@ -654,14 +551,146 @@ namespace psitri
                // Write the new subtree root back into the parent's tree
                if (cs.parent)
                {
-                  auto& parent_cs = get_change_set(cs.parent->parent_tid);
+                  auto& parent_cs = cs_at(cs.parent->parent_cs_index);
                   parent_cs.cursor->upsert(cs.parent->key, std::move(new_root));
                }
 
                committed[i] = true;
-               progress = true;
+               progress     = true;
             }
          }
+      }
+
+      // ── Internal mutation methods ─────────────────────────────────────
+
+      void do_insert(uint32_t idx, key_view key, value_view value)
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->insert(key, value);
+      }
+
+      void do_update(uint32_t idx, key_view key, value_view value)
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->update(key, value);
+      }
+
+      void do_upsert(uint32_t idx, key_view key, value_view value)
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->upsert(key, value);
+      }
+
+      void do_upsert_sorted(uint32_t idx, key_view key, value_view value)
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->upsert_sorted(key, value);
+      }
+
+      int do_remove(uint32_t idx, key_view key)
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+            return micro_remove(cs, key);
+         return cs.cursor->remove(key);
+      }
+
+      uint64_t do_remove_range(uint32_t idx, key_view lower, key_view upper)
+      {
+         if (_mode == tx_mode::occ)
+            throw std::logic_error("remove_range not supported in OCC mode");
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+            return micro_remove_range(cs, lower, upper);
+         return cs.cursor->remove_range(lower, upper);
+      }
+
+      // ── Internal read methods ─────────────────────────────────────────
+
+      template <ConstructibleBuffer T>
+      std::optional<T> do_get(uint32_t idx, key_view key) const
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+         {
+            const auto* entry = cs.buffer->get(key);
+            if (entry)
+            {
+               if (entry->is_tombstone())
+                  return std::nullopt;
+               auto val = entry->value();
+               T    result;
+               result.resize(val.size());
+               std::memcpy(result.data(), val.data(), val.size());
+               return result;
+            }
+         }
+         auto result = cs.cursor->get<T>(key);
+         track_read(cs, key);
+         return result;
+      }
+
+      int32_t do_get(uint32_t idx, key_view key, Buffer auto* buffer) const
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+         {
+            const auto* entry = cs.buffer->get(key);
+            if (entry)
+            {
+               if (entry->is_tombstone())
+                  return cursor::value_not_found;
+               auto val = entry->value();
+               buffer->resize(val.size());
+               std::memcpy(buffer->data(), val.data(), val.size());
+               return static_cast<int32_t>(val.size());
+            }
+         }
+         auto result = cs.cursor->get(key, buffer);
+         track_read(cs, key);
+         return result;
+      }
+
+      cursor do_lower_bound(uint32_t idx, key_view key) const
+      {
+         auto& cs = cs_at(idx);
+         cursor c(cs.cursor->root());
+         c.lower_bound(key);
+         track_bound(cs, key, c, false);
+         return c;
+      }
+
+      cursor do_upper_bound(uint32_t idx, key_view key) const
+      {
+         auto& cs = cs_at(idx);
+         cursor c(cs.cursor->root());
+         c.upper_bound(key);
+         track_bound(cs, key, c, true);
+         return c;
+      }
+
+      bool do_is_subtree(uint32_t idx, key_view key) const
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+         {
+            const auto* entry = cs.buffer->get(key);
+            if (entry)
+               return false;
+         }
+         return cs.cursor->is_subtree(key);
       }
 
       // ── Frame stack for sub-transactions ──────────────────────────────
@@ -677,7 +706,7 @@ namespace psitri
 
       void push_frame() noexcept
       {
-         auto& cs = primary();
+         auto& cs = cs_at(_primary_index);
          frame f;
          if (uses_buffer())
          {
@@ -701,8 +730,8 @@ namespace psitri
       void abort_frame() noexcept
       {
          assert(!_frames.empty());
-         auto& cs = primary();
-         auto f = std::move(_frames.back());
+         auto& cs = cs_at(_primary_index);
+         auto  f  = std::move(_frames.back());
          _frames.pop_back();
 
          if (uses_buffer())
@@ -716,8 +745,6 @@ namespace psitri
             cs.cursor.emplace(std::move(f.saved_root));
          }
       }
-
-      void assert_no_child_frame() const {}
 
       // ── Micro mode helpers ────────────────────────────────────────────
 
@@ -887,6 +914,86 @@ namespace psitri
    };
 
    // ═════════════════════════════════════════════════════════════════════
+   // tree_handle inline implementations
+   // ═════════════════════════════════════════════════════════════════════
+
+   inline void tree_handle::insert(key_view key, value_view value)
+   {
+      _tx->do_insert(_cs_index, key, value);
+   }
+
+   inline void tree_handle::update(key_view key, value_view value)
+   {
+      _tx->do_update(_cs_index, key, value);
+   }
+
+   inline void tree_handle::upsert(key_view key, value_view value)
+   {
+      _tx->do_upsert(_cs_index, key, value);
+   }
+
+   inline void tree_handle::upsert_sorted(key_view key, value_view value)
+   {
+      _tx->do_upsert_sorted(_cs_index, key, value);
+   }
+
+   inline int tree_handle::remove(key_view key)
+   {
+      return _tx->do_remove(_cs_index, key);
+   }
+
+   inline uint64_t tree_handle::remove_range(key_view lower, key_view upper)
+   {
+      return _tx->do_remove_range(_cs_index, lower, upper);
+   }
+
+   inline cursor tree_handle::read_cursor() const
+   {
+      return _tx->cs_at(_cs_index).cursor->read_cursor();
+   }
+
+   template <ConstructibleBuffer T>
+   std::optional<T> tree_handle::get(key_view key) const
+   {
+      return _tx->do_get<T>(_cs_index, key);
+   }
+
+   inline int32_t tree_handle::get(key_view key, Buffer auto* buffer) const
+   {
+      return _tx->do_get(_cs_index, key, buffer);
+   }
+
+   inline cursor tree_handle::lower_bound(key_view key) const
+   {
+      return _tx->do_lower_bound(_cs_index, key);
+   }
+
+   inline cursor tree_handle::upper_bound(key_view key) const
+   {
+      return _tx->do_upper_bound(_cs_index, key);
+   }
+
+   inline bool tree_handle::is_subtree(key_view key) const
+   {
+      return _tx->do_is_subtree(_cs_index, key);
+   }
+
+   inline tree_handle tree_handle::open_subtree(key_view key)
+   {
+      return tree_handle(*_tx, _tx->open_subtree_impl(_cs_index, key));
+   }
+
+   inline tree_handle tree_handle::create_subtree(key_view key)
+   {
+      return tree_handle(*_tx, _tx->create_subtree_impl(_cs_index, key));
+   }
+
+   inline tree_context::stats tree_handle::get_stats()
+   {
+      return _tx->cs_at(_cs_index).cursor->get_stats();
+   }
+
+   // ═════════════════════════════════════════════════════════════════════
    // transaction_frame_ref inline implementations
    // ═════════════════════════════════════════════════════════════════════
 
@@ -960,6 +1067,16 @@ namespace psitri
    inline write_cursor transaction_frame_ref::get_subtree_cursor(key_view key) const
    {
       return _tx->get_subtree_cursor(key);
+   }
+
+   inline tree_handle transaction_frame_ref::open_subtree(key_view key)
+   {
+      return _tx->primary().open_subtree(key);
+   }
+
+   inline tree_handle transaction_frame_ref::create_subtree(key_view key)
+   {
+      return _tx->primary().create_subtree(key);
    }
 
    inline void transaction_frame_ref::commit() noexcept
