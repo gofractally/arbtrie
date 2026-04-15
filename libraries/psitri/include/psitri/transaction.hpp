@@ -26,17 +26,34 @@ namespace psitri
       sal::ptr_address leaf_addr;  ///< leaf containing the key
    };
 
+   /// A lower/upper-bound predicate observation for OCC phantom detection.
+   /// Records the query key and the key it resolved to, so validation
+   /// can re-execute the bound and detect inserted phantoms.
+   struct lb_entry
+   {
+      std::string query_key;    ///< the key we searched for
+      std::string found_key;    ///< the key we landed on (empty if at_end)
+      bool        at_end;       ///< whether the bound hit end
+      bool        is_upper;     ///< true = upper_bound, false = lower_bound
+   };
+
    /// Accumulated read observations for an OCC transaction.
    struct read_set
    {
       std::vector<read_entry> entries;
+      std::vector<lb_entry>   lower_bounds;
 
       void record(key_view key, uint64_t version, sal::ptr_address leaf_addr)
       {
          entries.push_back({std::string(key), version, leaf_addr});
       }
 
-      bool empty() const noexcept { return entries.empty(); }
+      void record_bound(key_view query, key_view found, bool at_end, bool is_upper)
+      {
+         lower_bounds.push_back({std::string(query), std::string(found), at_end, is_upper});
+      }
+
+      bool empty() const noexcept { return entries.empty() && lower_bounds.empty(); }
    };
 
    // ═════════════════════════════════════════════════════════════════════
@@ -98,6 +115,14 @@ namespace psitri
       std::optional<T> get(key_view key) const;
 
       int32_t get(key_view key, Buffer auto* buffer) const;
+
+      /// Position a cursor at the first key >= query and record the
+      /// predicate for OCC phantom detection.
+      cursor lower_bound(key_view key) const;
+
+      /// Position a cursor at the first key > query and record the
+      /// predicate for OCC phantom detection.
+      cursor upper_bound(key_view key) const;
 
       bool                              is_subtree(key_view key) const;
       sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const;
@@ -304,6 +329,16 @@ namespace psitri
          return get(_primary_tid, key, buffer);
       }
 
+      cursor lower_bound(key_view key) const
+      {
+         return lower_bound(_primary_tid, key);
+      }
+
+      cursor upper_bound(key_view key) const
+      {
+         return upper_bound(_primary_tid, key);
+      }
+
       bool is_subtree(key_view key) const
       {
          return is_subtree(_primary_tid, key);
@@ -388,6 +423,28 @@ namespace psitri
                    cs.cursor->root().session(), sal::null_ptr_address);
          }
          return cs.cursor->get_subtree(key);
+      }
+
+      /// Position a cursor at lower_bound on the persistent tree and
+      /// record the predicate for OCC phantom detection.
+      cursor lower_bound(sal::tree_id tid, key_view key) const
+      {
+         auto& cs = get_change_set(tid);
+         cursor c(cs.cursor->root());
+         c.lower_bound(key);
+         track_bound(cs, key, c, false);
+         return c;
+      }
+
+      /// Position a cursor at upper_bound on the persistent tree and
+      /// record the predicate for OCC phantom detection.
+      cursor upper_bound(sal::tree_id tid, key_view key) const
+      {
+         auto& cs = get_change_set(tid);
+         cursor c(cs.cursor->root());
+         c.upper_bound(key);
+         track_bound(cs, key, c, true);
+         return c;
       }
 
       /// Open a subtree for modification within this transaction.
@@ -812,6 +869,16 @@ namespace psitri
          }
       }
 
+      /// Track a lower_bound/upper_bound predicate for OCC phantom detection.
+      void track_bound(const change_set& cs, key_view query, const cursor& c, bool is_upper) const
+      {
+         if (_occ_commit_func)
+         {
+            const_cast<change_set&>(cs).reads.record_bound(
+                query, c.is_end() ? key_view{} : c.key(), c.is_end(), is_upper);
+         }
+      }
+
       std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
       occ_commit_fn                                            _occ_commit_func;
       std::function<void()>                                    _rollback_func;
@@ -861,6 +928,15 @@ namespace psitri
       return _tx->remove_range(lower, upper);
    }
    inline cursor transaction_frame_ref::read_cursor() const { return _tx->read_cursor(); }
+
+   inline cursor transaction_frame_ref::lower_bound(key_view key) const
+   {
+      return _tx->lower_bound(key);
+   }
+   inline cursor transaction_frame_ref::upper_bound(key_view key) const
+   {
+      return _tx->upper_bound(key);
+   }
 
    template <ConstructibleBuffer T>
    std::optional<T> transaction_frame_ref::get(key_view key) const

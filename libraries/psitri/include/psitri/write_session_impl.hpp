@@ -67,11 +67,33 @@ namespace psitri
                 if (!reads.empty())
                 {
                    cursor c(current_root);
+
+                   // Point-read validation
                    for (const auto& entry : reads.entries)
                    {
                       auto info = c.get_key_info(entry.key);
                       if (info.leaf_addr != entry.leaf_addr || info.version != entry.version)
                          throw occ_conflict{};
+                   }
+
+                   // Bound predicate validation (phantom detection)
+                   for (const auto& lb : reads.lower_bounds)
+                   {
+                      if (lb.is_upper)
+                         c.upper_bound(lb.query_key);
+                      else
+                         c.lower_bound(lb.query_key);
+
+                      if (lb.at_end)
+                      {
+                         if (!c.is_end())
+                            throw occ_conflict{};
+                      }
+                      else
+                      {
+                         if (c.is_end() || c.key() != lb.found_key)
+                            throw occ_conflict{};
+                      }
                    }
                 }
 

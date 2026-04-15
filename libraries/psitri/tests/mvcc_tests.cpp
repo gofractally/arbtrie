@@ -1744,6 +1744,230 @@ TEST_CASE("occ: missing key detection — insert by concurrent writer", "[mvcc_o
    std::filesystem::remove_all(db_path);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// OCC phantom detection tests (lower-bound read-set tracking)
+// ═══════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("occ: lower_bound detects phantom insert", "[mvcc_occ][phantom]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("occ_phantom_lb_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+
+   // Seed: key_a, key_c (gap at key_b)
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key_a", "val_a");
+      tx.upsert("key_c", "val_c");
+      tx.commit();
+   }
+
+   // OCC: lower_bound("key_b") → lands on "key_c"
+   auto tx = ws->start_transaction(0, tx_mode::occ);
+   auto c  = tx.lower_bound("key_b");
+   REQUIRE(!c.is_end());
+   CHECK(c.key() == "key_c");
+
+   // Concurrent writer inserts "key_b" — a phantom in [key_b, key_c)
+   {
+      auto tx2 = ws->start_transaction(0);
+      tx2.upsert("key_b", "val_b_phantom");
+      tx2.commit();
+   }
+
+   // OCC commit must detect the phantom
+   CHECK_THROWS_AS(tx.commit(), occ_conflict);
+
+   std::filesystem::remove_all(db_path);
+}
+
+TEST_CASE("occ: lower_bound succeeds when no phantom inserted", "[mvcc_occ][phantom]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("occ_phantom_ok_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+
+   // Seed: key_a, key_c
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key_a", "val_a");
+      tx.upsert("key_c", "val_c");
+      tx.commit();
+   }
+
+   // OCC: lower_bound("key_b") → lands on "key_c"
+   auto tx = ws->start_transaction(0, tx_mode::occ);
+   auto c  = tx.lower_bound("key_b");
+   REQUIRE(!c.is_end());
+   CHECK(c.key() == "key_c");
+
+   // Concurrent writer modifies key_d (outside the range) — no phantom
+   {
+      auto tx2 = ws->start_transaction(0);
+      tx2.upsert("key_d", "val_d");
+      tx2.commit();
+   }
+
+   // OCC commit should succeed — lower_bound("key_b") still yields "key_c"
+   CHECK_NOTHROW(tx.commit());
+
+   std::filesystem::remove_all(db_path);
+}
+
+TEST_CASE("occ: lower_bound detects phantom when result key deleted", "[mvcc_occ][phantom]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("occ_phantom_del_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+
+   // Seed: key_a, key_b, key_c
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key_a", "val_a");
+      tx.upsert("key_b", "val_b");
+      tx.upsert("key_c", "val_c");
+      tx.commit();
+   }
+
+   // OCC: lower_bound("key_b") → lands on "key_b"
+   auto tx = ws->start_transaction(0, tx_mode::occ);
+   auto c  = tx.lower_bound("key_b");
+   REQUIRE(!c.is_end());
+   CHECK(c.key() == "key_b");
+
+   // Concurrent writer deletes "key_b"
+   {
+      auto tx2 = ws->start_transaction(0);
+      tx2.remove("key_b");
+      tx2.commit();
+   }
+
+   // OCC commit: lower_bound("key_b") now yields "key_c" — conflict
+   CHECK_THROWS_AS(tx.commit(), occ_conflict);
+
+   std::filesystem::remove_all(db_path);
+}
+
+TEST_CASE("occ: lower_bound at end detects phantom insert", "[mvcc_occ][phantom]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("occ_phantom_end_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+
+   // Seed: key_a only
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key_a", "val_a");
+      tx.commit();
+   }
+
+   // OCC: lower_bound("key_z") → at_end (nothing >= "key_z")
+   auto tx = ws->start_transaction(0, tx_mode::occ);
+   auto c  = tx.lower_bound("key_z");
+   CHECK(c.is_end());
+
+   // Concurrent writer inserts "key_z"
+   {
+      auto tx2 = ws->start_transaction(0);
+      tx2.upsert("key_z", "val_z");
+      tx2.commit();
+   }
+
+   // OCC commit: lower_bound("key_z") now finds "key_z" — phantom
+   CHECK_THROWS_AS(tx.commit(), occ_conflict);
+
+   std::filesystem::remove_all(db_path);
+}
+
+TEST_CASE("occ: upper_bound detects phantom insert", "[mvcc_occ][phantom]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("occ_phantom_ub_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+
+   // Seed: key_a, key_c
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key_a", "val_a");
+      tx.upsert("key_c", "val_c");
+      tx.commit();
+   }
+
+   // OCC: upper_bound("key_a") → lands on "key_c"
+   auto tx = ws->start_transaction(0, tx_mode::occ);
+   auto c  = tx.upper_bound("key_a");
+   REQUIRE(!c.is_end());
+   CHECK(c.key() == "key_c");
+
+   // Concurrent writer inserts "key_b" — phantom in (key_a, key_c)
+   {
+      auto tx2 = ws->start_transaction(0);
+      tx2.upsert("key_b", "val_b_phantom");
+      tx2.commit();
+   }
+
+   // OCC commit: upper_bound("key_a") now yields "key_b" — conflict
+   CHECK_THROWS_AS(tx.commit(), occ_conflict);
+
+   std::filesystem::remove_all(db_path);
+}
+
+TEST_CASE("occ: combined point reads and lower_bound phantom detection", "[mvcc_occ][phantom]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("occ_phantom_combined_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+
+   // Seed: key_a, key_c, key_e
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key_a", "val_a");
+      tx.upsert("key_c", "val_c");
+      tx.upsert("key_e", "val_e");
+      tx.commit();
+   }
+
+   // OCC: point-read key_a + lower_bound("key_d") → lands on "key_e"
+   auto tx = ws->start_transaction(0, tx_mode::occ);
+
+   auto v = tx.get<std::string>("key_a");
+   REQUIRE(v.has_value());
+
+   auto c = tx.lower_bound("key_d");
+   REQUIRE(!c.is_end());
+   CHECK(c.key() == "key_e");
+
+   // Concurrent writer inserts "key_d" — phantom in [key_d, key_e)
+   // key_a is untouched, so point-read would pass, but lower_bound fails
+   {
+      auto tx2 = ws->start_transaction(0);
+      tx2.upsert("key_d", "val_d");
+      tx2.commit();
+   }
+
+   CHECK_THROWS_AS(tx.commit(), occ_conflict);
+
+   std::filesystem::remove_all(db_path);
+}
+
 TEST_CASE("cow prunes old version entries from value_nodes", "[mvcc_write][cow_prune]")
 {
    sal::set_current_thread_name("main");

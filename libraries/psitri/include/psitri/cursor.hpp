@@ -330,6 +330,14 @@ namespace psitri
       auto read_lock = _node.session()->lock();
       return lower_bound_impl(key);
    }
+   inline bool cursor::upper_bound(key_view key) noexcept
+   {
+      if (!lower_bound(key))
+         return false;  // at end — nothing >= key
+      if (this->key() == key)
+         return next();  // skip exact match; true=found next, false=at end
+      return true;  // already positioned past key
+   }
    inline bool cursor::lower_bound_impl(key_view key) noexcept
    {
       if (sal::null_ptr_address == _node.address()) [[unlikely]]
