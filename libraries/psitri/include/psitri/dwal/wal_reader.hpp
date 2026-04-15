@@ -15,7 +15,7 @@ namespace psitri::dwal
       wal_op_type      type;
       std::string_view key;       // points into reader's buffer
       std::string_view value;     // upsert_data only
-      sal::ptr_address subtree;   // upsert_subtree only
+      sal::tree_id     subtree;   // upsert_subtree only
       std::string_view range_low; // remove_range only
       std::string_view range_high;// remove_range only
    };

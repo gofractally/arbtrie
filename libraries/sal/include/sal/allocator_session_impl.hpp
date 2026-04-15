@@ -152,6 +152,34 @@ namespace sal
       return smart_ref<To>(get_session_ptr(), node_ptr, from.control(),
                            from.control().load(std::memory_order_relaxed));
    }
+   /**
+    * MVCC realloc: like realloc but allows ref > 1.
+    * Atomically redirects a shared control block to new data constructed
+    * with the given arguments.  Old data is freed (epoch-reclaimed).
+    */
+   template <typename To, typename From>
+   [[nodiscard]] smart_ref<To> allocator_session::mvcc_realloc(const smart_ref<From>& from,
+                                                                uint32_t               size,
+                                                                auto&&... args)
+   {
+      assert(size >= sizeof(To));
+      assert(size % 64 == 0);
+      static_assert(std::is_base_of_v<alloc_header, To>, "To must derive from alloc_header");
+      static_assert(std::is_base_of_v<alloc_header, From>, "From must derive from alloc_header");
+
+      auto [loc, node_ptr] =
+          alloc_data<To>(size, from->address_seq(), std::forward<decltype(args)>(args)...);
+      assert(loc != from.loc());
+
+      control_block_data old_control = from.control().move(loc);
+      // No ref == 1 assertion — MVCC: other snapshots may reference this CB
+
+      record_freed_space(get<From>(old_control.loc()));
+
+      return smart_ref<To>(get_session_ptr(), node_ptr, from.control(),
+                           from.control().load(std::memory_order_relaxed));
+   }
+
    template <typename T>
    [[nodiscard]] T* allocator_session::copy_on_write(smart_ref<T>& ptr)
    {
@@ -264,6 +292,33 @@ namespace sal
    {
       return _sega._mapped_state->_cache_difficulty_state.should_cache(get_random(), size);
    }
+   inline ptr_address allocator_session::alloc_custom_cb(uint64_t user_value) noexcept
+   {
+      assert(check_thread_ownership());
+      allocation palloc = _ptr_alloc.alloc(alloc_hint{});
+
+      // Store user value in the location field with {active=0, pending_cache=1} marker
+      auto loc = location::from_cacheline(user_value);
+      palloc.ptr->store(
+          control_block_data().set_loc(loc).set_ref(1).set_pending_cache(true),
+          std::memory_order_release);
+
+      return palloc.addr_seq.address;
+   }
+
+   inline uint64_t allocator_session::read_custom_cb(ptr_address adr) const noexcept
+   {
+      auto& cb   = const_cast<control_block_alloc&>(_ptr_alloc).get(adr);
+      auto  data = cb.load(std::memory_order_acquire);
+      assert(is_custom_cb(data));
+      return data.cacheline_offset;
+   }
+
+   inline bool allocator_session::is_custom_cb(control_block_data cbd) noexcept
+   {
+      return !cbd.active && cbd.pending_cache;
+   }
+
    inline void allocator_session::retain(ptr_address adr)
    {
       get(adr).retain();
@@ -281,20 +336,32 @@ namespace sal
    }
    inline void allocator_session::final_release(ptr_address adr) noexcept
    {
-      auto& cb   = get(adr);
+      auto& cb  = get(adr);
+      // Read custom marker BEFORE release() clears the bits
+      auto  pre = cb.load(std::memory_order_relaxed);
+      bool  custom = is_custom_cb(pre);
+
       auto  prev = cb.release();
       if (prev.ref > 1)
          return;
 
-      location loc = prev.loc();
-      if (loc != location::null()) [[likely]]
+      if (!custom) [[likely]]
       {
-         this->retain_session();
-         allocator_session_ptr ptr(this);
+         location loc = prev.loc();
+         if (loc != location::null()) [[likely]]
+         {
+            this->retain_session();
+            allocator_session_ptr ptr(this);
 
-         const alloc_header* nptr = get<alloc_header>(loc);
-         vcall::destroy(nptr, ptr);
-         record_freed_space(nptr);
+            const alloc_header* nptr = get<alloc_header>(loc);
+            vcall::destroy(nptr, ptr);
+            record_freed_space(nptr);
+         }
+      }
+      else if (_sega._on_custom_cb_released) [[unlikely]]
+      {
+         // Custom CB released — notify callback with stored version number
+         _sega._on_custom_cb_released(pre.cacheline_offset);
       }
       _ptr_alloc.free(adr);
    }
@@ -314,18 +381,19 @@ namespace sal
    template <typename T>
    smart_ptr<T> allocator_session::get_root(root_object_number ro) noexcept
    {
-      return smart_ptr<T>(allocator_session_ptr(this, true), _sega.get(ro));
+      auto tid = _sega.get(ro);
+      return smart_ptr<T>(allocator_session_ptr(this, true), tid, false);
    }
    template <typename T>
    inline smart_ptr<T> allocator_session::set_root(root_object_number ro,
                                                    smart_ptr<T>       ptr,
                                                    sync_type          st) noexcept
    {
-      auto new_adr = ptr.take();
-      sync_root_info root_info{*ro, *new_adr};
+      auto new_tid = ptr.take_tree_id();
+      sync_root_info root_info{*ro, *new_tid.root};
       sync(st, _sega._mapped_state->_config, root_info);
-      auto old_adr = _sega.set(ro, new_adr, st);
-      return smart_ptr<T>(allocator_session_ptr(this, true), old_adr, false);
+      auto old_tid = _sega.set(ro, new_tid, st);
+      return smart_ptr<T>(allocator_session_ptr(this, true), old_tid, false);
    }
 
    template <typename T, typename U>
@@ -336,11 +404,13 @@ namespace sal
    {
       sync_root_info root_info{*ro, *desired.address()};
       sync(st, _sega._mapped_state->_config, root_info);
-      if (_sega.cas_root(ro, expect.address(), desired.address(), st))
+      auto expect_tid  = expect.get_tree_id();
+      auto desired_tid = desired.get_tree_id();
+      if (_sega.cas_root(ro, expect_tid, desired_tid, st))
       {
-         desired.take();  // _sega took it, so don't release it
+         desired.take_tree_id();  // _sega took it, so don't release it
          // let the caller determine how and when to release prior value
-         return smart_ptr<T>(expect.address(), this);
+         return smart_ptr<T>(allocator_session_ptr(this, true), expect_tid, false);
       }
       return smart_ptr<T>();
    }
@@ -360,11 +430,11 @@ namespace sal
        smart_ptr<alloc_header> desired,
        sync_type               st) noexcept
    {
-      auto new_adr = desired.take();
-      sync_root_info root_info{*ro, *new_adr};
+      auto new_tid = desired.take_tree_id();
+      sync_root_info root_info{*ro, *new_tid.root};
       sync(st, _sega._mapped_state->_config, root_info);
-      return smart_ptr<alloc_header>(get_session_ptr(),
-                                     _sega.transaction_commit(ro, new_adr, st));
+      auto old_tid = _sega.transaction_commit(ro, new_tid, st);
+      return smart_ptr<alloc_header>(get_session_ptr(), old_tid, false);
    }
    inline void allocator_session::transaction_abort(root_object_number ro) noexcept
    {
@@ -405,6 +475,9 @@ namespace sal
           {
              auto& cb   = const_cast<control_block_alloc&>(_ptr_alloc).get(adr);
              auto  data = cb.load(std::memory_order_relaxed);
+             // Skip custom control blocks (no segment data to inspect)
+             if (is_custom_cb(data))
+                return;
              auto* obj  = reinterpret_cast<alloc_header*>(_block_base_ptr + *data.loc().offset());
              visitor(adr, ref, obj);
           });

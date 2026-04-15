@@ -30,6 +30,12 @@ namespace psitri
          _dbfile(dir / "dbfile.bin", sal::access_mode::read_write)
    {
       register_node_types();
+
+      // Register callback: when a version CB's refcount drops to 0,
+      // record its version number in the dead-version map.
+      _allocator.set_on_custom_cb_released(
+          [this](uint64_t version) { _dead_versions.add_dead_version(version); });
+
       if (_dbfile.size() == 0)
       {
          _dbfile.resize(sizeof(detail::database_state));
@@ -311,14 +317,26 @@ namespace psitri
             case node_type::value:
             {
                auto* vn = static_cast<const value_node*>(static_cast<const node*>(obj));
-               if (vn->is_subtree)
+               if (vn->is_subtree_container())
                {
-                  auto child_addr = *reinterpret_cast<const sal::ptr_address*>(vn->data);
-                  verify_node(alloc, child_addr, key_prefix, root_index, result, visited);
+                  for (uint8_t vi = 0; vi < vn->num_versions(); ++vi)
+                  {
+                     int16_t off = vn->get_entry_offset(vi);
+                     if (off >= value_node::offset_data_start)
+                     {
+                        tree_id tid = vn->get_tree_id();
+                        verify_node(alloc, tid.root, key_prefix, root_index, result, visited);
+                     }
+                  }
                }
-               // value_node data integrity is covered by the object checksum
+               // Also visit child value_nodes
+               for (uint8_t ni = 0; ni < vn->num_next(); ++ni)
+                  verify_node(alloc, vn->next_ptrs()[ni].ptr, key_prefix, root_index, result, visited);
                break;
             }
+            case node_type::value_index:
+               // value_index nodes will be handled when implemented (Phase 3 overflow)
+               break;
          }
       }
    }  // anonymous namespace
@@ -338,11 +356,11 @@ namespace psitri
       auto  num_roots = std::min<uint32_t>(roots.size(), num_top_roots);
       for (uint32_t i = 0; i < num_roots; ++i)
       {
-         auto addr = roots[i].load(std::memory_order_relaxed);
-         if (addr != sal::null_ptr_address)
+         auto tid = sal::tree_id::unpack(roots[i].load(std::memory_order_relaxed));
+         if (tid.root != sal::null_ptr_address)
          {
             ++result.roots_checked;
-            verify_node(_allocator, addr, {}, i, result, visited);
+            verify_node(_allocator, tid.root, {}, i, result, visited);
          }
       }
 

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <new>
 #include <ucc/padded_atomic.hpp>
@@ -264,44 +265,49 @@ namespace sal
       ///@{
 
       /**
-       * Caller is responsible for releasing the returned address.
+       * Caller is responsible for releasing the returned tree_id (both root and ver).
        */
-      [[nodiscard]] ptr_address get(root_object_number ro) noexcept
+      [[nodiscard]] tree_id get(root_object_number ro) noexcept
       {
          assert(ro < _root_objects->size() && "invalid root object number");
          std::shared_lock<std::shared_mutex> lock(_root_object_mutex[*ro]);
-         auto adr = _root_objects->at(*ro).load(std::memory_order_acquire);
-         SAL_TRACE("get root object: {} adr: {}", ro, adr);
-         if (adr != null_ptr_address)
-            retain(adr);
-         return adr;
+         auto packed = _root_objects->at(*ro).load(std::memory_order_acquire);
+         auto tid = tree_id::unpack(packed);
+         SAL_TRACE("get root object: {} adr: {}", ro, tid.root);
+         if (tid.root != null_ptr_address)
+            retain(tid.root);
+         if (tid.ver != null_ptr_address)
+            retain(tid.ver);
+         return tid;
       }
 
       /**
-       * Caller is responsible for *giving* a valid reference, and releasing the returned address.
+       * Caller is responsible for *giving* a valid reference (both root and ver),
+       * and releasing the returned tree_id.
        */
-      [[nodiscard]] ptr_address set(root_object_number ro, ptr_address adr, sync_type st) noexcept
+      [[nodiscard]] tree_id set(root_object_number ro, tree_id tid, sync_type st) noexcept
       {
          std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
          std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-         auto result = _root_objects->at(*ro).exchange(adr, std::memory_order_release);
+         auto result = _root_objects->at(*ro).exchange(tid.pack(), std::memory_order_release);
          sync(st);
-         return result;
+         return tree_id::unpack(result);
       }
 
       /**
-       * Caller is responsible for *giving* a valid desire reference, and releasing the 
+       * Caller is responsible for *giving* a valid desire reference, and releasing the
        * expected reference if successful.  On failure the caller remains responsible for
        * the reference to the desired outcome.
        */
       bool cas_root(root_object_number ro,
-                    ptr_address        expect,
-                    ptr_address        desire,
+                    tree_id            expect,
+                    tree_id            desire,
                     sync_type          st) noexcept
       {
          std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
          std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-         if (_root_objects->at(*ro).compare_exchange_strong(expect, desire,
+         auto expect_packed = expect.pack();
+         if (_root_objects->at(*ro).compare_exchange_strong(expect_packed, desire.pack(),
                                                             std::memory_order_release))
          {
             sync(st);
@@ -311,11 +317,11 @@ namespace sal
       }
 
       /**
-       * Grabs the write mutex for root object, which will ensure that no other 
+       * Grabs the write mutex for root object, which will ensure that no other
        * threads will be working on a update to this root object until this transaction
-       * is committed or aborted. 
+       * is committed or aborted.
        */
-      [[nodiscard]] ptr_address start_transaction(root_object_number ro)
+      [[nodiscard]] tree_id start_transaction(root_object_number ro)
       {
          check_corruption();
          SAL_WARN("{}", _root_objects);
@@ -326,18 +332,18 @@ namespace sal
       }
 
       /**
-       * Commits the transaction, and updates the root object with the desired reference.
-       * Caller is responsible for releasing the returned address.
+       * Commits the transaction, and updates the root object with the desired tree_id.
+       * Caller is responsible for releasing the returned tree_id.
        */
-      [[nodiscard]] ptr_address transaction_commit(root_object_number ro,
-                                                   ptr_address        desired,
-                                                   sync_type          st) noexcept
+      [[nodiscard]] tree_id transaction_commit(root_object_number ro,
+                                               tree_id            desired,
+                                               sync_type          st) noexcept
       {
          assert(ro < _root_objects->size() && "invalid root object number");
-         auto result = _root_objects->at(*ro).exchange(desired, std::memory_order_release);
+         auto result = _root_objects->at(*ro).exchange(desired.pack(), std::memory_order_release);
          sync(st);
          _write_mutex[*ro].unlock();
-         return result;
+         return tree_id::unpack(result);
       }
 
       /**
@@ -356,7 +362,7 @@ namespace sal
 
       friend class allocator_session;
       friend class read_lock;
-      using root_object_array = std::array<std::atomic<ptr_address>, 1024>;
+      using root_object_array = std::array<std::atomic<uint64_t>, 1024>;
 
       mapped_memory::allocator_state* _mapped_state;
       control_block_alloc             _ptr_alloc;
@@ -375,6 +381,19 @@ namespace sal
       /// Own cacheline to avoid false sharing (128 bytes for Apple M-series).
       alignas(ucc::hardware_cacheline_size) std::atomic<bool> _corruption_detected{false};
 
+      /// Callback invoked when a custom control block's refcount drops to 0.
+      /// The argument is the user value stored in the CB (e.g., MVCC version number).
+      /// Called from final_release() context (release thread, compactor, or writer thread).
+      std::function<void(uint64_t)> _on_custom_cb_released;
+
+     public:
+      void set_on_custom_cb_released(std::function<void(uint64_t)> cb)
+      {
+         _on_custom_cb_released = std::move(cb);
+      }
+
+     private:
+
       inline bool config_validate_checksum_on_compact() const;
       inline bool config_update_checksum_on_compact() const;
       inline bool config_update_checksum_on_modify() const;
@@ -383,6 +402,9 @@ namespace sal
       void recursive_retain_all(ptr_address addr);
       // Implementation helper for reachable_size(); defined in allocator.cpp
       void recursive_sum_size(ptr_address addr, uint64_t& total, void* visited);
+      /// Reconstruct custom control blocks from root slots during recovery.
+      /// Custom CBs have no segment data and must be rebuilt from known positions.
+      void reconstruct_custom_cbs_from_roots();
       bool compactor_release_objects(allocator_session& ses);
 
       /**

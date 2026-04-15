@@ -44,7 +44,7 @@ namespace psitri::dwal
 
       /// Old value — only meaningful for overwrite_buffered and erase_buffered.
       /// For data values: old_value.data is arena-backed.
-      /// For subtree values: old_value.subtree_root is the ptr_address.
+      /// For subtree values: old_value.subtree.root is the ptr_address.
       btree_value old_value;
 
       /// For erase_range only
@@ -199,14 +199,20 @@ namespace psitri::dwal
                  entry.type == undo_entry::kind::erase_buffered) &&
                 entry.old_value.is_subtree())
             {
-               release_fn(entry.old_value.subtree_root);
+               release_fn(entry.old_value.subtree.root);
+               if (entry.old_value.subtree.ver != sal::null_ptr_address)
+                  release_fn(entry.old_value.subtree.ver);
             }
             if (entry.type == undo_entry::kind::erase_range && entry.range)
             {
                for (const auto& be : entry.range->buffered_keys)
                {
                   if (be.old_value.is_subtree())
-                     release_fn(be.old_value.subtree_root);
+                  {
+                     release_fn(be.old_value.subtree.root);
+                     if (be.old_value.subtree.ver != sal::null_ptr_address)
+                        release_fn(be.old_value.subtree.ver);
+                  }
                }
             }
          }

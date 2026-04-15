@@ -135,13 +135,12 @@ namespace psitri::dwal
       ++_op_count;
    }
 
-   void wal_writer::add_upsert_subtree(std::string_view key, sal::ptr_address addr)
+   void wal_writer::add_upsert_subtree(std::string_view key, sal::tree_id tid)
    {
       assert(_entry_active);
       write_u8(static_cast<uint8_t>(wal_op_type::upsert_subtree));
       write_string(key);
-      uint32_t raw = addr.get_value();
-      write_u32(raw);
+      write_u64(tid.pack());
       ++_op_count;
    }
 

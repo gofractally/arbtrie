@@ -15,18 +15,18 @@ namespace psitri::dwal
          tombstone
       };
 
-      kind             type         = kind::data;
-      std::string_view data         = {};       // arena-backed (kind::data only)
-      sal::ptr_address subtree_root = {};       // PsiTri subtree address (kind::subtree only)
+      kind             type    = kind::data;
+      std::string_view data    = {};       // arena-backed (kind::data only)
+      sal::tree_id     subtree = {};       // PsiTri subtree identifier (kind::subtree only)
 
       static btree_value make_data(std::string_view d) noexcept
       {
          return {kind::data, d, {}};
       }
 
-      static btree_value make_subtree(sal::ptr_address addr) noexcept
+      static btree_value make_subtree(sal::tree_id tid) noexcept
       {
-         return {kind::subtree, {}, addr};
+         return {kind::subtree, {}, tid};
       }
 
       static btree_value make_tombstone() noexcept { return {kind::tombstone, {}, {}}; }

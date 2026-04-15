@@ -82,6 +82,55 @@ namespace psitri
       transaction start_transaction(uint32_t root_index,
                                     tx_mode  mode = tx_mode::batch);
 
+      /**
+       * @brief Immediate-mode MVCC upsert on a single key.
+       *
+       * Two locking paths:
+       * - **Fast path** (key has value_node): acquires a stripe lock on the
+       *   value_node's ptr_address. Only the value_node is modified via CB
+       *   relocation — no leaf/inner cascade. Multiple writers on different
+       *   value_nodes can execute concurrently on the same root.
+       * - **Slow path** (inline value or new key): acquires the per-root
+       *   modify_lock because structural changes (inline→value_node promotion,
+       *   leaf insert, or COW fallback) may cascade.
+       *
+       * Both paths allocate a global version number and update the root slot's
+       * version CB for reclamation tracking.
+       *
+       * @param root_index Index into the 512 top-level roots (0-511).
+       * @param key        The key to insert or update.
+       * @param value      The new value.
+       * @return The version number allocated for this write.
+       */
+      uint64_t mvcc_upsert(uint32_t root_index, key_view key, value_view value);
+
+      /**
+       * @brief Immediate-mode MVCC remove (tombstone) on a single key.
+       *
+       * Same locking semantics as mvcc_upsert: stripe lock on value_node
+       * for keys that already have one, per-root mutex otherwise. Appends
+       * a tombstone entry to the key's value_node.
+       *
+       * @param root_index Index into the 512 top-level roots (0-511).
+       * @param key        The key to tombstone.
+       * @return The version number allocated for this write.
+       */
+      uint64_t mvcc_remove(uint32_t root_index, key_view key);
+
+      /**
+       * @brief Background defrag pass on a single root.
+       *
+       * Walks the tree and strips dead version entries from value_nodes.
+       * Dead entries are those whose version falls within a dead range
+       * (all snapshots referencing that version have been dropped).
+       *
+       * Acquires the per-root mutex for the duration of the pass.
+       *
+       * @param root_index Index into the 512 top-level roots (0-511).
+       * @return The number of value_nodes that were cleaned up.
+       */
+      uint64_t defrag_tree(uint32_t root_index);
+
       ///@}
 
       /** @name Write Cursors (Low-Level) */
@@ -148,6 +197,12 @@ namespace psitri
       sal::smart_ptr<sal::alloc_header> make_ptr(sal::ptr_address addr, bool retain = false)
       {
          return sal::smart_ptr<sal::alloc_header>(_allocator_session, addr, retain);
+      }
+
+      /// Create a reference-counted smart_ptr from a tree_id (root + ver).
+      sal::smart_ptr<sal::alloc_header> make_ptr(sal::tree_id tid, bool retain = false)
+      {
+         return sal::smart_ptr<sal::alloc_header>(_allocator_session, tid, retain);
       }
 
       ///@}
@@ -230,6 +285,10 @@ namespace psitri
 
      private:
       friend class transaction;
+
+      /// Fast-path version-CB swap under lightweight per-root ver lock.
+      void swap_root_ver(uint32_t root_index, uint64_t ver_num);
+
       sal::sync_type _sync = sal::sync_type::none;
    };
 

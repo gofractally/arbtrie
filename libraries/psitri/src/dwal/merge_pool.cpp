@@ -150,7 +150,7 @@ namespace psitri::dwal
          }
          else if (val.is_subtree())
          {
-            auto subtree = ws.make_ptr(val.subtree_root, /*retain=*/true);
+            auto subtree = ws.make_ptr(val.subtree, /*retain=*/true);
             if (subtree)
                tx.upsert_sorted(key, std::move(subtree));
          }

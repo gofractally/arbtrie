@@ -43,7 +43,7 @@ namespace psitri::dwal
       void add_upsert_data(std::string_view key, std::string_view value);
 
       /// Add an upsert (subtree) operation.
-      void add_upsert_subtree(std::string_view key, sal::ptr_address addr);
+      void add_upsert_subtree(std::string_view key, sal::tree_id tid);
 
       /// Add a remove operation.
       void add_remove(std::string_view key);

@@ -954,7 +954,11 @@ static uint64_t reachable_nodes(test_db& t)
    if (!root)
       return 0;
    tree_context ctx(root);
-   return ctx.get_stats().total_nodes();
+   uint64_t count = ctx.get_stats().total_nodes();
+   // Count the version CB attached to the root slot (not a tree node)
+   if (root.ver() != sal::null_ptr_address)
+      ++count;
+   return count;
 }
 
 /// Helper: assert no orphaned nodes exist.
@@ -968,6 +972,9 @@ static void require_no_orphans(test_db& t, const char* context = "")
    {
       tree_context ctx(root);
       reachable = ctx.get_stats().total_nodes();
+      // Count the version CB attached to the root slot (not a tree node)
+      if (root.ver() != sal::null_ptr_address)
+         ++reachable;
    }
    uint64_t allocated = t.ses->get_total_allocated_objects();
    INFO(context << " reachable=" << reachable << " allocated=" << allocated);

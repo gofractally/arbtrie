@@ -1,6 +1,7 @@
 #pragma once
 #include <cassert>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <psitri/detail/write_buffer.hpp>
 #include <psitri/tx_mode.hpp>
@@ -12,6 +13,53 @@ namespace psitri
    class write_session;
 
    class transaction;
+
+   // ═════════════════════════════════════════════════════════════════════
+   // OCC read-set tracking
+   // ═════════════════════════════════════════════════════════════════════
+
+   /// A single point-read observation for OCC validation.
+   struct read_entry
+   {
+      std::string      key;
+      uint64_t         version;    ///< 0=inline, latest_version()=VN, UINT64_MAX=missing
+      sal::ptr_address leaf_addr;  ///< leaf containing the key
+   };
+
+   /// Accumulated read observations for an OCC transaction.
+   struct read_set
+   {
+      std::vector<read_entry> entries;
+
+      void record(key_view key, uint64_t version, sal::ptr_address leaf_addr)
+      {
+         entries.push_back({std::string(key), version, leaf_addr});
+      }
+
+      bool empty() const noexcept { return entries.empty(); }
+   };
+
+   // ═════════════════════════════════════════════════════════════════════
+   // Per-tree change set
+   // ═════════════════════════════════════════════════════════════════════
+
+   /// Tracks modifications and reads for a single tree within a transaction.
+   /// Each tree_id opened during a transaction gets its own change_set.
+   struct change_set
+   {
+      std::optional<write_cursor>       cursor;
+      std::optional<detail::write_buffer> buffer;
+      read_set                          reads;
+
+      /// If this tree was obtained from a parent, records how to write
+      /// the new tree_id back on commit.
+      struct parent_link
+      {
+         sal::tree_id parent_tid;  ///< tree_id of the parent tree
+         std::string  key;         ///< key in parent where this subtree lives
+      };
+      std::optional<parent_link> parent;
+   };
 
    /// RAII guard for a sub-transaction frame. Movable, not copyable.
    /// Delegates all operations to the owning transaction via dot notation.
@@ -77,6 +125,10 @@ namespace psitri
    // transaction
    // ═════════════════════════════════════════════════════════════════════
 
+   /// OCC commit function type: receives the write buffer and read set,
+   /// validates per-key, applies writes to the current tree, publishes.
+   using occ_commit_fn = std::function<void(const detail::write_buffer*, const read_set&)>;
+
    class transaction
    {
      public:
@@ -89,13 +141,37 @@ namespace psitri
             _rollback_func(std::move(rollback_func)),
             _mode(mode)
       {
-         if (root)
-            _cursor.emplace(std::move(root));
-         else
-            _cursor.emplace(std::move(session));
+         _primary_tid = root.get_tree_id();
 
-         if (_mode == tx_mode::micro)
-            _buffer.emplace();
+         auto& cs = get_or_create_change_set(_primary_tid);
+         if (root)
+            cs.cursor.emplace(std::move(root));
+         else
+            cs.cursor.emplace(std::move(session));
+
+         if (uses_buffer())
+            cs.buffer.emplace();
+      }
+
+      /// OCC-specific constructor: provides an MVCC-aware commit function
+      /// that validates the read set per-key and applies writes to the current tree.
+      transaction(sal::allocator_session_ptr          session,
+                  sal::smart_ptr<sal::alloc_header>   root,
+                  occ_commit_fn                       occ_commit,
+                  std::function<void()>               rollback_func)
+          : _rollback_func(std::move(rollback_func)),
+            _mode(tx_mode::occ)
+      {
+         _occ_commit_func = std::move(occ_commit);
+         _primary_tid = root.get_tree_id();
+
+         auto& cs = get_or_create_change_set(_primary_tid);
+         if (root)
+            cs.cursor.emplace(std::move(root));
+         else
+            cs.cursor.emplace(std::move(session));
+
+         cs.buffer.emplace();
       }
 
       transaction(const transaction&)            = delete;
@@ -105,84 +181,153 @@ namespace psitri
 
       ~transaction() { abort(); }
 
-      // ── Mutations ─────────────────────────────────────────────────────
+      // ── Primary tree mutations (backward-compatible API) ──────────────
 
       void insert(key_view key, value_view value)
       {
-         assert_no_child_frame();
-         if (_mode == tx_mode::micro)
-            micro_put(key, value);
-         else
-            _cursor->insert(key, value);
+         insert(_primary_tid, key, value);
       }
 
       void update(key_view key, value_view value)
       {
-         assert_no_child_frame();
-         if (_mode == tx_mode::micro)
-            micro_put(key, value);
-         else
-            _cursor->update(key, value);
+         update(_primary_tid, key, value);
       }
 
       void upsert(key_view key, value_view value)
       {
-         assert_no_child_frame();
-         if (_mode == tx_mode::micro)
-            micro_put(key, value);
-         else
-            _cursor->upsert(key, value);
+         upsert(_primary_tid, key, value);
       }
 
       void upsert_sorted(key_view key, value_view value)
       {
-         assert_no_child_frame();
-         if (_mode == tx_mode::micro)
-            micro_put(key, value);
-         else
-            _cursor->upsert_sorted(key, value);
+         upsert_sorted(_primary_tid, key, value);
       }
 
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          assert_no_child_frame();
-         assert(_mode == tx_mode::batch && "subtree upsert not supported in micro mode");
-         _cursor->upsert(key, std::move(subtree_root));
+         auto& cs = primary();
+         assert(_mode == tx_mode::batch && "subtree upsert not supported in buffered mode");
+         cs.cursor->upsert(key, std::move(subtree_root));
       }
 
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          assert_no_child_frame();
-         assert(_mode == tx_mode::batch && "subtree upsert not supported in micro mode");
-         _cursor->upsert_sorted(key, std::move(subtree_root));
+         auto& cs = primary();
+         assert(_mode == tx_mode::batch && "subtree upsert not supported in buffered mode");
+         cs.cursor->upsert_sorted(key, std::move(subtree_root));
       }
 
       int remove(key_view key)
       {
-         assert_no_child_frame();
-         if (_mode == tx_mode::micro)
-            return micro_remove(key);
-         return _cursor->remove(key);
+         return remove(_primary_tid, key);
       }
 
       uint64_t remove_range(key_view lower, key_view upper)
       {
-         assert_no_child_frame();
-         if (_mode == tx_mode::micro)
-            return micro_remove_range(lower, upper);
-         return _cursor->remove_range(lower, upper);
+         return remove_range(_primary_tid, lower, upper);
       }
 
-      // ── Read access ───────────────────────────────────────────────────
+      // ── Multi-tree mutations (tree_id-parameterized) ──────────────────
 
-      cursor read_cursor() const { return _cursor->read_cursor(); }
+      void insert(sal::tree_id tid, key_view key, value_view value)
+      {
+         assert_no_child_frame();
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->insert(key, value);
+      }
+
+      void update(sal::tree_id tid, key_view key, value_view value)
+      {
+         assert_no_child_frame();
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->update(key, value);
+      }
+
+      void upsert(sal::tree_id tid, key_view key, value_view value)
+      {
+         assert_no_child_frame();
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->upsert(key, value);
+      }
+
+      void upsert_sorted(sal::tree_id tid, key_view key, value_view value)
+      {
+         assert_no_child_frame();
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
+            micro_put(cs, key, value);
+         else
+            cs.cursor->upsert_sorted(key, value);
+      }
+
+      int remove(sal::tree_id tid, key_view key)
+      {
+         assert_no_child_frame();
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
+            return micro_remove(cs, key);
+         return cs.cursor->remove(key);
+      }
+
+      uint64_t remove_range(sal::tree_id tid, key_view lower, key_view upper)
+      {
+         assert_no_child_frame();
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
+            return micro_remove_range(cs, lower, upper);
+         return cs.cursor->remove_range(lower, upper);
+      }
+
+      // ── Primary tree read access (backward-compatible) ────────────────
+
+      cursor read_cursor() const { return primary().cursor->read_cursor(); }
 
       template <ConstructibleBuffer T>
       std::optional<T> get(key_view key) const
       {
-         if (_mode == tx_mode::micro && _buffer)
+         return get<T>(_primary_tid, key);
+      }
+
+      int32_t get(key_view key, Buffer auto* buffer) const
+      {
+         return get(_primary_tid, key, buffer);
+      }
+
+      bool is_subtree(key_view key) const
+      {
+         return is_subtree(_primary_tid, key);
+      }
+
+      sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const
+      {
+         return get_subtree(_primary_tid, key);
+      }
+
+      write_cursor get_subtree_cursor(key_view key) const
+      {
+         return primary().cursor->get_subtree_cursor(key);
+      }
+
+      // ── Multi-tree read access ────────────────────────────────────────
+
+      template <ConstructibleBuffer T>
+      std::optional<T> get(sal::tree_id tid, key_view key) const
+      {
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
          {
-            const auto* entry = _buffer->get(key);
+            const auto* entry = cs.buffer->get(key);
             if (entry)
             {
                if (entry->is_tombstone())
@@ -194,14 +339,17 @@ namespace psitri
                return result;
             }
          }
-         return _cursor->get<T>(key);
+         auto result = cs.cursor->get<T>(key);
+         track_read(cs, key);
+         return result;
       }
 
-      int32_t get(key_view key, Buffer auto* buffer) const
+      int32_t get(sal::tree_id tid, key_view key, Buffer auto* buffer) const
       {
-         if (_mode == tx_mode::micro && _buffer)
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
          {
-            const auto* entry = _buffer->get(key);
+            const auto* entry = cs.buffer->get(key);
             if (entry)
             {
                if (entry->is_tombstone())
@@ -212,47 +360,108 @@ namespace psitri
                return static_cast<int32_t>(val.size());
             }
          }
-         return _cursor->get(key, buffer);
+         auto result = cs.cursor->get(key, buffer);
+         track_read(cs, key);
+         return result;
       }
 
-      bool is_subtree(key_view key) const
+      bool is_subtree(sal::tree_id tid, key_view key) const
       {
-         if (_mode == tx_mode::micro && _buffer)
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
          {
-            const auto* entry = _buffer->get(key);
+            const auto* entry = cs.buffer->get(key);
             if (entry)
-               return false;  // buffered entries are never subtrees
+               return false;
          }
-         return _cursor->is_subtree(key);
+         return cs.cursor->is_subtree(key);
       }
 
-      sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const
+      sal::smart_ptr<sal::alloc_header> get_subtree(sal::tree_id tid, key_view key) const
       {
-         if (_mode == tx_mode::micro && _buffer)
+         auto& cs = get_change_set(tid);
+         if (cs.buffer)
          {
-            const auto* entry = _buffer->get(key);
+            const auto* entry = cs.buffer->get(key);
             if (entry)
                return sal::smart_ptr<sal::alloc_header>(
-                   _cursor->root().session(), sal::null_ptr_address);
+                   cs.cursor->root().session(), sal::null_ptr_address);
          }
-         return _cursor->get_subtree(key);
+         return cs.cursor->get_subtree(key);
       }
 
-      write_cursor get_subtree_cursor(key_view key) const
+      /// Open a subtree for modification within this transaction.
+      /// Returns the subtree's tree_id. The subtree gets its own change_set
+      /// with a parent link back to (tid, key) so commit can propagate.
+      sal::tree_id open_subtree(sal::tree_id parent_tid, key_view key)
       {
-         return _cursor->get_subtree_cursor(key);
+         auto& pcs = get_change_set(parent_tid);
+
+         // Read the subtree tree_id from the parent tree
+         auto sub_ptr = pcs.cursor->get_subtree(key);
+         if (!sub_ptr)
+            return sal::null_tree_id;
+
+         auto sub_tid = sub_ptr.get_tree_id();
+
+         // Create change_set for the subtree if it doesn't exist
+         auto it = find_change_set(sub_tid);
+         if (it == _change_sets.end())
+         {
+            change_set cs;
+            cs.cursor.emplace(std::move(sub_ptr));
+            if (uses_buffer())
+               cs.buffer.emplace();
+            cs.parent = change_set::parent_link{parent_tid, std::string(key)};
+            _change_sets.push_back({sub_tid, std::move(cs)});
+         }
+
+         return sub_tid;
+      }
+
+      /// Open a subtree by tree_id directly (no parent link).
+      /// Use when the caller manages the tree_id independently.
+      sal::tree_id open_tree(sal::smart_ptr<sal::alloc_header> root)
+      {
+         auto tid = root.get_tree_id();
+         auto it  = find_change_set(tid);
+         if (it == _change_sets.end())
+         {
+            change_set cs;
+            cs.cursor.emplace(std::move(root));
+            if (uses_buffer())
+               cs.buffer.emplace();
+            _change_sets.push_back({tid, std::move(cs)});
+         }
+         return tid;
       }
 
       // ── Transaction control ───────────────────────────────────────────
 
-      void commit() noexcept
+      void commit()
       {
+         if (_occ_commit_func)
+         {
+            // OCC: commit subtrees bottom-up, then validate+apply primary
+            commit_subtrees_bottom_up();
+
+            auto& pcs = primary();
+            _occ_commit_func(pcs.buffer ? &*pcs.buffer : nullptr, pcs.reads);
+            _occ_commit_func = nullptr;
+            _commit_func     = nullptr;
+            _rollback_func   = nullptr;
+            return;
+         }
          if (_commit_func)
          {
-            if (_mode == tx_mode::micro && _buffer && !_buffer->empty())
-               merge_buffer_to_persistent();
+            // Batch/micro: commit subtrees bottom-up, then commit primary
+            commit_subtrees_bottom_up();
 
-            _commit_func(std::move(_cursor->root()));
+            auto& pcs = primary();
+            if (pcs.buffer && !pcs.buffer->empty())
+               merge_buffer_to_persistent(pcs);
+
+            _commit_func(pcs.cursor->root());
             _commit_func   = nullptr;
             _rollback_func = nullptr;
          }
@@ -260,21 +469,18 @@ namespace psitri
 
       void abort() noexcept
       {
-         // Unwind any outstanding frames
          while (!_frames.empty())
             abort_frame();
 
          if (_rollback_func)
          {
             _rollback_func();
-            _rollback_func = nullptr;
-            _commit_func   = nullptr;
+            _rollback_func   = nullptr;
+            _commit_func     = nullptr;
+            _occ_commit_func = nullptr;
          }
       }
 
-      /// Create a sub-transaction. Returns a transaction_frame_ref that
-      /// delegates operations to this transaction. The parent must not
-      /// be modified directly while the sub-transaction is active.
       [[nodiscard]] transaction_frame_ref sub_transaction() noexcept
       {
          push_frame();
@@ -283,37 +489,148 @@ namespace psitri
 
       // ── Diagnostics ───────────────────────────────────────────────────
 
-      tree_context::stats get_stats() { return _cursor->get_stats(); }
+      tree_context::stats get_stats() { return primary().cursor->get_stats(); }
 
      private:
       friend class transaction_frame_ref;
+
+      // ── Change set storage ────────────────────────────────────────────
+
+      /// Change sets stored as a vector of pairs (tree_id → change_set).
+      /// Small number expected (primary + a few subtrees), so linear scan is fine.
+      using cs_entry = std::pair<sal::tree_id, change_set>;
+      std::vector<cs_entry> _change_sets;
+      sal::tree_id          _primary_tid;
+
+      change_set& primary() { return get_change_set(_primary_tid); }
+      const change_set& primary() const { return get_change_set(_primary_tid); }
+
+      typename std::vector<cs_entry>::iterator find_change_set(sal::tree_id tid)
+      {
+         return std::find_if(_change_sets.begin(), _change_sets.end(),
+                             [&](const cs_entry& e) { return e.first == tid; });
+      }
+
+      typename std::vector<cs_entry>::const_iterator find_change_set(sal::tree_id tid) const
+      {
+         return std::find_if(_change_sets.begin(), _change_sets.end(),
+                             [&](const cs_entry& e) { return e.first == tid; });
+      }
+
+      change_set& get_change_set(sal::tree_id tid)
+      {
+         auto it = find_change_set(tid);
+         assert(it != _change_sets.end() && "change_set not found for tree_id");
+         return it->second;
+      }
+
+      const change_set& get_change_set(sal::tree_id tid) const
+      {
+         auto it = find_change_set(tid);
+         assert(it != _change_sets.end() && "change_set not found for tree_id");
+         return it->second;
+      }
+
+      change_set& get_or_create_change_set(sal::tree_id tid)
+      {
+         auto it = find_change_set(tid);
+         if (it != _change_sets.end())
+            return it->second;
+         _change_sets.push_back({tid, change_set{}});
+         return _change_sets.back().second;
+      }
+
+      // ── Subtree commit (bottom-up) ────────────────────────────────────
+
+      /// Commit all non-primary change sets bottom-up: children before parents.
+      /// Each committed subtree produces a new root that is upserted into its
+      /// parent's change set under the recorded key.
+      void commit_subtrees_bottom_up()
+      {
+         // Simple approach: iterate until all subtrees are committed.
+         // A subtree is ready to commit when none of its children are uncommitted.
+         // With typically shallow nesting, this converges quickly.
+
+         std::vector<bool> committed(_change_sets.size(), false);
+
+         // Mark primary as not-a-subtree (committed last, separately)
+         for (size_t i = 0; i < _change_sets.size(); ++i)
+         {
+            if (_change_sets[i].first == _primary_tid)
+               committed[i] = true;
+         }
+
+         bool progress = true;
+         while (progress)
+         {
+            progress = false;
+            for (size_t i = 0; i < _change_sets.size(); ++i)
+            {
+               if (committed[i])
+                  continue;
+
+               auto& cs = _change_sets[i].second;
+
+               // Check if all children of this subtree are committed
+               bool children_done = true;
+               for (size_t j = 0; j < _change_sets.size(); ++j)
+               {
+                  if (committed[j])
+                     continue;
+                  auto& child = _change_sets[j].second;
+                  if (child.parent && child.parent->parent_tid == _change_sets[i].first)
+                  {
+                     children_done = false;
+                     break;
+                  }
+               }
+
+               if (!children_done)
+                  continue;
+
+               // Commit this subtree: merge buffer, get new root
+               if (cs.buffer && !cs.buffer->empty())
+                  merge_buffer_to_persistent(cs);
+
+               auto new_root = cs.cursor->root();
+
+               // Write the new subtree root back into the parent's tree
+               if (cs.parent)
+               {
+                  auto& parent_cs = get_change_set(cs.parent->parent_tid);
+                  parent_cs.cursor->upsert(cs.parent->key, std::move(new_root));
+               }
+
+               committed[i] = true;
+               progress = true;
+            }
+         }
+      }
 
       // ── Frame stack for sub-transactions ──────────────────────────────
 
       struct frame
       {
-         // Saved cursor root — used for batch mode abort and micro mode
-         // abort after a merge-then-delegate has flushed the buffer.
          sal::smart_ptr<sal::alloc_header> saved_root;
-         // Saved buffer state — used for micro mode abort when no merge occurred.
          detail::write_buffer::saved_state buf_state;
-         // Set true when a merge-then-delegate occurs within this frame's lifetime.
-         // After merge, buf_state is invalid — abort must restore saved_root instead.
          bool micro_merged = false;
       };
 
+      bool uses_buffer() const noexcept { return _mode != tx_mode::batch; }
+
       void push_frame() noexcept
       {
+         auto& cs = primary();
          frame f;
-         if (_mode == tx_mode::micro)
+         if (uses_buffer())
          {
-            f.buf_state  = _buffer->save();
-            f.saved_root = _cursor->root();  // saved in case merge happens later
-            _buffer->bump_generation();
+            f.buf_state  = cs.buffer->save();
+            f.saved_root = cs.cursor->root();
+            cs.buffer->bump_generation();
          }
          else
          {
-            f.saved_root = _cursor->root();
+            f.saved_root = cs.cursor->root();
          }
          _frames.push_back(std::move(f));
       }
@@ -321,108 +638,90 @@ namespace psitri
       void commit_frame() noexcept
       {
          assert(!_frames.empty());
-         _frames.pop_back();  // Data stays (buffer or cursor unchanged)
+         _frames.pop_back();
       }
 
       void abort_frame() noexcept
       {
          assert(!_frames.empty());
+         auto& cs = primary();
          auto f = std::move(_frames.back());
          _frames.pop_back();
 
-         if (_mode == tx_mode::micro)
+         if (uses_buffer())
          {
-            // Restore buffer state — works even after soft_clear because
-            // the arena data is preserved (soft_clear doesn't free memory).
-            _buffer->restore(f.buf_state);
-
+            cs.buffer->restore(f.buf_state);
             if (f.micro_merged)
-            {
-               // Merge modified the cursor — restore the pre-frame root too.
-               _cursor.emplace(std::move(f.saved_root));
-            }
+               cs.cursor.emplace(std::move(f.saved_root));
          }
          else
          {
-            _cursor.emplace(std::move(f.saved_root));
+            cs.cursor.emplace(std::move(f.saved_root));
          }
       }
 
-      void assert_no_child_frame() const
-      {
-         // If frames exist, the topmost frame_ref should be used, not the parent.
-         // This is a debug assertion — not enforced at the type level.
-      }
+      void assert_no_child_frame() const {}
 
       // ── Micro mode helpers ────────────────────────────────────────────
 
-      void micro_put(key_view key, value_view value)
+      void micro_put(change_set& cs, key_view key, value_view value)
       {
-         assert(_buffer);
-         const auto* existing = _buffer->get(key);
+         assert(cs.buffer);
+         const auto* existing = cs.buffer->get(key);
          if (existing)
          {
-            // Buffer already has this key — existed_in_persistent doesn't matter
-            _buffer->put(key, value, false);
+            cs.buffer->put(key, value, false);
          }
          else
          {
-            bool existed = _cursor->get<std::string>(key).has_value();
-            _buffer->put(key, value, existed);
+            bool existed = cs.cursor->get<std::string>(key).has_value();
+            cs.buffer->put(key, value, existed);
          }
       }
 
-      int micro_remove(key_view key)
+      int micro_remove(change_set& cs, key_view key)
       {
-         assert(_buffer);
-         const auto* existing = _buffer->get(key);
+         assert(cs.buffer);
+         const auto* existing = cs.buffer->get(key);
          if (existing)
          {
             if (existing->is_tombstone())
-               return -1;  // already deleted
-
-            // Get value size before erasing (for return value compatibility)
+               return -1;
             int result = existing->is_data() ? static_cast<int>(existing->data_len) : 0;
-            _buffer->erase(key, false);  // existed_in_persistent ignored when in buffer
+            cs.buffer->erase(key, false);
             return result;
          }
          else
          {
-            // Check persistent tree
-            auto val = _cursor->get<std::string>(key);
+            auto val = cs.cursor->get<std::string>(key);
             if (val)
             {
                int result = static_cast<int>(val->size());
-               _buffer->erase(key, true);
+               cs.buffer->erase(key, true);
                return result;
             }
             else
             {
-               _buffer->erase(key, false);
+               cs.buffer->erase(key, false);
                return -1;
             }
          }
       }
 
-      /// Threshold: if persistent key count in range is at or below this,
-      /// use individual tombstones. Above: merge buffer and delegate.
       static constexpr uint64_t tombstone_threshold = 256;
 
-      uint64_t micro_remove_range(key_view lower, key_view upper)
+      uint64_t micro_remove_range(change_set& cs, key_view lower, key_view upper)
       {
-         assert(_buffer);
+         assert(cs.buffer);
 
-         // Count persistent keys in range
-         cursor   rc(_cursor->root());
+         cursor   rc(cs.cursor->root());
          uint64_t persistent_count = rc.count_keys(lower, upper);
 
          if (persistent_count <= tombstone_threshold)
          {
-            // Small range: tombstone individual keys
             uint64_t removed = 0;
 
-            // Tombstone persistent keys in range
-            cursor pc(_cursor->root());
+            cursor pc(cs.cursor->root());
             pc.lower_bound(lower);
             while (!pc.is_end())
             {
@@ -430,19 +729,18 @@ namespace psitri
                if (!upper.empty() && k >= upper)
                   break;
 
-               const auto* entry = _buffer->get(k);
+               const auto* entry = cs.buffer->get(k);
                if (!entry || !entry->is_tombstone())
                {
-                  _buffer->erase(k, true);  // exists in persistent tree
+                  cs.buffer->erase(k, true);
                   ++removed;
                }
                pc.next();
             }
 
-            // Also remove buffer-only inserts in range
             std::vector<std::string> buf_insert_keys;
-            auto                     it  = _buffer->lower_bound(lower);
-            auto                     end = _buffer->end();
+            auto                     it  = cs.buffer->lower_bound(lower);
+            auto                     end = cs.buffer->end();
             while (it != end)
             {
                auto k = it.key();
@@ -455,7 +753,7 @@ namespace psitri
             }
             for (auto& k : buf_insert_keys)
             {
-               _buffer->erase(k, false);
+               cs.buffer->erase(k, false);
                ++removed;
             }
 
@@ -463,28 +761,25 @@ namespace psitri
          }
          else
          {
-            // Large range: merge buffer to persistent, then range remove on cursor
-            if (!_buffer->empty())
+            if (!cs.buffer->empty())
             {
-               merge_buffer_to_persistent();
+               merge_buffer_to_persistent(cs);
                mark_frames_merged();
             }
-            return _cursor->remove_range(lower, upper);
+            return cs.cursor->remove_range(lower, upper);
          }
       }
 
-      /// Mark all existing frames as merged so abort restores the cursor root
-      /// rather than (now-invalid) buffer save states.
       void mark_frames_merged() noexcept
       {
          for (auto& f : _frames)
             f.micro_merged = true;
       }
 
-      void merge_buffer_to_persistent()
+      void merge_buffer_to_persistent(change_set& cs)
       {
-         auto it  = _buffer->begin();
-         auto end = _buffer->end();
+         auto it  = cs.buffer->begin();
+         auto end = cs.buffer->end();
          for (; it != end; ++it)
          {
             auto& entry = it.value();
@@ -493,26 +788,34 @@ namespace psitri
             if (entry.is_data())
             {
                auto val = entry.value();
-               _cursor->upsert_sorted(key, val);
+               cs.cursor->upsert_sorted(key, val);
             }
             else if (entry.type == detail::buffer_entry::tombstone)
             {
-               _cursor->remove(key);
+               cs.cursor->remove(key);
             }
-            // tombstone_noop: key doesn't exist in persistent tree — skip
          }
 
          if (_frames.empty())
-            _buffer->clear();      // No sub-tx frames — full clear is safe
+            cs.buffer->clear();
          else
-            _buffer->soft_clear();  // Preserve arena for sub-tx save/restore
+            cs.buffer->soft_clear();
       }
 
-      std::optional<write_cursor>                              _cursor;
+      /// Track a persistent-tree read for OCC validation.
+      void track_read(const change_set& cs, key_view key) const
+      {
+         if (_occ_commit_func)
+         {
+            auto info = cs.cursor->read_cursor().get_key_info(key);
+            const_cast<change_set&>(cs).reads.record(key, info.version, info.leaf_addr);
+         }
+      }
+
       std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
+      occ_commit_fn                                            _occ_commit_func;
       std::function<void()>                                    _rollback_func;
       tx_mode                                                  _mode = tx_mode::batch;
-      std::optional<detail::write_buffer>                      _buffer;
       std::vector<frame>                                       _frames;
    };
 

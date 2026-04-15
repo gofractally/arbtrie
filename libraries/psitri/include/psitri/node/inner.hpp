@@ -76,13 +76,13 @@ namespace psitri
                         const branch_set&             branches,
                         int                           numcline,
                         const std::array<uint8_t, 8>& cline_indices,
-                        uint64_t                      descendents) noexcept
+                        uint64_t                      epoch) noexcept
           : inner_node_base(asize, node_type::inner_prefix, seq)
       {
-         assert(asize == alloc_size(prefix, branches, numcline, cline_indices, descendents));
+         assert(asize == alloc_size(prefix, branches, numcline, cline_indices, epoch));
          // set cap once so offsets are valid
          _prefix_cap = prefix.size();
-         init(branches, numcline, cline_indices, descendents);
+         init(branches, numcline, cline_indices, epoch);
          set_prefix(prefix);
       }
 
@@ -92,11 +92,11 @@ namespace psitri
                         key_view                        prefix,
                         subrange                        range,
                         const cline_freq_table&         ftab,
-                        uint64_t                        descendents) noexcept
+                        uint64_t                        epoch) noexcept
           : inner_node_base(asize, node_type::inner_prefix, seq)
       {
          _prefix_cap = prefix.size();
-         init(asize, seq, clone, range, ftab, descendents);
+         init(asize, seq, clone, range, ftab, epoch);
          _prefix_cap = prefix.size();
          set_prefix(prefix);
       }
@@ -148,7 +148,7 @@ namespace psitri
          assert(asize == alloc_size(clone, prefix));
          _num_branches = clone->_num_branches;
          _num_cline    = clone->_num_cline;
-         _descendents  = clone->_descendents;
+         _epoch        = clone->_epoch;
          _prefix_cap   = prefix.size();
          set_prefix(prefix);
          memcpy(divisions(), clone->divisions(), clone->num_branches() - 1);
@@ -172,6 +172,8 @@ namespace psitri
          return (const branch*)(divisions() + num_divisions());
       }
       uint16_t num_branches() const noexcept { return _num_branches; }
+      uint64_t epoch() const noexcept { return _epoch; }
+      void     set_epoch(uint64_t e) noexcept { _epoch = e; }
 
       void set_prefix(key_view pre) noexcept
       {
@@ -197,7 +199,7 @@ namespace psitri
 
       template <typename T>
       friend class inner_node_base;
-      uint64_t _descendents : 39;  ///< 500 billion keys max
+      uint64_t _epoch : 39;  ///< epoch counter for MVCC structural maintenance
       uint64_t _num_branches : 9;  ///< a maximum of 256 branches per node (16 clines * 16 indices)
       uint64_t _num_cline : 5;     ///< only 16 cline are possible w/ 4 bit branch index
       uint64_t _prefix_len : 11;   ///< prefix length in bytes
@@ -240,14 +242,14 @@ namespace psitri
                  const branch_set&             branches,
                  int                           numcline,
                  const std::array<uint8_t, 8>& cline_indices,
-                 uint64_t                      descendents) noexcept;
+                 uint64_t                      epoch) noexcept;
 
       inner_node(uint32_t                        asize,
                  ptr_address_seq                 seq,
                  const any_inner_node_type auto* clone,
                  subrange                        range,
                  const cline_freq_table&         ftab,
-                 uint64_t                        descendents) noexcept;
+                 uint64_t                        epoch) noexcept;
 
       inner_node(uint32_t                        asize,
                  ptr_address_seq                 seq,
@@ -275,11 +277,11 @@ namespace psitri
       inline static uint32_t alloc_size(const branch_set&             branches,
                                         int                           numcline,
                                         const std::array<uint8_t, 8>& cline_indices,
-                                        uint64_t                      descendents = 0) noexcept;
+                                        uint64_t                      epoch = 0) noexcept;
       inline static uint32_t alloc_size(const any_inner_node_type auto* clone,
                                         subrange                        range,
                                         const cline_freq_table&         ftab,
-                                        uint64_t                        descendents = 0) noexcept;
+                                        uint64_t                        epoch = 0) noexcept;
       inline static uint32_t alloc_size(const any_inner_node_type auto* clone,
                                         const op::replace_branch&       update) noexcept;
       inline static uint32_t alloc_size(const any_inner_node_type auto* clone,
@@ -297,6 +299,8 @@ namespace psitri
 
       using inner_node_base<inner_node>::remove_branch;
       uint16_t num_branches() const noexcept { return _num_branches; }
+      uint64_t epoch() const noexcept { return _epoch; }
+      void     set_epoch(uint64_t e) noexcept { _epoch = e; }
 
       const branch* const_branches() const noexcept
       {
@@ -314,7 +318,7 @@ namespace psitri
       branch*        branches_end() noexcept { return branches() + num_branches(); }
 
      private:
-      uint64_t _descendents : 39;  // 500 billion keys max
+      uint64_t _epoch : 39;  // epoch counter for MVCC structural maintenance
       uint64_t _num_branches : 9;  // a maximum of 256 branches per node (16 clines * 16 indices)
       uint64_t _num_cline : 5;     /// only 16 cline are possible w/ 4 bit branch index
       uint64_t _unused : 11;       /// maybe store used_cline (_num_cline-used_cline = free_clines)
@@ -354,11 +358,11 @@ namespace psitri
                                  const branch_set&             init_branches,
                                  int                           numcline,
                                  const std::array<uint8_t, 8>& cline_indices,
-                                 uint64_t                      descendents) noexcept
+                                 uint64_t                      epoch) noexcept
        : inner_node_base(asize, node_type::inner, seq)
    {
-      assert(asize == alloc_size(init_branches, numcline, cline_indices, descendents));
-      init(init_branches, numcline, cline_indices, descendents);
+      assert(asize == alloc_size(init_branches, numcline, cline_indices, epoch));
+      init(init_branches, numcline, cline_indices, epoch);
    }
 
    inline inner_node::inner_node(uint32_t                        asize,
@@ -413,11 +417,11 @@ namespace psitri
                                  const any_inner_node_type auto* clone,
                                  subrange                        range,
                                  const cline_freq_table&         ftab,
-                                 uint64_t                        descendents) noexcept
+                                 uint64_t                        epoch) noexcept
        : inner_node_base(asize, node_type::inner, seq)
    {
-      assert(asize == alloc_size(clone, range, ftab, descendents));
-      init(asize, seq, clone, range, ftab, descendents);
+      assert(asize == alloc_size(clone, range, ftab, epoch));
+      init(asize, seq, clone, range, ftab, epoch);
    }
 
    inline uint32_t inner_node::alloc_size(const any_inner_node_type auto* clone,

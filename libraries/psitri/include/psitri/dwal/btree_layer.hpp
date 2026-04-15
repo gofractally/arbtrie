@@ -68,9 +68,9 @@ namespace psitri::dwal
       }
 
       /// Store a key/subtree pair.
-      void store_subtree(std::string_view key, sal::ptr_address addr)
+      void store_subtree(std::string_view key, sal::tree_id tid)
       {
-         map.upsert(key, btree_value::make_subtree(addr));
+         map.upsert(key, btree_value::make_subtree(tid));
       }
 
       /// Store a tombstone for a key.

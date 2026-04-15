@@ -342,7 +342,7 @@ namespace psitri::dwal
                            tx.remove(it.key());
                         else if (val.is_subtree())
                         {
-                           auto subtree = ws->make_ptr(val.subtree_root, true);
+                           auto subtree = ws->make_ptr(val.subtree, true);
                            if (subtree)
                               tx.upsert(it.key(), std::move(subtree));
                         }

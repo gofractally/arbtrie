@@ -11,7 +11,7 @@ namespace sal
      public:
       transaction(allocator_session_ptr session, root_object_number ro) : _session(session), _ro(ro)
       {
-         _adr = smart_ptr<alloc_header>(session, session->get_allocator().start_transaction(ro));
+         _adr = smart_ptr<alloc_header>(session, session->get_allocator().start_transaction(ro), false);
       }
       ~transaction() noexcept
       {

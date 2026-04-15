@@ -258,7 +258,7 @@ namespace psitri
       //int  can_insert(key_view key, const value_type& value) const noexcept;
       //bool can_insert_with_defrag(key_view key, const value_type& value) const noexcept;
 
-      int free_space() const noexcept { return alloc_head() - clines_end(); }
+      int free_space() const noexcept { return alloc_head() - meta_end(); }
 
       /// @return the branch number of the inserted key
       /// @pre key is not already in the node
@@ -286,15 +286,67 @@ namespace psitri
          return key_hashs()[*bn] == calc_key_hash(key);
       }
 
-      /// Verify the inline value checksum for branch bn.
-      /// Returns true if value is valid or not inline (only inline values have checksums).
-      bool verify_value_checksum(branch_number bn) const noexcept
+      /// Value-level checksums have been removed (rely on node-level checksum).
+      /// Always returns true for backward compat with verification code.
+      bool verify_value_checksum(branch_number) const noexcept { return true; }
+
+      /// Number of shared version table entries (0-31).
+      uint8_t num_versions() const noexcept { return _num_versions; }
+
+      /// Get the version index for a branch (0xFF = no version assigned).
+      /// Returns 0xFF when _num_versions == 0 (ver_indices not allocated).
+      uint8_t get_ver_index(branch_number bn) const noexcept
       {
-         auto vb = value_offsets()[*bn];
-         if (vb.type() != value_type_flag::inline_data)
-            return true;  // non-inline values don't have leaf-level checksums
-         return get_value_ptr(vb.offset())->is_valid();
+         assert(bn < num_branches());
+         if (_num_versions == 0)
+            return 0xFF;
+         return ver_indices()[*bn];
       }
+
+      /// Set the version index for a branch.
+      /// @pre _num_versions > 0 (ver_indices must be allocated)
+      void set_ver_index(branch_number bn, uint8_t idx) noexcept
+      {
+         assert(bn < num_branches());
+         assert(_num_versions > 0);
+         assert(idx < _num_versions || idx == 0xFF);
+         ver_indices()[*bn] = idx;
+      }
+
+      /// Get the version number for a branch via ver_indices → version_table.
+      /// Returns 0 if no version assigned (0xFF index or _num_versions == 0).
+      uint64_t get_version(branch_number bn) const noexcept
+      {
+         uint8_t idx = get_ver_index(bn);
+         if (idx == 0xFF)
+            return 0;
+         assert(idx < _num_versions);
+         return version_table()[idx].get();
+      }
+
+      /// Add a version to the shared table if not already present.
+      /// Returns the table index. Deduplicates: if version already exists, returns existing index.
+      /// @pre _num_versions < 31 (or version already exists)
+      /// @pre caller must have ensured free_space() >= sizeof(version48) + num_branches()
+      ///      (for first version, which allocates ver_indices + 1 version_table entry)
+      uint8_t add_version(uint64_t version) noexcept
+      {
+         if (_num_versions == 0)
+         {
+            // First version: allocate ver_indices (nb bytes) + first version_table entry.
+            // Caller must have verified free_space() is sufficient.
+            init_ver_indices();
+         }
+         auto* vt = version_table();
+         for (uint8_t i = 0; i < _num_versions; ++i)
+            if (vt[i].get() == version)
+               return i;
+         assert(_num_versions < 31);
+         uint8_t idx = _num_versions++;
+         version_table()[idx].set(version);
+         return idx;
+      }
+
       /// uses hash to find key
       branch_number get(key_view key) const noexcept
       {
@@ -411,20 +463,19 @@ namespace psitri
       uint32_t _optimal_layout : 1;  ///< a bit that gets set when the node is optimized,
                                      /// cleared when optimized invariants broken
       uint32_t _num_branches : 9;
-      uint32_t _unused : 13;
+      uint32_t _num_versions : 5;    ///< number of shared version table entries (0-31)
+      uint32_t _unused : 8;
       uint8_t  _key_hashs[/*num_branches()*/];
-      // the following fields are dynamic, but follow sequentially after clines
-      //   uint8_t      key_hash[num_branch]  // align on 16 byte boundary and 64 byte boundary
+      // Dynamic arrays follow sequentially after _key_hashs:
+      //   uint8_t      key_hash[num_branch]
       //   uint16_t     keys_offsets[num_branch]
-      //   value_branch value_offsets[num_branch];
-      //   ptr_address _clines[/*_cline_cap*/];
-      //     ... alloc area..., indexed from tail()
-      ///  tail() at end of object defined by ((char*)this) + size())
-      ///
-      ///  _clines is after value_offsets to make it easier to expand when updating
-      ///       value nodes, and because this is the last data needed by a query and may not
-      ///       be needed for many queries; therefore, get it out of the way of the more critical
-      ///       data such as key_hash and keys_offsets which are needed in every query.
+      //   value_branch value_offsets[num_branch]
+      //   ptr_address  _clines[_cline_cap]
+      //   uint8_t      ver_indices[num_branch]   (0xFF = no version)
+      //   version48    version_table[_num_versions]
+      //   [free space]
+      //   ← _alloc_pos (from tail)
+      //   [alloc area: keys + values]
 
       /// offset into the alloc area from tail pointing to a key structure
       using key_offset = ucc::typed_int<uint16_t, struct key_offset_tag>;
@@ -538,7 +589,7 @@ namespace psitri
                             (char*)value_offsets(),
                             (char*)clines().data(),
                             (char*)clines().data(),
-                            (char*)clines().data() + _cline_cap * sizeof(ptr_address)};
+                            const_cast<char*>(meta_end())};
       }
 
       ptr_address get_address(value_branch vb) const noexcept
@@ -561,6 +612,45 @@ namespace psitri
       const char* clines_end() const noexcept
       {
          return (const char*)(value_offsets() + num_branches()) + _cline_cap * sizeof(ptr_address);
+      }
+
+      /// Per-branch version index — maps branch to version_table entry.
+      /// 0xFF means no version assigned (default for COW-only mode).
+      uint8_t* ver_indices() noexcept
+      {
+         return reinterpret_cast<uint8_t*>(
+             const_cast<char*>(clines_end()));
+      }
+      const uint8_t* ver_indices() const noexcept
+      {
+         return reinterpret_cast<const uint8_t*>(clines_end());
+      }
+
+      /// Shared version table — up to 31 unique version48 entries.
+      version48* version_table() noexcept
+      {
+         return reinterpret_cast<version48*>(ver_indices() + num_branches());
+      }
+      const version48* version_table() const noexcept
+      {
+         return reinterpret_cast<const version48*>(ver_indices() + num_branches());
+      }
+
+      /// End of all metadata (past version_table).
+      /// When _num_versions == 0, ver_indices and version_table are not allocated
+      /// — meta_end() == clines_end().  This avoids consuming nb bytes of free space
+      /// in the common (COW-only) case.
+      const char* meta_end() const noexcept
+      {
+         if (_num_versions == 0)
+            return clines_end();
+         return reinterpret_cast<const char*>(version_table() + _num_versions);
+      }
+
+      /// Initialize ver_indices to 0xFF for all branches.
+      void init_ver_indices() noexcept
+      {
+         std::memset(ver_indices(), 0xFF, num_branches());
       }
 
       /// determine if addr is on an existing cline, or allocate a new one and
@@ -592,24 +682,16 @@ namespace psitri
       };
       class value_data
       {
-         uint8_t _checksum;
-         uint8_t _size;
-         uint8_t _data[];
+         uint16_t _size;
+         uint8_t  _data[];
 
         public:
          void set(value_view value)
          {
             _size = value.size();
             std::memcpy(_data, value.data(), _size);
-            _checksum = XXH3_64bits((char*)&_size, sizeof(_size) + _size);
          }
          value_view get() const noexcept { return value_view((const char*)_data, _size); }
-         bool       is_valid() const noexcept
-         {
-            return _checksum ==
-                   static_cast<uint8_t>(XXH3_64bits((char*)&_size, sizeof(_size) + _size));
-         }
-         uint8_t checksum() const noexcept { return _checksum; }
       };
       static_assert(sizeof(key) == 2);
       static_assert(sizeof(value_data) == 2);

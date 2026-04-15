@@ -137,7 +137,7 @@ namespace psitri::dwal
        * @param key   Key bytes
        * @param addr  PsiTri subtree root address (one ref consumed)
        */
-      void upsert_subtree(std::string_view key, sal::ptr_address addr);
+      void upsert_subtree(std::string_view key, sal::tree_id tid);
 
       /**
        * @brief Remove a single key.

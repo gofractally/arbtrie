@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include <sal/alloc_header.hpp>
 #include <string_view>
 #include <ucc/lower_bound.hpp>
@@ -10,6 +11,7 @@ namespace psitri
 {
    using ptr_address     = sal::ptr_address;
    using ptr_address_seq = sal::ptr_address_seq;
+   using tree_id         = sal::tree_id;
    using key_view        = std::string_view;
    using value_view      = std::string_view;
    using branch_number   = ucc::typed_int<uint16_t, struct branch_number_tag>;
@@ -46,13 +48,14 @@ namespace psitri
       inner = (uint8_t)sal::header_type::start_user_type,
       inner_prefix,
       leaf,
-      value
+      value,
+      value_index
    };
    inline std::ostream& operator<<(std::ostream& os, node_type t)
    {
-      static const char* names[] = {"inner", "inner_prefix", "leaf", "value", "unknown"};
+      static const char* names[] = {"inner", "inner_prefix", "leaf", "value", "value_index", "unknown"};
       auto               idx     = static_cast<size_t>(t) - static_cast<size_t>(node_type::inner);
-      os << (idx < 4 ? names[idx] : names[4]);
+      os << (idx < 5 ? names[idx] : names[5]);
       return os;
    }
 
@@ -203,6 +206,24 @@ namespace psitri
       ptr_address branches[6];
       uint8_t     div[6];
    };
+
+   /**
+    * Packed 48-bit version number stored in 6 bytes (little-endian).
+    * Used by both value_node (entry packing) and leaf_node (version table).
+    */
+   struct version48
+   {
+      uint8_t bytes[6];
+
+      uint64_t get() const noexcept
+      {
+         uint64_t v = 0;
+         std::memcpy(&v, bytes, 6);
+         return v;
+      }
+      void set(uint64_t v) noexcept { std::memcpy(bytes, &v, 6); }
+   } __attribute__((packed));
+   static_assert(sizeof(version48) == 6);
 
    /**
     * Base class for all nodes in the psitri tree, it mostly just wraps and redefines

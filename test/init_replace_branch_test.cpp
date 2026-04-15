@@ -152,7 +152,6 @@ int main(int argc, char* argv[])
        sub_branches,
        needed_clines,
        cline_indices,
-       0  // delta_descendents (doesn't matter for this test)
    };
 
    // Allocate dest buffer and use placement new with the public constructor

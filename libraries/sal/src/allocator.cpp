@@ -151,7 +151,7 @@ namespace sal
          _root_object_file.resize(system_config::round_to_page(sizeof(root_object_array)));
          auto arr = new (_root_object_file.data()) root_object_array();
          for (auto& ro : *arr)
-            ro = null_ptr_address;
+            ro.store(null_tree_id.pack(), std::memory_order_relaxed);
       }
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
@@ -357,11 +357,27 @@ namespace sal
             }
          }
 
-         // Copy root addresses
+         // Copy root slots (packed tree_ids) and their custom CBs
          for (uint32_t i = 0; i < _root_objects->size(); ++i)
          {
-            auto addr = (*_root_objects)[i].load(std::memory_order_relaxed);
-            (*dest._root_objects)[i].store(addr, std::memory_order_relaxed);
+            auto packed = (*_root_objects)[i].load(std::memory_order_relaxed);
+            (*dest._root_objects)[i].store(packed, std::memory_order_relaxed);
+
+            // Copy custom CBs (ver_adr) referenced by root slots
+            auto tid = tree_id::unpack(packed);
+            if (tid.ver != null_ptr_address)
+            {
+               auto* cb = _ptr_alloc.try_get(tid.ver);
+               if (cb)
+               {
+                  auto data = cb->load(std::memory_order_relaxed);
+                  if (allocator_session::is_custom_cb(data))
+                  {
+                     auto& dst_cb = dest._ptr_alloc.get_or_alloc(tid.ver);
+                     dst_cb.store(data, std::memory_order_relaxed);
+                  }
+               }
+            }
          }
       }  // dest session released here, active segment finalized
 
@@ -378,7 +394,11 @@ namespace sal
       if (!cb || cb->ref() == 0)
          return;
 
-      cb->retain();
+      auto prev = cb->retain();
+
+      // Custom control blocks: retained but not dereferenced (no segment data)
+      if (allocator_session::is_custom_cb(prev))
+         return;
 
       auto  loc    = cb->loc();
       auto  seg    = loc.segment();
@@ -410,6 +430,11 @@ namespace sal
       if (!cb || cb->ref() == 0)
          return;
 
+      // Custom control blocks: no segment data to measure
+      auto cbd = cb->load(std::memory_order_relaxed);
+      if (allocator_session::is_custom_cb(cbd))
+         return;
+
       auto  loc    = cb->loc();
       auto  seg    = loc.segment();
       auto* segptr = get_segment(seg);
@@ -439,9 +464,11 @@ namespace sal
 
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
-         if (addr != null_ptr_address)
-            recursive_sum_size(addr, total, &visited);
+         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         if (tid.root != null_ptr_address)
+            recursive_sum_size(tid.root, total, &visited);
+         if (tid.ver != null_ptr_address)
+            recursive_sum_size(tid.ver, total, &visited);
       }
       return total;
    }
@@ -453,6 +480,11 @@ namespace sal
 
       auto* cb = _ptr_alloc.try_get(addr);
       if (!cb || cb->ref() == 0)
+         return {nullptr, {}};
+
+      // Custom control blocks have no segment data
+      auto cbd = cb->load(std::memory_order_relaxed);
+      if (allocator_session::is_custom_cb(cbd))
          return {nullptr, {}};
 
       auto  loc    = cb->loc();
@@ -574,6 +606,30 @@ namespace sal
       return results;
    }
 
+   void allocator::reconstruct_custom_cbs_from_roots()
+   {
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+      {
+         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         if (tid.ver != null_ptr_address)
+         {
+            auto& cb   = _ptr_alloc.get_or_alloc(tid.ver);
+            auto  data = cb.load(std::memory_order_relaxed);
+            if (!data.ref)
+            {
+               // Reconstruct as custom CB with ref=1 and the custom marker.
+               // The original version number stored in the location field is lost
+               // (custom CBs have no segment data), so store 0 as placeholder.
+               cb.store(control_block_data()
+                            .set_ref(1)
+                            .set_pending_cache(true)
+                            .set_loc(location::from_cacheline(0)),
+                        std::memory_order_relaxed);
+            }
+         }
+      }
+   }
+
    void allocator::recover()
    {
       SAL_WARN("Recovering... rebuilding control blocks from segments!");
@@ -659,12 +715,17 @@ namespace sal
          }
       }
 
+      // Phase 3.5: Reconstruct custom CBs (version addresses) from root slots
+      reconstruct_custom_cbs_from_roots();
+
       // Phase 4: Walk all root objects, recursively retain reachable nodes
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
-         if (addr != null_ptr_address)
-            recursive_retain_all(addr);
+         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         if (tid.root != null_ptr_address)
+            recursive_retain_all(tid.root);
+         if (tid.ver != null_ptr_address)
+            recursive_retain_all(tid.ver);
       }
 
       // Phase 5: Free leaked objects
@@ -691,11 +752,16 @@ namespace sal
 
       _ptr_alloc.reset_all_refs();
 
+      // Reconstruct custom CBs before walking roots
+      reconstruct_custom_cbs_from_roots();
+
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
-         if (addr != null_ptr_address)
-            recursive_retain_all(addr);
+         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         if (tid.root != null_ptr_address)
+            recursive_retain_all(tid.root);
+         if (tid.ver != null_ptr_address)
+            recursive_retain_all(tid.ver);
       }
 
       _ptr_alloc.release_unreachable();
@@ -899,8 +965,10 @@ namespace sal
             auto* cb = _ptr_alloc.try_get(ptr_address(entry.root_address));
             if (cb && cb->loc().cacheline())
             {
+               // Store as packed tree_id with null ver (sync headers don't store ver)
+               auto recovered_tid = tree_id(ptr_address(entry.root_address));
                _root_objects->at(entry.root_index)
-                   .store(ptr_address(entry.root_address), std::memory_order_relaxed);
+                   .store(recovered_tid.pack(), std::memory_order_relaxed);
                root_set[entry.root_index] = true;
                ++roots_recovered;
                SAL_WARN("recovered root[{}] = {} from sync header (ts={})",
@@ -916,15 +984,15 @@ namespace sal
       {
          if (!root_set[i])
          {
-            auto old = _root_objects->at(i).load(std::memory_order_relaxed);
-            if (old != null_ptr_address)
+            auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+            if (tid.root != null_ptr_address)
             {
                // Verify the existing root's control block was rebuilt by the segment scan
-               auto* cb = _ptr_alloc.try_get(old);
+               auto* cb = _ptr_alloc.try_get(tid.root);
                if (!cb || !cb->loc().cacheline())
                {
-                  SAL_WARN("root[{}] = {} from roots file is invalid (no control block), clearing", i, *old);
-                  _root_objects->at(i).store(null_ptr_address, std::memory_order_relaxed);
+                  SAL_WARN("root[{}] = {} from roots file is invalid (no control block), clearing", i, *tid.root);
+                  _root_objects->at(i).store(null_tree_id.pack(), std::memory_order_relaxed);
                }
                else
                {
@@ -934,12 +1002,17 @@ namespace sal
          }
       }
 
+      // Phase 5.5: Reconstruct custom CBs from root slots
+      reconstruct_custom_cbs_from_roots();
+
       // Phase 6: Walk all valid roots, recursively retain reachable nodes
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto addr = _root_objects->at(i).load(std::memory_order_relaxed);
-         if (addr != null_ptr_address)
-            recursive_retain_all(addr);
+         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         if (tid.root != null_ptr_address)
+            recursive_retain_all(tid.root);
+         if (tid.ver != null_ptr_address)
+            recursive_retain_all(tid.ver);
       }
 
       // Phase 7: Free leaked objects
@@ -1107,9 +1180,7 @@ namespace sal
          auto num_loaded = rcache.pop(read_ids, 1024);
          for (uint32_t i = 0; i < num_loaded; ++i)
          {
-            auto addr    = read_ids[i];
-            auto obj_ref = ses.get_ref<alloc_header>(addr);
-            ses.final_release(addr);
+            ses.final_release(read_ids[i]);
          }
       }
       return more_work;

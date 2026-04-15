@@ -24,16 +24,29 @@ namespace psitri
    // Forward declaration
    uint64_t count_keys(sal::allocator_session& session, ptr_address addr, key_range range);
 
-   /// O(1) key count — reads descendents() for inner nodes, num_branches() for leaf.
+   /// Count all keys in the subtree rooted at addr.
+   /// Recursively sums children for inner nodes (O(N) — epoch replaced descendents).
    inline uint64_t count_child_keys(sal::allocator_session& session, ptr_address addr)
    {
       auto ref = session.get_ref(addr);
       switch (node_type(ref->type()))
       {
          case node_type::inner:
-            return ref.as<inner_node>()->descendents();
+         {
+            auto     in    = ref.as<inner_node>();
+            uint64_t total = 0;
+            for (uint16_t i = 0; i < in->num_branches(); ++i)
+               total += count_child_keys(session, in->get_branch(branch_number(i)));
+            return total;
+         }
          case node_type::inner_prefix:
-            return ref.as<inner_prefix_node>()->descendents();
+         {
+            auto     ipn   = ref.as<inner_prefix_node>();
+            uint64_t total = 0;
+            for (uint16_t i = 0; i < ipn->num_branches(); ++i)
+               total += count_child_keys(session, ipn->get_branch(branch_number(i)));
+            return total;
+         }
          case node_type::leaf:
             return ref.as<leaf_node>()->num_branches();
          case node_type::value:
@@ -123,7 +136,12 @@ namespace psitri
       }
 
       if (range.is_unbounded())
-         return node.descendents();
+      {
+         uint64_t total = 0;
+         for (uint16_t i = 0; i < node.num_branches(); ++i)
+            total += count_child_keys(session, node.get_branch(branch_number(i)));
+         return total;
+      }
 
       if (range.is_empty_range())
          return 0;
@@ -161,7 +179,8 @@ namespace psitri
       if (in_range > out_of_range)
       {
          // Exclusion: total - before - after
-         count = node.descendents();
+         for (uint16_t i = 0; i < node.num_branches(); ++i)
+            count += count_child_keys(session, node.get_branch(branch_number(i)));
 
          // Subtract branches before start
          for (uint16_t i = 0; i < *start; ++i)
@@ -195,7 +214,7 @@ namespace psitri
          // Start branch: pass full range (child handles routing)
          count += count_keys(session, node.get_branch(start), range);
 
-         // Middle branches: fully contained, use O(1) descendents
+         // Middle branches: fully contained
          for (uint16_t i = *start + 1; i < *end; ++i)
             count += count_child_keys(session, node.get_branch(branch_number(i)));
 

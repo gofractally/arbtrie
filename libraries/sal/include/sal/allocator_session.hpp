@@ -104,6 +104,18 @@ namespace sal
                                           uint32_t               size,
                                           auto&&... args);
 
+      /// Like realloc but allows ref > 1 (MVCC: atomically redirect shared CB to new data).
+      template <typename To, typename From>
+      [[nodiscard]] smart_ref<To> mvcc_realloc(const smart_ref<From>& ptr, auto&&... args) noexcept
+      {
+         return this->mvcc_realloc<To>(ptr, To::alloc_size(std::forward<decltype(args)>(args)...),
+                                       std::forward<decltype(args)>(args)...);
+      }
+      template <typename To, typename From>
+      [[nodiscard]] smart_ref<To> mvcc_realloc(const smart_ref<From>& ptr,
+                                               uint32_t               size,
+                                               auto&&... args);
+
       template <typename T>
       [[nodiscard]] T* copy_on_write(smart_ref<T>& ptr);
 
@@ -133,6 +145,19 @@ namespace sal
        */
       transaction_ptr       start_transaction(root_object_number ro) noexcept;
       allocator_session_ptr get_session_ptr() noexcept;
+
+      /// Allocate a custom control block with no segment-backed data.
+      /// Stores a user-defined value (up to 41 bits) in the location field.
+      /// Returns a ptr_address with ref count = 1.
+      [[nodiscard]] ptr_address alloc_custom_cb(uint64_t user_value) noexcept;
+
+      /// Read the user-defined value from a custom control block.
+      /// Precondition: adr was allocated via alloc_custom_cb().
+      uint64_t read_custom_cb(ptr_address adr) const noexcept;
+
+      /// Check if a control block is custom (no segment data).
+      /// The {active=0, pending_cache=1} bit pattern marks custom CBs.
+      static bool is_custom_cb(control_block_data cbd) noexcept;
 
       /**
        * This is to be used if and only if the user has taken ownership of the

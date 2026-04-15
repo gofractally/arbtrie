@@ -76,15 +76,15 @@ namespace psitri::dwal
          _wal->add_upsert_data(key, value);
    }
 
-   void dwal_transaction::upsert_subtree(std::string_view key, sal::ptr_address addr)
+   void dwal_transaction::upsert_subtree(std::string_view key, sal::tree_id tid)
    {
       assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
 
       record_undo_for_upsert(key);
-      _root->rw_layer->store_subtree(key, addr);
+      _root->rw_layer->store_subtree(key, tid);
 
       if (!_nested && _wal)
-         _wal->add_upsert_subtree(key, addr);
+         _wal->add_upsert_subtree(key, tid);
    }
 
    remove_result dwal_transaction::remove(std::string_view key)

@@ -69,6 +69,12 @@ namespace psitri
          return v;
       }
       static value_type make_subtree(ptr_address i) noexcept { return make<types::subtree>(i); }
+      static value_type make_subtree(tree_id tid) noexcept
+      {
+         value_type v;
+         v.data.emplace<static_cast<size_t>(types::subtree)>(tid);
+         return v;
+      }
       static value_type make_value_node(ptr_address i) noexcept
       {
          return make<types::value_node>(i);
@@ -81,6 +87,7 @@ namespace psitri
             case types::data:
                return std::get<value_view>(data).size();
             case types::subtree:
+               return sizeof(tree_id);
             case types::value_node:
                return sizeof(ptr_address);
             case types::remove:
@@ -89,10 +96,11 @@ namespace psitri
       }
 
       const value_view& view() const noexcept { return std::get<value_view>(data); }
-      ptr_address       subtree_address() const noexcept
+      tree_id           subtree_id() const noexcept
       {
          return std::get<static_cast<size_t>(types::subtree)>(data);
       }
+      ptr_address subtree_address() const noexcept { return subtree_id().root; }
       ptr_address value_address() const noexcept
       {
          return std::get<static_cast<size_t>(types::value_node)>(data);
@@ -127,6 +135,12 @@ namespace psitri
          {
             memcpy(buffer, vv->data(), vv->size());
          }
+         else if (is_subtree())
+         {
+            assert(size == sizeof(tree_id));
+            tree_id tid = subtree_id();
+            memcpy(buffer, &tid, sizeof(tree_id));
+         }
          else
          {
             assert(size == sizeof(ptr_address));
@@ -147,12 +161,12 @@ namespace psitri
       }
 
      private:
-      // Order must match types enum
+      // Order must match types enum: data(0), value_node(1), remove(2), subtree(3)
       std::variant<
           value_view,      // data
-          ptr_address,     // subtree
+          ptr_address,     // value_node
           std::monostate,  // remove
-          ptr_address      // value_node - TODO: consider using a different type to avoid ambiguity
+          tree_id          // subtree (root + MVCC version)
           >
           data;
 

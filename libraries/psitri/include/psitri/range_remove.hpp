@@ -14,7 +14,7 @@ namespace psitri
          return 0;  // empty range
 
       sal::read_lock lock = _session.lock();
-      _delta_descendents = 0;
+      _delta_removed_keys = 0;
 
       // Map max_key -> empty for internal unbounded representation
       key_range range = {lower, upper == max_key ? key_view() : upper};
@@ -38,7 +38,7 @@ namespace psitri
       else
          _root.give(make_inner(result));
 
-      return static_cast<uint64_t>(-_delta_descendents);
+      return static_cast<uint64_t>(-_delta_removed_keys);
    }
 
    template <upsert_mode mode>
@@ -69,7 +69,7 @@ namespace psitri
                             (range.upper_bound.empty() || key_view() < range.upper_bound);
             if (in_range)
             {
-               _delta_descendents -= 1;
+               _delta_removed_keys -= 1;
                result = {};  // remove this value
             }
             else
@@ -110,11 +110,11 @@ namespace psitri
       if (count == total)
       {
          // All branches removed — release value_nodes in the range via destroy cascade
-         _delta_descendents -= count;
+         _delta_removed_keys -= count;
          return {};
       }
 
-      _delta_descendents -= count;
+      _delta_removed_keys -= count;
 
       if constexpr (mode.is_unique())
       {
@@ -209,7 +209,8 @@ namespace psitri
       // After prefix narrowing, check if unbounded (remove everything)
       if (range.is_unbounded())
       {
-         _delta_descendents -= node->descendents();
+         for (uint16_t i = 0; i < node->num_branches(); ++i)
+            _delta_removed_keys -= psitri::count_child_keys(_session, node->get_branch(branch_number(i)));
          return {};  // remove entire subtree
       }
 
@@ -276,13 +277,12 @@ namespace psitri
                    [&](auto* n)
                    {
                       n->remove_branch(start);
-                      n->add_descendents(_delta_descendents);
                    });
                return node.address();
             }
             else
             {
-               op::inner_remove_branch rm{start, _delta_descendents};
+               op::inner_remove_branch rm{start};
                if constexpr (is_inner_node<NodeT>)
                   return _session.alloc<NodeT>(parent_hint, node.obj(), rm);
                else
@@ -290,15 +290,11 @@ namespace psitri
             }
          }
 
-         // Branch still exists — update descendents
+         // Branch still exists
          if constexpr (mode.is_unique())
          {
             if (sub.count() == 1 && sub.get_first_branch() == badr)
-            {
-               if (_delta_descendents != 0)
-                  node.modify()->add_descendents(_delta_descendents);
                return node.address();
-            }
             // Branch address changed in unique mode — need merge_branches
             return merge_branches<mode.make_shared_or_unique_only()>(parent_hint, node, start, sub);
          }
@@ -318,7 +314,7 @@ namespace psitri
       if constexpr (mode.is_shared())
          retain_children(node);
 
-      int64_t saved_delta = _delta_descendents;
+      int64_t saved_delta = _delta_removed_keys;
 
       // Count keys in middle branches (fully contained — will be removed entirely)
       int64_t middle_keys = 0;
@@ -338,7 +334,7 @@ namespace psitri
          start_recursed = true;
          auto start_ref = _session.get_ref(start_addr);
          start_shared   = (start_ref.ref() > 1);
-         _delta_descendents = 0;
+         _delta_removed_keys = 0;
          branch_set start_result = range_remove<mode>(node->get_branch_clines(), start_ref, range);
          if (start_result.count() == 0)
             start_empty = true;
@@ -358,11 +354,11 @@ namespace psitri
       else
       {
          // lower is unbounded, so start branch is fully contained
-         _delta_descendents = 0;
-         _delta_descendents -= psitri::count_child_keys(_session, start_addr);
+         _delta_removed_keys = 0;
+         _delta_removed_keys -= psitri::count_child_keys(_session, start_addr);
          start_empty = true;
       }
-      int64_t start_delta = _delta_descendents;
+      int64_t start_delta = _delta_removed_keys;
 
       // Recurse into boundary branch
       ptr_address boundary_addr     = sal::null_ptr_address;
@@ -378,7 +374,7 @@ namespace psitri
          new_boundary_addr = boundary_addr;
          auto boundary_ref = _session.get_ref(boundary_addr);
          boundary_shared   = (boundary_ref.ref() > 1);
-         _delta_descendents = 0;
+         _delta_removed_keys = 0;
          branch_set boundary_result =
              range_remove<mode>(node->get_branch_clines(), boundary_ref, range);
          if (boundary_result.count() == 0)
@@ -393,12 +389,12 @@ namespace psitri
             new_boundary_addr = make_inner(boundary_result);
             boundary_changed  = true;
          }
-         boundary_delta = _delta_descendents;
+         boundary_delta = _delta_removed_keys;
       }
 
       // Compute total delta
       int64_t total_delta = saved_delta + start_delta + boundary_delta - middle_keys;
-      _delta_descendents  = total_delta;
+      _delta_removed_keys  = total_delta;
 
       // Count surviving branches
       uint16_t before_count = *start;
@@ -491,16 +487,14 @@ namespace psitri
                 [&](auto* n)
                 {
                    n->remove_range(branch_number(remove_lo), branch_number(remove_hi));
-                   n->add_descendents(total_delta);
                 });
 
             // Handle changed addresses after the remove_range.
-            // add_descendents already applied total_delta, so merge_branches must use 0.
             // After remove_range, boundary's position shifted to remove_lo.
             if (!start_empty && start_changed && !boundary_empty && has_boundary && boundary_changed)
             {
                // Both changed — handle sequentially
-               _delta_descendents = 0;
+               _delta_removed_keys = 0;
                branch_set ssub(new_start_addr);
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, start, ssub);
                if (result.count() == 1)
@@ -510,24 +504,24 @@ namespace psitri
                   branch_set bsub(new_boundary_addr);
                   result = merge_branches<upsert_mode::unique>(parent_hint, result_ref, boundary_new_pos, bsub);
                }
-               _delta_descendents = total_delta;
+               _delta_removed_keys = total_delta;
                return result;
             }
             if (!boundary_empty && has_boundary && boundary_changed)
             {
                auto boundary_new_pos = branch_number(remove_lo);
-               _delta_descendents = 0;
+               _delta_removed_keys = 0;
                branch_set bsub(new_boundary_addr);
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, boundary_new_pos, bsub);
-               _delta_descendents = total_delta;
+               _delta_removed_keys = total_delta;
                return result;
             }
             if (!start_empty && start_changed)
             {
-               _delta_descendents = 0;
+               _delta_removed_keys = 0;
                branch_set ssub(new_start_addr);
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, start, ssub);
-               _delta_descendents = total_delta;
+               _delta_removed_keys = total_delta;
                return result;
             }
 
@@ -536,14 +530,10 @@ namespace psitri
          else
          {
             // Nothing to remove from inner node (all survived)
-            if (_delta_descendents != 0)
-               node.modify()->add_descendents(total_delta);
-
-            // Handle changed addresses — add_descendents already applied total_delta,
-            // so merge_branches must use 0 to avoid double-counting.
+            // Handle changed addresses.
             if (!start_empty && start_changed)
             {
-               _delta_descendents = 0;
+               _delta_removed_keys = 0;
                branch_set ssub(new_start_addr);
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, start, ssub);
 
@@ -554,15 +544,15 @@ namespace psitri
                   branch_set bsub(new_boundary_addr);
                   result = merge_branches<upsert_mode::unique>(parent_hint, result_ref, boundary, bsub);
                }
-               _delta_descendents = total_delta;
+               _delta_removed_keys = total_delta;
                return result;
             }
             if (!boundary_empty && has_boundary && boundary_changed)
             {
-               _delta_descendents = 0;
+               _delta_removed_keys = 0;
                branch_set bsub(new_boundary_addr);
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, boundary, bsub);
-               _delta_descendents = total_delta;
+               _delta_removed_keys = total_delta;
                return result;
             }
 
@@ -609,7 +599,7 @@ namespace psitri
             {
                // First merge: replace start branch
                branch_set ssub(new_start_addr);
-               _delta_descendents = 0;  // merge_branches uses _delta_descendents
+               _delta_removed_keys = 0;  // merge_branches uses _delta_removed_keys
                auto after_start = merge_branches<mode.make_shared_or_unique_only()>(
                    parent_hint, node, start, ssub);
                // after_start is a new node. Replace boundary in it.
@@ -618,7 +608,7 @@ namespace psitri
                {
                   auto after_ref = _session.template get_ref<NodeT>(after_start.get_first_branch());
                   branch_set bsub(new_boundary_addr);
-                  _delta_descendents = total_delta;  // apply the full delta on the second merge
+                  _delta_removed_keys = total_delta;  // apply the full delta on the second merge
                   return merge_branches<upsert_mode::unique>(parent_hint, after_ref, boundary, bsub);
                }
                // If split occurred (unlikely for a replacement), just return what we have
@@ -683,8 +673,7 @@ namespace psitri
 
                // Fallback: allocate via inner_remove_range (which uses original addresses),
                // then handle changed addresses via merge_branches afterward.
-               op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi),
-                                         total_delta};
+               op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi)};
                ptr_address new_addr;
                if constexpr (is_inner_node<NodeT>)
                   new_addr = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
@@ -698,7 +687,7 @@ namespace psitri
                {
                   // Find position of start in new node
                   branch_number new_start_pos = start;  // same position (we removed after start)
-                  _delta_descendents = 0;
+                  _delta_removed_keys = 0;
                   branch_set ssub(new_start_addr);
                   auto result =
                       merge_branches<upsert_mode::unique>(parent_hint, new_ref, new_start_pos, ssub);
@@ -710,15 +699,15 @@ namespace psitri
                         auto result_ref = _session.get_ref<NodeT>(result.get_first_branch());
                         branch_number new_boundary_pos =
                             branch_number(*start + 1);  // right after start
-                        _delta_descendents = 0;
+                        _delta_removed_keys = 0;
                         branch_set bsub(new_boundary_addr);
                         auto final_result = merge_branches<upsert_mode::unique>(parent_hint, result_ref,
                                                                    new_boundary_pos, bsub);
-                        _delta_descendents = total_delta;
+                        _delta_removed_keys = total_delta;
                         return final_result;
                      }
                   }
-                  _delta_descendents = total_delta;
+                  _delta_removed_keys = total_delta;
                   return result;
                }
                if (!boundary_empty && has_boundary && boundary_changed)
@@ -727,11 +716,11 @@ namespace psitri
                   branch_number new_boundary_pos = branch_number(remove_lo);
                   if (!start_empty)
                      new_boundary_pos = branch_number(remove_lo);  // already correct
-                  _delta_descendents = 0;
+                  _delta_removed_keys = 0;
                   branch_set bsub(new_boundary_addr);
                   auto final_result = merge_branches<upsert_mode::unique>(parent_hint, new_ref, new_boundary_pos,
                                                              bsub);
-                  _delta_descendents = total_delta;
+                  _delta_removed_keys = total_delta;
                   return final_result;
                }
 
@@ -739,8 +728,7 @@ namespace psitri
             }
 
             // Simple case: no address changes, just remove the range
-            op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi),
-                                      total_delta};
+            op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi)};
             if constexpr (is_inner_node<NodeT>)
                return _session.alloc<NodeT>(parent_hint, node.obj(), rm);
             else

@@ -36,7 +36,7 @@ namespace psitri::dwal
         public:
          // ── Mutations (assert writable) ────────────────────────────
          void upsert(std::string_view key, std::string_view value);
-         void upsert_subtree(std::string_view key, sal::ptr_address addr);
+         void upsert_subtree(std::string_view key, sal::tree_id tid);
          remove_result remove(std::string_view key);
          void remove_range(std::string_view low, std::string_view high);
 

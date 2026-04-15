@@ -217,8 +217,16 @@ namespace psitri::dwal
             case wal_op_type::upsert_subtree:
             {
                op.key = read_sv();
-               uint32_t raw = read_u32();
-               op.subtree = sal::ptr_address(raw);
+               auto read_u64 = [&]() -> uint64_t
+               {
+                  if (cur + 8 > end)
+                     return 0;
+                  uint64_t v;
+                  std::memcpy(&v, cur, 8);
+                  cur += 8;
+                  return v;
+               };
+               op.subtree = sal::tree_id::unpack(read_u64());
                break;
             }
             default:

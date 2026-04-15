@@ -17,10 +17,10 @@ namespace psitri::dwal
       _inner->upsert(key, value);
    }
 
-   void transaction::root_handle::upsert_subtree(std::string_view key, sal::ptr_address addr)
+   void transaction::root_handle::upsert_subtree(std::string_view key, sal::tree_id tid)
    {
       assert(_writable && "upsert_subtree called on read-only root");
-      _inner->upsert_subtree(key, addr);
+      _inner->upsert_subtree(key, tid);
    }
 
    remove_result transaction::root_handle::remove(std::string_view key)

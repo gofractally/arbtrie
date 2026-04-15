@@ -71,6 +71,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
+      _num_versions = 0;
       set_num_branches(0);  // Must initialize before lower_bound reads it
       apply(op::leaf_insert{*this, lower_bound(key), key, value});
    }
@@ -81,9 +82,7 @@ namespace psitri
       // will rebuild via clone_from to eliminate dead space, then compaction can shrink.
       if (_dead_space > 0)
          return size();
-      auto     ccline     = clines();
-      auto     ccline_end = ccline.data() + ccline.size();
-      uint32_t head_size  = (const char*)ccline_end - (const char*)this;
+      uint32_t head_size  = meta_end() - (const char*)this;
       uint32_t result     = ucc::round_up_multiple<64>(head_size) +
                             ucc::round_up_multiple<64>(_alloc_pos);
       // Floor: at least one cacheline for a valid node
@@ -104,10 +103,8 @@ namespace psitri
       // Save the destination's alloc_header (size, address_seq set by allocator)
       auto saved_header = *compact_dst;
 
-      auto     ccline     = clines();
-      auto     ccline_end = ccline.data() + ccline.size();
-      uint32_t head_bytes = (const char*)ccline_end - (const char*)this;
-      // Copy fixed header + dynamic arrays (everything from start to clines_end)
+      uint32_t head_bytes = meta_end() - (const char*)this;
+      // Copy fixed header + dynamic arrays (everything from start to meta_end)
       memcpy(compact_dst, this, head_bytes);
       // Restore the alloc_header fields
       memcpy(compact_dst, &saved_header, sizeof(alloc_header));
@@ -137,6 +134,7 @@ namespace psitri
             _alloc_pos      = 0;
             _dead_space     = 0;
             _cline_cap      = 0;
+            _num_versions   = 0;
             _optimal_layout = true;
 
             const uint16_t nb = clone->num_branches();
@@ -184,6 +182,7 @@ namespace psitri
       _alloc_pos      = clone->_alloc_pos;
       _cline_cap      = clone->_cline_cap;
       _dead_space     = clone->_dead_space;
+      _num_versions   = clone->_num_versions;
       _optimal_layout = clone->_optimal_layout;
 
       assert(free_space() >= 0);
@@ -191,9 +190,8 @@ namespace psitri
       // We cannot use the faster aligned memcpy unless we are copying from a leaf node
       // that has an optimal layout, otherwise we could end up copying data that is not
       // aligned to the cacheline size.
-      auto ccline     = clone->clines();
-      auto ccline_end = ccline.data() + ccline.size();
-      auto head_size  = (char*)ccline_end - (char*)clone->_key_hashs;
+      // Copy everything from _key_hashs through meta_end (includes clines + ver_indices + version_table)
+      auto head_size  = clone->meta_end() - (const char*)clone->_key_hashs;
 
       memcpy(_key_hashs, clone->_key_hashs, head_size);
 
@@ -224,6 +222,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
+      _num_versions = 0;
       clone_from(clone);
       apply(ins);
    }
@@ -235,6 +234,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
+      _num_versions = 0;
       // Rebuild from scratch, substituting the new value at upd.lb during the copy.
       // This avoids clone_from + update_value which would carry the old value as dead
       // space — causing overflow when the leaf is already near capacity.
@@ -283,6 +283,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
+      _num_versions = 0;
       /// TODO: could be more effecient by copying node values in order and just skipping the
       /// removed branch, it would leave the leaf in a better layout without dead space
       /// but putting this work onto the compactor might make more sense.
@@ -297,6 +298,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
+      _num_versions = 0;
       // Clone the source then remove the range in-place.
       // This is simple and correct; the compactor can optimize layout later.
       clone_from(&rm.src);
@@ -310,6 +312,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
+      _num_versions = 0;
       const leaf_node& src = pp.src;
       const uint16_t   nb  = src.num_branches();
       set_num_branches(nb);
@@ -360,7 +363,7 @@ namespace psitri
    }
    /*
     * Each node has an optimal layout that looks something like this:
-    *   1. no dead space 
+    *   1. no dead space
     *   2. all keys are grouped together
     *   3. all keys are ordered by lower-bound search visit probability
     *   4. clines are sorted based upon order they appear in sorted keys,
@@ -394,6 +397,7 @@ namespace psitri
       _alloc_pos      = 0;
       _dead_space     = 0;
       _cline_cap      = 0;
+      _num_versions   = 0;
       _optimal_layout = true;
       set_num_branches(*end - *start);
       auto nb = num_branches();
@@ -490,6 +494,7 @@ namespace psitri
        : node(alloc_size, node_type::leaf, seq),
          _alloc_pos(0), _dead_space(0), _cline_cap(0), _optimal_layout(true)
    {
+      _num_versions = 0;
       set_num_branches(vis.count);
       if (vis.count == 0) return;
 
@@ -504,11 +509,11 @@ namespace psitri
    {
       assert(ins.key.size() <= 1024);  // TODO: max key size constant
       assert(not ins.value.is_remove());
-      // key hash(1), key_offset, value_branch(2),
+      // key hash(1), key_offset(2), value_branch(2)
       size_t size_required = sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
       if (ins.value.is_view())
       {
-         assert(ins.value.view().size() <= 0xff);
+         assert(ins.value.view().size() <= 0xffff);
          value_view data = ins.value.view();
          size_required += data.size() + sizeof(value_data);
       }

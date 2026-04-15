@@ -17,15 +17,21 @@ namespace sal
       if (ptr.is_valid())
       {
          ptr.retain();
-         _internal = std::make_shared<internal>(ptr.address(),
-                                                ptr.session()->get_allocator().shared_from_this());
+         _internal = std::make_shared<internal>(
+             ptr.address(), ptr.ver(),
+             ptr.session()->get_allocator().shared_from_this());
       }
    }
 
    inline smart_ptr_base shared_smart_ptr_base::get() const noexcept
    {
       if (_internal)
-         return smart_ptr_base(_internal->_allocator->get_session(), _internal->_ptr, true);
+      {
+         auto result =
+             smart_ptr_base(_internal->_allocator->get_session(),
+                            tree_id{_internal->_ptr, _internal->_ver}, true);
+         return result;
+      }
       return {};
    }
 
@@ -33,10 +39,15 @@ namespace sal
    {
       assert(ptr.is_read_only());
       if (_internal)
+      {
          _internal->_allocator->release(_internal->_ptr);
+         if (_internal->_ver != null_ptr_address)
+            _internal->_allocator->release(_internal->_ver);
+      }
       if (ptr.is_valid())
-         _internal = std::make_shared<internal>(ptr.address(),
-                                                ptr.session()->get_allocator().shared_from_this());
+         _internal = std::make_shared<internal>(
+             ptr.address(), ptr.ver(),
+             ptr.session()->get_allocator().shared_from_this());
       else
          _internal.reset();
       return *this;

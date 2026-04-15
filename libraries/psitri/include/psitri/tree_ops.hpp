@@ -16,15 +16,19 @@ namespace psitri
    using sal::smart_ref;
    class tree_context
    {
-      value_type                   _new_value;
-      sal::allocator_session&      _session;
-      sal::smart_ptr<alloc_header> _root;
-      int                          _old_value_size = -1;
-      int                          _delta_descendents          = 0;  // +1 insert, -1 remove, 0 update/not-found
-      uint32_t                     _collapse_threshold = 24;
+      value_type                          _new_value;
+      sal::allocator_session&             _session;
+      sal::smart_ptr<alloc_header>        _root;
+      int                                 _old_value_size = -1;
+      int64_t                             _delta_removed_keys = 0;  // used only by range_remove to count removed keys
+      uint32_t                            _collapse_threshold = 24;
+      const live_range_map::snapshot*      _dead_snap = nullptr;
+      uint64_t                             _current_epoch = 0;
 
      public:
       void set_collapse_threshold(uint32_t t) { _collapse_threshold = t; }
+      void set_dead_versions(const live_range_map::snapshot* s) { _dead_snap = s; }
+      void set_current_epoch(uint64_t e) { _current_epoch = e; }
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
       sal::smart_ptr<alloc_header> take_root() { return std::move(_root); }
       tree_context(sal::smart_ptr<alloc_header> root)
@@ -58,11 +62,19 @@ namespace psitri
          switch (nt)
          {
             case node_type::inner:
-               result = ref.as<inner_node>()->descendents();
+            {
+               auto in = ref.as<inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  result += count_child_keys(in->get_branch(branch_number(i)));
                break;
+            }
             case node_type::inner_prefix:
-               result = ref.as<inner_prefix_node>()->descendents();
+            {
+               auto ipn = ref.as<inner_prefix_node>();
+               for (uint16_t i = 0; i < ipn->num_branches(); ++i)
+                  result += count_child_keys(ipn->get_branch(branch_number(i)));
                break;
+            }
             case node_type::leaf:
                result = ref.as<leaf_node>()->num_branches();
                break;
@@ -85,7 +97,7 @@ namespace psitri
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
          return _session.alloc<inner_node>(branches, needed_clines, out_cline_idx,
-                                           count_branch_keys(branches));
+                                           _current_epoch);
       }
       ptr_address make_inner_prefix(sal::alloc_hint   hint,
                                     key_view          prefix,
@@ -93,9 +105,8 @@ namespace psitri
       {
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
-         auto cbk = count_branch_keys(branches);
          return _session.alloc<inner_prefix_node>(hint, prefix, branches, needed_clines,
-                                                  out_cline_idx, cbk);
+                                                  out_cline_idx, _current_epoch);
       }
       template <typename NodeType>
       smart_ref<inner_prefix_node> remake_inner_prefix(const smart_ref<NodeType>& in,
@@ -104,9 +115,8 @@ namespace psitri
       {
          std::array<uint8_t, 8> out_cline_idx;
          auto                   needed_clines = find_clines(branches, out_cline_idx);
-         auto cbk = count_branch_keys(branches);
          return _session.realloc<inner_prefix_node>(in, prefix, branches, needed_clines,
-                                                    out_cline_idx, cbk);
+                                                    out_cline_idx, _current_epoch);
       }
 
       template <typename InnerNodeType>
@@ -126,7 +136,7 @@ namespace psitri
          const branch* brs  = in->const_branches();
          auto          freq = create_cline_freq_table(brs + *range.begin, brs + *range.end);
          return _session.alloc<inner_node>(parent_hint, in, range, freq,
-                                           count_subrange_keys(in, range));
+                                           _current_epoch);
       }
       template <typename NodeType, any_inner_node_type InnerNodeType>
       smart_ref<inner_node> remake_inner_node(const smart_ref<NodeType>& in,
@@ -136,13 +146,12 @@ namespace psitri
          const branch* brs  = in->const_branches();
          auto          freq = create_cline_freq_table(brs + *range.begin, brs + *range.end);
          return _session.realloc<inner_node>(in, in_obj, range, freq,
-                                             count_subrange_keys(in_obj, range));
+                                             _current_epoch);
       }
 
       void insert(key_view key, value_type value)
       {
          _old_value_size = -1;
-         _delta_descendents          = 0;
          auto result     = upsert<upsert_mode::unique_insert>(key, value);
          assert(result == -1);
       }
@@ -153,7 +162,6 @@ namespace psitri
       {
          _old_value_size    = -1;
          sal::read_lock lock = _session.lock();
-         _delta_descendents  = 0;
          _new_value          = std::move(value);
          if (not _root)
          {
@@ -191,7 +199,6 @@ namespace psitri
             return -1;
          _old_value_size = -1;
          sal::read_lock lock = _session.lock();
-         _delta_descendents  = 0;
          auto           rref = *_root;
          auto       old_addr = _root.take();
          /// ironically, if we are in shared mode removing a key could force a split because the new
@@ -214,6 +221,55 @@ namespace psitri
       branch_set range_remove(const sal::alloc_hint&   parent_hint,
                               smart_ref<alloc_header>& ref,
                               key_range                range);
+
+      // ── MVCC operations ─────────────────────────────────────────
+      // These modify leaf/value_node data in-place via CB location update
+      // without cascading inner node changes to the root.
+
+      /// MVCC upsert: insert or update a key at the given version.
+      /// For shared trees (ref > 1), modifies only the leaf or value_node
+      /// via CB relocation — no inner node cascade, root unchanged.
+      /// Falls back to full COW cascade if structural changes are needed (split).
+      void mvcc_upsert(key_view key, value_type value, uint64_t version);
+
+      /// MVCC remove: append a tombstone for key at the given version.
+      void mvcc_remove(key_view key, uint64_t version);
+
+      /// Read-only traversal to find the MVCC target node for a key.
+      /// Returns the node ptr_address that needs to be stripe-locked:
+      /// - value_node address if the key has a value_node (Case B)
+      /// - leaf address if the key has an inline value (Case A) or is new (Case C)
+      /// Returns null_ptr_address only when COW fallback is unavoidable
+      /// (empty tree, prefix mismatch).
+      ptr_address mvcc_find_target(key_view key) const;
+
+      /// Try MVCC upsert under stripe lock.  Returns true on success,
+      /// false if the operation requires COW fallback (overflow/split).
+      /// On false, no side effects — caller should retry under root mutex.
+      bool try_mvcc_upsert(key_view key, value_type value, uint64_t version);
+
+      /// Try MVCC remove under stripe lock.  Returns true on success,
+      /// false if COW fallback is needed.
+      bool try_mvcc_remove(key_view key, uint64_t version);
+
+      /// MVCC helper: handle upsert at the leaf level.
+      void mvcc_upsert_leaf(smart_ref<leaf_node>& leaf,
+                            key_view              leaf_key,
+                            key_view              full_key,
+                            value_type&           value,
+                            uint64_t              version);
+
+      // ── Defrag operations ───────────────────────────────────────
+      /// Background defrag: walk the tree, strip dead entries from value_nodes.
+      /// Returns the number of value_nodes cleaned up.
+      uint64_t defrag();
+
+     private:
+      /// Defrag helper: strip dead entries from value_nodes in a subtree.
+      uint64_t defrag_subtree(ptr_address addr);
+      /// Defrag helper: strip dead entries from value_nodes in a leaf.
+      uint64_t defrag_leaf(smart_ref<leaf_node>& leaf);
+     public:
 
       template <upsert_mode mode>
       branch_set range_remove_leaf(const sal::alloc_hint& parent_hint,
@@ -288,6 +344,7 @@ namespace psitri
          uint64_t total_leaf_size       = 0;
          uint64_t total_value_size      = 0;
          uint64_t total_keys            = 0;
+         uint64_t total_version_entries = 0;  ///< sum of num_versions across all value_nodes
          uint64_t single_branch_inners  = 0;
          uint64_t sparse_subtree_inners = 0;
          double   branch_per_cline      = 0;
@@ -494,6 +551,11 @@ namespace psitri
                 _session.retain(br);
              });
       }
+      /// Prune multi-version value_nodes in a freshly-allocated leaf (ref=1).
+      /// During COW-to-unique, each value_node with num_versions > 1 is replaced
+      /// with a single-version copy of the latest entry.
+      void prune_leaf_value_nodes(ptr_address leaf_addr);
+
       template <upsert_mode mode>
       branch_set split_insert(const sal::alloc_hint& parent_hint,
                               smart_ref<leaf_node>&  leaf,
@@ -639,31 +701,7 @@ namespace psitri
             recursive_counts[i] = validate_subtree(ref, depth);
             total_keys += recursive_counts[i];
          }
-         if (r->descendents() != total_keys)
-         {
-            SAL_ERROR("validate: descendents mismatch at depth {}: addr={} stored={} actual={} num_branches={}",
-                      depth, r.address(), r->descendents(), total_keys, r->num_branches());
-            // Dump all branch counts: O(1) stored vs recursive actual
-            for (int i = 0; i < r->num_branches(); ++i)
-            {
-               auto br  = r->get_branch(branch_number(i));
-               auto ref = _session.get_ref(br);
-               auto nt = node_type(ref->type());
-               uint64_t stored_count = 0;
-               if (nt == node_type::inner)
-                  stored_count = ref.template as<inner_node>()->descendents();
-               else if (nt == node_type::inner_prefix)
-                  stored_count = ref.template as<inner_prefix_node>()->descendents();
-               else if (nt == node_type::leaf)
-                  stored_count = ref.template as<leaf_node>()->num_branches();
-               if (stored_count != recursive_counts[i])
-                  SAL_ERROR("  branch[{}]: addr={} type={} stored={} actual={} MISMATCH",
-                            i, br, (int)nt, stored_count, recursive_counts[i]);
-               else
-                  SAL_ERROR("  branch[{}]: addr={} type={} count={}", i, br, (int)nt, stored_count);
-            }
-            assert(r->descendents() == total_keys);
-         }
+         // Descendent validation removed — epoch replaced descendents
          return total_keys;
       }
       void validate(smart_ref<alloc_header> r, int depth = 0)
@@ -759,8 +797,7 @@ namespace psitri
          s.branch_per_cline += double(r->num_branches()) / r->num_clines();
          if (r->num_branches() == 1)
             ++s.single_branch_inners;
-         if (r->descendents() <= 24)
-            ++s.sparse_subtree_inners;
+         // sparse_subtree_inners tracking removed — epoch replaced descendents
          if (!r->validate_invariants())
          {
             SAL_ERROR("calc_stats: inner node {} failed validate_invariants at depth {},"
@@ -804,6 +841,7 @@ namespace psitri
                      auto vref = _session.get_ref<value_node>(
                          leaf->get_value_address(branch_number(i)));
                      s.total_value_size += vref->size();
+                     s.total_version_entries += vref->num_versions();
                   }
                }
                break;
@@ -910,31 +948,11 @@ namespace psitri
    {
       auto nb = in->num_branches();
 
-      // split() computes descendant counts via count_child_keys which follows
-      // control-block forwarding. The recursive upsert already realloc'd the
-      // child at branch `br`, so forwarding returns the POST-upsert count for
-      // that branch. This makes the split half containing `br` have an inflated
-      // descendant count. Compute the error so we can fix it after split.
-      uint64_t forwarded_count = count_child_keys(in->get_branch(br));
-      // in->descendents() is still the correct pre-upsert total because the
-      // inner node itself hasn't been modified yet.
-      // original_count = in->descendents() - sum_of_all_other_branches
-      // But that's expensive. Instead, compute it from the sub_branches total:
-      // _delta_descendents = sub_branches_total - original_count
-      // => original_count = sub_branches_total - _delta_descendents
-      uint64_t sub_total = count_branch_keys(sub_branches);
-      uint64_t original_count = sub_total - _delta_descendents;
-      int64_t  forwarding_error = int64_t(forwarded_count) - int64_t(original_count);
-
       auto [left, right] = split<mode>(parent_hint, in, br, sub_branches);
 
-      // Fix the descendant count of the half containing branch `br`
-      // to undo the forwarding-induced inflation.
       if (br < nb / 2)
       {
          smart_ref<inner_node> left_ref = _session.get_ref<inner_node>(left);
-         if (forwarding_error != 0)
-            left_ref.modify()->add_descendents(-forwarding_error);
          auto left_result =
              merge_branches<upsert_mode::unique>(parent_hint, left_ref, br, sub_branches);
          left_result.push_back(in->divs()[nb / 2 - 1], right);
@@ -943,8 +961,6 @@ namespace psitri
       else
       {
          smart_ref<inner_node> right_ref = _session.get_ref<inner_node>(right);
-         if (forwarding_error != 0)
-            right_ref.modify()->add_descendents(-forwarding_error);
          branch_set right_result = merge_branches<upsert_mode::unique>(
              parent_hint, right_ref, branch_number(*br - nb / 2), sub_branches);
          right_result.push_front(left, in->divs()[nb / 2 - 1]);
@@ -989,7 +1005,7 @@ namespace psitri
 
       if constexpr (mode.is_unique())
       {
-         op::replace_branch update = {br, sub_branches, needed_clines, cline_indices, _delta_descendents};
+         op::replace_branch update = {br, sub_branches, needed_clines, cline_indices};
 
          /// this is the likely path because realloc grows by cachelines and
          /// most updates don't force a node to grow.
@@ -1014,12 +1030,12 @@ namespace psitri
          if constexpr (is_inner_node<InnerNodeType>)
             return _session.alloc<InnerNodeType>(
                 parent_hint, in.obj(),
-                op::replace_branch{br, sub_branches, needed_clines, cline_indices, _delta_descendents});
+                op::replace_branch{br, sub_branches, needed_clines, cline_indices});
          else if constexpr (is_inner_prefix_node<InnerNodeType>)
          {
             return _session.alloc<InnerNodeType>(
                 parent_hint, in->prefix(), in.obj(),
-                op::replace_branch{br, sub_branches, needed_clines, cline_indices, _delta_descendents});
+                op::replace_branch{br, sub_branches, needed_clines, cline_indices});
          }
       }
    }
@@ -1054,7 +1070,7 @@ namespace psitri
                std::unreachable();
             }
 
-            _delta_descendents = 1;  // inserting a new key via prefix mismatch
+            // prefix mismatch — inserting a new key
 
             if (cpre.size() == 0)
             {
@@ -1178,7 +1194,6 @@ namespace psitri
                    [&](auto* n)
                    {
                       n->remove_branch(br);
-                      n->add_descendents(_delta_descendents);
                    });
 
                // Phase 2: Collapse single-branch inner node
@@ -1236,7 +1251,7 @@ namespace psitri
                         if constexpr (is_inner_node<InnerNodeType>)
                         {
                            (void)_session.realloc<inner_node>(in, child_ptr, range, freq,
-                                                              child_ptr->descendents());
+                                                              _current_epoch);
                         }
                         else if constexpr (is_inner_prefix_node<InnerNodeType>)
                         {
@@ -1245,7 +1260,7 @@ namespace psitri
                            memcpy(prefix_buf, pfx.data(), pfx.size());
                            (void)_session.realloc<inner_prefix_node>(
                                in, child_ptr, key_view(prefix_buf, pfx.size()), range, freq,
-                               child_ptr->descendents());
+                               _current_epoch);
                         }
                         _session.release(child_addr);
                         break;
@@ -1279,8 +1294,8 @@ namespace psitri
                }
 
                // Phase 3: Collapse sparse multi-branch subtree into a single leaf
-               if (_collapse_threshold > 0 && in->num_branches() > 1 &&
-                   in->descendents() <= _collapse_threshold)
+               // (size_subtree has an early-exit at _collapse_threshold, bounding cost)
+               if (_collapse_threshold > 0 && in->num_branches() > 1)
                {
                   subtree_sizer sizer(_collapse_threshold);
                   uint16_t pfx_len = 0;
@@ -1369,7 +1384,7 @@ namespace psitri
                                                  branch_number(child_ptr->num_branches()));
                            auto result = _session.alloc<inner_prefix_node>(
                                parent_hint, child_ptr, in->prefix(), range, freq,
-                               child_ptr->descendents());
+                               _current_epoch);
                            _session.release(remaining_addr);
                            return result;
                         }
@@ -1396,9 +1411,7 @@ namespace psitri
 
                // Phase 3: Collapse sparse subtree in shared mode
                {
-                  uint64_t new_desc = in->descendents() + _delta_descendents;
-                  if (_collapse_threshold > 0 && in->num_branches() > 2 &&
-                      new_desc <= _collapse_threshold)
+                  if (_collapse_threshold > 0 && in->num_branches() > 2)
                   {
                      ptr_address remaining[256];
                      uint16_t rb_count = 0;
@@ -1446,7 +1459,7 @@ namespace psitri
 
                // retain_children gave +1 to all remaining children; the removed
                // child's extra retain was already released above.
-               op::inner_remove_branch rm{br, _delta_descendents};
+               op::inner_remove_branch rm{br};
                if constexpr (is_inner_node<InnerNodeType>)
                   return _session.alloc<InnerNodeType>(parent_hint, in.obj(), rm);
                else if constexpr (is_inner_prefix_node<InnerNodeType>)
@@ -1470,8 +1483,6 @@ namespace psitri
          // are unbalanced — release all children to restore balance.
          if constexpr (mode.is_shared())
             in->visit_branches([this](ptr_address br) { _session.release(br); });
-         if (_delta_descendents != 0)
-            in.modify()->add_descendents(_delta_descendents);
          return in.address();
       }
       // integrate the sub_branches into the current node, and return the resulting branch set
@@ -1485,8 +1496,6 @@ namespace psitri
                                    key_view               key,
                                    branch_number          br)
    {
-      _delta_descendents = 0;  // updating an existing key, no count change
-
       // Record old value size and release old external value if needed
       auto old_value = leaf->get_value(br);
       if (old_value.is_value_node())
@@ -1540,14 +1549,10 @@ namespace psitri
                op::leaf_remove rm_op{.src = *leaf.obj(), .bn = br};
                auto removed = _session.realloc<leaf_node>(leaf, rm_op);
                // Now insert the key with the new value into the (possibly smaller) leaf.
-               // insert() sets _delta_descendents=1, but this is an update (net 0),
-               // so we reset it after insert to avoid corrupting ancestor descendent counts.
                // Must use unique_upsert (not mode=unique_update) because the key was
                // removed — split_insert calls upsert<mode>() which must INSERT, not UPDATE.
                branch_number lb = removed->lower_bound(key);
-               auto result = insert<upsert_mode::unique_upsert>(parent_hint, removed, key, lb);
-               _delta_descendents = 0;
-               return result;
+               return insert<upsert_mode::unique_upsert>(parent_hint, removed, key, lb);
             }
          }
          std::unreachable();
@@ -1568,7 +1573,9 @@ namespace psitri
             if (old_has_address)
                _session.release(leaf->get_value(br).address());
 
-            return _session.alloc<leaf_node>(parent_hint, update_op);
+            auto new_leaf = _session.alloc<leaf_node>(parent_hint, update_op);
+            prune_leaf_value_nodes(new_leaf);
+            return new_leaf;
          }
 
          // Overflow: the leaf is at max capacity and the new value is larger.
@@ -1596,13 +1603,12 @@ namespace psitri
          // Create a new leaf without the key at br (copies N-1 child refs from source).
          // This leaf has ref=1, so we can operate on it in unique mode.
          op::leaf_remove rm_op{.src = *leaf.obj(), .bn = br};
-         auto removed = _session.get_ref<leaf_node>(
-             _session.alloc<leaf_node>(parent_hint, rm_op));
+         auto rm_addr = _session.alloc<leaf_node>(parent_hint, rm_op);
+         prune_leaf_value_nodes(rm_addr);
+         auto removed = _session.get_ref<leaf_node>(rm_addr);
          branch_number new_lb = removed->lower_bound(key);
          // Insert using unique mode since removed has ref=1.
-         auto result = insert<upsert_mode::unique_upsert>(parent_hint, removed, key, new_lb);
-         _delta_descendents = 0;  // update is net-zero, insert set it to +1
-         return result;
+         return insert<upsert_mode::unique_upsert>(parent_hint, removed, key, new_lb);
       }
    }
    template <upsert_mode mode>
@@ -1631,7 +1637,6 @@ namespace psitri
          this->_old_value_size = _session.get_ref(old_value.value_address())->size();
       else
          this->_old_value_size = leaf->get_value(lb).size();
-      _delta_descendents = -1;  // removing an existing key
       // at this point we know the key exists and must be removed
 
       if constexpr (mode.is_unique())
@@ -1663,6 +1668,7 @@ namespace psitri
          retain_children(leaf);
          op::leaf_remove remove_op{.src = *leaf.obj(), .bn = lb};
          auto            new_leaf = _session.alloc<leaf_node>(parent_hint, remove_op);
+         prune_leaf_value_nodes(new_leaf);
 
          // if bn is an address, we need to release the address (value_node or subtree)
          if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
@@ -1681,7 +1687,6 @@ namespace psitri
                                    key_view               key,
                                    branch_number          lb)
    {
-      _delta_descendents = 1;  // inserting a new key
       //     SAL_INFO("insert: leaf {} key: {} ptr: {}", leaf.address(), key, leaf.obj());
       if constexpr (mode.is_shared())
       {
@@ -1742,9 +1747,8 @@ namespace psitri
                //SAL_INFO("insert: shared mode: cloning leaf {} with insert_op leaf.obj {}",
                //         leaf.address(), leaf.obj());
                auto new_leaf = _session.alloc<leaf_node>(parent_hint, leaf.obj(), insert_op);
-               //SAL_INFO("insert: shared mode: new_leaf: {}", new_leaf);
+               prune_leaf_value_nodes(new_leaf);
                return new_leaf;
-               //   [[likely]] return _session.alloc<leaf_node>(leaf.obj(), insert_op);
             }
             case leaf_node::can_apply_mode::none:
                //SAL_ERROR("insert: split_insert ");
@@ -1755,6 +1759,59 @@ namespace psitri
       }
       std::unreachable();
    }
+   inline void tree_context::prune_leaf_value_nodes(ptr_address leaf_addr)
+   {
+      auto leaf_ref = _session.get_ref<leaf_node>(leaf_addr);
+      const uint32_t n = leaf_ref->num_branches();
+
+      // Quick scan: any multi-version value_nodes?
+      bool need_prune = false;
+      for (uint32_t i = 0; i < n && !need_prune; ++i)
+      {
+         branch_number bn(i);
+         if (leaf_ref->get_value_type(bn) != leaf_node::value_type_flag::value_node)
+            continue;
+         auto vn_ref = _session.get_ref<value_node>(leaf_ref->get_value_address(bn));
+         if (vn_ref->num_versions() > 1)
+            need_prune = true;
+      }
+      if (!need_prune)
+         return;
+
+      // Replace each multi-version value_node with a single-version copy
+      leaf_ref.modify(
+          [&](leaf_node* mutable_leaf)
+          {
+             for (uint32_t i = 0; i < n; ++i)
+             {
+                branch_number bn(i);
+                if (mutable_leaf->get_value_type(bn) != leaf_node::value_type_flag::value_node)
+                   continue;
+
+                auto old_addr = mutable_leaf->get_value_address(bn);
+                auto vn_ref   = _session.get_ref<value_node>(old_addr);
+                if (vn_ref->num_versions() <= 1)
+                   continue;
+
+                // Skip if latest entry is a tombstone or null (no data to preserve)
+                int16_t latest_off = vn_ref->get_entry_offset(vn_ref->num_versions() - 1);
+                if (latest_off < value_node::offset_data_start)
+                   continue;
+
+                // Allocate a new single-version value_node with the latest value
+                value_view  latest_data = vn_ref->get_data();
+                ptr_address new_vn_addr =
+                    _session.alloc<value_node>(leaf_ref->clines(), latest_data);
+
+                // Swap the address in the leaf
+                mutable_leaf->update_value(bn, value_type::make_value_node(new_vn_addr));
+
+                // Release the old multi-version value_node
+                _session.release(old_addr);
+             }
+          });
+   }
+
    inline std::string format(const sal::alloc_hint& hint)
    {
       std::string formatted_span = "[";
@@ -1964,6 +2021,560 @@ namespace psitri
          }
       }
       std::unreachable();
+   }
+
+   // ─── MVCC find target ─────────────────────────────────────────────
+   inline ptr_address tree_context::mvcc_find_target(key_view key) const
+   {
+      if (!_root)
+         return sal::null_ptr_address;  // empty tree → COW (allocate root)
+
+      ptr_address addr     = _root.address();
+      key_view    remaining = key;
+
+      for (;;)
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::inner_prefix:
+            {
+               auto ipn  = ref.as<inner_prefix_node>();
+               if (ipn->epoch() < _current_epoch)
+                  return sal::null_ptr_address;  // stale epoch → COW cascade for maintenance
+               auto cpre = common_prefix(remaining, ipn->prefix());
+               if (cpre != ipn->prefix())
+                  return sal::null_ptr_address;  // prefix mismatch → COW fallback
+               remaining = remaining.substr(cpre.size());
+               addr      = ipn->get_branch(ipn->lower_bound(remaining));
+               continue;
+            }
+            case node_type::inner:
+            {
+               auto in = ref.as<inner_node>();
+               if (in->epoch() < _current_epoch)
+                  return sal::null_ptr_address;  // stale epoch → COW cascade for maintenance
+               addr    = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::leaf:
+            {
+               auto          leaf = ref.as<leaf_node>();
+               branch_number lb   = leaf->lower_bound(remaining);
+
+               if (lb != leaf->num_branches() && leaf->get_key(lb) == remaining)
+               {
+                  auto val = leaf->get_value(lb);
+                  if (val.is_value_node())
+                     return val.value_address();  // Case B: lock value_node
+                  return leaf.address();           // Case A: lock leaf (inline → value_node)
+               }
+               return leaf.address();              // Case C: lock leaf (new key insert)
+            }
+            default:
+               return sal::null_ptr_address;
+         }
+      }
+   }
+
+   // ─── try_mvcc_upsert: stripe-lock-safe, no COW fallback ─────────
+   inline bool tree_context::try_mvcc_upsert(key_view key, value_type value, uint64_t version)
+   {
+      sal::read_lock lock = _session.lock();
+
+      if (!_root)
+         return false;
+
+      // Flat read-only traversal to the leaf
+      ptr_address addr      = _root.address();
+      key_view    remaining = key;
+
+      for (;;)
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::inner_prefix:
+            {
+               auto ipn  = ref.as<inner_prefix_node>();
+               if (ipn->epoch() < _current_epoch)
+                  return false;  // stale epoch → COW cascade
+               auto cpre = common_prefix(remaining, ipn->prefix());
+               if (cpre != ipn->prefix())
+                  return false;  // prefix mismatch → COW
+               remaining = remaining.substr(cpre.size());
+               addr      = ipn->get_branch(ipn->lower_bound(remaining));
+               continue;
+            }
+            case node_type::inner:
+            {
+               auto in = ref.as<inner_node>();
+               if (in->epoch() < _current_epoch)
+                  return false;  // stale epoch → COW cascade
+               addr    = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::leaf:
+            {
+               auto          leaf     = ref.as<leaf_node>();
+               branch_number lb       = leaf->lower_bound(remaining);
+
+               if (lb != leaf->num_branches() && leaf->get_key(lb) == remaining)
+               {
+                  // Key exists
+                  auto old_val = leaf->get_value(lb);
+
+                  if (old_val.is_value_node())
+                  {
+                     auto vref = _session.get_ref<value_node>(old_val.value_address());
+
+                     // Flat value_nodes (large values) can't use MVCC entry system
+                     if (vref->is_flat())
+                        return false;  // COW fallback
+
+                     // Case B: append to existing value_node via CB relocation
+                     auto new_val = value.is_view() ? value.view() : value_view();
+                     if (_dead_snap)
+                        (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, new_val, _dead_snap);
+                     else
+                        (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, new_val);
+                     return true;
+                  }
+
+                  // Case A: inline → value_node promotion + leaf update
+                  value_view old_data = old_val.view();
+                  auto       new_data = value.is_view() ? value.view() : value_view();
+                  uint64_t   old_ver  = 0;
+
+                  auto vn_addr = _session.alloc<value_node>(
+                      leaf->clines(), old_ver, old_data, version, new_data);
+
+                  value_type     vn_value = value_type::make_value_node(vn_addr);
+                  op::leaf_update update_op{.src = *leaf.obj(), .lb = lb,
+                                            .key = remaining, .value = vn_value};
+
+                  if (leaf->can_apply(update_op) != leaf_node::can_apply_mode::none)
+                  {
+                     (void)_session.mvcc_realloc<leaf_node>(leaf, update_op);
+                     return true;
+                  }
+                  // Overflow — release allocated value_node, signal COW needed
+                  _session.release(vn_addr);
+                  return false;
+               }
+
+               // Case C: new key — insert into leaf via CB relocation
+               auto new_val = make_value(value, leaf->clines());
+
+               uint8_t cline_idx = 0xff;
+               if (new_val.is_address())
+                  cline_idx = leaf->find_cline_index(new_val.address());
+
+               op::leaf_insert insert_op{
+                   .src = *leaf.obj(), .lb = lb, .key = remaining,
+                   .value = new_val, .cline_idx = cline_idx};
+
+               if (cline_idx < 16 &&
+                   leaf->can_apply(insert_op) != leaf_node::can_apply_mode::none)
+               {
+                  (void)_session.mvcc_realloc<leaf_node>(leaf, leaf.obj(), insert_op);
+                  return true;
+               }
+               // Overflow or cline overflow — signal COW needed
+               if (new_val.is_value_node())
+                  _session.release(new_val.value_address());
+               return false;
+            }
+            default:
+               return false;
+         }
+      }
+   }
+
+   // ─── try_mvcc_remove: stripe-lock-safe, no COW fallback ─────────
+   inline bool tree_context::try_mvcc_remove(key_view key, uint64_t version)
+   {
+      if (!_root)
+         return true;  // nothing to remove
+
+      sal::read_lock lock = _session.lock();
+
+      ptr_address addr      = _root.address();
+      key_view    remaining = key;
+
+      for (;;)
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::inner_prefix:
+            {
+               auto ipn  = ref.as<inner_prefix_node>();
+               if (ipn->epoch() < _current_epoch)
+                  return false;  // stale epoch → COW cascade
+               auto cpre = common_prefix(remaining, ipn->prefix());
+               if (cpre != ipn->prefix())
+                  return true;  // key doesn't exist — no-op
+               remaining = remaining.substr(cpre.size());
+               addr      = ipn->get_branch(ipn->lower_bound(remaining));
+               continue;
+            }
+            case node_type::inner:
+            {
+               auto in = ref.as<inner_node>();
+               if (in->epoch() < _current_epoch)
+                  return false;  // stale epoch → COW cascade
+               addr    = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::leaf:
+            {
+               auto          leaf = ref.as<leaf_node>();
+               branch_number lb   = leaf->lower_bound(remaining);
+               if (lb == leaf->num_branches() || leaf->get_key(lb) != remaining)
+                  return true;  // key doesn't exist — no-op
+
+               auto old_val = leaf->get_value(lb);
+               if (old_val.is_value_node())
+               {
+                  auto vref = _session.get_ref<value_node>(old_val.value_address());
+                  if (vref->is_flat())
+                     return false;  // COW fallback for flat nodes
+
+                  // Append tombstone to existing value_node
+                  if (_dead_snap)
+                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr, _dead_snap);
+                  else
+                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr);
+                  return true;
+               }
+
+               // Inline value: promote to value_node + tombstone, update leaf
+               value_view old_data = old_val.view();
+               auto       vn_addr  = _session.alloc<value_node>(leaf->clines(), old_data);
+               auto       vref     = _session.get_ref<value_node>(vn_addr);
+               if (_dead_snap)
+                  (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr, _dead_snap);
+               else
+                  (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr);
+
+               value_type     vn_value = value_type::make_value_node(vn_addr);
+               op::leaf_update update_op{.src = *leaf.obj(), .lb = lb,
+                                         .key = remaining, .value = vn_value};
+               if (leaf->can_apply(update_op) != leaf_node::can_apply_mode::none)
+               {
+                  (void)_session.mvcc_realloc<leaf_node>(leaf, update_op);
+                  return true;
+               }
+               // Overflow — clean up and signal COW needed
+               // (value_node and its tombstone entry are wasted but refcount-safe)
+               _session.release(vn_addr);
+               return false;
+            }
+            default:
+               return false;
+         }
+      }
+   }
+
+   // ─── MVCC upsert implementation ──────────────────────────────────
+   inline void tree_context::mvcc_upsert(key_view key, value_type value, uint64_t version)
+   {
+      sal::read_lock lock = _session.lock();
+
+      if (!_root)
+      {
+         _root = _session.smart_alloc<leaf_node>(key, make_value(value, sal::alloc_hint()));
+         return;
+      }
+
+      // Flat read-only traversal to the leaf using ptr_address.
+      // If any inner node has a stale epoch, fall back to full COW cascade
+      // which updates epochs and prunes multi-version value_nodes.
+      ptr_address addr = _root.address();
+      key_view remaining = key;
+
+      for (;;)
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::inner_prefix:
+            {
+               auto ipn = ref.as<inner_prefix_node>();
+               auto cpre = common_prefix(remaining, ipn->prefix());
+               if (cpre != ipn->prefix() || ipn->epoch() < _current_epoch)
+               {
+                  // Prefix mismatch or stale epoch — fall back to COW.
+                  upsert<upsert_mode::unique_upsert>(key, std::move(value));
+                  return;
+               }
+               remaining = remaining.substr(cpre.size());
+               addr = ipn->get_branch(ipn->lower_bound(remaining));
+               continue;
+            }
+            case node_type::inner:
+            {
+               auto in = ref.as<inner_node>();
+               if (in->epoch() < _current_epoch)
+               {
+                  upsert<upsert_mode::unique_upsert>(key, std::move(value));
+                  return;
+               }
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::leaf:
+            {
+               auto leaf = ref.as<leaf_node>();
+               mvcc_upsert_leaf(leaf, remaining, key, value, version);
+               return;
+            }
+            default:
+               std::unreachable();
+         }
+      }
+   }
+
+   inline void tree_context::mvcc_upsert_leaf(smart_ref<leaf_node>& leaf,
+                                               key_view              leaf_key,
+                                               key_view              full_key,
+                                               value_type&           value,
+                                               uint64_t              version)
+   {
+      branch_number lb = leaf->lower_bound(leaf_key);
+
+      if (lb != leaf->num_branches() && leaf->get_key(lb) == leaf_key)
+      {
+         // Key exists — update
+         auto old_val = leaf->get_value(lb);
+
+         if (old_val.is_value_node())
+         {
+            auto vref = _session.get_ref<value_node>(old_val.value_address());
+            if (vref->is_flat())
+            {
+               // Flat value_node (large value) — COW fallback
+               upsert<upsert_mode::unique_upsert>(full_key, std::move(value));
+               return;
+            }
+            // Case B: existing key with value_node — append version via CB relocation
+            auto new_val = value.is_view() ? value.view() : value_view();
+            if (_dead_snap)
+               (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, new_val, _dead_snap);
+            else
+               (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, new_val);
+            // ptr_address unchanged — leaf and inner nodes untouched
+            return;
+         }
+
+         // Case A: existing key with inline value — promote to 2-entry value_node
+         value_view old_data = old_val.view();
+         auto new_data = value.is_view() ? value.view() : value_view();
+         uint64_t old_ver = 0;
+
+         auto vn_addr = _session.alloc<value_node>(
+             leaf->clines(), old_ver, old_data, version, new_data);
+
+         // COW the leaf to update the value branch from inline to value_node
+         value_type vn_value = value_type::make_value_node(vn_addr);
+         op::leaf_update update_op{.src = *leaf.obj(), .lb = lb,
+                                   .key = leaf_key, .value = vn_value};
+
+         if (leaf->can_apply(update_op) != leaf_node::can_apply_mode::none)
+         {
+            (void)_session.mvcc_realloc<leaf_node>(leaf, update_op);
+         }
+         else
+         {
+            // Overflow — fall back to full COW cascade
+            _session.release(vn_addr);  // release the value_node we just allocated
+            upsert<upsert_mode::unique_upsert>(full_key, std::move(value));
+         }
+         return;
+      }
+
+      // Case C: new key — insert into leaf via CB relocation
+      auto new_val = make_value(value, leaf->clines());
+
+      uint8_t cline_idx = 0xff;
+      if (new_val.is_address())
+         cline_idx = leaf->find_cline_index(new_val.address());
+
+      op::leaf_insert insert_op{
+          .src = *leaf.obj(), .lb = lb, .key = leaf_key,
+          .value = new_val, .cline_idx = cline_idx};
+
+      if (cline_idx < 16 &&
+          leaf->can_apply(insert_op) != leaf_node::can_apply_mode::none)
+      {
+         (void)_session.mvcc_realloc<leaf_node>(leaf, leaf.obj(), insert_op);
+      }
+      else
+      {
+         // Overflow or cline overflow — fall back to full COW cascade
+         if (new_val.is_value_node())
+            _session.release(new_val.value_address());
+         upsert<upsert_mode::unique_upsert>(full_key, std::move(value));
+      }
+   }
+
+   // ─── MVCC remove implementation ──────────────────────────────────
+   inline void tree_context::mvcc_remove(key_view key, uint64_t version)
+   {
+      if (!_root)
+         return;
+
+      sal::read_lock lock = _session.lock();
+
+      // Flat read-only traversal to the leaf using ptr_address.
+      // Stale epoch triggers COW cascade for structural maintenance.
+      ptr_address addr = _root.address();
+      key_view remaining = key;
+
+      for (;;)
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::inner_prefix:
+            {
+               auto ipn = ref.as<inner_prefix_node>();
+               auto cpre = common_prefix(remaining, ipn->prefix());
+               if (cpre != ipn->prefix())
+                  return;  // key doesn't exist
+               if (ipn->epoch() < _current_epoch)
+               {
+                  remove(key);  // stale epoch — COW cascade
+                  return;
+               }
+               remaining = remaining.substr(cpre.size());
+               addr = ipn->get_branch(ipn->lower_bound(remaining));
+               continue;
+            }
+            case node_type::inner:
+            {
+               auto in = ref.as<inner_node>();
+               if (in->epoch() < _current_epoch)
+               {
+                  remove(key);  // stale epoch — COW cascade
+                  return;
+               }
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::leaf:
+            {
+               auto leaf = ref.as<leaf_node>();
+               branch_number lb = leaf->lower_bound(remaining);
+               if (lb == leaf->num_branches() || leaf->get_key(lb) != remaining)
+                  return;  // key doesn't exist
+
+               auto old_val = leaf->get_value(lb);
+               if (old_val.is_value_node())
+               {
+                  auto vref = _session.get_ref<value_node>(old_val.value_address());
+                  if (vref->is_flat())
+                  {
+                     remove(key);  // COW fallback for flat nodes
+                     return;
+                  }
+                  // Append tombstone to existing value_node
+                  if (_dead_snap)
+                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr, _dead_snap);
+                  else
+                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr);
+               }
+               else
+               {
+                  // Promote inline value to value_node with old data + tombstone.
+                  // Create single-entry value_node with old data, then append tombstone.
+                  value_view old_data = old_val.view();
+                  auto vn_addr = _session.alloc<value_node>(leaf->clines(), old_data);
+                  auto vref = _session.get_ref<value_node>(vn_addr);
+                  if (_dead_snap)
+                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr, _dead_snap);
+                  else
+                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr);
+
+                  // Update leaf to point to value_node
+                  value_type vn_value = value_type::make_value_node(vn_addr);
+                  op::leaf_update update_op{.src = *leaf.obj(), .lb = lb,
+                                            .key = remaining, .value = vn_value};
+                  if (leaf->can_apply(update_op) != leaf_node::can_apply_mode::none)
+                     (void)_session.mvcc_realloc<leaf_node>(leaf, update_op);
+                  else
+                     remove(key);  // fall back to COW remove
+               }
+               return;
+            }
+            default:
+               std::unreachable();
+         }
+      }
+   }
+
+   // ─── Defrag implementation ──────────────────────────────────────
+   inline uint64_t tree_context::defrag()
+   {
+      if (!_root || !_dead_snap)
+         return 0;
+
+      sal::read_lock lock = _session.lock();
+      return defrag_subtree(_root.address());
+   }
+
+   inline uint64_t tree_context::defrag_subtree(ptr_address addr)
+   {
+      uint64_t cleaned = 0;
+      auto ref = _session.get_ref(addr);
+
+      switch (node_type(ref->type()))
+      {
+         case node_type::inner_prefix:
+         {
+            auto ipn = ref.as<inner_prefix_node>();
+            for (uint8_t i = 0; i < ipn->num_branches(); ++i)
+               cleaned += defrag_subtree(ipn->get_branch(branch_number(i)));
+            break;
+         }
+         case node_type::inner:
+         {
+            auto in = ref.as<inner_node>();
+            for (uint8_t i = 0; i < in->num_branches(); ++i)
+               cleaned += defrag_subtree(in->get_branch(branch_number(i)));
+            break;
+         }
+         case node_type::leaf:
+         {
+            auto leaf = ref.as<leaf_node>();
+            cleaned += defrag_leaf(leaf);
+            break;
+         }
+         default:
+            break;
+      }
+      return cleaned;
+   }
+
+   inline uint64_t tree_context::defrag_leaf(smart_ref<leaf_node>& leaf)
+   {
+      uint64_t cleaned = 0;
+
+      for (branch_number i{0}; i < leaf->num_branches(); ++i)
+      {
+         auto val = leaf->get_value(i);
+         if (!val.is_value_node())
+            continue;
+
+         auto vref = _session.get_ref<value_node>(val.value_address());
+         if (vref->has_dead_entries(_dead_snap))
+         {
+            (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), _dead_snap);
+            ++cleaned;
+         }
+      }
+      return cleaned;
    }
 
 }  // namespace psitri

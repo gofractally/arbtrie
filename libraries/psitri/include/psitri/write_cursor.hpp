@@ -54,15 +54,17 @@ namespace psitri
       /// Takes ownership of the smart_ptr's reference count (the smart_ptr is consumed).
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         auto addr = subtree_root.take();  // extract address without releasing ref
-         _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(addr));
+         auto tid = subtree_root.get_tree_id();
+         subtree_root.take();  // release ownership without decrementing ref
+         _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(tid));
       }
 
       /// Sorted variant of subtree upsert.
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         auto addr = subtree_root.take();
-         _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type::make_subtree(addr));
+         auto tid = subtree_root.get_tree_id();
+         subtree_root.take();  // release ownership without decrementing ref
+         _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type::make_subtree(tid));
       }
 
       /// Remove key. Returns size of removed value, or -1 if not found.

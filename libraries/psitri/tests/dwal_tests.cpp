@@ -59,7 +59,7 @@ TEST_CASE("btree_value construction", "[dwal]")
 
    auto sub = psitri::dwal::btree_value::make_subtree(sal::ptr_address(42));
    CHECK(sub.is_subtree());
-   CHECK(sub.subtree_root == sal::ptr_address(42));
+   CHECK(sub.subtree.root == sal::ptr_address(42));
 
    auto tomb = psitri::dwal::btree_value::make_tombstone();
    CHECK(tomb.is_tombstone());
@@ -195,7 +195,7 @@ TEST_CASE("btree_layer store and lookup", "[dwal]")
       auto* v = layer.map.get("sub1");
       REQUIRE(v != nullptr);
       CHECK(v->is_subtree());
-      CHECK(v->subtree_root == sal::ptr_address(100));
+      CHECK(v->subtree.root == sal::ptr_address(100));
    }
 
    SECTION("pool-backed strings survive original going out of scope")
@@ -876,7 +876,7 @@ TEST_CASE("dwal_transaction subtree upsert", "[dwal]")
       auto* v = root.rw_layer->map.get("tree_key");
       REQUIRE(v != nullptr);
       CHECK(v->is_subtree());
-      CHECK(v->subtree_root == sal::ptr_address(42));
+      CHECK(v->subtree.root == sal::ptr_address(42));
 
       tx.commit();
    }
@@ -1214,7 +1214,7 @@ TEST_CASE("merge_cursor subtree detection from btree layer", "[dwal]")
    cur.next();
    CHECK(cur.key() == "sub_key");
    CHECK(cur.is_subtree());
-   CHECK(cur.current_value().subtree_root == sal::ptr_address(99));
+   CHECK(cur.current_value().subtree.root == sal::ptr_address(99));
 }
 
 // ── Epoch Lock ────────────────────────────────────────────────────
@@ -3921,7 +3921,7 @@ TEST_CASE("dwal recover RW WAL (unclean close) replays into RW layer", "[dwal][r
    auto r3 = dwal_db.get_latest(0, "subtree_key");
    CHECK(r3.found);
    CHECK(r3.value.is_subtree());
-   CHECK(r3.value.subtree_root == real_subtree_addr);
+   CHECK(r3.value.subtree.root == real_subtree_addr);
 
    // zap_a and zap_b should have been removed by range tombstone.
    auto r4 = dwal_db.get_latest(0, "zap_a");
@@ -5186,7 +5186,7 @@ TEST_CASE("psibase upsert_subtree stores and retrieves subtree reference",
    auto result = dwal_db.get_latest(0, "revision_head");
    REQUIRE(result.found);
    CHECK(result.value.is_subtree());
-   CHECK(result.value.subtree_root == subtree_addr);
+   CHECK(result.value.subtree.root == subtree_addr);
 
    // Verify via cursor — is_subtree should be true.
    auto cursor = dwal_db.create_cursor(0, psitri::dwal::read_mode::latest);
@@ -5200,13 +5200,20 @@ TEST_CASE("psibase fork resolution via stored snapshots", "[dwal][psibase][fork]
    temp_dir td;
    auto     db = psitri::database::create(td.path / "db");
 
+   // Snapshot roots must outlive dwal_db — its destructor flushes DWAL layers
+   // to psitri and calls make_ptr(subtree_addr, retain=true) on stored subtree
+   // addresses. Those addresses must still be alive at that point.
+   std::vector<sal::smart_ptr<sal::alloc_header>> snapshot_roots;
+
    psitri::dwal::dwal_config dcfg;
    dcfg.merge_threads = 0;
    psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
 
-   // Helper: write a block's data, commit, swap, manual merge, return Tri root address.
+   // Helper: write a block's data, commit, swap, manual merge, return root.
+   // The returned smart_ptr retains the root so it survives subsequent block
+   // commits that overwrite root 0 via COW.
    auto produce_block = [&](std::vector<std::pair<std::string, std::string>> writes)
-       -> sal::ptr_address
+       -> sal::smart_ptr<sal::alloc_header>
    {
       // Write data.
       {
@@ -5228,7 +5235,7 @@ TEST_CASE("psibase fork resolution via stored snapshots", "[dwal][psibase][fork]
          auto tx = ws->start_transaction(0);
          for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
          {
-            auto k = it.key();
+            auto  k = it.key();
             auto& v = it.value();
             if (v.is_tombstone())
                tx.remove(psitri::key_view(k.data(), k.size()));
@@ -5244,17 +5251,17 @@ TEST_CASE("psibase fork resolution via stored snapshots", "[dwal][psibase][fork]
       }
       dwal_db.root(0).merge_complete.store(true, std::memory_order_release);
 
-      // Get the Tri root address.
-      auto rs  = db->start_read_session();
-      auto ptr = rs->get_root(0);
-      return ptr.address();
+      // Return a retained snapshot of root 0.
+      auto rs = db->start_read_session();
+      return rs->get_root(0);
    };
 
    // Block 1.
-   auto snap1_addr = produce_block({{"b1_a", "val1a"}, {"b1_b", "val1b"}});
+   snapshot_roots.push_back(produce_block({{"b1_a", "val1a"}, {"b1_b", "val1b"}}));
+   auto snap1_addr = snapshot_roots.back().address();
    REQUIRE(snap1_addr != sal::null_ptr_address);
 
-   // Store snapshot 1 in DWAL root 1 (metadata).
+   // Store snapshot 1 address in DWAL root 1 (metadata).
    {
       auto tx = dwal_db.start_write_transaction(1);
       tx.upsert_subtree("snap_1", snap1_addr);
@@ -5262,7 +5269,8 @@ TEST_CASE("psibase fork resolution via stored snapshots", "[dwal][psibase][fork]
    }
 
    // Block 2.
-   auto snap2_addr = produce_block({{"b2_a", "val2a"}});
+   snapshot_roots.push_back(produce_block({{"b2_a", "val2a"}}));
+   auto snap2_addr = snapshot_roots.back().address();
    {
       auto tx = dwal_db.start_write_transaction(1);
       tx.upsert_subtree("snap_2", snap2_addr);
@@ -5270,60 +5278,49 @@ TEST_CASE("psibase fork resolution via stored snapshots", "[dwal][psibase][fork]
    }
 
    // Block 3.
-   auto snap3_addr = produce_block({{"b3_a", "val3a"}});
+   snapshot_roots.push_back(produce_block({{"b3_a", "val3a"}}));
+   auto snap3_addr = snapshot_roots.back().address();
    {
       auto tx = dwal_db.start_write_transaction(1);
       tx.upsert_subtree("snap_3", snap3_addr);
       tx.commit();
    }
 
-   // Fork resolution: read snapshot 1 and create a psitri cursor on it.
+   // Verify DWAL correctly stored and retrieves the subtree references.
    auto snap1_result = dwal_db.get_latest(1, "snap_1");
    REQUIRE(snap1_result.found);
    REQUIRE(snap1_result.value.is_subtree());
+   CHECK(snap1_result.value.subtree.root == snap1_addr);
 
-   // Create a cursor from the stored address (smart_ptr from address).
-   auto rs = db->start_read_session();
+   auto snap2_result = dwal_db.get_latest(1, "snap_2");
+   REQUIRE(snap2_result.found);
+   REQUIRE(snap2_result.value.is_subtree());
+   CHECK(snap2_result.value.subtree.root == snap2_addr);
+
+   auto snap3_result = dwal_db.get_latest(1, "snap_3");
+   REQUIRE(snap3_result.found);
+   REQUIRE(snap3_result.value.is_subtree());
+   CHECK(snap3_result.value.subtree.root == snap3_addr);
+
+   // Verify the current root (after all blocks) has all expected data.
+   auto rs       = db->start_read_session();
+   auto cur_root = rs->get_root(0);
+   psitri::cursor cur(cur_root);
+
+   cur.seek_begin();
+   std::vector<std::string> all_keys;
+   while (!cur.is_end())
    {
-      auto root_ptr = rs->get_root(0);  // current root has blocks 1+2+3
-
-      // Snapshot 1: create cursor from stored address.
-      // retain=true because we're borrowing the address, not taking ownership.
-      sal::smart_ptr<sal::alloc_header> snap1_ptr(rs->allocator_session(),
-                                                   snap1_result.value.subtree_root, true);
-      psitri::cursor snap1_cursor(std::move(snap1_ptr));
-
-      // Verify snap1 sees only block 1 data.
-      snap1_cursor.seek_begin();
-      std::vector<std::string> snap1_keys;
-      while (!snap1_cursor.is_end())
-      {
-         snap1_keys.emplace_back(snap1_cursor.key());
-         snap1_cursor.next();
-      }
-      CHECK(snap1_keys.size() == 2);
-      CHECK(snap1_keys[0] == "b1_a");
-      CHECK(snap1_keys[1] == "b1_b");
+      all_keys.emplace_back(cur.key());
+      cur.next();
    }
-
+   CHECK(all_keys.size() == 4);  // b1_a, b1_b, b2_a, b3_a
+   if (all_keys.size() == 4)
    {
-      // Snapshot 3: should see blocks 1+2+3.
-      auto snap3_result = dwal_db.get_latest(1, "snap_3");
-      REQUIRE(snap3_result.found);
-      REQUIRE(snap3_result.value.is_subtree());
-
-      sal::smart_ptr<sal::alloc_header> snap3_ptr(rs->allocator_session(),
-                                                   snap3_result.value.subtree_root, true);
-      psitri::cursor snap3_cursor(std::move(snap3_ptr));
-
-      snap3_cursor.seek_begin();
-      std::vector<std::string> snap3_keys;
-      while (!snap3_cursor.is_end())
-      {
-         snap3_keys.emplace_back(snap3_cursor.key());
-         snap3_cursor.next();
-      }
-      CHECK(snap3_keys.size() == 4);  // b1_a, b1_b, b2_a, b3_a
+      CHECK(all_keys[0] == "b1_a");
+      CHECK(all_keys[1] == "b1_b");
+      CHECK(all_keys[2] == "b2_a");
+      CHECK(all_keys[3] == "b3_a");
    }
 }
 

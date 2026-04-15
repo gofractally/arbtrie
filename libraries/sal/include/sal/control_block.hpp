@@ -178,6 +178,9 @@ namespace sal
          do
          {
             updated.from_int(expected);
+            // Preserve custom CB marker: {active=0, pending_cache=1}
+            if (!updated.active && updated.pending_cache)
+               return;
             updated.set_active(false);
             updated.set_pending_cache(false);
          } while (

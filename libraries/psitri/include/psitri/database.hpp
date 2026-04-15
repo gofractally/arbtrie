@@ -1,7 +1,9 @@
 #pragma once
 #include <chrono>
 #include <filesystem>
+#include <hash/xxhash.h>
 #include <mutex>
+#include <psitri/live_range_map.hpp>
 #include <psitri/write_session.hpp>
 #include <sal/allocator.hpp>
 #include <sal/config.hpp>
@@ -265,6 +267,19 @@ namespace psitri
 
       ///@}
 
+      /** @name MVCC Configuration */
+      ///@{
+
+      /// Set the epoch interval (number of global versions per epoch).
+      /// Smaller values cause more frequent COW maintenance passes;
+      /// larger values allow more MVCC fast-path writes before cleanup.
+      void set_epoch_interval(uint64_t interval);
+
+      /// Current epoch number.
+      uint64_t current_epoch() const;
+
+      ///@}
+
       /** @name Compaction & Maintenance */
       ///@{
 
@@ -282,7 +297,12 @@ namespace psitri
             {
                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                if (_allocator.total_pending_releases() == 0)
+               {
+                  // Publish any accumulated dead versions so defrag/COW can see them
+                  _dead_versions.flush_pending();
+                  _dead_versions.publish_snapshot();
                   return true;
+               }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
          }
@@ -382,6 +402,15 @@ namespace psitri
 
       ///@}
 
+      /** @name MVCC Version Reclamation */
+      ///@{
+
+      /// Access the dead-version range map (for diagnostics or testing).
+      live_range_map& dead_versions() noexcept { return _dead_versions; }
+      const live_range_map& dead_versions() const noexcept { return _dead_versions; }
+
+      ///@}
+
      private:
       friend class read_session;
       friend class write_session;
@@ -390,16 +419,38 @@ namespace psitri
       runtime_config        _cfg;
 
       mutable std::mutex _sync_mutex;
-      mutable std::mutex _root_change_mutex[num_top_roots];
+      /// Lightweight lock for root slot version-CB swaps (fast-path MVCC).
+      /// Does NOT protect tree structure — only the ver field in the root slot.
+      mutable std::mutex _root_ver_mutex[num_top_roots];
+      /// Full per-root mutex for COW mutations that change the root.
       mutable std::mutex _modify_lock[num_top_roots];
 
+      std::mutex& root_ver_lock(int index) { return _root_ver_mutex[index]; }
       std::mutex& modify_lock(int index) { return _modify_lock[index]; }
+
+      // ── Stripe locks for fine-grained MVCC concurrency ──────────
+      static constexpr uint32_t num_stripe_locks = 1024;
+
+      struct alignas(64) stripe_lock
+      {
+         std::mutex m;
+      };
+      stripe_lock _stripes[num_stripe_locks];
+
+      uint32_t stripe_index(sal::ptr_address adr) const noexcept
+      {
+         uint32_t v = *adr;
+         return XXH3_64bits(&v, sizeof(v)) & (num_stripe_locks - 1);
+      }
+
+      std::mutex& stripe_mutex(sal::ptr_address adr) { return _stripes[stripe_index(adr)].m; }
 
       void            init_allocator_shared_ownership();
       std::once_flag  _alloc_shared_init;
       sal::allocator  _allocator;
       sal::mapping            _dbfile;
       detail::database_state* _dbm;
+      live_range_map          _dead_versions;
    };
    using database_ptr = std::shared_ptr<database>;
 }  // namespace psitri
