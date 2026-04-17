@@ -164,7 +164,7 @@ namespace psitri::dwal
          for (; it != layer.map.end() && it.key() < high; ++it)
             keys_to_erase.emplace_back(it.key());
          for (auto& k : keys_to_erase)
-            layer.map.erase(k);
+            layer.erase(k);
       }
 
       layer.tombstones.add(std::string(low), std::string(high));
@@ -363,7 +363,9 @@ namespace psitri::dwal
                    case undo_entry::kind::insert:
                    case undo_entry::kind::overwrite_cow:
                    case undo_entry::kind::erase_cow:
-                      layer.map.erase(entry.key);
+                      // Route through layer.erase so that any subtree ref
+                      // held by the slot is released.
+                      layer.erase(entry.key);
                       break;
 
                    case undo_entry::kind::overwrite_buffered:
@@ -372,7 +374,18 @@ namespace psitri::dwal
                       btree_value restored = entry.old_value;
                       if (restored.is_data() && !restored.data.empty())
                          restored.data = layer.store_string(restored.data);
-                      layer.map.upsert(entry.key, restored);
+                      // Route through the layer wrappers so the refcount
+                      // contract for subtree values is maintained. For
+                      // subtree restoration the address recorded in the
+                      // undo log was not separately retained, so restoring
+                      // it assumes the caller kept the allocation alive —
+                      // matching the pre-existing contract on these paths.
+                      if (restored.is_subtree())
+                         layer.store_subtree(entry.key, restored.subtree_root);
+                      else if (restored.is_tombstone())
+                         layer.store_tombstone(entry.key);
+                      else
+                         layer.store_data(entry.key, restored.data);
                       break;
                    }
 
@@ -385,7 +398,12 @@ namespace psitri::dwal
                             btree_value restored = be.old_value;
                             if (restored.is_data() && !restored.data.empty())
                                restored.data = layer.store_string(restored.data);
-                            layer.map.upsert(be.key, restored);
+                            if (restored.is_subtree())
+                               layer.store_subtree(be.key, restored.subtree_root);
+                            else if (restored.is_tombstone())
+                               layer.store_tombstone(be.key);
+                            else
+                               layer.store_data(be.key, restored.data);
                          }
                       }
                       break;
@@ -411,7 +429,9 @@ namespace psitri::dwal
                    case undo_entry::kind::insert:
                    case undo_entry::kind::overwrite_cow:
                    case undo_entry::kind::erase_cow:
-                      layer.map.erase(entry.key);
+                      // Route through layer.erase so that any subtree ref
+                      // held by the slot is released.
+                      layer.erase(entry.key);
                       break;
 
                    case undo_entry::kind::overwrite_buffered:
@@ -420,7 +440,18 @@ namespace psitri::dwal
                       btree_value restored = entry.old_value;
                       if (restored.is_data() && !restored.data.empty())
                          restored.data = layer.store_string(restored.data);
-                      layer.map.upsert(entry.key, restored);
+                      // Route through the layer wrappers so the refcount
+                      // contract for subtree values is maintained. For
+                      // subtree restoration the address recorded in the
+                      // undo log was not separately retained, so restoring
+                      // it assumes the caller kept the allocation alive —
+                      // matching the pre-existing contract on these paths.
+                      if (restored.is_subtree())
+                         layer.store_subtree(entry.key, restored.subtree_root);
+                      else if (restored.is_tombstone())
+                         layer.store_tombstone(entry.key);
+                      else
+                         layer.store_data(entry.key, restored.data);
                       break;
                    }
 
@@ -433,7 +464,12 @@ namespace psitri::dwal
                             btree_value restored = be.old_value;
                             if (restored.is_data() && !restored.data.empty())
                                restored.data = layer.store_string(restored.data);
-                            layer.map.upsert(be.key, restored);
+                            if (restored.is_subtree())
+                               layer.store_subtree(be.key, restored.subtree_root);
+                            else if (restored.is_tombstone())
+                               layer.store_tombstone(be.key);
+                            else
+                               layer.store_data(be.key, restored.data);
                          }
                       }
                       break;

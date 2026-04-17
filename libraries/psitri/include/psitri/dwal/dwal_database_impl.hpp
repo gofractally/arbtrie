@@ -161,7 +161,7 @@ namespace psitri::dwal
                      for (; it != root.rw_layer->map.end() && it.key() < op.range_high; ++it)
                         keys_to_erase.emplace_back(it.key());
                      for (auto& k : keys_to_erase)
-                        root.rw_layer->map.erase(k);
+                        root.rw_layer->erase(k);
                      root.rw_layer->tombstones.add(std::string(op.range_low),
                                                    std::string(op.range_high));
                      break;
@@ -253,7 +253,7 @@ namespace psitri::dwal
                       for (; it != root.rw_layer->map.end() && it.key() < op.range_high; ++it)
                          keys_to_erase.emplace_back(it.key());
                       for (auto& k : keys_to_erase)
-                         root.rw_layer->map.erase(k);
+                         root.rw_layer->erase(k);
                       root.rw_layer->tombstones.add(std::string(op.range_low),
                                                     std::string(op.range_high));
                       break;
@@ -328,6 +328,16 @@ namespace psitri::dwal
                   if (root.rw_layer && !root.rw_layer->map.empty())
                      flush_layer(*root.rw_layer);
 
+                  // Ensure each layer is bound to the shared allocator.
+                  // `alloc->release` forwards to the calling thread's
+                  // thread-local session, so the layer's destructor will
+                  // run correctly regardless of which thread owns the
+                  // last shared_ptr reference.
+                  if (ro)
+                     ro->set_allocator(&_db->underlying_allocator());
+                  if (root.rw_layer)
+                     root.rw_layer->set_allocator(&_db->underlying_allocator());
+
                   flushed = true;
                }
                catch (...)
@@ -369,6 +379,13 @@ namespace psitri::dwal
       {
          _roots[index] = std::make_unique<dwal_root_type>();
       }
+      // Bind the allocator so the btree_layer can retain/release subtree
+      // addresses. `sal::allocator::retain` is atomic and `release`
+      // forwards to the calling thread's thread-local session, so the
+      // same allocator pointer is safe from any thread (writer, merge
+      // worker, or the database-destructor flush thread).
+      if (_roots[index]->rw_layer && !_roots[index]->rw_layer->alloc)
+         _roots[index]->rw_layer->set_allocator(&_db->underlying_allocator());
       return *_roots[index];
    }
 
@@ -511,6 +528,7 @@ namespace psitri::dwal
             root.buffered_ptr = std::move(root.rw_layer);
          }
          root.rw_layer = std::make_shared<btree_layer>();
+         root.rw_layer->set_allocator(&_db->underlying_allocator());
 
          root.cow.reset();
       }
