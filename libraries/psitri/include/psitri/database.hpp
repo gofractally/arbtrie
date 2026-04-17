@@ -339,6 +339,14 @@ namespace psitri
 
       /// @cond INTERNAL
       mutex_type& modify_lock(int index) { return _modify_lock[index]; }
+
+      /// Internal accessor used by layered components (e.g. DWAL) to
+      /// perform ref-count manipulation on addresses without going
+      /// through a thread-affine session. `sal::allocator::retain` is
+      /// atomic; `sal::allocator::release` forwards to the calling
+      /// thread's thread-local session, so both can be called from any
+      /// thread safely.
+      sal::allocator& underlying_allocator() noexcept { return _allocator; }
       /// @endcond
 
      private:
