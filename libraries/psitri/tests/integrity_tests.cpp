@@ -4,6 +4,7 @@
 #include <set>
 #include <string>
 #include <psitri/database.hpp>
+#include <psitri/database_impl.hpp>
 #include <psitri/transaction.hpp>
 #include <psitri/write_session_impl.hpp>
 #include <psitri/read_session_impl.hpp>

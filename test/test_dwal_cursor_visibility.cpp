@@ -2,7 +2,9 @@
 // Verifies all four read modes: trie, buffered, fresh, latest.
 
 #include <psitri/database.hpp>
+#include <psitri/database_impl.hpp>
 #include <psitri/dwal/dwal_database.hpp>
+#include <psitri/dwal/dwal_database_impl.hpp>
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
 

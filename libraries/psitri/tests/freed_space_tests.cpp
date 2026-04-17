@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 #include <psitri/database.hpp>
+#include <psitri/database_impl.hpp>
 #include <psitri/transaction.hpp>
 #include <psitri/write_session_impl.hpp>
 #include <sal/allocator.hpp>

@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <psitri/database.hpp>
+#include <psitri/database_impl.hpp>
 #include <psitri/transaction.hpp>
 #include <psitri/tree_ops.hpp>
 #include <psitri/write_session_impl.hpp>

@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 #include <psitri/database.hpp>
+#include <psitri/database_impl.hpp>
 #include <psitri/value_type.hpp>
 #include <sal/smart_ptr.hpp>
 

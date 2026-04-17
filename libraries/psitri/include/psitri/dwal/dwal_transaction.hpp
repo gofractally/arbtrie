@@ -5,6 +5,7 @@
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/undo_log.hpp>
 #include <psitri/dwal/wal_writer.hpp>
+#include <psitri/lock_policy.hpp>
 
 #include <cassert>
 #include <optional>
@@ -13,8 +14,11 @@
 
 namespace psitri::dwal
 {
-   class dwal_database;
-   class dwal_transaction;
+   template <class LockPolicy>
+   class basic_dwal_database;
+
+   template <class LockPolicy>
+   class basic_dwal_transaction;
 
    /**
     * @brief Lazy result from dwal_transaction::remove().
@@ -23,9 +27,12 @@ namespace psitri::dwal
     * If not, converting to bool triggers a lookup in lower layers (RO + Tri).
     * Callers that discard the result pay no lookup cost.
     */
-   class remove_result
+   template <class LockPolicy = std_lock_policy>
+   class basic_remove_result
    {
      public:
+      using transaction_type = basic_dwal_transaction<LockPolicy>;
+
       /// Implicit conversion — resolves the lazy check if needed.
       operator bool()
       {
@@ -35,21 +42,24 @@ namespace psitri::dwal
       }
 
      private:
-      friend class dwal_transaction;
+      friend class basic_dwal_transaction<LockPolicy>;
 
-      explicit remove_result(bool existed)
-          : _existed(existed), _resolved(true) {}
+      explicit basic_remove_result(bool existed) : _existed(existed), _resolved(true) {}
 
-      remove_result(const dwal_transaction* tx, std::string key)
-          : _tx(tx), _key(std::move(key)), _resolved(false) {}
+      basic_remove_result(const transaction_type* tx, std::string key)
+          : _tx(tx), _key(std::move(key)), _resolved(false)
+      {
+      }
 
       void resolve();
 
-      const dwal_transaction* _tx = nullptr;
+      const transaction_type* _tx = nullptr;
       std::string             _key;
       bool                    _existed  = false;
       bool                    _resolved = true;
    };
+
+   using remove_result = basic_remove_result<std_lock_policy>;
 
    /// Mode for a root within a transaction.
    enum class root_mode : uint8_t
@@ -95,35 +105,30 @@ namespace psitri::dwal
     * transaction_mode::direct when starting the transaction.  This flushes
     * the DWAL buffer and writes directly to the PsiTri COW trie.
     */
-   class dwal_transaction
+   template <class LockPolicy = std_lock_policy>
+   class basic_dwal_transaction
    {
      public:
-      dwal_transaction(dwal_root&     root,
-                       wal_writer*    wal,
-                       uint32_t       root_index,
-                       dwal_database* db     = nullptr,
-                       bool           nested = false,
-                       root_mode      mode   = root_mode::read_write);
+      using database_type      = basic_dwal_database<LockPolicy>;
+      using dwal_root_type     = basic_dwal_root<LockPolicy>;
+      using remove_result_type = basic_remove_result<LockPolicy>;
 
-      ~dwal_transaction();
+      basic_dwal_transaction(dwal_root_type& root,
+                             wal_writer*     wal,
+                             uint32_t        root_index,
+                             database_type*  db     = nullptr,
+                             bool            nested = false,
+                             root_mode       mode   = root_mode::read_write);
 
-      dwal_transaction(const dwal_transaction&)            = delete;
-      dwal_transaction& operator=(const dwal_transaction&) = delete;
-      dwal_transaction(dwal_transaction&& other) noexcept;
-      dwal_transaction& operator=(dwal_transaction&&) = delete;
+      ~basic_dwal_transaction();
+
+      basic_dwal_transaction(const basic_dwal_transaction&)            = delete;
+      basic_dwal_transaction& operator=(const basic_dwal_transaction&) = delete;
+      basic_dwal_transaction(basic_dwal_transaction&& other) noexcept;
+      basic_dwal_transaction& operator=(basic_dwal_transaction&&) = delete;
 
       // ── Mutations ──────────────────────────────────────────────────
 
-      /**
-       * @brief Insert or update a data key-value pair.
-       *
-       * The write goes immediately to the RW ART map and is recorded
-       * in the undo log (for rollback) and WAL buffer (for durability).
-       *
-       * @pre  !is_committed() && !is_aborted() && !is_read_only()
-       * @param key    Key bytes (copied into ART arena)
-       * @param value  Value bytes (copied into PMR pool)
-       */
       void upsert(std::string_view key, std::string_view value);
 
       /**
@@ -135,7 +140,7 @@ namespace psitri::dwal
        *
        * @pre  !is_committed() && !is_aborted() && !is_read_only()
        * @param key   Key bytes
-       * @param addr  PsiTri subtree root address (one ref consumed)
+       * @param tid   PsiTri subtree tree_id (one ref consumed)
        */
       void upsert_subtree(std::string_view key, sal::tree_id tid);
 
@@ -150,7 +155,7 @@ namespace psitri::dwal
        *
        * @pre  !is_committed() && !is_aborted() && !is_read_only()
        */
-      remove_result remove(std::string_view key);
+      remove_result_type remove(std::string_view key);
 
       /**
        * @brief Remove all keys in [low, high).
@@ -166,10 +171,6 @@ namespace psitri::dwal
 
       /**
        * @brief Result of a point lookup or cursor value read.
-       *
-       * For RW/RO layer results, value.data points into pool-backed memory
-       * valid for the layer's lifetime.  For Tri layer results, owned_data
-       * holds a copy and value.data points into it.
        */
       struct lookup_result
       {
@@ -187,92 +188,15 @@ namespace psitri::dwal
          }
       };
 
-      /**
-       * @brief Point lookup across all layers (RW → RO → Tri).
-       *
-       * Sees uncommitted writes from this transaction.  Returns immediately
-       * on first hit or tombstone.
-       *
-       * @pre  !is_committed() && !is_aborted()
-       * @param key  Key to look up
-       * @return     lookup_result with found=true if key exists and is not
-       *             tombstoned, found=false otherwise.
-       */
-      lookup_result get(std::string_view key) const;
-
-      /**
-       * @brief Create a merge cursor that sees uncommitted writes.
-       *
-       * Returns an owned cursor that merges three layers:
-       *   1. RW ART map — live, includes uncommitted mutations from this tx
-       *   2. RO ART map — frozen snapshot from last swap (if any)
-       *   3. PsiTri COW trie — persistent on-disk data
-       *
-       * The cursor supports full iteration: seek_begin(), next(), prev(),
-       * lower_bound(), upper_bound(), count_keys().  Higher layers shadow
-       * lower layers; tombstones filter deleted keys automatically.
-       *
-       * @pre  !is_committed() && !is_aborted()
-       *
-       * @note Writer-thread only.  The cursor accesses the live RW ART map
-       *       without locking (writer-private).  Do not share across threads.
-       *
-       * @note Invalidated by subsequent mutations.  After calling upsert(),
-       *       remove(), or remove_range(), discard the cursor and create a
-       *       new one to see the updated state.
-       */
+      lookup_result      get(std::string_view key) const;
       owned_merge_cursor create_cursor() const;
 
       // ── Transaction Control ────────────────────────────────────────
 
-      /**
-       * @brief Commit the transaction.
-       *
-       * Writes a WAL entry containing all mutations, releases old subtree
-       * refs from the undo log, and discards the undo log.  After commit,
-       * the mutations are durable (subject to WAL flush policy) and visible
-       * to subsequent transactions.
-       *
-       * @pre  !is_committed() && !is_aborted()
-       * @post is_committed() == true
-       */
       void commit();
-
-      /**
-       * @brief Commit as part of a multi-root transaction.
-       *
-       * Tags the WAL entry with a shared transaction ID and participant
-       * count.  The last participant sets is_commit=true, which marks the
-       * group as atomically committed.  Used by dwal::transaction for
-       * cross-root atomicity.
-       *
-       * @pre  !is_committed() && !is_aborted()
-       */
       void commit_multi(uint64_t tx_id, uint16_t participants, bool is_commit);
-
-      /**
-       * @brief Abort the transaction.
-       *
-       * Replays the undo log in reverse to restore the RW ART map to its
-       * pre-transaction state.  Releases new subtree refs that were
-       * displaced during replay.
-       *
-       * @pre  !is_committed() && !is_aborted()
-       * @post is_aborted() == true
-       */
       void abort();
-
-      /**
-       * @brief Start a nested (sub) transaction.
-       *
-       * Returns a child transaction that operates on the same RW ART map.
-       * The child's commit merges its undo entries into the parent.  The
-       * child's abort undoes only its own mutations.  Only the outermost
-       * transaction writes a WAL entry on commit.
-       *
-       * @pre  !is_committed() && !is_aborted() && !is_read_only()
-       */
-      dwal_transaction sub_transaction();
+      basic_dwal_transaction sub_transaction();
 
       // ── Accessors ──────────────────────────────────────────────────
 
@@ -282,23 +206,25 @@ namespace psitri::dwal
       uint32_t root_index() const noexcept { return _root_index; }
 
      private:
-      friend class remove_result;
+      friend class basic_remove_result<LockPolicy>;
 
       lookup_result ro_get(std::string_view key) const;
-      bool exists_in_lower_layers(std::string_view key) const;
-      void record_undo_for_upsert(std::string_view key);
-      void record_undo_for_remove(std::string_view key);
+      bool          exists_in_lower_layers(std::string_view key) const;
+      void          record_undo_for_upsert(std::string_view key);
+      void          record_undo_for_remove(std::string_view key);
 
-      dwal_root*     _root       = nullptr;
-      wal_writer*    _wal        = nullptr;
-      dwal_database* _db         = nullptr;
-      uint32_t       _root_index = 0;
-      bool        _committed  = false;
-      bool        _aborted    = false;
-      bool        _nested     = false;
-      root_mode   _mode       = root_mode::read_write;
+      dwal_root_type* _root       = nullptr;
+      wal_writer*     _wal        = nullptr;
+      database_type*  _db         = nullptr;
+      uint32_t        _root_index = 0;
+      bool            _committed  = false;
+      bool            _aborted    = false;
+      bool            _nested     = false;
+      root_mode       _mode       = root_mode::read_write;
 
-      undo_log    _undo;
+      undo_log _undo;
    };
+
+   using dwal_transaction = basic_dwal_transaction<std_lock_policy>;
 
 }  // namespace psitri::dwal

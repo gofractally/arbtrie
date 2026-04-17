@@ -3,6 +3,7 @@
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/undo_log.hpp>
 #include <psitri/dwal/wal_writer.hpp>
+#include <psitri/lock_policy.hpp>
 #include <sal/numbers.hpp>
 
 #include <atomic>
@@ -42,8 +43,12 @@ namespace psitri::dwal
    ///
    /// Reader/writer coordination is handled lock-free by cow_coordinator.
    /// The only mutex is tx_mutex for per-root transaction serialization.
-   struct dwal_root
+   template <class LockPolicy = std_lock_policy>
+   struct basic_dwal_root
    {
+      using mutex_type        = typename LockPolicy::mutex_type;
+      using shared_mutex_type = typename LockPolicy::shared_mutex_type;
+
       // ── Writer-private section ────────────────────────────────────
 
       /// The hot RW btree. Writer-private during transactions.
@@ -63,13 +68,13 @@ namespace psitri::dwal
       /// Per-root transaction-level read/write exclusion.
       /// Writers take exclusive, readers take shared.
       /// Acquired in sorted root-index order to prevent deadlocks.
-      std::shared_mutex tx_mutex;
+      shared_mutex_type tx_mutex;
 
       // ── Reader section (cache-line separated) ─────────────────────
 
       /// The frozen RO btree — published on arena swap, read by buffered readers.
       /// Brief mutex for shared_ptr copy (only held for the copy, not during read).
-      alignas(128) std::mutex buffered_mutex;
+      alignas(128) mutex_type buffered_mutex;
       std::shared_ptr<btree_layer> buffered_ptr;
 
       /// Generation counter — incremented on each arena swap.
@@ -99,7 +104,9 @@ namespace psitri::dwal
       /// Manages head root, prev_root, reader_count, writer_active, cow_seq.
       art::cow_coordinator cow;
 
-      dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
+      basic_dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
    };
+
+   using dwal_root = basic_dwal_root<std_lock_policy>;
 
 }  // namespace psitri::dwal

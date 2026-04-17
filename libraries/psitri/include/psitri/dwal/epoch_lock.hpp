@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/lock_policy.hpp>
 #include <ucc/padded_atomic.hpp>
 
 #include <cstdint>
@@ -47,13 +48,16 @@ namespace psitri::dwal
    ///
    /// The merge thread checks `min_pinned()` to determine whether an old
    /// RO pool can be safely freed: safe when min_pinned > pool_generation.
-   class epoch_registry
+   template <class LockPolicy = std_lock_policy>
+   class basic_epoch_registry
    {
      public:
+      using mutex_type = typename LockPolicy::mutex_type;
+
       /// Allocate a new session lock. Returns its index.
       uint32_t allocate()
       {
-         std::lock_guard lk(_mu);
+         std::lock_guard<mutex_type> lk(_mu);
          if (!_free_list.empty())
          {
             uint32_t idx = _free_list.back();
@@ -69,7 +73,7 @@ namespace psitri::dwal
       /// Release a session lock slot back to the free list.
       void release(uint32_t idx)
       {
-         std::lock_guard lk(_mu);
+         std::lock_guard<mutex_type> lk(_mu);
          _locks[idx]->gen_ptr.store(uint64_t(-1), std::memory_order_relaxed);
          _free_list.push_back(idx);
       }
@@ -80,7 +84,7 @@ namespace psitri::dwal
       /// Broadcast a new generation to all sessions.
       void broadcast_all(uint32_t gen)
       {
-         std::lock_guard lk(_mu);
+         std::lock_guard<mutex_type> lk(_mu);
          for (auto& lock : _locks)
             lock->broadcast(gen);
       }
@@ -103,14 +107,16 @@ namespace psitri::dwal
 
       size_t size() const
       {
-         std::lock_guard lk(_mu);
+         std::lock_guard<mutex_type> lk(_mu);
          return _locks.size();
       }
 
      private:
-      mutable std::mutex                                _mu;
-      std::vector<std::unique_ptr<dwal_session_lock>>   _locks;
-      std::vector<uint32_t>                             _free_list;
+      mutable mutex_type                              _mu;
+      std::vector<std::unique_ptr<dwal_session_lock>> _locks;
+      std::vector<uint32_t>                           _free_list;
    };
+
+   using epoch_registry = basic_epoch_registry<std_lock_policy>;
 
 }  // namespace psitri::dwal
