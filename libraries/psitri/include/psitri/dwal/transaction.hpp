@@ -1,6 +1,7 @@
 #pragma once
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
+#include <psitri/lock_policy.hpp>
 
 #include <cassert>
 #include <cstdint>
@@ -10,7 +11,8 @@
 
 namespace psitri::dwal
 {
-   class dwal_database;
+   template <class LockPolicy>
+   class basic_dwal_database;
 
    /// Multi-root DWAL transaction.
    ///
@@ -27,72 +29,72 @@ namespace psitri::dwal
    ///   auto r = tx.root(3).get("cfg");
    ///   tx.commit();
    /// @endcode
-   class transaction
+   template <class LockPolicy = std_lock_policy>
+   class basic_transaction
    {
      public:
+      using database_type         = basic_dwal_database<LockPolicy>;
+      using dwal_transaction_type = basic_dwal_transaction<LockPolicy>;
+      using remove_result_type    = basic_remove_result<LockPolicy>;
+      using lookup_result         = typename dwal_transaction_type::lookup_result;
+
       /// Per-root handle. Exposes mutations (write roots only) and reads.
       class root_handle
       {
         public:
          // ── Mutations (assert writable) ────────────────────────────
-         void upsert(std::string_view key, std::string_view value);
-         void upsert_subtree(std::string_view key, sal::ptr_address addr);
-         remove_result remove(std::string_view key);
-         void remove_range(std::string_view low, std::string_view high);
+         void               upsert(std::string_view key, std::string_view value);
+         void               upsert_subtree(std::string_view key, sal::ptr_address addr);
+         remove_result_type remove(std::string_view key);
+         void               remove_range(std::string_view low, std::string_view high);
 
          // ── Reads (always allowed) ─────────────────────────────────
-         dwal_transaction::lookup_result get(std::string_view key) const;
+         lookup_result get(std::string_view key) const;
 
          bool     writable() const noexcept { return _writable; }
          uint32_t index() const noexcept { return _root_index; }
 
         private:
-         friend class transaction;
-         root_handle(dwal_transaction* inner, uint32_t root_index, bool writable)
+         friend class basic_transaction<LockPolicy>;
+         root_handle(dwal_transaction_type* inner, uint32_t root_index, bool writable)
              : _inner(inner), _root_index(root_index), _writable(writable)
          {
          }
 
-         dwal_transaction* _inner;
-         uint32_t          _root_index;
-         bool              _writable;
+         dwal_transaction_type* _inner;
+         uint32_t               _root_index;
+         bool                   _writable;
       };
 
-      /// Construct a multi-root transaction. Locks are acquired in sorted order.
-      /// write_roots get exclusive locks; read_roots get shared locks.
-      transaction(dwal_database&                  db,
-                  std::initializer_list<uint32_t> write_roots,
-                  std::initializer_list<uint32_t> read_roots = {});
+      basic_transaction(database_type&                  db,
+                        std::initializer_list<uint32_t> write_roots,
+                        std::initializer_list<uint32_t> read_roots = {});
 
-      /// Construct a multi-root transaction from vectors (for programmatic use).
-      transaction(dwal_database&             db,
-                  std::vector<uint32_t>      write_roots,
-                  std::vector<uint32_t>      read_roots = {});
+      basic_transaction(database_type&        db,
+                        std::vector<uint32_t> write_roots,
+                        std::vector<uint32_t> read_roots = {});
 
-      ~transaction();
+      ~basic_transaction();
 
-      transaction(transaction&& other) noexcept;
-      transaction(const transaction&)            = delete;
-      transaction& operator=(const transaction&) = delete;
-      transaction& operator=(transaction&&)      = delete;
+      basic_transaction(basic_transaction&& other) noexcept;
+      basic_transaction(const basic_transaction&)            = delete;
+      basic_transaction& operator=(const basic_transaction&) = delete;
+      basic_transaction& operator=(basic_transaction&&)      = delete;
 
       /// Access a root that was declared at construction time.
-      /// Asserts if root_index was not in the initial write or read set.
       root_handle& root(uint32_t root_index);
 
       // ── Convenience methods (delegate to root_handle) ─────────────
 
-      void upsert(uint32_t root_index, std::string_view key, std::string_view value);
-      remove_result remove(uint32_t root_index, std::string_view key);
-      void remove_range(uint32_t root_index, std::string_view low, std::string_view high);
-      dwal_transaction::lookup_result get(uint32_t root_index, std::string_view key);
+      void               upsert(uint32_t root_index, std::string_view key, std::string_view value);
+      remove_result_type remove(uint32_t root_index, std::string_view key);
+      void               remove_range(uint32_t root_index, std::string_view low,
+                                      std::string_view high);
+      lookup_result      get(uint32_t root_index, std::string_view key);
 
       // ── Transaction control ───────────────────────────────────────
 
-      /// Atomic commit across all write roots. Read roots just release locks.
       void commit();
-
-      /// Rollback all write roots and release all locks.
       void abort();
 
       bool is_committed() const noexcept { return _committed; }
@@ -108,13 +110,15 @@ namespace psitri::dwal
          bool     exclusive;
       };
 
-      dwal_database*                        _db = nullptr;
-      std::vector<lock_entry>               _locks;    // sorted by index
-      std::map<uint32_t, dwal_transaction>  _txns;     // per-root transactions
-      std::map<uint32_t, root_handle>       _handles;  // per-root handles
-      std::vector<uint32_t>                 _write_roots;
-      bool _committed = false;
-      bool _aborted   = false;
+      database_type*                               _db = nullptr;
+      std::vector<lock_entry>                      _locks;    // sorted by index
+      std::map<uint32_t, dwal_transaction_type>    _txns;     // per-root transactions
+      std::map<uint32_t, root_handle>              _handles;  // per-root handles
+      std::vector<uint32_t>                        _write_roots;
+      bool                                         _committed = false;
+      bool                                         _aborted   = false;
    };
+
+   using transaction = basic_transaction<std_lock_policy>;
 
 }  // namespace psitri::dwal

@@ -7,6 +7,7 @@
 #include <psitri/dwal/merge_pool.hpp>
 #include <psitri/dwal/transaction.hpp>
 #include <psitri/fwd.hpp>
+#include <psitri/lock_policy.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -48,6 +49,36 @@ namespace psitri::dwal
       uint64_t max_rw_arena_bytes = 1ULL * 1024 * 1024 * 1024;
    };
 
+   namespace detail
+   {
+      /// Thread-local caches used by dwal_database::tri_get and create_cursor.
+      /// Non-template storage — holds type-erased pointers so a single TU
+      /// can serve every policy instantiation.
+      struct tl_cache_storage
+      {
+         // Used by create_cursor (Tri layer)
+         std::shared_ptr<void> cursor_session;
+         void*                 cursor_db = nullptr;
+
+         // Used by tri_get
+         std::shared_ptr<void> tri_session;
+         psitri::cursor*       tri_cursor = nullptr;
+         void*                 tri_db     = nullptr;
+
+         void reset()
+         {
+            cursor_session.reset();
+            cursor_db = nullptr;
+            delete tri_cursor;
+            tri_cursor = nullptr;
+            tri_session.reset();
+            tri_db = nullptr;
+         }
+      };
+
+      tl_cache_storage& thread_local_cache();
+   }  // namespace detail
+
    /// DWAL database — wraps a PsiTri database with buffered write-ahead logging.
    ///
    /// Provides the same logical API as psitri::database but routes writes through
@@ -57,170 +88,116 @@ namespace psitri::dwal
    ///
    /// Each root (0-511) has independent state: its own btree, WAL file, undo log,
    /// mutex, and RO slot. Operations on different roots never contend.
-   class dwal_database
+   template <class LockPolicy = std_lock_policy>
+   class basic_dwal_database
    {
      public:
+      using lock_policy_type      = LockPolicy;
+      using database_type         = basic_database<LockPolicy>;
+      using read_session_type     = basic_read_session<LockPolicy>;
+      using write_session_type    = basic_write_session<LockPolicy>;
+      using dwal_root_type        = basic_dwal_root<LockPolicy>;
+      using epoch_registry_type   = basic_epoch_registry<LockPolicy>;
+      using merge_pool_type       = basic_merge_pool<LockPolicy>;
+      using dwal_transaction_type = basic_dwal_transaction<LockPolicy>;
+      using transaction_type      = basic_transaction<LockPolicy>;
+      using read_session_dwal_type = basic_dwal_read_session<LockPolicy>;
+      using lookup_result         = typename dwal_transaction_type::lookup_result;
+
       /// Create a DWAL database wrapping an existing PsiTri database.
       /// WAL files are stored in wal_dir (defaults to db_dir/wal/).
-      dwal_database(std::shared_ptr<psitri::database> db,
-                    std::filesystem::path              wal_dir,
-                    dwal_config                        cfg = {});
+      basic_dwal_database(std::shared_ptr<database_type> db,
+                          std::filesystem::path          wal_dir,
+                          dwal_config                    cfg = {});
 
-      ~dwal_database();
+      ~basic_dwal_database();
 
-      dwal_database(const dwal_database&)            = delete;
-      dwal_database& operator=(const dwal_database&) = delete;
+      basic_dwal_database(const basic_dwal_database&)            = delete;
+      basic_dwal_database& operator=(const basic_dwal_database&) = delete;
 
       // ── Transactions ──────────────────────────────────────────────
 
-      /// Start a buffered write transaction on a root (legacy single-root API).
-      /// Acquires the per-root exclusive lock.
-      dwal_transaction start_write_transaction(uint32_t         root_index,
-                                               transaction_mode mode = transaction_mode::buffered);
+      dwal_transaction_type start_write_transaction(
+          uint32_t         root_index,
+          transaction_mode mode = transaction_mode::buffered);
 
-      /// Start a multi-root transaction. Write roots get exclusive locks;
-      /// read roots get shared locks. Locks acquired in sorted index order.
-      transaction start_transaction(std::initializer_list<uint32_t> write_roots,
-                                    std::initializer_list<uint32_t> read_roots = {});
+      transaction_type start_transaction(std::initializer_list<uint32_t> write_roots,
+                                         std::initializer_list<uint32_t> read_roots = {});
 
-      /// Convenience: single write root transaction.
-      transaction start_transaction(uint32_t root_index);
+      transaction_type start_transaction(uint32_t root_index);
 
-      /// Generate a monotonically increasing multi-transaction ID.
       uint64_t next_multi_tx_id() noexcept;
 
       // ── Read Access ───────────────────────────────────────────────
 
-      /// Create a read session with cached snapshots.
-      /// One per reader thread. The session caches DWAL snapshots and PsiTri
-      /// cursors, refreshing only when the generation changes (after a swap).
-      dwal_read_session start_read_session() { return dwal_read_session(*this); }
+      read_session_dwal_type start_read_session() { return read_session_dwal_type(*this); }
 
-      /// Single-shot layered lookup of RO + Tri only (no caching — acquires mutex per call).
-      /// Does NOT see uncommitted RW data. Prefer start_read_session() for repeated reads.
-      dwal_transaction::lookup_result get(uint32_t         root_index,
-                                          std::string_view key,
-                                          read_mode        mode = read_mode::trie);
+      lookup_result get(uint32_t root_index, std::string_view key,
+                        read_mode mode = read_mode::trie);
 
-      /// Full layered lookup: RW → RO → Tri.
-      /// Sees uncommitted writes in the RW btree. Intended for same-thread
-      /// read-after-write (e.g. RocksDB Get() after Put()).
-      dwal_transaction::lookup_result get_latest(uint32_t root_index, std::string_view key);
+      lookup_result get_latest(uint32_t root_index, std::string_view key);
 
-      /// Create a merge cursor over the DWAL layers for iteration.
-      /// Locking is handled internally based on the read mode:
-      ///   - latest:    RW + RO + Tri (writer-thread only — RW is not locked)
-      ///   - buffered:  RO + Tri (acquires buffered_mutex internally)
-      ///   - trie: Tri only (no DWAL locks)
-      /// The returned cursor owns shared_ptr copies of the layer snapshots,
-      /// so callers do not need to hold any locks during iteration.
       owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode,
-                                      bool skip_rw_lock = false);
+                                       bool skip_rw_lock = false);
 
       // ── Flush & Swap ──────────────────────────────────────────────
 
-      /// Try to swap the RW btree to RO for a specific root.
-      /// Only succeeds if the merge thread has completed (merge_complete == true).
-      /// Called from commit when buffer thresholds are exceeded.
       void try_swap_rw_to_ro(uint32_t root_index);
-
-      /// Legacy entry point — delegates to try_swap_rw_to_ro.
       void swap_rw_to_ro(uint32_t root_index);
-
-      /// Flush all dirty WAL files to disk (F_FULLFSYNC).
       void flush_wal();
-
-      /// Flush all dirty WAL files with explicit sync level.
       void flush_wal(sal::sync_type sync);
-
-      /// Flush a specific root's WAL to disk (F_FULLFSYNC).
       void flush_wal(uint32_t root_index);
-
-      /// Flush a specific root's WAL with explicit sync level.
       void flush_wal(uint32_t root_index, sal::sync_type sync);
 
       // ── Accessors ─────────────────────────────────────────────────
 
-      std::shared_ptr<psitri::database>& underlying_db() noexcept { return _db; }
-      const dwal_config&                 config() const noexcept { return _cfg; }
-      dwal_root&                         root(uint32_t index) { return ensure_root(index); }
+      std::shared_ptr<database_type>& underlying_db() noexcept { return _db; }
+      const dwal_config&              config() const noexcept { return _cfg; }
+      dwal_root_type&                 root(uint32_t index) { return ensure_root(index); }
 
-      /// Access the epoch registry (for session lock allocation).
-      epoch_registry& epochs() noexcept { return _epochs; }
+      epoch_registry_type& epochs() noexcept { return _epochs; }
 
-      /// Check if a swap should be triggered for a root after a commit.
       bool should_swap(uint32_t root_index) const;
-
-      /// Check if the RW tree has exceeded the backpressure threshold.
       bool should_backpressure(uint32_t root_index) const;
 
-      /// Request graceful shutdown.  Wakes any writer blocked on merge
-      /// backpressure and signals the merge pool to abort in-flight merges.
       void request_shutdown();
 
-      /// Lazily initialize a root's DWAL state (public for transaction).
-      dwal_root& ensure_root_public(uint32_t index) { return ensure_root(index); }
+      dwal_root_type& ensure_root_public(uint32_t index) { return ensure_root(index); }
 
-      /// Clear thread-local caches for the calling thread.
-      /// Must be called from the same thread that used create_cursor/tri_get.
       void clear_thread_local_cache();
 
-      /// Ensure WAL directory and files exist for a root (public for transaction).
       void ensure_wal_public(uint32_t root_index) { ensure_wal(root_index); }
 
-      /// Tri-layer point lookup — reads directly from the PsiTri COW tree.
-      /// Used by dwal_transaction::get() as the final fallback layer.
-      /// Thread-safe: uses a thread-local read session internally.
-      dwal_transaction::lookup_result tri_get(uint32_t root_index, std::string_view key);
+      lookup_result tri_get(uint32_t root_index, std::string_view key);
 
-      /// Create a PsiTri cursor for the tri layer only.
-      /// Used by dwal_transaction::create_cursor() to compose the merge cursor.
-      /// Thread-safe: uses a thread-local read session internally.
       psitri::cursor create_tri_cursor(uint32_t root_index);
 
-      /// Clear thread-local caches (read sessions, cursors) for the calling thread.
-      /// Must be called on each thread that used tri_get() or create_cursor()
-      /// before the database is destroyed, to avoid dangling shared_ptr references.
       void clear_thread_local_caches();
 
       /// Replay any WAL files found on disk to recover from a crash.
-      /// Called automatically by the constructor. Safe to call on clean startup
-      /// (no WAL files = no-op).
       void recover();
 
      private:
-
-      /// Replay a single WAL file's entries into the PsiTri COW tree.
       void replay_wal_to_tri(uint32_t root_index, const std::filesystem::path& wal_path);
-
-      /// Replay a single WAL file's entries into a root's RW btree layer.
-      /// @deprecated Superseded by inline replay in recover() which handles multi-tx filtering.
-      ///             Kept temporarily for existing tests. Remove when tests are migrated.
       void replay_wal_to_rw(uint32_t root_index, const std::filesystem::path& wal_path);
-
-      /// Ensure WAL directory and files exist for a root.
       void ensure_wal(uint32_t root_index);
 
-      std::shared_ptr<psitri::database> _db;
-      std::filesystem::path             _wal_dir;
-      dwal_config                       _cfg;
+      std::shared_ptr<database_type> _db;
+      std::filesystem::path          _wal_dir;
+      dwal_config                    _cfg;
 
-      /// Per-root DWAL state. Only roots that are actively used get initialized.
-      /// Using unique_ptr to avoid huge array of dwal_root (which has mutex + atomics).
-      static constexpr uint32_t  max_roots = 512;
-      std::unique_ptr<dwal_root> _roots[max_roots];
+      static constexpr uint32_t       max_roots = 512;
+      std::unique_ptr<dwal_root_type> _roots[max_roots];
 
-      /// Lazily initialize a root's DWAL state.
-      dwal_root& ensure_root(uint32_t index);
+      dwal_root_type& ensure_root(uint32_t index);
 
-      /// Monotonically increasing counter for multi-root transaction IDs.
       std::atomic<uint64_t> _next_multi_tx_id{1};
 
-      /// Epoch registry for RO pool reclamation.
-      epoch_registry _epochs;
+      epoch_registry_type _epochs;
 
-      /// Merge thread pool — drains RO btrees into PsiTri.
-      std::unique_ptr<merge_pool> _merge_pool;
+      std::unique_ptr<merge_pool_type> _merge_pool;
    };
+
+   using dwal_database = basic_dwal_database<std_lock_policy>;
 
 }  // namespace psitri::dwal

@@ -2,8 +2,8 @@
 #include <psitri/cursor.hpp>
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/dwal_root.hpp>
-#include <psitri/read_session.hpp>
-#include <psitri/read_session_impl.hpp>
+#include <psitri/fwd.hpp>
+#include <psitri/lock_policy.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -11,7 +11,8 @@
 
 namespace psitri::dwal
 {
-   class dwal_database;
+   template <class LockPolicy>
+   class basic_dwal_database;
 
    /// A read session for the DWAL layer.
    ///
@@ -29,26 +30,32 @@ namespace psitri::dwal
    ///   if (!result.found)
    ///       // not in any layer
    /// @endcode
-   class dwal_read_session
+   template <class LockPolicy = std_lock_policy>
+   class basic_dwal_read_session
    {
      public:
+      using database_type     = basic_dwal_database<LockPolicy>;
+      using read_session_type = basic_read_session<LockPolicy>;
+
       struct lookup_result
       {
          bool        found = false;
          std::string value;
       };
 
-      dwal_read_session(dwal_database& db);
-      ~dwal_read_session();
+      basic_dwal_read_session(database_type& db);
+      ~basic_dwal_read_session();
 
-      dwal_read_session(dwal_read_session&& other) noexcept
-          : _db(other._db), _tri_session(std::move(other._tri_session)), _cache(other._cache)
+      basic_dwal_read_session(basic_dwal_read_session&& other) noexcept
+          : _db(other._db),
+            _tri_session(std::move(other._tri_session)),
+            _cache(other._cache)
       {
          other._cache = nullptr;
       }
-      dwal_read_session& operator=(dwal_read_session&&) = delete;
-      dwal_read_session(const dwal_read_session&)       = delete;
-      dwal_read_session& operator=(const dwal_read_session&) = delete;
+      basic_dwal_read_session& operator=(basic_dwal_read_session&&) = delete;
+      basic_dwal_read_session(const basic_dwal_read_session&)       = delete;
+      basic_dwal_read_session& operator=(const basic_dwal_read_session&) = delete;
 
       /// Layered lookup with automatic snapshot caching.
       ///
@@ -66,7 +73,7 @@ namespace psitri::dwal
       {
          std::shared_ptr<btree_layer> snapshot;
          psitri::cursor               tri_cursor;
-         uint32_t                     gen = 0;
+         uint32_t                     gen         = 0;
          bool                         initialized = false;
 
          root_cache(sal::allocator_session_ptr session)
@@ -75,13 +82,15 @@ namespace psitri::dwal
          }
       };
 
-      dwal_database&                        _db;
-      std::shared_ptr<psitri::read_session>  _tri_session;
+      database_type&                    _db;
+      std::shared_ptr<read_session_type> _tri_session;
 
       void init_cache();
 
       static constexpr uint32_t max_roots = 512;
-      root_cache*               _cache = nullptr;
+      root_cache*               _cache    = nullptr;
    };
+
+   using dwal_read_session = basic_dwal_read_session<std_lock_policy>;
 
 }  // namespace psitri::dwal
