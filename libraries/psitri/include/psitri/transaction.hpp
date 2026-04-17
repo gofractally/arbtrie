@@ -3,6 +3,7 @@
 #include <functional>
 #include <optional>
 #include <psitri/detail/write_buffer.hpp>
+#include <psitri/fwd.hpp>
 #include <psitri/tx_mode.hpp>
 #include <psitri/write_cursor.hpp>
 #include <stdexcept>
@@ -10,7 +11,6 @@
 
 namespace psitri
 {
-   class write_session;
    class transaction;
    class tree_handle;
 
@@ -413,7 +413,7 @@ namespace psitri
      private:
       friend class tree_handle;
       friend class transaction_frame_ref;
-      friend class write_session;
+      template <class> friend class basic_write_session;
 
       // ── Change set storage ────────────────────────────────────────────
 

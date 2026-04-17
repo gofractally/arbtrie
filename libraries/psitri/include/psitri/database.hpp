@@ -2,8 +2,10 @@
 #include <chrono>
 #include <filesystem>
 #include <hash/xxhash.h>
+#include <memory>
 #include <mutex>
 #include <psitri/live_range_map.hpp>
+#include <psitri/lock_policy.hpp>
 #include <psitri/write_session.hpp>
 #include <sal/allocator.hpp>
 #include <sal/config.hpp>
@@ -16,8 +18,12 @@ namespace psitri
 {
    using runtime_config = sal::runtime_config;
    using recovery_mode  = sal::recovery_mode;
-   class write_session;
-   class read_session;
+
+   template <class LockPolicy>
+   class basic_write_session;
+
+   template <class LockPolicy>
+   class basic_read_session;
 
    static constexpr uint32_t num_top_roots = 512;
 
@@ -41,7 +47,16 @@ namespace psitri
    namespace detail
    {
       class database_state;
-   }
+
+      /// One-time registration of psitri node vtables with SAL.  Idempotent,
+      /// safe to call multiple times and from multiple threads.
+      void register_node_types();
+
+      /// Walk the tree from all top-level roots and populate a verify_result.
+      /// Non-template so it can live in a .cpp file and keep the tree-walk
+      /// logic out of the header.
+      sal::verify_result verify_all_roots(sal::allocator& alloc);
+   }  // namespace detail
 
    /**
     * @brief High-level database statistics for monitoring and diagnostics.
@@ -129,7 +144,13 @@ namespace psitri
     * segment provider, read-bit decay), and up to 512 independent top-level
     * roots. All reads and writes go through sessions obtained from this class.
     *
-    * Typical usage:
+    * @tparam LockPolicy  Policy type whose `mutex_type` alias selects the
+    *                    mutex used for internal synchronization. Defaults to
+    *                    `std_lock_policy` (std::mutex). Fiber-based callers
+    *                    should supply a policy whose mutex yields instead of
+    *                    blocking the OS thread on contention.
+    *
+    * Typical usage (default policy):
     * @code
     *   auto db = psitri::database::create("mydb");
     *   auto ws = db->start_write_session();
@@ -138,113 +159,80 @@ namespace psitri
     *   tx.commit();
     * @endcode
     */
-   class database : public std::enable_shared_from_this<database>
+   template <class LockPolicy = std_lock_policy>
+   class basic_database : public std::enable_shared_from_this<basic_database<LockPolicy>>
    {
      public:
+      using lock_policy_type = LockPolicy;
+      using mutex_type       = typename LockPolicy::mutex_type;
+      using write_session_type = basic_write_session<LockPolicy>;
+      using read_session_type  = basic_read_session<LockPolicy>;
+
       /** @name Construction & Lifecycle */
       ///@{
 
       /**
        * @brief Open or create a database.
        *
-       * This is the primary entry point for obtaining a database instance.
-       *
        * @param dir   Directory containing (or to contain) the database files.
        * @param mode  How to handle existing vs. new databases.
        * @param cfg   Runtime configuration (cache budget, sync mode, etc.).
        * @return A shared_ptr to the database.
-       *
-       * @throws std::runtime_error if mode is create_only and the database exists.
-       * @throws std::runtime_error if mode is open_existing and the database does not exist.
-       * @throws std::runtime_error if mode is read_only (not yet implemented).
        */
-      static std::shared_ptr<database> open(std::filesystem::path dir,
-                                            open_mode             mode     = open_mode::create_or_open,
-                                            const runtime_config& cfg      = {},
-                                            recovery_mode         recovery = recovery_mode::none);
+      static std::shared_ptr<basic_database> open(
+          std::filesystem::path dir,
+          open_mode             mode     = open_mode::create_or_open,
+          const runtime_config& cfg      = {},
+          recovery_mode         recovery = recovery_mode::none);
 
       /**
        * @brief Create a new database. Fails if the database already exists.
        * @deprecated Use database::open(dir, open_mode::create_only) instead.
        */
-      static std::shared_ptr<database> create(std::filesystem::path dir,
-                                              const runtime_config& = {});
+      static std::shared_ptr<basic_database> create(std::filesystem::path dir,
+                                                    const runtime_config& = {});
 
-      ~database();
+      ~basic_database();
 
       ///@}
 
       /// @cond INTERNAL
       /**
        * @brief Low-level constructor. Prefer database::open() for normal use.
-       * @param dir  Directory containing the database files.
-       * @param cfg  Runtime configuration.
-       * @param mode Recovery mode to apply on open.
        */
-      database(const std::filesystem::path& dir,
-               const runtime_config&       cfg,
-               recovery_mode               mode = recovery_mode::none);
+      basic_database(const std::filesystem::path& dir,
+                     const runtime_config&        cfg,
+                     recovery_mode                mode = recovery_mode::none);
       /// @endcond
 
       /** @name Sessions */
       ///@{
 
-      /**
-       * @brief Create a write session for the calling thread.
-       *
-       * The returned session is backed by the calling thread's allocator_session
-       * and must only be used from the thread that created it. For multi-writer
-       * patterns, call start_write_session() from each writer thread rather than
-       * creating sessions on a coordinator thread and distributing them.
-       *
-       * @return A shared_ptr to the new write session.
-       */
-      std::shared_ptr<write_session> start_write_session();
-
-      /**
-       * @brief Create a read session for the calling thread.
-       *
-       * Same thread-affinity rule as start_write_session(): create the session
-       * on the thread that will use it.
-       *
-       * @return A shared_ptr to the new read session.
-       */
-      std::shared_ptr<read_session> start_read_session();
+      std::shared_ptr<write_session_type> start_write_session();
+      std::shared_ptr<read_session_type>  start_read_session();
 
       ///@}
 
       /** @name Configuration */
       ///@{
 
-      /**
-       * @brief Flush all pending writes to the configured sync level.
-       */
-      void sync();
+      void sync()
+      {
+         std::lock_guard<mutex_type> lock(_sync_mutex);
+         _allocator.sync(_cfg.sync_mode);
+      }
 
-      /**
-       * @brief Update runtime configuration (cache budget, sync mode, etc.).
-       * @param cfg The new configuration to apply.
-       */
-      void set_runtime_config(const runtime_config& cfg);
+      void set_runtime_config(const runtime_config& cfg)
+      {
+         _cfg = cfg;
+         _allocator.set_runtime_config(cfg);
+      }
 
       ///@}
 
       /** @name Statistics */
       ///@{
 
-      /**
-       * @brief Return a snapshot of database statistics.
-       *
-       * Gathers storage, cache, and session metrics into a database_stats
-       * object that can be inspected programmatically or printed.
-       *
-       * @code
-       *   auto stats = db->get_stats();
-       *   std::cout << stats;                           // human-readable
-       *   if (stats.total_free_bytes > 1024*1024*100)   // programmatic check
-       *       db->compact_and_truncate();
-       * @endcode
-       */
       database_stats get_stats() const
       {
          auto d = _allocator.dump();
@@ -283,11 +271,6 @@ namespace psitri
       /** @name Compaction & Maintenance */
       ///@{
 
-      /**
-       * @brief Block until the compactor has drained all pending releases.
-       * @param timeout Maximum time to wait.
-       * @return true if drained, false if timed out.
-       */
       bool wait_for_compactor(std::chrono::milliseconds timeout = std::chrono::milliseconds(10000))
       {
          auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -309,21 +292,12 @@ namespace psitri
          return false;
       }
 
-      /**
-       * @brief Wait for compaction to complete, then truncate trailing free
-       *        segments from the data file to reclaim disk space.
-       */
       void compact_and_truncate()
       {
          wait_for_compactor();
          _allocator.truncate_free_tail();
       }
 
-      /**
-       * @brief Create a defragmented copy of the database, then swap it in.
-       *
-       * The old database files are preserved as dir.old until verification passes.
-       */
       void defrag();
 
       ///@}
@@ -331,73 +305,25 @@ namespace psitri
       /** @name Recovery */
       ///@{
 
-      /**
-       * @brief Check whether reference counts are stale from a deferred_cleanup recovery.
-       *
-       * Leaked memory is not reclaimed until reclaim_leaked_memory() is called.
-       *
-       * @return true if ref counts need rebuilding.
-       */
       bool ref_counts_stale() const;
 
-      /**
-       * @brief Reclaim leaked memory from a prior deferred_cleanup recovery.
-       *
-       * This is the expensive O(live objects) walk that deferred_cleanup skips.
-       * No-op if ref counts are not stale.
-       */
       void reclaim_leaked_memory();
 
-      /**
-       * @brief Full offline integrity verification.
-       *
-       * Checks segment checksums, object checksums, key hashes, value checksums,
-       * and tree structure. Returns detailed results including per-failure context
-       * for targeted repair.
-       */
-      sal::verify_result verify();
+      sal::verify_result verify() { return detail::verify_all_roots(_allocator); }
 
-      /**
-       * @brief Full recovery: rebuild control blocks from segments and reclaim leaked memory.
-       */
       void recover() { _allocator.recover(); }
 
-      /**
-       * @brief Lightweight recovery: reset reference counts and reclaim leaked memory.
-       */
       void reset_reference_counts() { _allocator.reset_reference_counts(); }
 
       ///@}
 
-      /** @name Low-Level Diagnostics
-       *  These methods expose SAL allocator internals. They are intended for
-       *  debugging, tooling (psitri-tool), and advanced monitoring — not for
-       *  normal application use. Prefer get_stats() for production monitoring.
-       */
+      /** @name Low-Level Diagnostics */
       ///@{
 
-      /**
-       * @brief Return the raw SAL allocator dump with per-segment detail.
-       *
-       * Contains detailed per-segment info (freed bytes, pinned state, age,
-       * object counts) and internal histograms. Use get_stats() instead for
-       * a clean summary.
-       */
       sal::seg_alloc_dump dump() const { return _allocator.dump(); }
 
-      /**
-       * @brief Return the total size in bytes of all reachable (live) objects.
-       *
-       * Walks the entire object graph. Expensive for large databases.
-       */
       uint64_t reachable_size() { return _allocator.reachable_size(); }
 
-      /**
-       * @brief Audit freed space accounting across all segments.
-       *
-       * Compares the allocator's tracked free space against a full segment
-       * scan. For debugging allocator accounting bugs.
-       */
       auto audit_freed_space() { return _allocator.audit_freed_space(); }
 
       ///@}
@@ -411,29 +337,32 @@ namespace psitri
 
       ///@}
 
+      /// @cond INTERNAL
+      mutex_type& modify_lock(int index) { return _modify_lock[index]; }
+      /// @endcond
+
      private:
-      friend class read_session;
-      friend class write_session;
+      template <class> friend class basic_read_session;
+      template <class> friend class basic_write_session;
 
       std::filesystem::path _dir;
       runtime_config        _cfg;
 
-      mutable std::mutex _sync_mutex;
+      mutable mutex_type _sync_mutex;
       /// Lightweight lock for root slot version-CB swaps (fast-path MVCC).
       /// Does NOT protect tree structure — only the ver field in the root slot.
-      mutable std::mutex _root_ver_mutex[num_top_roots];
+      mutable mutex_type _root_ver_mutex[num_top_roots];
       /// Full per-root mutex for COW mutations that change the root.
-      mutable std::mutex _modify_lock[num_top_roots];
+      mutable mutex_type _modify_lock[num_top_roots];
 
-      std::mutex& root_ver_lock(int index) { return _root_ver_mutex[index]; }
-      std::mutex& modify_lock(int index) { return _modify_lock[index]; }
+      mutex_type& root_ver_lock(int index) { return _root_ver_mutex[index]; }
 
       // ── Stripe locks for fine-grained MVCC concurrency ──────────
       static constexpr uint32_t num_stripe_locks = 1024;
 
       struct alignas(64) stripe_lock
       {
-         std::mutex m;
+         mutex_type m;
       };
       stripe_lock _stripes[num_stripe_locks];
 
@@ -443,7 +372,7 @@ namespace psitri
          return XXH3_64bits(&v, sizeof(v)) & (num_stripe_locks - 1);
       }
 
-      std::mutex& stripe_mutex(sal::ptr_address adr) { return _stripes[stripe_index(adr)].m; }
+      mutex_type& stripe_mutex(sal::ptr_address adr) { return _stripes[stripe_index(adr)].m; }
 
       void            init_allocator_shared_ownership();
       std::once_flag  _alloc_shared_init;
@@ -452,5 +381,9 @@ namespace psitri
       detail::database_state* _dbm;
       live_range_map          _dead_versions;
    };
+
+   /// Default-policy alias preserved for existing consumers.
+   using database     = basic_database<std_lock_policy>;
    using database_ptr = std::shared_ptr<database>;
+
 }  // namespace psitri
