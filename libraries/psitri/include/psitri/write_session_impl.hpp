@@ -1,5 +1,6 @@
 #pragma once
 #include <psitri/database.hpp>
+#include <psitri/read_session_impl.hpp>
 #include <psitri/transaction.hpp>
 #include <psitri/write_session.hpp>
 #include <sal/allocator_session_impl.hpp>
@@ -7,48 +8,64 @@
 namespace psitri
 {
 
-   inline write_session::write_session(database& db) : read_session(db) {}
-
-   inline write_cursor_ptr write_session::create_write_cursor()
+   template <class LockPolicy>
+   inline basic_write_session<LockPolicy>::basic_write_session(database_type& db)
+       : basic_read_session<LockPolicy>(db)
    {
-      return std::make_shared<write_cursor>(_allocator_session);
    }
 
-   inline write_cursor_ptr write_session::create_write_cursor(sal::smart_ptr<sal::alloc_header> root)
+   template <class LockPolicy>
+   inline write_cursor_ptr basic_write_session<LockPolicy>::create_write_cursor()
+   {
+      return std::make_shared<write_cursor>(this->_allocator_session);
+   }
+
+   template <class LockPolicy>
+   inline write_cursor_ptr basic_write_session<LockPolicy>::create_write_cursor(
+       sal::smart_ptr<sal::alloc_header> root)
    {
       return std::make_shared<write_cursor>(std::move(root));
    }
 
-   inline sal::smart_ptr<sal::alloc_header> write_session::get_root(uint32_t root_index)
+   template <class LockPolicy>
+   inline sal::smart_ptr<sal::alloc_header>
+   basic_write_session<LockPolicy>::get_root(uint32_t root_index)
    {
-      return _allocator_session->get_root<>(sal::root_object_number(root_index));
+      return this->_allocator_session->template get_root<>(
+          sal::root_object_number(root_index));
    }
 
-   inline void write_session::set_root(uint32_t                          root_index,
-                                        sal::smart_ptr<sal::alloc_header> root,
-                                        sal::sync_type                    sync)
+   template <class LockPolicy>
+   inline void basic_write_session<LockPolicy>::set_root(
+       uint32_t                          root_index,
+       sal::smart_ptr<sal::alloc_header> root,
+       sal::sync_type                    sync)
    {
-      _allocator_session->set_root(sal::root_object_number(root_index), std::move(root), sync);
+      this->_allocator_session->set_root(
+          sal::root_object_number(root_index), std::move(root), sync);
    }
 
-   inline uint64_t write_session::get_total_allocated_objects() const
+   template <class LockPolicy>
+   inline uint64_t basic_write_session<LockPolicy>::get_total_allocated_objects() const
    {
-      return _allocator_session->get_total_allocated_objects();
+      return this->_allocator_session->get_total_allocated_objects();
    }
 
-   inline uint64_t write_session::get_pending_release_count() const
+   template <class LockPolicy>
+   inline uint64_t basic_write_session<LockPolicy>::get_pending_release_count() const
    {
-      return _allocator_session->get_pending_release_count();
+      return this->_allocator_session->get_pending_release_count();
    }
 
-   inline transaction write_session::start_transaction(uint32_t root_index, tx_mode mode)
+   template <class LockPolicy>
+   inline transaction basic_write_session<LockPolicy>::start_transaction(
+       uint32_t root_index, tx_mode mode)
    {
-      auto& lock = _db->modify_lock(root_index);
+      auto& lock = this->_db->modify_lock(root_index);
       lock.lock();
 
       auto root    = get_root(root_index);
-      auto session = _allocator_session;
-      auto db      = _db;
+      auto session = this->_allocator_session;
 
       // Capture this session for commit/rollback
       auto* self = this;
@@ -66,9 +83,10 @@ namespace psitri
           mode);
    }
 
-   inline void write_session::dump_live_objects() const
+   template <class LockPolicy>
+   inline void basic_write_session<LockPolicy>::dump_live_objects() const
    {
-      _allocator_session->for_each_live_object(
+      this->_allocator_session->for_each_live_object(
           [](sal::ptr_address adr, uint32_t ref, const sal::alloc_header* obj)
           {
              const char* type_name = "unknown";

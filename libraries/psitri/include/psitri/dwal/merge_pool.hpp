@@ -1,5 +1,6 @@
 #pragma once
 #include <psitri/dwal/epoch_lock.hpp>
+#include <psitri/fwd.hpp>
 
 #include <atomic>
 #include <condition_variable>
@@ -10,12 +11,6 @@
 #include <queue>
 #include <thread>
 #include <vector>
-
-namespace psitri
-{
-   class database;
-   class write_session;
-}  // namespace psitri
 
 namespace psitri::dwal
 {

@@ -6,18 +6,12 @@
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/merge_pool.hpp>
 #include <psitri/dwal/transaction.hpp>
+#include <psitri/fwd.hpp>
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
-
-namespace psitri
-{
-   class database;
-   class write_session;
-   class read_session;
-}  // namespace psitri
 
 namespace psitri::dwal
 {

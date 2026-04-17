@@ -4,8 +4,6 @@
 
 namespace psitri
 {
-   class write_session;
-
    class write_cursor
    {
      public:

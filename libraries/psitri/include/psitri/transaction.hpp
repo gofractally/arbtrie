@@ -9,8 +9,6 @@
 
 namespace psitri
 {
-   class write_session;
-
    class transaction;
 
    /// RAII guard for a sub-transaction frame. Movable, not copyable.
