@@ -53,6 +53,12 @@ namespace psitri
       sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const;
       write_cursor                      get_subtree_cursor(key_view key) const;
 
+      // Apply fn(write_cursor&) to the tracked subtree at key. Creates the
+      // entry on first call; subsequent calls continue from the prior state.
+      // Flushed to the main tree atomically on commit, discarded on abort.
+      template <typename Fn>
+      void with_subtree(key_view key, Fn&& fn);
+
       // ── Transaction control ───────────────────────────────────────────
 
       void                                commit() noexcept;
@@ -241,12 +247,20 @@ namespace psitri
          return _cursor->get_subtree_cursor(key);
       }
 
+      template <typename Fn>
+      void with_subtree(key_view key, Fn&& fn)
+      {
+         with_subtree_impl(key, std::forward<Fn>(fn));
+      }
+
       // ── Transaction control ───────────────────────────────────────────
 
       void commit() noexcept
       {
          if (_commit_func)
          {
+            flush_open_subtrees();
+
             if (_mode == tx_mode::micro && _buffer && !_buffer->empty())
                merge_buffer_to_persistent();
 
@@ -258,9 +272,10 @@ namespace psitri
 
       void abort() noexcept
       {
-         // Unwind any outstanding frames
          while (!_frames.empty())
             abort_frame();
+
+         _open_subtrees.clear();
 
          if (_rollback_func)
          {
@@ -290,14 +305,13 @@ namespace psitri
 
       struct frame
       {
-         // Saved cursor root — used for batch mode abort and micro mode
-         // abort after a merge-then-delegate has flushed the buffer.
          sal::smart_ptr<sal::alloc_header> saved_root;
-         // Saved buffer state — used for micro mode abort when no merge occurred.
          detail::write_buffer::saved_state buf_state;
-         // Set true when a merge-then-delegate occurs within this frame's lifetime.
-         // After merge, buf_state is invalid — abort must restore saved_root instead.
-         bool micro_merged = false;
+         bool                              micro_merged = false;
+         // Number of open subtrees at push_frame time; entries beyond are new.
+         size_t subtrees_at_push = 0;
+         // Roots of the first subtrees_at_push entries at push_frame time.
+         std::vector<sal::smart_ptr<sal::alloc_header>> subtree_roots;
       };
 
       void push_frame() noexcept
@@ -306,13 +320,17 @@ namespace psitri
          if (_mode == tx_mode::micro)
          {
             f.buf_state  = _buffer->save();
-            f.saved_root = _cursor->root();  // saved in case merge happens later
+            f.saved_root = _cursor->root();
             _buffer->bump_generation();
          }
          else
          {
             f.saved_root = _cursor->root();
          }
+         f.subtrees_at_push = _open_subtrees.size();
+         f.subtree_roots.reserve(_open_subtrees.size());
+         for (auto& e : _open_subtrees)
+            f.subtree_roots.push_back(e.root);
          _frames.push_back(std::move(f));
       }
 
@@ -328,17 +346,17 @@ namespace psitri
          auto f = std::move(_frames.back());
          _frames.pop_back();
 
+         // Drop subtree entries opened within this frame.
+         _open_subtrees.resize(f.subtrees_at_push);
+         // Restore pre-frame roots by index.
+         for (size_t i = 0; i < f.subtrees_at_push; ++i)
+            _open_subtrees[i].root = std::move(f.subtree_roots[i]);
+
          if (_mode == tx_mode::micro)
          {
-            // Restore buffer state — works even after soft_clear because
-            // the arena data is preserved (soft_clear doesn't free memory).
             _buffer->restore(f.buf_state);
-
             if (f.micro_merged)
-            {
-               // Merge modified the cursor — restore the pre-frame root too.
                _cursor.emplace(std::move(f.saved_root));
-            }
          }
          else
          {
@@ -350,6 +368,56 @@ namespace psitri
       {
          // If frames exist, the topmost frame_ref should be used, not the parent.
          // This is a debug assertion — not enforced at the type level.
+      }
+
+      // ── Tracked subtree cursors ───────────────────────────────────────
+
+      struct subtree_entry
+      {
+         std::string                       key;
+         sal::smart_ptr<sal::alloc_header> root;
+      };
+
+      // Linear scan — fast for the small N (< 20) typical of transactions.
+      size_t find_subtree(key_view key) const noexcept
+      {
+         for (size_t i = 0; i < _open_subtrees.size(); ++i)
+            if (_open_subtrees[i].key == key)
+               return i;
+         return _open_subtrees.size();
+      }
+
+      template <typename Fn>
+      void with_subtree_impl(key_view key, Fn&& fn)
+      {
+         size_t idx = find_subtree(key);
+         if (idx == _open_subtrees.size())
+         {
+            if (_mode == tx_mode::micro && _buffer && !_buffer->empty())
+            {
+               merge_buffer_to_persistent();
+               mark_frames_merged();
+            }
+            _open_subtrees.push_back({std::string(key), _cursor->get_subtree(key)});
+            idx = _open_subtrees.size() - 1;
+         }
+
+         auto& entry = _open_subtrees[idx];
+         {
+            write_cursor cur(entry.root ? entry.root
+                                        : sal::smart_ptr<sal::alloc_header>(
+                                              _cursor->root().session(), sal::null_ptr_address));
+            std::forward<Fn>(fn)(cur);
+            entry.root = cur.root();
+         }
+      }
+
+      void flush_open_subtrees()
+      {
+         for (auto& e : _open_subtrees)
+            if (e.root)
+               _cursor->upsert(key_view(e.key), std::move(e.root));
+         _open_subtrees.clear();
       }
 
       // ── Micro mode helpers ────────────────────────────────────────────
@@ -512,6 +580,7 @@ namespace psitri
       tx_mode                                                  _mode = tx_mode::batch;
       std::optional<detail::write_buffer>                      _buffer;
       std::vector<frame>                                       _frames;
+      std::vector<subtree_entry>                               _open_subtrees;
    };
 
    // ═════════════════════════════════════════════════════════════════════
@@ -579,6 +648,12 @@ namespace psitri
    inline write_cursor transaction_frame_ref::get_subtree_cursor(key_view key) const
    {
       return _tx->get_subtree_cursor(key);
+   }
+
+   template <typename Fn>
+   void transaction_frame_ref::with_subtree(key_view key, Fn&& fn)
+   {
+      _tx->with_subtree_impl(key, std::forward<Fn>(fn));
    }
 
    inline void transaction_frame_ref::commit() noexcept
