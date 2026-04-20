@@ -85,10 +85,10 @@ namespace
 }  // namespace
 
 // ═════════════════════════════════════════════════════════════════════════════
-// open_subtree: basic commit
+// with_subtree: basic commit
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: open_subtree changes are committed with the transaction",
+TEST_CASE("subtree-tx: with_subtree changes are committed with the transaction",
           "[subtree][tx-tracking]")
 {
    tx_track_db t;
@@ -96,24 +96,23 @@ TEST_CASE("subtree-tx: open_subtree changes are committed with the transaction",
 
    {
       auto txn = t.ses->start_transaction(0);
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
+      });
       txn.commit();
    }
 
    REQUIRE(t.subtree_has(to_key("accounts"), to_key("alice")));
    REQUIRE(t.subtree_key_count(to_key("accounts")) == 11);
 
-   t.assert_no_leaks("basic open_subtree commit");
+   t.assert_no_leaks("basic with_subtree commit");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// open_subtree: abort discards changes
+// with_subtree: abort discards changes
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: open_subtree changes are discarded on abort",
+TEST_CASE("subtree-tx: with_subtree changes are discarded on abort",
           "[subtree][tx-tracking]")
 {
    tx_track_db t;
@@ -121,24 +120,23 @@ TEST_CASE("subtree-tx: open_subtree changes are discarded on abort",
 
    {
       auto txn = t.ses->start_transaction(0);
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
+      });
       txn.abort();
    }
 
    REQUIRE_FALSE(t.subtree_has(to_key("accounts"), to_key("alice")));
    REQUIRE(t.subtree_key_count(to_key("accounts")) == 10);
 
-   t.assert_no_leaks("open_subtree abort");
+   t.assert_no_leaks("with_subtree abort");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// open_subtree: multiple subtrees committed atomically
+// with_subtree: multiple subtrees committed atomically
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: multiple open_subtree handles committed atomically",
+TEST_CASE("subtree-tx: multiple with_subtree cursors committed atomically",
           "[subtree][tx-tracking]")
 {
    tx_track_db t;
@@ -147,28 +145,26 @@ TEST_CASE("subtree-tx: multiple open_subtree handles committed atomically",
 
    {
       auto txn = t.ses->start_transaction(0);
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
-      {
-         auto sub = txn.primary().open_subtree(to_key("index"));
+      });
+      txn.with_subtree(to_key("index"), [](write_cursor& sub) {
          sub.upsert(to_key("alice_idx"), to_value("ref"));
-      }
+      });
       txn.commit();
    }
 
    REQUIRE(t.subtree_has(to_key("accounts"), to_key("alice")));
    REQUIRE(t.subtree_has(to_key("index"), to_key("alice_idx")));
 
-   t.assert_no_leaks("multiple open_subtree commit");
+   t.assert_no_leaks("multiple with_subtree commit");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// open_subtree: multiple subtrees aborted atomically
+// with_subtree: multiple subtrees aborted atomically
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: multiple open_subtree handles discarded on abort",
+TEST_CASE("subtree-tx: multiple with_subtree cursors discarded on abort",
           "[subtree][tx-tracking]")
 {
    tx_track_db t;
@@ -177,28 +173,26 @@ TEST_CASE("subtree-tx: multiple open_subtree handles discarded on abort",
 
    {
       auto txn = t.ses->start_transaction(0);
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
-      {
-         auto sub = txn.primary().open_subtree(to_key("index"));
+      });
+      txn.with_subtree(to_key("index"), [](write_cursor& sub) {
          sub.upsert(to_key("alice_idx"), to_value("ref"));
-      }
+      });
       txn.abort();
    }
 
    REQUIRE_FALSE(t.subtree_has(to_key("accounts"), to_key("alice")));
    REQUIRE_FALSE(t.subtree_has(to_key("index"), to_key("alice_idx")));
 
-   t.assert_no_leaks("multiple open_subtree abort");
+   t.assert_no_leaks("multiple with_subtree abort");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// open_subtree: same key opened twice — second handle sees first handle's writes
+// with_subtree: same key called twice — second call sees first call's writes
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: same key opened twice accumulates changes",
+TEST_CASE("subtree-tx: same key called twice accumulates changes",
           "[subtree][tx-tracking]")
 {
    tx_track_db t;
@@ -206,17 +200,15 @@ TEST_CASE("subtree-tx: same key opened twice accumulates changes",
 
    {
       auto txn = t.ses->start_transaction(0);
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
-      // Second open must see alice from the first handle.
+      });
+      // Second call must see alice from the first call.
       bool alice_visible = false;
-      {
-         auto sub    = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [&](write_cursor& sub) {
          alice_visible = sub.get<std::string>(to_key("alice")).has_value();
          sub.upsert(to_key("bob"), to_value("200"));
-      }
+      });
       REQUIRE(alice_visible);
       txn.commit();
    }
@@ -224,14 +216,14 @@ TEST_CASE("subtree-tx: same key opened twice accumulates changes",
    REQUIRE(t.subtree_has(to_key("accounts"), to_key("alice")));
    REQUIRE(t.subtree_has(to_key("accounts"), to_key("bob")));
 
-   t.assert_no_leaks("open_subtree accumulates");
+   t.assert_no_leaks("with_subtree accumulates");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// open_subtree + flat keys: committed atomically
+// with_subtree + flat keys: committed atomically
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: open_subtree and flat-key changes committed together",
+TEST_CASE("subtree-tx: with_subtree and flat-key changes committed together",
           "[subtree][tx-tracking]")
 {
    tx_track_db t;
@@ -240,10 +232,9 @@ TEST_CASE("subtree-tx: open_subtree and flat-key changes committed together",
    {
       auto txn = t.ses->start_transaction(0);
       txn.upsert(to_key("meta"), to_value("v1"));
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
+      });
       txn.commit();
    }
 
@@ -253,7 +244,7 @@ TEST_CASE("subtree-tx: open_subtree and flat-key changes committed together",
       REQUIRE(cursor(root).get<std::string>(to_key("meta")).has_value());
    }
 
-   t.assert_no_leaks("open_subtree + flat key commit");
+   t.assert_no_leaks("with_subtree + flat key commit");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -268,27 +259,23 @@ TEST_CASE("subtree-tx: frame abort reverts subtree edits within that frame",
 
    {
       auto txn = t.ses->start_transaction(0);
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
+      });
 
       {
          auto frame = txn.sub_transaction();
-         {
-            auto sub = frame.open_subtree(to_key("accounts"));
+         frame.with_subtree(to_key("accounts"), [](write_cursor& sub) {
             sub.upsert(to_key("bob"), to_value("200"));
-         }
+         });
          frame.abort();  // bob must vanish, alice must survive
       }
 
-      // verify via a third open
       bool alice_ok = false, bob_absent = false;
-      {
-         auto sub  = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [&](write_cursor& sub) {
          alice_ok   = sub.get<std::string>(to_key("alice")).has_value();
          bob_absent = !sub.get<std::string>(to_key("bob")).has_value();
-      }
+      });
       REQUIRE(alice_ok);
       REQUIRE(bob_absent);
 
@@ -316,18 +303,16 @@ TEST_CASE("subtree-tx: frame commit propagates subtree edits to parent",
 
       {
          auto frame = txn.sub_transaction();
-         {
-            auto sub = frame.open_subtree(to_key("accounts"));
+         frame.with_subtree(to_key("accounts"), [](write_cursor& sub) {
             sub.upsert(to_key("alice"), to_value("100"));
-         }
+         });
          frame.commit();
       }
 
       bool alice_visible = false;
-      {
-         auto sub      = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [&](write_cursor& sub) {
          alice_visible = sub.get<std::string>(to_key("alice")).has_value();
-      }
+      });
       REQUIRE(alice_visible);
 
       txn.commit();
@@ -352,10 +337,9 @@ TEST_CASE("subtree-tx: outer abort discards frame-committed subtree edits",
 
       {
          auto frame = txn.sub_transaction();
-         {
-            auto sub = frame.open_subtree(to_key("accounts"));
+         frame.with_subtree(to_key("accounts"), [](write_cursor& sub) {
             sub.upsert(to_key("alice"), to_value("100"));
-         }
+         });
          frame.commit();
       }
 
@@ -369,34 +353,33 @@ TEST_CASE("subtree-tx: outer abort discards frame-committed subtree edits",
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// create_subtree on a non-existent key creates empty subtree on commit
+// with_subtree on a non-existent key creates empty subtree on commit
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: create_subtree on missing key creates subtree on commit",
+TEST_CASE("subtree-tx: with_subtree on missing key creates subtree on commit",
           "[subtree][tx-tracking]")
 {
    tx_track_db t;
 
    {
       auto txn = t.ses->start_transaction(0);
-      {
-         auto sub = txn.primary().create_subtree(to_key("new_table"));
+      txn.with_subtree(to_key("new_table"), [](write_cursor& sub) {
          sub.upsert(to_key("row0"), to_value("data"));
-      }
+      });
       txn.commit();
    }
 
    REQUIRE(t.subtree_has(to_key("new_table"), to_key("row0")));
    REQUIRE(t.subtree_key_count(to_key("new_table")) == 1);
 
-   t.assert_no_leaks("create_subtree creates new subtree");
+   t.assert_no_leaks("with_subtree creates new subtree");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Micro mode: open_subtree works correctly with buffered flat writes
+// Micro mode: with_subtree flushes buffer first and works correctly
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("subtree-tx: micro mode open_subtree works with buffered writes",
+TEST_CASE("subtree-tx: micro mode with_subtree flushes buffer and works",
           "[subtree][tx-tracking][micro]")
 {
    tx_track_db t;
@@ -405,10 +388,9 @@ TEST_CASE("subtree-tx: micro mode open_subtree works with buffered writes",
    {
       auto txn = t.ses->start_transaction(0, tx_mode::micro);
       txn.upsert(to_key("meta"), to_value("v1"));
-      {
-         auto sub = txn.primary().open_subtree(to_key("accounts"));
+      txn.with_subtree(to_key("accounts"), [](write_cursor& sub) {
          sub.upsert(to_key("alice"), to_value("100"));
-      }
+      });
       txn.commit();
    }
 
@@ -418,5 +400,5 @@ TEST_CASE("subtree-tx: micro mode open_subtree works with buffered writes",
       REQUIRE(cursor(root).get<std::string>(to_key("meta")).has_value());
    }
 
-   t.assert_no_leaks("micro mode open_subtree");
+   t.assert_no_leaks("micro mode with_subtree");
 }

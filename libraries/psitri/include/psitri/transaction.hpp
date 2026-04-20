@@ -193,6 +193,13 @@ namespace psitri
       tree_handle open_subtree(key_view key);
       tree_handle create_subtree(key_view key);
 
+      // Lambda-style subtree mutation: wrapper over open_subtree /
+      // create_subtree that exposes the subtree's write_cursor directly.
+      // Committed atomically with the parent transaction; rolled back on
+      // abort or frame abort.
+      template <typename Fn>
+      void with_subtree(key_view key, Fn&& fn);
+
       // ── Transaction control ───────────────────────────────────────────
 
       void                                commit() noexcept;
@@ -350,6 +357,22 @@ namespace psitri
       write_cursor get_subtree_cursor(key_view key) const
       {
          return cs_at(_primary_index).cursor->get_subtree_cursor(key);
+      }
+
+      /// Lambda-style subtree mutation: opens (or creates) the subtree at
+      /// `key` as a tracked change_set and invokes `fn(write_cursor&)`.
+      /// The subtree is committed atomically with the parent transaction;
+      /// frame abort restores the prior root.
+      template <typename Fn>
+      void with_subtree(key_view key, Fn&& fn)
+      {
+         auto& pcs = cs_at(_primary_index);
+         if (pcs.buffer && !pcs.buffer->empty())
+            merge_buffer_to_persistent(pcs);
+         uint32_t cs_idx = pcs.cursor->is_subtree(key)
+                               ? open_subtree_impl(_primary_index, key)
+                               : create_subtree_impl(_primary_index, key);
+         fn(*cs_at(cs_idx).cursor);
       }
 
       // ── Transaction control ───────────────────────────────────────────
@@ -1048,6 +1071,12 @@ namespace psitri
    inline tree_handle transaction_frame_ref::create_subtree(key_view key)
    {
       return _tx->primary().create_subtree(key);
+   }
+
+   template <typename Fn>
+   void transaction_frame_ref::with_subtree(key_view key, Fn&& fn)
+   {
+      _tx->with_subtree(key, std::forward<Fn>(fn));
    }
 
    inline void transaction_frame_ref::commit() noexcept
