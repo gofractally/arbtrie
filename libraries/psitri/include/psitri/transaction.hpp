@@ -658,27 +658,28 @@ namespace psitri
 
       struct frame
       {
-         sal::smart_ptr<sal::alloc_header> saved_root;
-         detail::write_buffer::saved_state buf_state;
-         bool micro_merged = false;
+         detail::write_buffer::saved_state              buf_state;
+         // Number of change_sets at push time; entries beyond this are dropped on abort.
+         uint32_t                                       change_sets_size = 0;
+         // Cursor roots of all change_sets at push time, indexed in parallel.
+         std::vector<sal::smart_ptr<sal::alloc_header>> cs_roots;
       };
 
       bool uses_buffer() const noexcept { return _mode != tx_mode::batch; }
 
       void push_frame() noexcept
       {
-         auto& cs = cs_at(_primary_index);
          frame f;
          if (uses_buffer())
          {
-            f.buf_state  = cs.buffer->save();
-            f.saved_root = cs.cursor->root();
+            auto& cs    = cs_at(_primary_index);
+            f.buf_state = cs.buffer->save();
             cs.buffer->bump_generation();
          }
-         else
-         {
-            f.saved_root = cs.cursor->root();
-         }
+         f.change_sets_size = static_cast<uint32_t>(_change_sets.size());
+         f.cs_roots.reserve(_change_sets.size());
+         for (auto& cs : _change_sets)
+            f.cs_roots.push_back(cs.cursor->root());
          _frames.push_back(std::move(f));
       }
 
@@ -691,20 +692,19 @@ namespace psitri
       void abort_frame() noexcept
       {
          assert(!_frames.empty());
-         auto& cs = cs_at(_primary_index);
-         auto  f  = std::move(_frames.back());
+         auto f = std::move(_frames.back());
          _frames.pop_back();
 
+         // Drop subtree change_sets opened within this frame.
+         _change_sets.resize(f.change_sets_size);
+
+         // Restore every cursor root to its pre-frame snapshot.
+         for (uint32_t i = 0; i < f.change_sets_size; ++i)
+            _change_sets[i].cursor.emplace(std::move(f.cs_roots[i]));
+
+         // Restore primary write buffer in buffered mode.
          if (uses_buffer())
-         {
-            cs.buffer->restore(f.buf_state);
-            if (f.micro_merged)
-               cs.cursor.emplace(std::move(f.saved_root));
-         }
-         else
-         {
-            cs.cursor.emplace(std::move(f.saved_root));
-         }
+            cs_at(_primary_index).buffer->restore(f.buf_state);
       }
 
       // ── Micro mode helpers ────────────────────────────────────────────
@@ -809,16 +809,9 @@ namespace psitri
             if (!cs.buffer->empty())
             {
                merge_buffer_to_persistent(cs);
-               mark_frames_merged();
             }
             return cs.cursor->remove_range(lower, upper);
          }
-      }
-
-      void mark_frames_merged() noexcept
-      {
-         for (auto& f : _frames)
-            f.micro_merged = true;
       }
 
       void merge_buffer_to_persistent(change_set& cs)
