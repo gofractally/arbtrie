@@ -279,6 +279,15 @@ namespace psitri
           visit(_node.address(), [](auto&& node) { return branch_number(node.num_branches()); });
    }
 
+   inline bool cursor::upper_bound(key_view key) noexcept
+   {
+      if (!lower_bound(key))
+         return false;
+      if (this->key() == key)
+         return next();
+      return true;
+   }
+
    inline bool cursor::lower_bound(key_view key) noexcept
    {
       auto read_lock = _node.session()->lock();
