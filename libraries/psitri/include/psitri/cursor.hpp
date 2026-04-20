@@ -284,6 +284,14 @@ namespace psitri
       auto read_lock = _node.session()->lock();
       return lower_bound_impl(key);
    }
+   inline bool cursor::upper_bound(key_view key) noexcept
+   {
+      auto read_lock = _node.session()->lock();
+      bool found     = lower_bound_impl(key);
+      if (found && this->key() == key)
+         return next_impl();
+      return found;
+   }
    inline bool cursor::lower_bound_impl(key_view key) noexcept
    {
       if (sal::null_ptr_address == _node.address()) [[unlikely]]
