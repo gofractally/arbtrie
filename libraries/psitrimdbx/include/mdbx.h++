@@ -55,6 +55,8 @@ namespace mdbx
 
       static void success_or_throw(int code);
       static bool boolean_or_throw(int code);
+      [[noreturn]] static void throw_exception(int code);
+      [[noreturn]] static void throw_exception(MDBX_error_t code) { throw_exception(static_cast<int>(code)); }
 
       friend bool operator==(const error& a, const error& b) noexcept { return a.code_ == b.code_; }
       friend bool operator!=(const error& a, const error& b) noexcept { return a.code_ != b.code_; }
@@ -125,6 +127,14 @@ namespace mdbx
       slice(const char (&text)[N]) noexcept
           : data_(text), size_(N - 1) {}
 
+      // Accept any contiguous range with data()+size() (e.g. span<uint8_t>)
+      template <typename T,
+                typename = std::enable_if_t<!std::is_same_v<std::decay_t<T>, slice> &&
+                                            !std::is_same_v<std::decay_t<T>, std::string> &&
+                                            !std::is_same_v<std::decay_t<T>, std::string_view> &&
+                                            !std::is_same_v<std::decay_t<T>, MDBX_val>>>
+      slice(const T& v) noexcept : data_(v.data()), size_(v.size()) {}
+
       // Accessors
       const void*  data() const noexcept { return data_; }
       const void*  end() const noexcept { return static_cast<const byte*>(data_) + size_; }
@@ -138,6 +148,8 @@ namespace mdbx
       {
          return static_cast<const byte*>(data_)[n];
       }
+
+      const char* char_ptr() const noexcept { return static_cast<const char*>(data_); }
 
       // Conversion
       std::string_view string_view() const noexcept
@@ -266,7 +278,7 @@ namespace mdbx
       struct info
       {
          MDBX_dbi dbi;
-         unsigned flags;
+         MDBX_db_flags_t flags;
          unsigned state;
 
          key_mode key_mode() const noexcept
@@ -524,6 +536,9 @@ namespace mdbx
       void drop_map(map_handle map);
       void clear_map(map_handle map);
 
+      bool drop_map(const std::string& name, bool throw_if_absent = true);
+      bool clear_map(const std::string& name, bool throw_if_absent = true);
+
       // ── Cursor ─────────────────────────────────────────────────────
 
       cursor_managed open_cursor(map_handle map) const;
@@ -738,6 +753,16 @@ namespace mdbx
    inline void error::success_or_throw(int code)
    {
       error(static_cast<MDBX_error_t>(code)).throw_on_failure();
+   }
+
+   inline void error::throw_exception(int code)
+   {
+      error e(static_cast<MDBX_error_t>(code));
+      if (code == MDBX_NOTFOUND)
+         throw not_found();
+      if (code == MDBX_KEYEXIST)
+         throw key_exists();
+      throw exception(e);
    }
 
    inline bool error::boolean_or_throw(int code)

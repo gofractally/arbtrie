@@ -2372,6 +2372,36 @@ namespace mdbx
       error::success_or_throw(mdbx_drop(handle_, map.dbi, 0));
    }
 
+   bool txn::drop_map(const std::string& name, bool throw_if_absent)
+   {
+      MDBX_dbi dbi = 0;
+      int rc = mdbx_dbi_open(handle_, name.c_str(), MDBX_DB_DEFAULTS, &dbi);
+      if (rc == MDBX_NOTFOUND)
+      {
+         if (throw_if_absent)
+            throw not_found();
+         return false;
+      }
+      error::success_or_throw(rc);
+      error::success_or_throw(mdbx_drop(handle_, dbi, 1));
+      return true;
+   }
+
+   bool txn::clear_map(const std::string& name, bool throw_if_absent)
+   {
+      MDBX_dbi dbi = 0;
+      int rc = mdbx_dbi_open(handle_, name.c_str(), MDBX_DB_DEFAULTS, &dbi);
+      if (rc == MDBX_NOTFOUND)
+      {
+         if (throw_if_absent)
+            throw not_found();
+         return false;
+      }
+      error::success_or_throw(rc);
+      error::success_or_throw(mdbx_drop(handle_, dbi, 0));
+      return true;
+   }
+
    cursor_managed txn::open_cursor(map_handle map) const
    {
       MDBX_cursor* c = nullptr;
@@ -2489,7 +2519,9 @@ namespace mdbx
    {
       map_handle::info inf{};
       inf.dbi = map.dbi;
-      mdbx_dbi_flags_ex(handle_, map.dbi, &inf.flags, &inf.state);
+      unsigned raw_flags = 0;
+      mdbx_dbi_flags_ex(handle_, map.dbi, &raw_flags, &inf.state);
+      inf.flags = static_cast<MDBX_db_flags_t>(raw_flags);
       return inf;
    }
 
