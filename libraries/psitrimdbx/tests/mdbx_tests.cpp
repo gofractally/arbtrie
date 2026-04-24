@@ -2670,3 +2670,130 @@ TEST_CASE("C++ API: value_mode::multi_reverse iteration order", "[mdbx][cpp-api]
       REQUIRE_FALSE(kv.done);
    }
 }
+
+TEST_CASE("C API: mdbx_env_copy creates valid copy", "[mdbx][c-api][env]")
+{
+   auto dir  = make_temp_dir("env_copy_src");
+   auto dest = make_temp_dir("env_copy_dst");
+
+   // Write data into source env
+   {
+      MDBX_env* env = nullptr;
+      mdbx_env_create(&env);
+      mdbx_env_set_maxdbs(env, 16);
+      mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      MDBX_dbi dbi;
+      mdbx_dbi_open(txn, "test", MDBX_db_flags_t(MDBX_CREATE), &dbi);
+
+      MDBX_val key{const_cast<char*>("hello"), 5};
+      MDBX_val val{const_cast<char*>("world"), 5};
+      mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT);
+      mdbx_txn_commit(txn);
+
+      // Copy the env
+      REQUIRE(mdbx_env_copy(env, dest.c_str(), 0) == MDBX_SUCCESS);
+      mdbx_env_close(env);
+   }
+
+   // Open the copy and verify data survived
+   {
+      MDBX_env* env = nullptr;
+      mdbx_env_create(&env);
+      mdbx_env_set_maxdbs(env, 16);
+      mdbx_env_open(env, dest.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);
+      MDBX_dbi dbi;
+      mdbx_dbi_open(txn, "test", MDBX_DB_DEFAULTS, &dbi);
+
+      MDBX_val key{const_cast<char*>("hello"), 5};
+      MDBX_val val{};
+      REQUIRE(mdbx_get(txn, dbi, &key, &val) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "world");
+
+      mdbx_txn_abort(txn);
+      mdbx_env_close(env);
+   }
+}
+
+TEST_CASE("C API: drain with tombstones across env close/reopen", "[mdbx][c-api][persistence]")
+{
+   auto dir = make_temp_dir("drain_tombstones");
+
+   // Write data, then delete some, then close (triggers drain)
+   {
+      MDBX_env* env = nullptr;
+      mdbx_env_create(&env);
+      mdbx_env_set_maxdbs(env, 16);
+      mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      MDBX_dbi dbi;
+      mdbx_dbi_open(txn, "tbl", MDBX_db_flags_t(MDBX_CREATE), &dbi);
+
+      for (int i = 0; i < 10; i++)
+      {
+         std::string k = "key" + std::to_string(i);
+         std::string v = "val" + std::to_string(i);
+         MDBX_val key{k.data(), k.size()};
+         MDBX_val val{v.data(), v.size()};
+         mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+
+      // Delete key3, key5, key7
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      mdbx_dbi_open(txn, "tbl", MDBX_DB_DEFAULTS, &dbi);
+      for (int i : {3, 5, 7})
+      {
+         std::string k = "key" + std::to_string(i);
+         MDBX_val key{k.data(), k.size()};
+         mdbx_del(txn, dbi, &key, nullptr);
+      }
+      mdbx_txn_commit(txn);
+
+      // Close triggers drain — tombstones should propagate to psitri
+      mdbx_env_close(env);
+   }
+
+   // Reopen and verify: deleted keys are gone, others remain
+   {
+      MDBX_env* env = nullptr;
+      mdbx_env_create(&env);
+      mdbx_env_set_maxdbs(env, 16);
+      mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);
+      MDBX_dbi dbi;
+      mdbx_dbi_open(txn, "tbl", MDBX_DB_DEFAULTS, &dbi);
+
+      // Deleted keys should be gone
+      for (int i : {3, 5, 7})
+      {
+         std::string k = "key" + std::to_string(i);
+         MDBX_val key{k.data(), k.size()};
+         MDBX_val val{};
+         REQUIRE(mdbx_get(txn, dbi, &key, &val) == MDBX_NOTFOUND);
+      }
+
+      // Surviving keys should be present
+      for (int i : {0, 1, 2, 4, 6, 8, 9})
+      {
+         std::string k = "key" + std::to_string(i);
+         std::string expected = "val" + std::to_string(i);
+         MDBX_val key{k.data(), k.size()};
+         MDBX_val val{};
+         REQUIRE(mdbx_get(txn, dbi, &key, &val) == MDBX_SUCCESS);
+         REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == expected);
+      }
+
+      mdbx_txn_abort(txn);
+      mdbx_env_close(env);
+   }
+}
