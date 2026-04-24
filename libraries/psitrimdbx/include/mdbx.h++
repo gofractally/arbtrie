@@ -127,12 +127,15 @@ namespace mdbx
       slice(const char (&text)[N]) noexcept
           : data_(text), size_(N - 1) {}
 
-      // Accept any contiguous range with data()+size() (e.g. span<uint8_t>)
+      // Accept any contiguous view with data()+size() (e.g. span<uint8_t>, basic_string_view<uint8_t>)
+      // Excludes owning containers (basic_string<unsigned char>) to avoid overload ambiguity
       template <typename T,
-                typename = std::enable_if_t<!std::is_same_v<std::decay_t<T>, slice> &&
-                                            !std::is_same_v<std::decay_t<T>, std::string> &&
-                                            !std::is_same_v<std::decay_t<T>, std::string_view> &&
-                                            !std::is_same_v<std::decay_t<T>, MDBX_val>>>
+                typename = std::enable_if_t<
+                    !std::is_same_v<std::decay_t<T>, slice> &&
+                    !std::is_same_v<std::decay_t<T>, std::string> &&
+                    !std::is_same_v<std::decay_t<T>, std::string_view> &&
+                    !std::is_same_v<std::decay_t<T>, std::basic_string<unsigned char>> &&
+                    !std::is_same_v<std::decay_t<T>, MDBX_val>>>
       slice(const T& v) noexcept : data_(v.data()), size_(v.size()) {}
 
       // Accessors
