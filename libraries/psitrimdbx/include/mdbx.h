@@ -301,6 +301,38 @@ int  mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor);
 MDBX_dbi mdbx_cursor_dbi(const MDBX_cursor* cursor);
 MDBX_txn* mdbx_cursor_txn(const MDBX_cursor* cursor);
 
+/* ── Cursor creation (unbound) ────────────────────────────────────── */
+
+int  mdbx_cursor_create(MDBX_cursor** cursor);
+int  mdbx_cursor_copy(const MDBX_cursor* src, MDBX_cursor* dst);
+
+/* ── Environment options ─────────────────────────────────────────── */
+
+typedef enum MDBX_option_t {
+   MDBX_opt_max_db,
+   MDBX_opt_max_readers,
+   MDBX_opt_sync_bytes,
+   MDBX_opt_sync_period,
+   MDBX_opt_rp_augment_limit,
+   MDBX_opt_loose_limit,
+   MDBX_opt_dp_reserve_limit,
+   MDBX_opt_txn_dp_limit,
+   MDBX_opt_txn_dp_initial,
+   MDBX_opt_spill_max_denominator,
+   MDBX_opt_spill_min_denominator,
+   MDBX_opt_spill_parent4child_denominator,
+   MDBX_opt_merge_threshold_16dot16_percent,
+   MDBX_opt_writethrough_threshold,
+   MDBX_opt_prefault_write_enable,
+} MDBX_option_t;
+
+int  mdbx_env_set_option(MDBX_env* env, MDBX_option_t option, uint64_t value);
+int  mdbx_env_get_option(const MDBX_env* env, MDBX_option_t option, uint64_t* value);
+
+/* ── Database copy/backup ────────────────────────────────────────── */
+
+int  mdbx_env_copy(MDBX_env* env, const char* dest, unsigned flags);
+
 /* ── Error handling ───────────────────────────────────────────────── */
 
 const char* mdbx_strerror(int errnum);

@@ -1989,3 +1989,548 @@ TEST_CASE("C API: sequential write transactions", "[mdbx][c-api]")
 
    mdbx_env_close(env);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Phase 3: New test cases for bug fixes and missing APIs
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("C API: multi-DBI transaction atomicity (commit)", "[mdbx][c-api][atomicity]")
+{
+   auto dir = make_temp_dir("multi_dbi_commit");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   // Write to two different named databases in one transaction
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr) == MDBX_SUCCESS);
+
+      MDBX_dbi dbi1 = 0, dbi2 = 0;
+      REQUIRE(mdbx_dbi_open(txn, "table_a", MDBX_CREATE, &dbi1) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, "table_b", MDBX_CREATE, &dbi2) == MDBX_SUCCESS);
+
+      MDBX_val k1{const_cast<char*>("k1"), 2};
+      MDBX_val v1{const_cast<char*>("from_a"), 6};
+      REQUIRE(mdbx_put(txn, dbi1, &k1, &v1, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      MDBX_val k2{const_cast<char*>("k2"), 2};
+      MDBX_val v2{const_cast<char*>("from_b"), 6};
+      REQUIRE(mdbx_put(txn, dbi2, &k2, &v2, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   }
+
+   // Read back — both tables should have their data
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);
+
+      MDBX_dbi dbi1 = 0, dbi2 = 0;
+      mdbx_dbi_open(txn, "table_a", MDBX_DB_DEFAULTS, &dbi1);
+      mdbx_dbi_open(txn, "table_b", MDBX_DB_DEFAULTS, &dbi2);
+
+      MDBX_val k1{const_cast<char*>("k1"), 2};
+      MDBX_val val{};
+      REQUIRE(mdbx_get(txn, dbi1, &k1, &val) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "from_a");
+
+      MDBX_val k2{const_cast<char*>("k2"), 2};
+      REQUIRE(mdbx_get(txn, dbi2, &k2, &val) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "from_b");
+
+      mdbx_txn_abort(txn);
+   }
+
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: multi-DBI transaction atomicity (abort)", "[mdbx][c-api][atomicity]")
+{
+   auto dir = make_temp_dir("multi_dbi_abort");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 8);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   // Insert initial data
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, "tbl", MDBX_CREATE, &dbi);
+      MDBX_val k{const_cast<char*>("orig"), 4};
+      MDBX_val v{const_cast<char*>("data"), 4};
+      mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      mdbx_txn_commit(txn);
+   }
+
+   // Write to two tables then abort — nothing should persist
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr);
+      MDBX_dbi dbi1 = 0, dbi2 = 0;
+      mdbx_dbi_open(txn, "tbl", MDBX_DB_DEFAULTS, &dbi1);
+      mdbx_dbi_open(txn, "tbl2", MDBX_CREATE, &dbi2);
+
+      MDBX_val k1{const_cast<char*>("new_key"), 7};
+      MDBX_val v1{const_cast<char*>("new_val"), 7};
+      mdbx_put(txn, dbi1, &k1, &v1, MDBX_UPSERT);
+
+      MDBX_val k2{const_cast<char*>("x"), 1};
+      MDBX_val v2{const_cast<char*>("y"), 1};
+      mdbx_put(txn, dbi2, &k2, &v2, MDBX_UPSERT);
+
+      mdbx_txn_abort(txn);
+   }
+
+   // Verify: orig data still there, aborted data not
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, "tbl", MDBX_DB_DEFAULTS, &dbi);
+
+      MDBX_val k{const_cast<char*>("orig"), 4};
+      MDBX_val val{};
+      REQUIRE(mdbx_get(txn, dbi, &k, &val) == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "data");
+
+      MDBX_val k2{const_cast<char*>("new_key"), 7};
+      REQUIRE(mdbx_get(txn, dbi, &k2, &val) == MDBX_NOTFOUND);
+
+      mdbx_txn_abort(txn);
+   }
+
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: MDBX_CURRENT returns NOTFOUND for missing key", "[mdbx][c-api][flags]")
+{
+   auto dir = make_temp_dir("current_flag");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 4);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi);
+
+   // Insert a key
+   MDBX_val k{const_cast<char*>("exists"), 6};
+   MDBX_val v{const_cast<char*>("val1"), 4};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   // MDBX_CURRENT on existing key should succeed
+   MDBX_val v2{const_cast<char*>("val2"), 4};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v2, MDBX_CURRENT) == MDBX_SUCCESS);
+
+   // MDBX_CURRENT on missing key should return NOTFOUND
+   MDBX_val km{const_cast<char*>("missing"), 7};
+   MDBX_val vm{const_cast<char*>("nope"), 4};
+   REQUIRE(mdbx_put(txn, dbi, &km, &vm, MDBX_CURRENT) == MDBX_NOTFOUND);
+
+   mdbx_txn_abort(txn);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: MDBX_APPEND validates key ordering", "[mdbx][c-api][flags]")
+{
+   auto dir = make_temp_dir("append_flag");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 4);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi);
+
+   // First APPEND should succeed (empty DB)
+   MDBX_val k1{const_cast<char*>("aaa"), 3};
+   MDBX_val v1{const_cast<char*>("v"), 1};
+   REQUIRE(mdbx_put(txn, dbi, &k1, &v1, MDBX_APPEND) == MDBX_SUCCESS);
+
+   // APPEND with greater key should succeed
+   MDBX_val k2{const_cast<char*>("bbb"), 3};
+   REQUIRE(mdbx_put(txn, dbi, &k2, &v1, MDBX_APPEND) == MDBX_SUCCESS);
+
+   // APPEND with smaller key should fail
+   MDBX_val k3{const_cast<char*>("aab"), 3};
+   REQUIRE(mdbx_put(txn, dbi, &k3, &v1, MDBX_APPEND) == MDBX_EKEYMISMATCH);
+
+   mdbx_txn_abort(txn);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: MDBX_NOOVERWRITE returns existing value", "[mdbx][c-api][flags]")
+{
+   auto dir = make_temp_dir("nooverwrite_flag");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 4);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi);
+
+   MDBX_val k{const_cast<char*>("key"), 3};
+   MDBX_val v{const_cast<char*>("original"), 8};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   // NOOVERWRITE should fail and return existing value
+   MDBX_val v2{const_cast<char*>("replaced"), 8};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v2, MDBX_NOOVERWRITE) == MDBX_KEYEXIST);
+   REQUIRE(std::string_view(static_cast<char*>(v2.iov_base), v2.iov_len) == "original");
+
+   mdbx_txn_abort(txn);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: mdbx_cursor_create unbound", "[mdbx][c-api][cursor]")
+{
+   // Verify that mdbx_cursor_create allocates an unbound cursor
+   MDBX_cursor* cur = nullptr;
+   REQUIRE(mdbx_cursor_create(&cur) == MDBX_SUCCESS);
+   REQUIRE(cur != nullptr);
+   mdbx_cursor_close(cur);
+}
+
+TEST_CASE("C++ API: cursor bind pattern", "[mdbx][cpp-api][cursor]")
+{
+   auto dir = make_temp_dir("cursor_bind");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   {
+      auto txn = db.start_write();
+      auto map = txn.create_map("test");
+      txn.upsert(map, mdbx::slice("a"), mdbx::slice("1"));
+      txn.upsert(map, mdbx::slice("b"), mdbx::slice("2"));
+      txn.commit();
+   }
+
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("test");
+      auto cur = txn.open_cursor(map);
+
+      // Bind to same txn/map should work
+      cur.bind(txn, map);
+
+      auto kv = cur.to_first();
+      REQUIRE(kv.key.string_view() == "a");
+   }
+}
+
+TEST_CASE("C API: mdbx_cursor_copy clones position", "[mdbx][c-api][cursor]")
+{
+   auto dir = make_temp_dir("cursor_copy");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 4);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi);
+      for (int i = 0; i < 5; i++)
+      {
+         auto key = "key" + std::to_string(i);
+         auto val = "val" + std::to_string(i);
+         MDBX_val k{key.data(), key.size()};
+         MDBX_val v{val.data(), val.size()};
+         mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      }
+      mdbx_txn_commit(txn);
+   }
+
+   MDBX_txn* txn = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   MDBX_cursor* src = nullptr;
+   mdbx_cursor_open(txn, dbi, &src);
+
+   // Position src at key2
+   MDBX_val k{}, v{};
+   mdbx_cursor_get(src, &k, &v, MDBX_FIRST);
+   mdbx_cursor_get(src, &k, &v, MDBX_NEXT);
+   mdbx_cursor_get(src, &k, &v, MDBX_NEXT);
+   REQUIRE(std::string_view(static_cast<char*>(k.iov_base), k.iov_len) == "key2");
+
+   // Copy and verify same position
+   MDBX_cursor* dst = nullptr;
+   mdbx_cursor_open(txn, dbi, &dst);
+   REQUIRE(mdbx_cursor_copy(src, dst) == MDBX_SUCCESS);
+
+   MDBX_val k2{}, v2{};
+   REQUIRE(mdbx_cursor_get(dst, &k2, &v2, MDBX_GET_CURRENT) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(k2.iov_base), k2.iov_len) == "key2");
+
+   // Advance src — dst should stay at key2
+   mdbx_cursor_get(src, &k, &v, MDBX_NEXT);
+   REQUIRE(std::string_view(static_cast<char*>(k.iov_base), k.iov_len) == "key3");
+
+   mdbx_cursor_get(dst, &k2, &v2, MDBX_GET_CURRENT);
+   REQUIRE(std::string_view(static_cast<char*>(k2.iov_base), k2.iov_len) == "key2");
+
+   mdbx_cursor_close(src);
+   mdbx_cursor_close(dst);
+   mdbx_txn_abort(txn);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: mdbx_env_set_option / get_option", "[mdbx][c-api][option]")
+{
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+
+   // Most options are no-ops in the shim, but should round-trip
+   REQUIRE(mdbx_env_set_option(env, MDBX_opt_max_db, 32) == MDBX_SUCCESS);
+
+   uint64_t val = 0;
+   REQUIRE(mdbx_env_get_option(env, MDBX_opt_max_db, &val) == MDBX_SUCCESS);
+
+   // Unknown options are silently accepted (no-op) by the shim
+   REQUIRE(mdbx_env_set_option(env, static_cast<MDBX_option_t>(9999), 42) == MDBX_SUCCESS);
+
+   mdbx_env_close_ex(env, false);
+}
+
+TEST_CASE("C++ API: DUPSORT erase via txn", "[mdbx][cpp-api][dupsort]")
+{
+   auto dir = make_temp_dir("dupsort_erase");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   // Insert multiple dups for one key
+   {
+      auto txn = db.start_write();
+      auto map = txn.create_map("ds", mdbx::key_mode::usual, mdbx::value_mode::multi);
+
+      txn.upsert(map, mdbx::slice("key"), mdbx::slice("alpha"));
+      txn.upsert(map, mdbx::slice("key"), mdbx::slice("beta"));
+      txn.upsert(map, mdbx::slice("key"), mdbx::slice("gamma"));
+      txn.commit();
+   }
+
+   // Verify all dups via read cursor
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("ds");
+      auto cur = txn.open_cursor(map);
+
+      auto kv = cur.to_first();
+      REQUIRE(kv.done);
+      REQUIRE(kv.value.string_view() == "alpha");
+      kv = cur.to_next();
+      REQUIRE(kv.value.string_view() == "beta");
+      kv = cur.to_next();
+      REQUIRE(kv.value.string_view() == "gamma");
+   }
+
+   // Erase specific dup value via txn.erase(map, key, value)
+   {
+      auto txn = db.start_write();
+      auto map = txn.open_map("ds");
+      REQUIRE(txn.erase(map, mdbx::slice("key"), mdbx::slice("beta")));
+      txn.commit();
+   }
+
+   // Verify: alpha and gamma remain, beta is gone
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("ds");
+      auto cur = txn.open_cursor(map);
+
+      auto kv = cur.to_first();
+      REQUIRE(kv.value.string_view() == "alpha");
+      kv = cur.to_next();
+      REQUIRE(kv.value.string_view() == "gamma");
+      kv = cur.to_next(false);
+      REQUIRE_FALSE(kv.done);
+   }
+
+   // Erase remaining key via txn.erase(map, key)  — removes all dups
+   {
+      auto txn = db.start_write();
+      auto map = txn.open_map("ds");
+      REQUIRE(txn.erase(map, mdbx::slice("key")));
+      txn.commit();
+   }
+
+   // Verify: key is gone
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("ds");
+      REQUIRE_THROWS_AS(txn.get(map, mdbx::slice("key")), mdbx::not_found);
+   }
+}
+
+TEST_CASE("C++ API: cursor move generic operation", "[mdbx][cpp-api][cursor]")
+{
+   auto dir = make_temp_dir("cursor_move");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   {
+      auto txn = db.start_write();
+      auto map = txn.create_map("test");
+      txn.upsert(map, mdbx::slice("a"), mdbx::slice("1"));
+      txn.upsert(map, mdbx::slice("b"), mdbx::slice("2"));
+      txn.upsert(map, mdbx::slice("c"), mdbx::slice("3"));
+      txn.commit();
+   }
+
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("test");
+      auto cur = txn.open_cursor(map);
+
+      // FIRST
+      auto r1 = cur.move(MDBX_FIRST, nullptr, nullptr, false);
+      REQUIRE(r1.done);
+      REQUIRE(r1.key.string_view() == "a");
+
+      // NEXT
+      auto r2 = cur.move(MDBX_NEXT, nullptr, nullptr, false);
+      REQUIRE(r2.done);
+      REQUIRE(r2.key.string_view() == "b");
+
+      // LAST
+      auto r3 = cur.move(MDBX_LAST, nullptr, nullptr, false);
+      REQUIRE(r3.done);
+      REQUIRE(r3.key.string_view() == "c");
+
+      // NEXT past end — should not throw, done=false
+      auto r4 = cur.move(MDBX_NEXT, nullptr, nullptr, false);
+      REQUIRE_FALSE(r4.done);
+   }
+}
+
+TEST_CASE("C API: txn_reset releases snapshot", "[mdbx][c-api][txn]")
+{
+   auto dir = make_temp_dir("txn_reset");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 4);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   // Insert initial data
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &txn, nullptr);
+      MDBX_dbi dbi = 0;
+      mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi);
+      MDBX_val k{const_cast<char*>("k"), 1};
+      MDBX_val v{const_cast<char*>("v1"), 2};
+      mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT);
+      mdbx_txn_commit(txn);
+   }
+
+   // Start RO transaction, read, reset, renew after a write, read again
+   MDBX_txn* ro = nullptr;
+   mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
+   MDBX_dbi dbi = 0;
+   mdbx_dbi_open(ro, nullptr, MDBX_DB_DEFAULTS, &dbi);
+
+   MDBX_val k{const_cast<char*>("k"), 1};
+   MDBX_val val{};
+   REQUIRE(mdbx_get(ro, dbi, &k, &val) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "v1");
+
+   // Reset (releases snapshot)
+   REQUIRE(mdbx_txn_reset(ro) == MDBX_SUCCESS);
+
+   // Write new value while RO txn is reset
+   {
+      MDBX_txn* rw = nullptr;
+      mdbx_txn_begin_ex(env, nullptr, MDBX_TXN_READWRITE, &rw, nullptr);
+      MDBX_dbi dbi2 = 0;
+      mdbx_dbi_open(rw, nullptr, MDBX_DB_DEFAULTS, &dbi2);
+      MDBX_val v2{const_cast<char*>("v2"), 2};
+      mdbx_put(rw, dbi2, &k, &v2, MDBX_UPSERT);
+      mdbx_txn_commit(rw);
+   }
+
+   // Renew and read — should see new value
+   REQUIRE(mdbx_txn_renew(ro) == MDBX_SUCCESS);
+   REQUIRE(mdbx_get(ro, dbi, &k, &val) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(val.iov_base), val.iov_len) == "v2");
+
+   mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C++ API: env get_stat, get_info, get_pagesize", "[mdbx][cpp-api][env]")
+{
+   auto dir = make_temp_dir("env_info");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   auto stat = db.get_stat();
+   REQUIRE(stat.ms_psize > 0);
+
+   auto info = db.get_info();
+   REQUIRE(info.mi_dxb_pagesize > 0);
+
+   REQUIRE(db.get_pagesize() > 0);
+}
+
+TEST_CASE("C++ API: txn get_map_stat and get_handle_info", "[mdbx][cpp-api][txn]")
+{
+   auto dir = make_temp_dir("map_stat");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   {
+      auto txn = db.start_write();
+      auto map = txn.create_map("test");
+      txn.upsert(map, mdbx::slice("a"), mdbx::slice("1"));
+      txn.upsert(map, mdbx::slice("b"), mdbx::slice("2"));
+      txn.commit();
+   }
+
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("test");
+
+      auto stat = txn.get_map_stat(map);
+      REQUIRE(stat.ms_entries == 2);
+
+      auto info = txn.get_handle_info(map);
+      REQUIRE(info.dbi == map.dbi);
+   }
+}

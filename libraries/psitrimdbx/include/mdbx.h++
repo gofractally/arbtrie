@@ -81,6 +81,12 @@ namespace mdbx
       key_exists() : exception(::mdbx::error(MDBX_KEYEXIST)) {}
    };
 
+   class incompatible_operation : public exception
+   {
+     public:
+      incompatible_operation() : exception(::mdbx::error(MDBX_INCOMPATIBLE)) {}
+   };
+
    // ── slice ─────────────────────────────────────────────────────────
 
    class slice
@@ -238,6 +244,13 @@ namespace mdbx
       operator bool() const noexcept { return dbi != 0; }
       operator MDBX_dbi() const noexcept { return dbi; }
 
+      struct info
+      {
+         MDBX_dbi dbi;
+         unsigned flags;
+         unsigned state;
+      };
+
       friend bool operator==(const map_handle& a, const map_handle& b) noexcept
       {
          return a.dbi == b.dbi;
@@ -376,6 +389,12 @@ namespace mdbx
 
       void close_map(const map_handle& map);
 
+      MDBX_stat    get_stat() const;
+      MDBX_envinfo get_info() const;
+      size_t       get_pagesize() const { return 4096; }
+      int          check_readers() { return 0; }
+      void         copy(const char* dest, bool compactify = false);
+
       txn_managed start_read() const;
       txn_managed start_write(bool dont_wait = false);
    };
@@ -501,9 +520,10 @@ namespace mdbx
 
       bool erase(map_handle map, const slice& key, const slice& value);
 
-      // ── Estimation ─────────────────────────────────────────────────
+      // ── Map statistics ────────────────────────────────────────────
 
-      // Simplified — not fully implemented
+      MDBX_stat        get_map_stat(map_handle map) const;
+      map_handle::info get_handle_info(map_handle map) const;
    };
 
    // ── txn_managed ───────────────────────────────────────────────────
@@ -583,6 +603,10 @@ namespace mdbx
       move_result find(const slice& key, bool throw_notfound = true);
       move_result lower_bound(const slice& key, bool throw_notfound = false);
       move_result upper_bound(const slice& key, bool throw_notfound = false);
+
+      // Generic move
+      move_result move(move_operation op, MDBX_val* key, MDBX_val* value,
+                       bool throw_notfound);
 
       // DUPSORT multi-value navigation
       move_result to_current_first_multi(bool throw_notfound = true);
@@ -679,5 +703,24 @@ namespace mdbx
       error(static_cast<MDBX_error_t>(code)).throw_on_failure();
       return false;
    }
+
+   // ── Utility functions ─────────────────────────────────────────────
+
+   inline std::string to_hex(const slice& s)
+   {
+      static const char hex[] = "0123456789abcdef";
+      std::string result;
+      result.reserve(s.size() * 2);
+      auto p = static_cast<const byte*>(s.data());
+      for (size_t i = 0; i < s.size(); ++i)
+      {
+         result += hex[p[i] >> 4];
+         result += hex[p[i] & 0xf];
+      }
+      return result;
+   }
+
+   inline const MDBX_version_info& get_version() { return mdbx_version; }
+   inline const char*              get_build()   { return "psitrimdbx"; }
 
 }  // namespace mdbx

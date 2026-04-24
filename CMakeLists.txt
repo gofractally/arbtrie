@@ -873,6 +873,11 @@ if(BUILD_EXAMPLES)
     endforeach()
 endif()
 
+option(BUILD_SILKWORM_CASE_STUDY "Build Silkworm case study benchmark" OFF)
+if(BUILD_SILKWORM_CASE_STUDY)
+    add_subdirectory(case-studies/silkworm)
+endif()
+
 # ── Installation ──
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
