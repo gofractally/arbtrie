@@ -162,6 +162,25 @@ typedef enum MDBX_cursor_op {
    MDBX_PREV_MULTIPLE,
    MDBX_SET_LOWERBOUND,
    MDBX_SET_UPPERBOUND,
+#ifdef __cplusplus
+   first          = MDBX_FIRST,
+   first_dup      = MDBX_FIRST_DUP,
+   get_both       = MDBX_GET_BOTH,
+   get_both_range = MDBX_GET_BOTH_RANGE,
+   get_current    = MDBX_GET_CURRENT,
+   get_multiple   = MDBX_GET_MULTIPLE,
+   last           = MDBX_LAST,
+   last_dup       = MDBX_LAST_DUP,
+   next           = MDBX_NEXT,
+   next_dup       = MDBX_NEXT_DUP,
+   next_multiple  = MDBX_NEXT_MULTIPLE,
+   next_nodup     = MDBX_NEXT_NODUP,
+   previous       = MDBX_PREV,
+   previous_dup   = MDBX_PREV_DUP,
+   previous_nodup = MDBX_PREV_NODUP,
+   key_exact      = MDBX_SET,
+   key_lowerbound = MDBX_SET_RANGE,
+#endif
 } MDBX_cursor_op;
 
 /* ── Statistics ───────────────────────────────────────────────────── */
@@ -305,7 +324,7 @@ MDBX_txn* mdbx_cursor_txn(const MDBX_cursor* cursor);
 
 /* ── Cursor creation (unbound) ────────────────────────────────────── */
 
-int  mdbx_cursor_create(MDBX_cursor** cursor);
+MDBX_cursor* mdbx_cursor_create(void* context);
 int  mdbx_cursor_copy(const MDBX_cursor* src, MDBX_cursor* dst);
 
 /* ── Environment options ─────────────────────────────────────────── */

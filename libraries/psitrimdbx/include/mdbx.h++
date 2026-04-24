@@ -11,8 +11,11 @@
 
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
+
+#include <ucc/hex.hpp>
 #include <string_view>
 #include <utility>
 
@@ -232,6 +235,22 @@ namespace mdbx
       operator bool() const noexcept { return done; }
    };
 
+   // ── Key/value mode enums ──────────────────────────────────────────
+
+   enum key_mode {
+      usual   = MDBX_DB_DEFAULTS,
+      reverse = MDBX_REVERSEKEY,
+      ordinal = MDBX_INTEGERKEY,
+   };
+
+   enum value_mode {
+      single              = MDBX_DB_DEFAULTS,
+      multi               = MDBX_DUPSORT,
+      multi_reverse        = MDBX_DUPSORT | MDBX_REVERSEDUP,
+      multi_samelength     = MDBX_DUPSORT | MDBX_DUPFIXED,
+      multi_ordinal        = MDBX_DUPSORT | MDBX_DUPFIXED | MDBX_INTEGERDUP,
+   };
+
    // ── map_handle ────────────────────────────────────────────────────
 
    struct map_handle
@@ -249,6 +268,16 @@ namespace mdbx
          MDBX_dbi dbi;
          unsigned flags;
          unsigned state;
+
+         key_mode key_mode() const noexcept
+         {
+            return static_cast<enum key_mode>(flags & (MDBX_REVERSEKEY | MDBX_INTEGERKEY));
+         }
+         value_mode value_mode() const noexcept
+         {
+            return static_cast<enum value_mode>(
+                flags & (MDBX_DUPSORT | MDBX_REVERSEDUP | MDBX_DUPFIXED | MDBX_INTEGERDUP));
+         }
       };
 
       friend bool operator==(const map_handle& a, const map_handle& b) noexcept
@@ -259,22 +288,6 @@ namespace mdbx
       {
          return a.dbi < b.dbi;
       }
-   };
-
-   // ── Key/value mode enums ──────────────────────────────────────────
-
-   enum key_mode {
-      usual   = MDBX_DB_DEFAULTS,
-      reverse = MDBX_REVERSEKEY,
-      ordinal = MDBX_INTEGERKEY,
-   };
-
-   enum value_mode {
-      single              = MDBX_DB_DEFAULTS,
-      multi               = MDBX_DUPSORT,
-      multi_reverse        = MDBX_DUPSORT | MDBX_REVERSEDUP,
-      multi_samelength     = MDBX_DUPSORT | MDBX_DUPFIXED,
-      multi_ordinal        = MDBX_DUPSORT | MDBX_DUPFIXED | MDBX_INTEGERDUP,
    };
 
    enum put_mode {
@@ -411,7 +424,8 @@ namespace mdbx
       MDBX_envinfo get_info() const;
       size_t       get_pagesize() const { return 4096; }
       int          check_readers() { return 0; }
-      void         copy(const char* dest, bool compactify = false);
+      void         copy(const char* dest, bool compactify = false, bool force_dynamic = false);
+      std::filesystem::path get_path() const;
 
       txn_managed start_read() const;
       txn_managed start_write(bool dont_wait = false);
@@ -555,7 +569,7 @@ namespace mdbx
 
       void abort();
       void commit();
-      void commit(MDBX_commit_latency& latency) { commit(); }
+      void commit(MDBX_commit_latency& /*latency*/) { commit(); }
 
       txn_managed(txn_managed&& o) noexcept : txn(std::move(o)) {}
       txn_managed& operator=(txn_managed&& o) noexcept;
@@ -575,9 +589,8 @@ namespace mdbx
      protected:
       MDBX_cursor* handle_ = nullptr;
 
-      constexpr cursor(MDBX_cursor* ptr) noexcept : handle_(ptr) {}
-
      public:
+      constexpr cursor(MDBX_cursor* ptr) noexcept : handle_(ptr) {}
       constexpr cursor() noexcept = default;
       cursor(const cursor&) noexcept            = default;
       cursor& operator=(const cursor&) noexcept = default;
@@ -667,8 +680,11 @@ namespace mdbx
 
       void append(const slice& key, const slice& value);
 
+      MDBX_error_t put(const slice& key, slice* value, MDBX_put_flags_t flags) noexcept;
+
       bool erase(bool whole_multivalue = false);
       bool erase(const slice& key, bool whole_multivalue = true);
+      bool erase(const slice& key, const slice& value);
 
       // ── Binding ────────────────────────────────────────────────────
 
@@ -736,19 +752,13 @@ namespace mdbx
 
    // ── Utility functions ─────────────────────────────────────────────
 
-   inline std::string to_hex(const slice& s)
+   struct to_hex
    {
-      static const char hex[] = "0123456789abcdef";
-      std::string result;
-      result.reserve(s.size() * 2);
-      auto p = static_cast<const byte*>(s.data());
-      for (size_t i = 0; i < s.size(); ++i)
-      {
-         result += hex[p[i] >> 4];
-         result += hex[p[i] & 0xf];
-      }
-      return result;
-   }
+      std::string str_;
+      explicit to_hex(const slice& s) : str_(ucc::to_hex(s.data(), s.size())) {}
+      std::string as_string() const { return str_; }
+      operator std::string() const { return str_; }
+   };
 
    inline const MDBX_version_info& get_version() { return mdbx_version; }
    inline const char*              get_build()   { return "psitrimdbx"; }

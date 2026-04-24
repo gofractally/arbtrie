@@ -2203,8 +2203,7 @@ TEST_CASE("C API: MDBX_NOOVERWRITE returns existing value", "[mdbx][c-api][flags
 TEST_CASE("C API: mdbx_cursor_create unbound", "[mdbx][c-api][cursor]")
 {
    // Verify that mdbx_cursor_create allocates an unbound cursor
-   MDBX_cursor* cur = nullptr;
-   REQUIRE(mdbx_cursor_create(&cur) == MDBX_SUCCESS);
+   MDBX_cursor* cur = mdbx_cursor_create(nullptr);
    REQUIRE(cur != nullptr);
    mdbx_cursor_close(cur);
 }

@@ -328,6 +328,7 @@ struct MDBX_cursor
    MDBX_dbi  dbi  = 0;
    bool      is_dupsort    = false;
    bool      is_reverse_dup = false;
+   void*     context = nullptr;
 
    std::unique_ptr<cursor_state> state;
 };
@@ -2073,12 +2074,11 @@ MDBX_txn* mdbx_cursor_txn(const MDBX_cursor* cursor)
 
 // ── Cursor create/copy (unbound) ─────────────────────────────────
 
-int mdbx_cursor_create(MDBX_cursor** cursor)
+MDBX_cursor* mdbx_cursor_create(void* context)
 {
-   if (!cursor)
-      return MDBX_EINVAL;
-   *cursor = new MDBX_cursor();
-   return MDBX_SUCCESS;
+   auto* c = new MDBX_cursor();
+   c->context = context;
+   return c;
 }
 
 int mdbx_cursor_copy(const MDBX_cursor* src, MDBX_cursor* dst)
@@ -2227,9 +2227,16 @@ namespace mdbx
       return i;
    }
 
-   void env::copy(const char* dest, bool compactify)
+   void env::copy(const char* dest, bool compactify, bool /*force_dynamic*/)
    {
       error::success_or_throw(mdbx_env_copy(handle_, dest, compactify ? 1 : 0));
+   }
+
+   std::filesystem::path env::get_path() const
+   {
+      if (!handle_)
+         error::success_or_throw(MDBX_EINVAL);
+      return static_cast<const MDBX_env*>(handle_)->path;
    }
 
    void env::close_map(const map_handle& map)
@@ -2757,6 +2764,20 @@ namespace mdbx
       error::success_or_throw(mdbx_cursor_put(handle_, &k, &v, MDBX_APPEND));
    }
 
+   MDBX_error_t cursor::put(const slice& key, slice* value, MDBX_put_flags_t flags) noexcept
+   {
+      MDBX_val k = key;
+      MDBX_val v;
+      if (value)
+         v = *value;
+      else
+         v = MDBX_val{nullptr, 0};
+      int rc = mdbx_cursor_put(handle_, &k, &v, flags);
+      if (value && rc == MDBX_SUCCESS)
+         *value = slice(v.iov_base, v.iov_len);
+      return static_cast<MDBX_error_t>(rc);
+   }
+
    void cursor::insert(const slice& key, slice value)
    {
       MDBX_val k = key;
@@ -2821,6 +2842,17 @@ namespace mdbx
          return false;
       error::success_or_throw(rc);
       rc = mdbx_del(mdbx_cursor_txn(handle_), mdbx_cursor_dbi(handle_), &k, &v);
+      if (rc == MDBX_NOTFOUND)
+         return false;
+      error::success_or_throw(rc);
+      return true;
+   }
+
+   bool cursor::erase(const slice& key, const slice& value)
+   {
+      MDBX_val k = key;
+      MDBX_val v = value;
+      int rc = mdbx_del(mdbx_cursor_txn(handle_), mdbx_cursor_dbi(handle_), &k, &v);
       if (rc == MDBX_NOTFOUND)
          return false;
       error::success_or_throw(rc);
