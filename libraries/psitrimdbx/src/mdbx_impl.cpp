@@ -39,6 +39,7 @@ struct dbi_info
    uint32_t    root_index;     // psitri root index
    unsigned    flags;          // MDBX_db_flags_t used at creation
    bool        is_dupsort;     // (flags & MDBX_DUPSORT) != 0
+   bool        reverse_dup;    // (flags & MDBX_REVERSEDUP) != 0
 };
 
 struct MDBX_env
@@ -75,16 +76,17 @@ struct MDBX_env
    void init_default_dbi()
    {
       // DBI 0: metadata root (stores name→dbi mappings)
-      dbis.push_back({"__meta__", 0, 0, false});
+      dbis.push_back({"__meta__", 0, 0, false, false});
       // DBI 1: unnamed default database (root 1)
-      dbis.push_back({"", 1, MDBX_DB_DEFAULTS, false});
+      dbis.push_back({"", 1, MDBX_DB_DEFAULTS, false, false});
    }
 
    MDBX_dbi allocate_dbi(const std::string& name, unsigned flags)
    {
       MDBX_dbi dbi = static_cast<MDBX_dbi>(dbis.size());
       uint32_t root_idx = dbi + 1;
-      dbis.push_back({name, root_idx, flags, (flags & MDBX_DUPSORT) != 0});
+      dbis.push_back({name, root_idx, flags, (flags & MDBX_DUPSORT) != 0,
+                      (flags & MDBX_REVERSEDUP) != 0});
       // Use dbi+1 as root_index (root 0 = meta, root 1 = default, root 2+ = named)
       if (!name.empty())
          name_to_dbi[name] = dbi;
@@ -108,7 +110,8 @@ struct MDBX_env
 // then by value within the same key. The \x00\x00 separator cannot
 // appear in an escaped key, so decoding is unambiguous.
 
-static std::string dupsort_encode(std::string_view key, std::string_view value)
+static std::string dupsort_encode(std::string_view key, std::string_view value,
+                                  bool reverse_dup = false)
 {
    std::string result;
    result.reserve(key.size() + 2 + value.size());
@@ -120,7 +123,15 @@ static std::string dupsort_encode(std::string_view key, std::string_view value)
    }
    result += '\0';
    result += '\0';
-   result.append(value.data(), value.size());
+   if (reverse_dup)
+   {
+      for (char c : value)
+         result += static_cast<char>(~static_cast<unsigned char>(c));
+   }
+   else
+   {
+      result.append(value.data(), value.size());
+   }
    return result;
 }
 
@@ -156,7 +167,8 @@ static std::string dupsort_key_upper(std::string_view key)
 
 static bool dupsort_decode(std::string_view composite,
                            std::string& key_out,
-                           std::string& val_out)
+                           std::string& val_out,
+                           bool reverse_dup = false)
 {
    key_out.clear();
    val_out.clear();
@@ -172,7 +184,17 @@ static bool dupsort_decode(std::string_view composite,
          }
          else if (i + 1 < composite.size() && composite[i + 1] == '\x00')
          {
-            val_out.assign(composite.data() + i + 2, composite.size() - i - 2);
+            if (reverse_dup)
+            {
+               val_out.resize(composite.size() - i - 2);
+               for (size_t j = i + 2; j < composite.size(); ++j)
+                  val_out[j - i - 2] = static_cast<char>(
+                     ~static_cast<unsigned char>(composite[j]));
+            }
+            else
+            {
+               val_out.assign(composite.data() + i + 2, composite.size() - i - 2);
+            }
             return true;
          }
          else
@@ -199,8 +221,10 @@ struct cursor_state
    std::string                      val_buf;   // exposed value
    std::string                      raw_key;   // raw composite (DUPSORT only)
 
-   explicit cursor_state(psitri::dwal::owned_merge_cursor m, bool ds = false)
-       : mc(std::move(m)), dupsort(ds)
+   bool                             rev_dup    = false;
+
+   explicit cursor_state(psitri::dwal::owned_merge_cursor m, bool ds = false, bool rd = false)
+       : mc(std::move(m)), dupsort(ds), rev_dup(rd)
    {
    }
 
@@ -239,7 +263,7 @@ struct cursor_state
       {
          // Composite key — decode into key + value
          raw_key.assign(mc->key().data(), mc->key().size());
-         if (!dupsort_decode(raw_key, key_buf, val_buf))
+         if (!dupsort_decode(raw_key, key_buf, val_buf, rev_dup))
          {
             valid = false;
             return;
@@ -302,7 +326,8 @@ struct MDBX_cursor
 {
    MDBX_txn* txn  = nullptr;
    MDBX_dbi  dbi  = 0;
-   bool      is_dupsort = false;
+   bool      is_dupsort    = false;
+   bool      is_reverse_dup = false;
 
    std::unique_ptr<cursor_state> state;
 };
@@ -334,6 +359,14 @@ static bool dbi_is_dupsort(MDBX_env* env, MDBX_dbi dbi)
    if (dbi >= env->dbis.size())
       return false;
    return env->dbis[dbi].is_dupsort;
+}
+
+static bool dbi_is_reverse_dup(MDBX_env* env, MDBX_dbi dbi)
+{
+   std::shared_lock lk(env->dbi_mutex);
+   if (dbi >= env->dbis.size())
+      return false;
+   return env->dbis[dbi].reverse_dup;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1072,8 +1105,9 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
             return MDBX_NOTFOUND;
 
          // Decode the composite to get the value part
+         bool rev = dbi_is_reverse_dup(txn->env, dbi);
          std::string dk, dv;
-         if (!dupsort_decode(found, dk, dv))
+         if (!dupsort_decode(found, dk, dv, rev))
             return MDBX_NOTFOUND;
 
          mtxn->get_buf = std::move(dv);
@@ -1284,6 +1318,7 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
    auto key_sv = to_sv(key);
    auto val_sv = to_sv(data);
    bool is_ds  = dbi_is_dupsort(txn->env, dbi);
+   bool rev    = dbi_is_reverse_dup(txn->env, dbi);
 
    try
    {
@@ -1315,7 +1350,7 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
 
       if (is_ds)
       {
-         auto composite = dupsort_encode(key_sv, val_sv);
+         auto composite = dupsort_encode(key_sv, val_sv, rev);
 
          if (flags & MDBX_NODUPDATA)
          {
@@ -1333,7 +1368,7 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
                if (mc->lower_bound(prefix) && !mc->is_end())
                {
                   std::string dk, dv;
-                  if (dupsort_decode(mc->key(), dk, dv))
+                  if (dupsort_decode(mc->key(), dk, dv, rev))
                   {
                      txn->get_buf = std::move(dv);
                      data->iov_base = txn->get_buf.data();
@@ -1438,6 +1473,7 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
 
    auto key_sv = to_sv(key);
    bool is_ds  = dbi_is_dupsort(txn->env, dbi);
+   bool rev    = dbi_is_reverse_dup(txn->env, dbi);
 
    try
    {
@@ -1460,7 +1496,7 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
 
          if (data)
          {
-            auto composite = dupsort_encode(key_sv, to_sv(data));
+            auto composite = dupsort_encode(key_sv, to_sv(data), rev);
             bool removed = txn->write_tx->remove(root_idx, composite);
             return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
          }
@@ -1537,7 +1573,8 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
       auto* c = new MDBX_cursor();
       c->txn  = txn;
       c->dbi  = dbi;
-      c->is_dupsort = dbi_is_dupsort(txn->env, dbi);
+      c->is_dupsort     = dbi_is_dupsort(txn->env, dbi);
+      c->is_reverse_dup = dbi_is_reverse_dup(txn->env, dbi);
 
       auto mode = psitri::dwal::read_mode::latest;
 
@@ -1573,7 +1610,7 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
       // Skip the RW lock if the writer thread already holds it.
       bool writer = !txn->is_readonly() && txn->write_tx;
       auto mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
-      c->state = std::make_unique<cursor_state>(std::move(mc), c->is_dupsort);
+      c->state = std::make_unique<cursor_state>(std::move(mc), c->is_dupsort, c->is_reverse_dup);
 
       *cursor = c;
       return MDBX_SUCCESS;
@@ -1815,7 +1852,7 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
                return MDBX_EINVAL;
             if (!st.dupsort)
                return MDBX_EINVAL;
-            auto composite = dupsort_encode(to_sv(key), to_sv(data));
+            auto composite = dupsort_encode(to_sv(key), to_sv(data), st.rev_dup);
             ok = mc->seek(composite);
             break;
          }
@@ -1826,7 +1863,7 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
             if (!st.dupsort)
                return MDBX_EINVAL;
             // lower_bound on composite, verify same key
-            auto composite = dupsort_encode(to_sv(key), to_sv(data));
+            auto composite = dupsort_encode(to_sv(key), to_sv(data), st.rev_dup);
             ok = mc->lower_bound(composite);
             if (ok && !mc->is_end())
             {
@@ -1890,8 +1927,6 @@ int mdbx_cursor_del(MDBX_cursor* cursor, MDBX_put_flags_t flags)
       }
       else
       {
-         // Delete current (key, value) pair
-         auto composite = dupsort_encode(st.key_buf, st.val_buf);
          MDBX_val k = {const_cast<char*>(st.key_buf.data()), st.key_buf.size()};
          MDBX_val v = {const_cast<char*>(st.val_buf.data()), st.val_buf.size()};
          return mdbx_del(cursor->txn, cursor->dbi, &k, &v);
@@ -2008,7 +2043,7 @@ int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
                                      : psitri::dwal::read_mode::latest;
       bool writer = !txn->is_readonly() && txn->write_tx;
       auto mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
-      cursor->state = std::make_unique<cursor_state>(std::move(mc), cursor->is_dupsort);
+      cursor->state = std::make_unique<cursor_state>(std::move(mc), cursor->is_dupsort, cursor->is_reverse_dup);
       return MDBX_SUCCESS;
    }
    catch (...)
@@ -2044,7 +2079,10 @@ int mdbx_cursor_copy(const MDBX_cursor* src, MDBX_cursor* dst)
    if (!src->state || !src->txn)
       return MDBX_EINVAL;
 
-   // Rebind dst to same txn/dbi
+   // Copy DBI/flags, then rebind to same txn
+   dst->dbi            = src->dbi;
+   dst->is_dupsort     = src->is_dupsort;
+   dst->is_reverse_dup = src->is_reverse_dup;
    int rc = mdbx_cursor_renew(src->txn, dst);
    if (rc != MDBX_SUCCESS)
       return rc;

@@ -2534,3 +2534,139 @@ TEST_CASE("C++ API: txn get_map_stat and get_handle_info", "[mdbx][cpp-api][txn]
       REQUIRE(info.dbi == map.dbi);
    }
 }
+
+TEST_CASE("C API: DUPSORT GET_BOTH in write transaction", "[mdbx][dupsort]")
+{
+   auto dir = make_temp_dir("dupsort_get_both_rw");
+
+   MDBX_env* env = nullptr;
+   mdbx_env_create(&env);
+   mdbx_env_set_maxdbs(env, 16);
+   mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644);
+
+   MDBX_dbi dbi;
+
+   // Write data in first transaction
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      mdbx_dbi_open(txn, "ds", MDBX_db_flags_t(MDBX_DUPSORT | MDBX_CREATE), &dbi);
+
+      MDBX_val key{const_cast<char*>("key1"), 4};
+      MDBX_val val1{const_cast<char*>("alpha"), 5};
+      MDBX_val val2{const_cast<char*>("beta"), 4};
+      MDBX_val val3{const_cast<char*>("gamma"), 5};
+      mdbx_put(txn, dbi, &key, &val1, MDBX_UPSERT);
+      mdbx_put(txn, dbi, &key, &val2, MDBX_UPSERT);
+      mdbx_put(txn, dbi, &key, &val3, MDBX_UPSERT);
+      mdbx_txn_commit(txn);
+   }
+
+   // Open a write transaction, open cursor, use GET_BOTH
+   {
+      MDBX_txn* txn = nullptr;
+      mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+      mdbx_dbi_open(txn, "ds", MDBX_db_flags_t(MDBX_DUPSORT), &dbi);
+
+      MDBX_cursor* cur = nullptr;
+      REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+
+      // GET_BOTH should find exact key+value pair
+      MDBX_val key{const_cast<char*>("key1"), 4};
+      MDBX_val data{const_cast<char*>("beta"), 4};
+      int rc = mdbx_cursor_get(cur, &key, &data, MDBX_GET_BOTH);
+      REQUIRE(rc == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(key.iov_base), key.iov_len) == "key1");
+      REQUIRE(std::string_view(static_cast<char*>(data.iov_base), data.iov_len) == "beta");
+
+      // GET_BOTH for non-existent value should return NOTFOUND
+      MDBX_val key2{const_cast<char*>("key1"), 4};
+      MDBX_val data2{const_cast<char*>("delta"), 5};
+      REQUIRE(mdbx_cursor_get(cur, &key2, &data2, MDBX_GET_BOTH) == MDBX_NOTFOUND);
+
+      // GET_BOTH_RANGE should find >= value within key
+      MDBX_val key3{const_cast<char*>("key1"), 4};
+      MDBX_val data3{const_cast<char*>("b"), 1};
+      rc = mdbx_cursor_get(cur, &key3, &data3, MDBX_GET_BOTH_RANGE);
+      REQUIRE(rc == MDBX_SUCCESS);
+      REQUIRE(std::string_view(static_cast<char*>(data3.iov_base), data3.iov_len) == "beta");
+
+      mdbx_cursor_close(cur);
+      mdbx_txn_abort(txn);
+   }
+
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C++ API: value_mode::multi_reverse iteration order", "[mdbx][cpp-api][dupsort]")
+{
+   auto dir = make_temp_dir("multi_reverse");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   // Create a table with multi_reverse (DUPSORT | REVERSEDUP)
+   {
+      auto txn = db.start_write();
+      auto map = txn.create_map("rev", mdbx::key_mode::usual, mdbx::value_mode::multi_reverse);
+
+      txn.upsert(map, mdbx::slice("k1"), mdbx::slice("aaa"));
+      txn.upsert(map, mdbx::slice("k1"), mdbx::slice("bbb"));
+      txn.upsert(map, mdbx::slice("k1"), mdbx::slice("ccc"));
+      txn.commit();
+   }
+
+   // Values should iterate in reverse order (ccc, bbb, aaa)
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("rev");
+      auto cur = txn.open_cursor(map);
+
+      auto kv = cur.to_first();
+      REQUIRE(kv.done);
+      REQUIRE(kv.key.string_view() == "k1");
+      REQUIRE(kv.value.string_view() == "ccc");
+
+      kv = cur.to_next();
+      REQUIRE(kv.done);
+      REQUIRE(kv.value.string_view() == "bbb");
+
+      kv = cur.to_next();
+      REQUIRE(kv.done);
+      REQUIRE(kv.value.string_view() == "aaa");
+
+      kv = cur.to_next(false);
+      REQUIRE_FALSE(kv.done);
+   }
+
+   // mdbx_get returns the first value in iteration order ("ccc")
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("rev");
+      auto val = txn.get(map, mdbx::slice("k1"));
+      REQUIRE(val.string_view() == "ccc");
+   }
+
+   // Erase works with reverse dup
+   {
+      auto txn = db.start_write();
+      auto map = txn.open_map("rev");
+      REQUIRE(txn.erase(map, mdbx::slice("k1"), mdbx::slice("bbb")));
+      txn.commit();
+   }
+
+   {
+      auto txn = db.start_read();
+      auto map = txn.open_map("rev");
+      auto cur = txn.open_cursor(map);
+
+      auto kv = cur.to_first();
+      REQUIRE(kv.value.string_view() == "ccc");
+      kv = cur.to_next();
+      REQUIRE(kv.value.string_view() == "aaa");
+      kv = cur.to_next(false);
+      REQUIRE_FALSE(kv.done);
+   }
+}
