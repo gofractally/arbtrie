@@ -141,6 +141,14 @@ namespace psitri::dwal
       double   sum_top_us     = 0;  // sum of entries >= 1ms
       uint64_t count_top      = 0;
 
+      // Apply range tombstones BEFORE entries. When a range tombstone is
+      // created, existing entries within its range are removed from the RW map.
+      // Any entries in the RO map within a range tombstone's bounds were added
+      // AFTER the tombstone, so they must survive. Applying tombstones first
+      // then upserting entries achieves this.
+      for (const auto& range : ro->tombstones.ranges())
+         tx.remove_range(range.low, range.high);
+
       bool aborted = false;
       for (auto it = ro->map.begin(); it != ro->map.end(); ++it)
       {
@@ -195,10 +203,6 @@ namespace psitri::dwal
          root.merge_complete.notify_all();
          return;
       }
-
-      // Apply range tombstones.
-      for (const auto& range : ro->tombstones.ranges())
-         tx.remove_range(range.low, range.high);
 
       auto            wall_pre_commit = std::chrono::steady_clock::now();
       struct timespec cpu_pre_commit_ts;

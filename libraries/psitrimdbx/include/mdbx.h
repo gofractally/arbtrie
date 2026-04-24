@@ -67,7 +67,8 @@ typedef enum MDBX_error_t {
    MDBX_TOO_LARGE         = -30417,
    MDBX_THREAD_MISMATCH   = -30416,
    MDBX_TXN_OVERLAPPING   = -30415,
-   MDBX_ENOSYS            = -30400,   /* Feature not implemented */
+   MDBX_ENODATA           = -30401,
+   MDBX_ENOSYS            = -30400,
    MDBX_EINVAL            = -22,
    MDBX_EACCESS           = -13,
    MDBX_ENOMEM            = -12,
@@ -86,6 +87,7 @@ typedef enum MDBX_env_flags_t {
    MDBX_NORDAHEAD          = 0x800000,
    MDBX_NOMEMINIT          = 0x1000000,
    MDBX_LIFORECLAIM        = 0x4000000,
+   MDBX_COALESCE           = 0x2000000,
    MDBX_EXCLUSIVE          = 0x400000,
    MDBX_ACCEDE             = 0x40000000,
 

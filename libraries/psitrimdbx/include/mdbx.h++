@@ -362,8 +362,26 @@ namespace mdbx
          unsigned    max_readers = 0;
          env::mode       mode       = write_mapped_io;
          env::durability durability = robust_synchronous;
+         unsigned    options = 0;
 
          MDBX_env_flags_t make_flags() const noexcept;
+
+         static enum mode mode_from_flags(MDBX_env_flags_t flags) noexcept
+         {
+            if (flags & MDBX_RDONLY) return readonly;
+            if (flags & MDBX_WRITEMAP) return write_mapped_io;
+            return write_file_io;
+         }
+
+         static unsigned options_from_flags(MDBX_env_flags_t) noexcept { return 0; }
+
+         static env::durability durability_from_flags(MDBX_env_flags_t flags) noexcept
+         {
+            if (flags & MDBX_UTTERLY_NOSYNC) return whole_fragile;
+            if (flags & MDBX_SAFE_NOSYNC) return lazy_weak_tail;
+            if (flags & MDBX_NOMETASYNC) return half_synchronous_weak_last;
+            return robust_synchronous;
+         }
       };
 
       // ── create_parameters (for env_managed) ────────────────────────
@@ -608,13 +626,23 @@ namespace mdbx
       move_result move(move_operation op, MDBX_val* key, MDBX_val* value,
                        bool throw_notfound);
 
+      // Overloads for move with key and key+value
+      move_result move(move_operation op, bool throw_notfound);
+      move_result move(move_operation op, const slice& key, bool throw_notfound);
+      move_result move(move_operation op, const slice& key, const slice& value,
+                       bool throw_notfound);
+
       // DUPSORT multi-value navigation
       move_result to_current_first_multi(bool throw_notfound = true);
       move_result to_current_last_multi(bool throw_notfound = true);
+      move_result to_current_prev_multi(bool throw_notfound = true);
+      move_result to_current_next_multi(bool throw_notfound = true);
       move_result to_next_dup(bool throw_notfound = true);
       move_result to_prev_dup(bool throw_notfound = true);
       move_result to_next_nodup(bool throw_notfound = true);
       move_result to_prev_nodup(bool throw_notfound = true);
+      move_result to_previous_last_multi(bool throw_notfound = true);
+      move_result to_next_first_multi(bool throw_notfound = true);
 
       move_result find_multivalue(const slice& key, const slice& value,
                                   bool throw_notfound = true);
@@ -636,6 +664,8 @@ namespace mdbx
       value_result try_insert(const slice& key, slice value);
       void update(const slice& key, const slice& value);
       bool try_update(const slice& key, const slice& value);
+
+      void append(const slice& key, const slice& value);
 
       bool erase(bool whole_multivalue = false);
       bool erase(const slice& key, bool whole_multivalue = true);

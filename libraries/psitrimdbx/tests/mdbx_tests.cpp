@@ -3,9 +3,11 @@
 #include <mdbx.h>
 #include <mdbx.h++>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -2668,6 +2670,128 @@ TEST_CASE("C++ API: value_mode::multi_reverse iteration order", "[mdbx][cpp-api]
       REQUIRE(kv.value.string_view() == "aaa");
       kv = cur.to_next(false);
       REQUIRE_FALSE(kv.done);
+   }
+}
+
+TEST_CASE("C++ API: DUPSORT upsert accumulates across transactions", "[mdbx][dupsort][cpp-api]")
+{
+   auto dir = make_temp_dir("dupsort_cross_txn");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   mdbx::map_handle map;
+   {
+      auto txn = db.start_write();
+      map = txn.create_map("ds", mdbx::key_mode::usual, mdbx::value_mode::multi);
+      txn.upsert(map, mdbx::slice("k"), mdbx::slice("v1"));
+      txn.commit();
+   }
+
+   {
+      auto txn = db.start_read();
+      auto stat = txn.get_map_stat(map);
+      REQUIRE(stat.ms_entries == 1);
+   }
+
+   // Second transaction: upsert different value for same key
+   {
+      auto txn = db.start_write();
+      map = txn.open_map("ds");
+      txn.upsert(map, mdbx::slice("k"), mdbx::slice("v2"));
+      txn.commit();
+   }
+
+   // Should have 2 entries now (v1 and v2 are separate dups)
+   {
+      auto txn = db.start_read();
+      auto stat = txn.get_map_stat(map);
+      INFO("Expected 2 entries (v1 + v2), got " << stat.ms_entries);
+      REQUIRE(stat.ms_entries == 2);
+   }
+
+   // Verify both values are present via cursor
+   {
+      auto txn = db.start_read();
+      auto cur = txn.open_cursor(map);
+      auto kv = cur.to_first();
+      REQUIRE(kv.done);
+      REQUIRE(kv.value.string_view() == "v1");
+      kv = cur.to_next();
+      REQUIRE(kv.done);
+      REQUIRE(kv.value.string_view() == "v2");
+      kv = cur.to_next(false);
+      REQUIRE_FALSE(kv.done);
+   }
+}
+
+TEST_CASE("C++ API: DUPSORT upsert with binary keys accumulates", "[mdbx][dupsort][cpp-api]")
+{
+   auto dir = make_temp_dir("dupsort_binary_accum");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   mdbx::env_managed db(dir.c_str(), cp, op);
+
+   // Simulate eth benchmark: 20-byte key with embedded \x00, 32-byte random values
+   auto make_addr = [](uint64_t id) {
+      std::string a(20, '\0');
+      std::memcpy(a.data() + 12, &id, sizeof(id));
+      return a;
+   };
+
+   std::mt19937_64 rng(42);
+   auto rand_bytes = [&](size_t len) {
+      std::string s(len, '\0');
+      for (size_t i = 0; i < len; i += 8) {
+         uint64_t r = rng();
+         size_t n = std::min(len - i, size_t(8));
+         std::memcpy(s.data() + i, &r, n);
+      }
+      return s;
+   };
+
+   mdbx::map_handle map;
+
+   // Preload 100K accounts (matches benchmark scale)
+   {
+      auto txn = db.start_write();
+      map = txn.create_map("acct", mdbx::key_mode::usual, mdbx::value_mode::multi);
+      for (int i = 0; i < 100000; i++) {
+         auto addr = make_addr(i);
+         auto bal = rand_bytes(32);
+         txn.upsert(map, mdbx::slice(addr), mdbx::slice(bal));
+      }
+      txn.commit();
+   }
+
+   {
+      auto txn = db.start_read();
+      auto stat = txn.get_map_stat(map);
+      INFO("After preload: expected 100000, got " << stat.ms_entries);
+      REQUIRE(stat.ms_entries == 100000);
+   }
+
+   // Upsert 100 updates to existing accounts in a new transaction
+   {
+      auto txn = db.start_write();
+      map = txn.open_map("acct");
+      for (int i = 0; i < 100; i++) {
+         auto addr = make_addr(rng() % 100000);
+         auto bal = rand_bytes(32);
+         txn.upsert(map, mdbx::slice(addr), mdbx::slice(bal));
+      }
+      txn.commit();
+   }
+
+   {
+      auto txn = db.start_read();
+      auto stat = txn.get_map_stat(map);
+      INFO("After 100 updates: expected 100100, got " << stat.ms_entries);
+      REQUIRE(stat.ms_entries == 100100);
    }
 }
 

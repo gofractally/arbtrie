@@ -152,6 +152,11 @@ static bench_result run_benchmark(const config& cfg)
       txn.commit();
    }
 
+   {
+      auto txn  = db.start_read();
+      auto stat = txn.get_map_stat(accounts_map);
+      std::cout << "Post-preload account entries: " << stat.ms_entries << "\n";
+   }
    std::cout << "Preloaded " << NUM_PRELOAD_ACCOUNTS << " accounts\n";
 
    // Benchmark: simulate block processing
@@ -206,6 +211,19 @@ static bench_result run_benchmark(const config& cfg)
       txn.upsert(headers_map, mdbx::slice(block_key), mdbx::slice(hash));
 
       txn.commit();
+
+      if (cfg.blocks <= 20)
+      {
+         auto rtxn = db.start_read();
+         auto stat = rtxn.get_map_stat(accounts_map);
+         auto sstat = rtxn.get_map_stat(storage_map);
+         auto cstat = rtxn.get_map_stat(code_map);
+         auto hstat = rtxn.get_map_stat(headers_map);
+         std::cout << "  Block " << block << ": acct=" << stat.ms_entries
+                   << " stor=" << sstat.ms_entries
+                   << " code=" << cstat.ms_entries
+                   << " hdr=" << hstat.ms_entries << "\n";
+      }
    }
 
    auto end             = std::chrono::steady_clock::now();
@@ -229,7 +247,10 @@ int main(int argc, char** argv)
 {
    auto cfg = parse_args(argc, argv);
 
-   std::cout << "=== Ethereum State Workload Benchmark (psitrimdbx) ===\n";
+#ifndef BACKEND_NAME
+#define BACKEND_NAME "psitrimdbx"
+#endif
+   std::cout << "=== Ethereum State Workload Benchmark (" BACKEND_NAME ") ===\n";
    std::cout << "Ops/block: " << cfg.ops_per_block << "\n";
    std::cout << "Blocks:    " << cfg.blocks << "\n";
    std::cout << "Directory: " << cfg.dir << "\n\n";

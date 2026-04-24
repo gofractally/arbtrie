@@ -1008,7 +1008,11 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
       if (txn->buffer_flushed && txn->write_tx)
       {
          for (auto& k : keys_to_remove)
+         {
             txn->write_tx->remove(root_idx, k);
+            // Also buffer for potential re-flush on root expansion
+            txn->write_buffer[root_idx].push_back({write_op::type::remove, k, {}});
+         }
       }
       else
       {
@@ -1394,17 +1398,15 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
             }
          }
 
-         // Write: buffer or direct depending on flush state
-         if (txn->buffer_flushed)
-         {
-            txn->write_tx->upsert(root_idx, composite, std::string_view{});
-         }
-         else
+         // Always buffer for potential re-flush on root expansion
          {
             auto& ops = txn->write_buffer[root_idx];
             txn->write_index[root_idx][composite] = ops.size();
             ops.push_back({write_op::type::upsert, composite, {}});
          }
+         // Also write directly to live transaction if already flushed
+         if (txn->buffer_flushed)
+            txn->write_tx->upsert(root_idx, composite, std::string_view{});
          return MDBX_SUCCESS;
       }
 
@@ -1437,18 +1439,16 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
          }
       }
 
-      // Write: buffer or direct depending on flush state
-      if (txn->buffer_flushed)
-      {
-         txn->write_tx->upsert(root_idx, key_sv, val_sv);
-      }
-      else
+      // Always buffer for potential re-flush on root expansion
       {
          auto& ops = txn->write_buffer[root_idx];
          std::string k(key_sv);
          txn->write_index[root_idx][k] = ops.size();
-         ops.push_back({write_op::type::upsert, std::move(k), std::string(val_sv)});
+         ops.push_back({write_op::type::upsert, std::string(k), std::string(val_sv)});
       }
+      // Also write directly to live transaction if already flushed
+      if (txn->buffer_flushed)
+         txn->write_tx->upsert(root_idx, key_sv, val_sv);
       return MDBX_SUCCESS;
    }
    catch (...)
@@ -1497,13 +1497,20 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
          if (data)
          {
             auto composite = dupsort_encode(key_sv, to_sv(data), rev);
+            // Buffer for potential re-flush
+            txn->write_buffer[root_idx].push_back(
+               {write_op::type::remove, composite, {}});
             bool removed = txn->write_tx->remove(root_idx, composite);
             return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
          }
          else
          {
-            txn->write_tx->remove_range(root_idx, dupsort_key_prefix(key_sv),
-                                         dupsort_key_upper(key_sv));
+            auto prefix = dupsort_key_prefix(key_sv);
+            auto upper  = dupsort_key_upper(key_sv);
+            // Buffer for potential re-flush
+            txn->write_buffer[root_idx].push_back(
+               {write_op::type::remove_range, prefix, upper});
+            txn->write_tx->remove_range(root_idx, prefix, upper);
             return MDBX_SUCCESS;
          }
       }
@@ -1512,11 +1519,10 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
       if (!txn->buffer_flushed)
       {
          int frc = flush_write_buffer(txn);
-         if (frc != MDBX_SUCCESS && frc != MDBX_SUCCESS)
+         if (frc != MDBX_SUCCESS)
             return frc;
          if (!txn->write_tx)
          {
-            // Empty buffer — need a transaction for this root
             txn->write_tx = std::make_unique<psitri::dwal::transaction>(
                *txn->env->dwal_db, std::vector<uint32_t>{root_idx});
             txn->write_roots = {root_idx};
@@ -1524,6 +1530,9 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
          }
       }
       {
+         // Buffer for potential re-flush
+         txn->write_buffer[root_idx].push_back(
+            {write_op::type::remove, std::string(key_sv), {}});
          bool removed = txn->write_tx->remove(root_idx, key_sv);
          return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
       }
@@ -2597,6 +2606,26 @@ namespace mdbx
       return do_get(op, key, value, throw_notfound);
    }
 
+   cursor::move_result cursor::move(move_operation op, bool throw_notfound)
+   {
+      return do_get(op, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::move(move_operation op, const slice& key,
+                                     bool throw_notfound)
+   {
+      MDBX_val k = key;
+      return do_get(op, &k, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::move(move_operation op, const slice& key,
+                                     const slice& value, bool throw_notfound)
+   {
+      MDBX_val k = key;
+      MDBX_val v = value;
+      return do_get(op, &k, &v, throw_notfound);
+   }
+
    // DUPSORT multi-value navigation
    cursor::move_result cursor::to_current_first_multi(bool throw_notfound)
    {
@@ -2626,6 +2655,26 @@ namespace mdbx
    cursor::move_result cursor::to_prev_nodup(bool throw_notfound)
    {
       return do_get(MDBX_PREV_NODUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_current_prev_multi(bool throw_notfound)
+   {
+      return do_get(MDBX_PREV_DUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_current_next_multi(bool throw_notfound)
+   {
+      return do_get(MDBX_NEXT_DUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_previous_last_multi(bool throw_notfound)
+   {
+      return do_get(MDBX_PREV_NODUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_next_first_multi(bool throw_notfound)
+   {
+      return do_get(MDBX_NEXT_NODUP, nullptr, nullptr, throw_notfound);
    }
 
    cursor::move_result cursor::find_multivalue(const slice& key, const slice& value,
@@ -2699,6 +2748,13 @@ namespace mdbx
       MDBX_val k = key;
       MDBX_val v = value;
       error::success_or_throw(mdbx_cursor_put(handle_, &k, &v, MDBX_UPSERT));
+   }
+
+   void cursor::append(const slice& key, const slice& value)
+   {
+      MDBX_val k = key;
+      MDBX_val v = value;
+      error::success_or_throw(mdbx_cursor_put(handle_, &k, &v, MDBX_APPEND));
    }
 
    void cursor::insert(const slice& key, slice value)
