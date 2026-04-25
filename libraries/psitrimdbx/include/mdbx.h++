@@ -102,10 +102,10 @@ namespace mdbx
      public:
       constexpr slice() noexcept = default;
 
-      slice(const void* ptr, size_t bytes) noexcept
+      constexpr slice(const void* ptr, size_t bytes) noexcept
           : data_(ptr), size_(bytes) {}
 
-      slice(const void* begin, const void* end) noexcept
+      constexpr slice(const void* begin, const void* end) noexcept
           : data_(begin),
             size_(static_cast<const byte*>(end) - static_cast<const byte*>(begin))
       {
@@ -127,20 +127,33 @@ namespace mdbx
       slice(const char (&text)[N]) noexcept
           : data_(text), size_(N - 1) {}
 
-      // Accept any contiguous view with data()+size() (e.g. span<uint8_t>, basic_string_view<uint8_t>)
-      // Excludes owning containers (basic_string<unsigned char>) to avoid overload ambiguity
+     private:
+      template <typename> struct is_basic_string : std::false_type {};
+      template <typename C, typename Tr, typename A>
+      struct is_basic_string<std::basic_string<C, Tr, A>> : std::true_type {};
+
+     public:
+      // Explicit conversion from non-char basic_string (e.g. evmc::bytes)
+      template <typename C, typename Tr, typename A,
+                typename = std::enable_if_t<!std::is_same_v<C, char>>>
+      explicit slice(const std::basic_string<C, Tr, A>& s) noexcept
+          : data_(s.data()), size_(s.size()) {}
+
+      // Implicit conversion from contiguous views with data()+size()
       template <typename T,
                 typename = std::enable_if_t<
                     !std::is_same_v<std::decay_t<T>, slice> &&
-                    !std::is_same_v<std::decay_t<T>, std::string> &&
                     !std::is_same_v<std::decay_t<T>, std::string_view> &&
-                    !std::is_same_v<std::decay_t<T>, std::basic_string<unsigned char>> &&
-                    !std::is_same_v<std::decay_t<T>, MDBX_val>>>
+                    !std::is_same_v<std::decay_t<T>, MDBX_val> &&
+                    !std::is_pointer_v<std::decay_t<T>> &&
+                    !std::is_array_v<std::remove_reference_t<T>> &&
+                    !is_basic_string<std::decay_t<T>>::value>>
       slice(const T& v) noexcept : data_(v.data()), size_(v.size()) {}
 
       // Accessors
-      const void*  data() const noexcept { return data_; }
+      void*        data() const noexcept { return const_cast<void*>(data_); }
       const void*  end() const noexcept { return static_cast<const byte*>(data_) + size_; }
+      const byte*  byte_ptr() const noexcept { return static_cast<const byte*>(data_); }
       size_t       length() const noexcept { return size_; }
       size_t       size() const noexcept { return size_; }
       bool         empty() const noexcept { return size_ == 0; }
@@ -192,6 +205,35 @@ namespace mdbx
       }
 
       void clear() noexcept { data_ = nullptr; size_ = 0; }
+
+      void remove_prefix(size_t n) noexcept
+      {
+         data_ = static_cast<const byte*>(data_) + n;
+         size_ -= n;
+      }
+
+      void remove_suffix(size_t n) noexcept { size_ -= n; }
+
+      slice safe_head(size_t n) const
+      {
+         if (n > size_)
+            throw std::out_of_range("slice::safe_head");
+         return {data_, n};
+      }
+
+      slice safe_tail(size_t n) const
+      {
+         if (n > size_)
+            throw std::out_of_range("slice::safe_tail");
+         return {static_cast<const byte*>(data_) + (size_ - n), n};
+      }
+
+      slice safe_middle(size_t from, size_t n) const
+      {
+         if (from + n > size_)
+            throw std::out_of_range("slice::safe_middle");
+         return {static_cast<const byte*>(data_) + from, n};
+      }
 
       // Comparison
       static int compare_fast(const slice& a, const slice& b) noexcept
@@ -440,6 +482,10 @@ namespace mdbx
       size_t       get_pagesize() const { return 4096; }
       int          check_readers() { return 0; }
       void         copy(const char* dest, bool compactify = false, bool force_dynamic = false);
+      void         copy(const std::string& dest, bool compactify = false, bool force_dynamic = false)
+      {
+         copy(dest.c_str(), compactify, force_dynamic);
+      }
       std::filesystem::path get_path() const;
 
       txn_managed start_read() const;
@@ -572,7 +618,17 @@ namespace mdbx
 
       // ── Map statistics ────────────────────────────────────────────
 
+      using map_stat = MDBX_stat;
       MDBX_stat        get_map_stat(map_handle map) const;
+
+      void renew_reading()
+      {
+         if (handle_)
+         {
+            error::success_or_throw(mdbx_txn_reset(handle_));
+            error::success_or_throw(mdbx_txn_renew(handle_));
+         }
+      }
       map_handle::info get_handle_info(map_handle map) const;
    };
 
@@ -625,6 +681,7 @@ namespace mdbx
       operator bool() const noexcept { return handle_ != nullptr; }
       operator const MDBX_cursor*() const { return handle_; }
       operator MDBX_cursor*() { return handle_; }
+      operator map_handle() const { return map(); }
 
       using move_operation = MDBX_cursor_op;
 
@@ -749,6 +806,8 @@ namespace mdbx
             throw not_found();
          if (code_ == MDBX_KEYEXIST)
             throw key_exists();
+         if (code_ == MDBX_INCOMPATIBLE)
+            throw incompatible_operation();
          throw exception(*this);
       }
    }
@@ -765,6 +824,8 @@ namespace mdbx
          throw not_found();
       if (code == MDBX_KEYEXIST)
          throw key_exists();
+      if (code == MDBX_INCOMPATIBLE)
+         throw incompatible_operation();
       throw exception(e);
    }
 
@@ -788,7 +849,9 @@ namespace mdbx
       operator std::string() const { return str_; }
    };
 
+   using build_info = ::MDBX_build_info;
+
    inline const MDBX_version_info& get_version() { return mdbx_version; }
-   inline const char*              get_build()   { return "psitrimdbx"; }
+   inline const MDBX_build_info&   get_build()   { return mdbx_build; }
 
 }  // namespace mdbx

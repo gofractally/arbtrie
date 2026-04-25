@@ -180,6 +180,9 @@ typedef enum MDBX_cursor_op {
    previous_nodup = MDBX_PREV_NODUP,
    key_exact      = MDBX_SET,
    key_lowerbound = MDBX_SET_RANGE,
+   multi_nextkey_firstvalue    = MDBX_NEXT_NODUP,
+   multi_currentkey_nextvalue  = MDBX_NEXT_DUP,
+   multi_currentkey_prevvalue  = MDBX_PREV_DUP,
 #endif
 } MDBX_cursor_op;
 
@@ -376,6 +379,16 @@ typedef struct MDBX_version_info {
 } MDBX_version_info;
 
 extern const MDBX_version_info mdbx_version;
+
+typedef struct MDBX_build_info {
+   const char* datetime;
+   const char* target;
+   const char* options;
+   const char* compiler;
+   const char* flags;
+} MDBX_build_info;
+
+extern const MDBX_build_info mdbx_build;
 
 #ifdef __cplusplus
 }  /* extern "C" */

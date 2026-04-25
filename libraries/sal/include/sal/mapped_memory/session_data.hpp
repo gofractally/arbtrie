@@ -176,10 +176,8 @@ namespace sal
 
       inline void session_data::release_session_num(allocator_session_number num) noexcept
       {
-         // bit should be 0 (in use) when we attempt to release it
-         assert(!(free_sessions.load(std::memory_order_relaxed) & (1ULL << *num)));
-
-         // Set the bit to 1 to mark it as free
+         assert(!(free_sessions.load(std::memory_order_relaxed) & (1ULL << *num)) &&
+                "double release of session_num");
          free_sessions.fetch_add(uint64_t(1) << *num, std::memory_order_relaxed);
       }
 

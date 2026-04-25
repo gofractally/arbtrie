@@ -53,7 +53,11 @@ namespace sal
    }
 
    ///@}
-   /** 
+
+   /// each thread has an array of allocator_session pointers, indexed by allocator_index
+   static thread_local std::array<allocator_session*, 64>* current_session = nullptr;
+
+   /**
     * Insert a new element into a sorted array of pairs, maintaining sort order.
     * Uses binary search to find insertion point and rotation for efficient insertion.
     * 
@@ -223,6 +227,17 @@ namespace sal
    {
       stop_background_threads();
       truncate_free_tail_stopped();
+      if (current_session)
+      {
+         auto* ses = (*current_session)[_allocator_index];
+         if (ses)
+         {
+            ses->finalize_active_segment();
+            _mapped_state->_session_data.release_session_num(ses->_session_num);
+            ses->_session_num = allocator_session_number(-1);
+         }
+         (*current_session)[_allocator_index] = nullptr;
+      }
       free_allocator_index(_allocator_index);
    }
 
@@ -1870,22 +1885,17 @@ namespace sal
       _mapped_state->_segment_data.set_pinned(seg_num, is_pinned);
    }
 
-   /// each thread has an array of allocator_session pointers, indexed by allocator_index
-   static thread_local std::array<allocator_session*, 64>* current_session = nullptr;
    void allocator::end_session(allocator_session* ses)
    {
-      assert(current_session and "end_session called with no current session");
-      auto cs = current_session->at(_allocator_index);
-      assert(cs == ses and "end_session called with a different thread's session");
-      (void)ses;  // release warning suppression
-      delete cs;
-      current_session->at(_allocator_index) = nullptr;
+      if (current_session && current_session->at(_allocator_index) == ses)
+         current_session->at(_allocator_index) = nullptr;
+      delete ses;
    }
+
    allocator_session_ptr allocator::get_session()
    {
       if (not current_session)
       {
-         SAL_INFO("get_session: creating new session array {} ", _allocator_index);
          current_session = new std::array<allocator_session*, 64>();
          for (auto& s : *current_session)
             s = nullptr;
@@ -1893,24 +1903,23 @@ namespace sal
 
       if (not current_session->at(_allocator_index))
       {
-         SAL_INFO("get_session: creating new session {} ", _allocator_index);
          return allocator_session_ptr((*current_session)[_allocator_index] =
                                           new allocator_session(*this, alloc_session_num()));
       }
-      SAL_INFO("get_session: returning existing session");
       auto cs = current_session->at(_allocator_index);
       cs->retain_session();
-      SAL_INFO("get_session: returning existing session {}  allocidx: {}  sessptr: {} ",
-               cs->get_session_num(), _allocator_index, current_session->at(_allocator_index));
       return allocator_session_ptr(cs);
    }
    void allocator::release_session_num(allocator_session_number sn) noexcept
    {
-      SAL_INFO("release_session_num: {}  allocidx: {}  sessptr: {} ", sn, _allocator_index,
-               current_session->at(_allocator_index));
-      assert(current_session);
-      assert(current_session->at(_allocator_index));
-      (*current_session)[_allocator_index] = nullptr;
+      // Clear thread-local cache if it exists for this allocator.
+      // May be called from a different thread during cross-thread destruction.
+      if (current_session && current_session->at(_allocator_index))
+      {
+         SAL_INFO("release_session_num: {}  allocidx: {}  sessptr: {} ", sn, _allocator_index,
+                  current_session->at(_allocator_index));
+         (*current_session)[_allocator_index] = nullptr;
+      }
       _mapped_state->_session_data.release_session_num(sn);
    }
    std::array<vtable_pointers, 128>& get_type_vtables()
