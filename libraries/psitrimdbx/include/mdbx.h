@@ -108,6 +108,20 @@ typedef enum MDBX_txn_flags_t {
    MDBX_TXN_TRY            = 0x10000000,
    MDBX_TXN_NOMETASYNC     = 0x40000,
    MDBX_TXN_NOSYNC         = 0x10000,
+
+   /* psitrimdbx extension. Default (flag absent) is direct COW: writes go
+    * straight to psitri's persistent COW trie via write_cursor. No ART
+    * arena, no per-transaction byte cap — matches libmdbx's contract on
+    * unlimited transaction size.
+    *
+    * When set, the transaction uses the DWAL (buffered) path: ART map +
+    * WAL, ~100 ns commit on small txns, but a hard per-transaction byte
+    * cap (~1 GB practical, due to uint32_t arena offsets in the ART
+    * buffer). Hitting the cap throws psitrimdbx::dwal_capacity_exceeded.
+    *
+    * Bit 0x20000000 is unused by libmdbx and ignored by libmdbx-compatible
+    * code that doesn't know about it. */
+   MDBX_TXN_USE_DWAL       = 0x20000000,
 } MDBX_txn_flags_t;
 
 /* ── Database (DBI) flags ─────────────────────────────────────────── */

@@ -92,6 +92,27 @@ namespace mdbx
       incompatible_operation() : exception(::mdbx::error(MDBX_INCOMPATIBLE)) {}
    };
 
+   /// psitrimdbx-specific: thrown when a transaction opened with
+   /// MDBX_TXN_USE_DWAL exceeds the per-transaction byte cap of the
+   /// DWAL ART buffer (~1 GB practical, due to uint32_t arena offsets).
+   ///
+   /// The caller asked for the buffered/low-latency path explicitly via
+   /// MDBX_TXN_USE_DWAL, so they are expected to know the cap and either
+   /// commit more frequently or restart the transaction without the flag
+   /// (using direct COW mode, which has no cap).
+   ///
+   /// Subclasses std::runtime_error so existing libmdbx error handlers
+   /// still catch it; code that wants to recover specifically can
+   /// catch psitrimdbx::dwal_capacity_exceeded.
+   class dwal_capacity_exceeded : public std::runtime_error
+   {
+     public:
+      dwal_capacity_exceeded(const std::string& msg)
+          : std::runtime_error(msg)
+      {
+      }
+   };
+
    // ── slice ─────────────────────────────────────────────────────────
 
    class slice

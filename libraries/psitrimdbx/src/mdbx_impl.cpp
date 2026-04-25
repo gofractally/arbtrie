@@ -318,6 +318,19 @@ struct MDBX_txn
    void*             context   = nullptr;
    uint64_t          id        = 0;
 
+   /// True when MDBX_TXN_USE_DWAL was passed at txn_begin. Default
+   /// (false) routes writes through the direct COW path (no buffer cap).
+   bool              use_dwal  = false;
+
+   // ── Direct COW path (default) ──────────────────────────────────────
+   // One write_session per RW txn, plus one per-root psitri::transaction
+   // lazily created on first write. Each per-root transaction owns the
+   // root's write mutex until commit() or abort(). MDBX_txn destruction
+   // aborts each by ~transaction(). No write_buffer, no replay, no cap.
+   std::shared_ptr<psitri::write_session>          direct_session;
+   std::map<uint32_t, psitri::transaction>         direct_root_txns;
+
+   // ── DWAL path (opt-in via MDBX_TXN_USE_DWAL) ───────────────────────
    // RW transaction — lazily created at flush time with all touched roots
    std::unique_ptr<psitri::dwal::transaction>      write_tx;
    std::vector<uint32_t>                           write_roots;
@@ -362,6 +375,23 @@ static std::string_view to_sv(const MDBX_val* v)
 {
    return v ? std::string_view(static_cast<const char*>(v->iov_base), v->iov_len)
             : std::string_view{};
+}
+
+/// Lazily get-or-create a psitri::transaction for the given root_idx in
+/// direct COW mode. Acquires the per-root write mutex on first call.
+/// Throws if the txn is read-only or DWAL mode.
+static psitri::transaction& ensure_direct_root_txn(MDBX_txn* txn, uint32_t root_idx)
+{
+   assert(!txn->is_readonly() && !txn->use_dwal && txn->direct_session);
+   auto it = txn->direct_root_txns.find(root_idx);
+   if (it != txn->direct_root_txns.end())
+      return it->second;
+   // start_transaction returns by value (move-only). Use try_emplace to
+   // construct in place via piecewise/forward_as_tuple semantics.
+   auto [ins_it, inserted] = txn->direct_root_txns.try_emplace(
+       root_idx,
+       txn->direct_session->start_transaction(root_idx, psitri::tx_mode::batch));
+   return ins_it->second;
 }
 
 static int flush_write_buffer(MDBX_txn* txn);
@@ -778,14 +808,21 @@ int mdbx_txn_begin_ex(MDBX_env* env, MDBX_txn* parent,
       t->txn_flags = flags;
       t->context   = context;
       t->id        = env->next_txn_id.fetch_add(1);
+      t->use_dwal  = (flags & MDBX_TXN_USE_DWAL) != 0;
 
       if (flags & MDBX_TXN_RDONLY)
       {
          t->read_session = std::make_unique<psitri::dwal::dwal_read_session>(
             env->dwal_db->start_read_session());
       }
-      // RW transaction created lazily when first DBI is used,
-      // because we need to know which roots to lock.
+      else if (!t->use_dwal)
+      {
+         // Direct COW path: open a write_session up front. Per-root
+         // psitri::transaction objects are created lazily on first
+         // touch via ensure_direct_root_txn().
+         t->direct_session = env->db->start_write_session();
+      }
+      // DWAL path: write_tx created lazily at first flush_write_buffer.
 
       *txn = t;
       return MDBX_SUCCESS;
@@ -3030,8 +3067,19 @@ namespace mdbx
       // lookup key after rebinding the cursor to a different map. Preserve
       // that contract by reusing the existing cursor object — the state
       // buffers (key_buf, val_buf) that back returned slices stay alive.
-      if (!handle_)
+      // Fresh cursor (no prior state): use mdbx_cursor_open so it runs the
+      // RW txn setup (ensure_rw_root, flush_write_buffer if dirty) which
+      // makes pending writes visible to subsequent reads. The reuse path
+      // below is only valid for cursors that already have state (have done
+      // at least one operation) — those preserve their key_buf/val_buf so
+      // slices returned from a prior find() remain valid across rebinds.
+      if (!handle_ || !handle_->state)
       {
+         if (handle_)
+         {
+            mdbx_cursor_close(handle_);
+            handle_ = nullptr;
+         }
          MDBX_cursor* c = nullptr;
          error::success_or_throw(mdbx_cursor_open(t, map.dbi, &c));
          handle_ = c;
@@ -3041,6 +3089,32 @@ namespace mdbx
       uint32_t root_idx = dbi_root_index(txn->env, map.dbi);
       if (root_idx == UINT32_MAX)
          error::success_or_throw(MDBX_BAD_DBI);
+
+      // Reuse path: must still ensure the txn's write state is consistent
+      // with what mdbx_cursor_open would have done. Specifically, if there
+      // are buffered writes that haven't been flushed, flushing them now
+      // makes them visible to reads through the cursor we're about to
+      // rebind.
+      if (!txn->is_readonly())
+      {
+         int rc = ensure_rw_root(txn, root_idx);
+         if (rc != MDBX_SUCCESS)
+            error::success_or_throw(rc);
+         if (!txn->buffer_flushed)
+         {
+            bool has_ops = false;
+            for (auto& [ri, ops] : txn->write_buffer)
+            {
+               if (!ops.empty()) { has_ops = true; break; }
+            }
+            if (has_ops)
+            {
+               rc = flush_write_buffer(txn);
+               if (rc != MDBX_SUCCESS)
+                  error::success_or_throw(rc);
+            }
+         }
+      }
 
       handle_->txn = txn;
       handle_->dbi = map.dbi;
@@ -3057,20 +3131,11 @@ namespace mdbx
       bool writer = !txn->is_readonly() && txn->write_tx;
       auto new_mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
 
-      if (handle_->state)
-      {
-         // Preserve key_buf/val_buf — they back slices returned to the caller.
-         handle_->state->mc         = std::move(new_mc);
-         handle_->state->dupsort    = handle_->is_dupsort;
-         handle_->state->rev_dup    = handle_->is_reverse_dup;
-         handle_->state->positioned = false;
-         handle_->state->valid      = false;
-      }
-      else
-      {
-         handle_->state = std::make_unique<cursor_state>(
-             std::move(new_mc), handle_->is_dupsort, handle_->is_reverse_dup);
-      }
+      handle_->state->mc         = std::move(new_mc);
+      handle_->state->dupsort    = handle_->is_dupsort;
+      handle_->state->rev_dup    = handle_->is_reverse_dup;
+      handle_->state->positioned = false;
+      handle_->state->valid      = false;
       handle_->cursor_gen = txn->write_gen;
    }
 
