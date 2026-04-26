@@ -289,7 +289,7 @@ namespace psitri
    inline tree_handle transaction::open_root(uint32_t root_index)
    {
       assert(_ws && "open_root requires a transaction created via start_transaction");
-      assert(_mode == tx_mode::batch && "multi-root only supported in batch mode");
+      assert(_mode == tx_mode::expect_success && "multi-root only supported in batch mode");
       assert(root_index > _max_held_root && "roots must be opened in ascending index order");
 
       auto& lock = _ws->root_modify_lock(root_index);

@@ -1599,7 +1599,7 @@ TEST_CASE("micro transaction basic upsert and get", "[public-api][transaction][m
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("hello"), to_value("world"));
    tx.upsert(to_key("foo"), to_value("bar"));
 
@@ -1631,7 +1631,7 @@ TEST_CASE("micro transaction get with Buffer overload", "[public-api][transactio
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("key"), to_value("value123"));
 
    std::string buf;
@@ -1649,7 +1649,7 @@ TEST_CASE("micro transaction overwrite value", "[public-api][transaction][micro]
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("key"), to_value("first"));
 
    auto v = tx.get<std::string>(to_key("key"));
@@ -1684,7 +1684,7 @@ TEST_CASE("micro transaction remove", "[public-api][transaction][micro]")
 
    // Micro mode: remove "b"
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
 
       REQUIRE(tx.get<std::string>(to_key("b")).has_value());
       int removed_size = tx.remove(to_key("b"));
@@ -1713,7 +1713,7 @@ TEST_CASE("micro transaction remove nonexistent key returns -1", "[public-api][t
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    int result = tx.remove(to_key("nonexistent"));
    REQUIRE(result == -1);
    tx.commit();
@@ -1731,7 +1731,7 @@ TEST_CASE("micro transaction remove then re-insert", "[public-api][transaction][
    }
 
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
       tx.remove(to_key("key"));
       REQUIRE_FALSE(tx.get<std::string>(to_key("key")).has_value());
 
@@ -1762,7 +1762,7 @@ TEST_CASE("micro transaction abort discards all changes", "[public-api][transact
    }
 
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
       tx.upsert(to_key("new_key"), to_value("gone"));
       tx.remove(to_key("existing"));
       tx.abort();
@@ -1781,7 +1781,7 @@ TEST_CASE("micro transaction sub_transaction commit", "[public-api][transaction]
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("outer"), to_value("yes"));
 
    {
@@ -1807,7 +1807,7 @@ TEST_CASE("micro transaction sub_transaction abort", "[public-api][transaction][
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("outer"), to_value("yes"));
 
    {
@@ -1832,7 +1832,7 @@ TEST_CASE("micro transaction sub_transaction destructor aborts", "[public-api][t
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("kept"), to_value("yes"));
 
    {
@@ -1851,7 +1851,7 @@ TEST_CASE("micro transaction nested sub_transactions two levels", "[public-api][
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("L0"), to_value("zero"));
 
    {
@@ -1888,7 +1888,7 @@ TEST_CASE("micro transaction nested abort inner preserves outer", "[public-api][
 {
    test_db t;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    tx.upsert(to_key("L0"), to_value("zero"));
 
    {
@@ -1929,7 +1929,7 @@ TEST_CASE("micro transaction sub_transaction abort after remove restores", "[pub
    }
 
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
 
       {
          auto sub = tx.sub_transaction();
@@ -1953,7 +1953,7 @@ TEST_CASE("micro transaction many keys merge to persistent tree", "[public-api][
 
    constexpr int N = 200;
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    for (int i = 0; i < N; ++i)
    {
       auto k = "key_" + std::to_string(i);
@@ -1992,7 +1992,7 @@ TEST_CASE("micro transaction with pre-existing persistent data", "[public-api][t
 
    // Micro mode: add new, update existing, remove some
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
 
       // Add new keys
       for (int i = 50; i < 75; ++i)
@@ -2143,7 +2143,7 @@ TEST_CASE("micro remove_range small uses tombstones", "[public-api][transaction]
 
    // Micro mode: remove range [e, u) — 16 keys, well under tombstone threshold
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
       tx.upsert(to_key("new1"), to_value("added"));
 
       uint64_t removed = tx.remove_range(to_key("e"), to_key("u"));
@@ -2184,7 +2184,7 @@ TEST_CASE("micro remove_range also removes buffer inserts in range",
    test_db t;
 
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
 
       // Insert keys into buffer (no persistent data)
       for (char c = 'a'; c <= 'z'; ++c)
@@ -2239,7 +2239,7 @@ TEST_CASE("micro remove_range large triggers merge-then-delegate",
 
    // Micro mode: some writes, then large range deletion
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
 
       // Buffer some writes
       tx.upsert(to_key("aaa_before_range"), to_value("kept"));
@@ -2309,7 +2309,7 @@ TEST_CASE("micro sub_transaction with large range remove then abort",
 
    // Micro mode: writes, then sub-tx with large range remove, then abort sub-tx
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
 
       // Parent writes
       tx.upsert(to_key("parent_key"), to_value("parent_val"));
@@ -2371,7 +2371,7 @@ TEST_CASE("micro nested sub_transaction: inner merge, outer abort",
    }
 
    {
-      auto tx = t.ses->start_transaction(0, tx_mode::micro);
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
       tx.upsert(to_key("L0_key"), to_value("L0_val"));
 
       {

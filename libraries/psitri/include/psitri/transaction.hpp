@@ -133,12 +133,10 @@ namespace psitri
 
       int32_t get(key_view key, Buffer auto* buffer) const;
 
-      /// Position a cursor at the first key >= query and record the
-      /// predicate for OCC phantom detection.
+      /// Position a cursor at the first key >= query.
       cursor lower_bound(key_view key) const;
 
-      /// Position a cursor at the first key > query and record the
-      /// predicate for OCC phantom detection.
+      /// Position a cursor at the first key > query.
       cursor upper_bound(key_view key) const;
 
       bool                              is_subtree(key_view key) const;
@@ -179,7 +177,7 @@ namespace psitri
                   sal::smart_ptr<sal::alloc_header>                      root,
                   std::function<void(sal::smart_ptr<sal::alloc_header>)> commit_func,
                   std::function<void()>                                  rollback_func,
-                  tx_mode                                                mode = tx_mode::batch)
+                  tx_mode                                                mode = tx_mode::expect_success)
           : _session(std::move(session)),
             _commit_func(std::move(commit_func)),
             _rollback_func(std::move(rollback_func)),
@@ -228,14 +226,14 @@ namespace psitri
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          auto& cs = cs_at(_primary_index);
-         assert(_mode == tx_mode::batch && "subtree upsert not supported in buffered mode");
+         assert(_mode == tx_mode::expect_success && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert(key, std::move(subtree_root));
       }
 
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          auto& cs = cs_at(_primary_index);
-         assert(_mode == tx_mode::batch && "subtree upsert not supported in buffered mode");
+         assert(_mode == tx_mode::expect_success && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert_sorted(key, std::move(subtree_root));
       }
 
@@ -586,7 +584,7 @@ namespace psitri
          std::vector<sal::smart_ptr<sal::alloc_header>> cs_roots;
       };
 
-      bool uses_buffer() const noexcept { return _mode != tx_mode::batch; }
+      bool uses_buffer() const noexcept { return _mode != tx_mode::expect_success; }
 
       void push_frame() noexcept
       {
@@ -763,7 +761,7 @@ namespace psitri
 
       std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
       std::function<void()>                                    _rollback_func;
-      tx_mode                                                  _mode = tx_mode::batch;
+      tx_mode                                                  _mode = tx_mode::expect_success;
       std::vector<frame>                                       _frames;
 
       // ── Multi-root support ────────────────────────────────────────────

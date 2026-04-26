@@ -193,7 +193,7 @@ TEST_CASE("tree_handle: works with micro mode", "[tree_handle]")
       tx.commit();
    }
 
-   auto tx = t.ses->start_transaction(0, tx_mode::micro);
+   auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
    auto h  = tx.primary();
 
    h.upsert("b", "updated");

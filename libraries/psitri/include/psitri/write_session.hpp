@@ -7,8 +7,6 @@
 namespace psitri
 {
    class transaction;
-   struct read_set;
-   namespace detail { class write_buffer; }
 
    template <class LockPolicy>
    class basic_write_session;
@@ -69,15 +67,15 @@ namespace psitri
        * is called (or the transaction is destroyed).
        *
        * @param root_index Index into the 512 top-level roots (0-511).
-       * @param mode Transaction mode: batch (default, direct COW) or micro
-       *        (buffered writes, O(1) sub-transaction abort).
+       * @param mode Transaction mode: expect_success (default, direct COW)
+       *        or expect_failure (buffered writes, O(1) abort).
        * @return A transaction that provides insert/update/upsert/remove/get.
        *
        * @warning The returned transaction captures a pointer to this session.
        *          The session must outlive the transaction.
        */
       transaction start_transaction(uint32_t root_index,
-                                    tx_mode  mode = tx_mode::batch);
+                                    tx_mode  mode = tx_mode::expect_success);
 
       /**
        * @brief Immediate-mode MVCC upsert on a single key.
