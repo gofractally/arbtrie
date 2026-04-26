@@ -2132,12 +2132,24 @@ namespace psitri
                      if (vref->is_flat())
                         return false;  // COW fallback
 
-                     // Case B: append to existing value_node via CB relocation
+                     // Case B: append to existing value_node via CB relocation.
+                     // Coalesce: if the topmost chain entry's version matches
+                     // ours (caller is updating the same key twice with the
+                     // same version, e.g. inside a per-txn version scope),
+                     // replace the top entry instead of growing the chain.
                      auto new_val = value.is_view() ? value.view() : value_view();
-                     if (_dead_snap)
-                        (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, new_val, _dead_snap);
+                     bool coalesce =
+                         vref->num_versions() > 0 && vref->latest_version() == version;
+                     if (coalesce)
+                        (void)_session.mvcc_realloc<value_node>(
+                            vref, vref.obj(), version, new_val,
+                            value_node::replace_last_tag{});
+                     else if (_dead_snap)
+                        (void)_session.mvcc_realloc<value_node>(
+                            vref, vref.obj(), version, new_val, _dead_snap);
                      else
-                        (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, new_val);
+                        (void)_session.mvcc_realloc<value_node>(
+                            vref, vref.obj(), version, new_val);
                      return true;
                   }
 
@@ -2241,11 +2253,22 @@ namespace psitri
                   if (vref->is_flat())
                      return false;  // COW fallback for flat nodes
 
-                  // Append tombstone to existing value_node
-                  if (_dead_snap)
-                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr, _dead_snap);
+                  // Append tombstone to existing value_node, with coalesce
+                  // when the topmost chain entry already belongs to this
+                  // version (caller updating same key twice in the same
+                  // per-txn version scope).
+                  bool coalesce =
+                      vref->num_versions() > 0 && vref->latest_version() == version;
+                  if (coalesce)
+                     (void)_session.mvcc_realloc<value_node>(
+                         vref, vref.obj(), version, nullptr,
+                         value_node::replace_last_tag{});
+                  else if (_dead_snap)
+                     (void)_session.mvcc_realloc<value_node>(
+                         vref, vref.obj(), version, nullptr, _dead_snap);
                   else
-                     (void)_session.mvcc_realloc<value_node>(vref, vref.obj(), version, nullptr);
+                     (void)_session.mvcc_realloc<value_node>(
+                         vref, vref.obj(), version, nullptr);
                   return true;
                }
 

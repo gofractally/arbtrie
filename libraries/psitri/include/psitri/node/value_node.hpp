@@ -152,6 +152,21 @@ namespace psitri
          return alloc_size(src, version, nullptr);
       }
 
+      // ── Overloads for the replace-last (coalesce) ctor variants ──
+      // The replace path stores at most one fewer entry's worth than append,
+      // so reusing the append size is a safe over-allocation.
+      struct replace_last_tag;  // forward decl; defined inside class
+      static uint32_t alloc_size(const value_node* src, uint64_t version, value_view new_val,
+                                 replace_last_tag)
+      {
+         return alloc_size(src, version, new_val);
+      }
+      static uint32_t alloc_size(const value_node* src, uint64_t version, std::nullptr_t,
+                                 replace_last_tag)
+      {
+         return alloc_size(src, version, nullptr);
+      }
+
       /// Strip-only: alloc size for copying with dead entries removed (no new entry).
       static uint32_t alloc_size(const value_node* src, const live_range_map::snapshot*)
       {

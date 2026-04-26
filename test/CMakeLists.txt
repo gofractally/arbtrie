@@ -44,6 +44,7 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/value_node_tests.cpp
     ../libraries/psitri/tests/mvcc_tests.cpp
     ../libraries/psitri/tests/live_range_map_tests.cpp
+    ../libraries/psitri/tests/per_txn_version_tests.cpp
     test_dwal_cursor_visibility.cpp
 )
 target_link_libraries(psitri-tests
