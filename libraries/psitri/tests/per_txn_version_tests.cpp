@@ -599,8 +599,8 @@ TEST_CASE("Phase C: expect_failure aborted after forced flush releases version",
 // Phase D: in-place coalesce fast paths
 // ════════════════════════════════════════════════════════════════════
 
-TEST_CASE("Phase D: same-size hot-key updates allocate zero new value_nodes",
-          "[per_txn][phaseD][in_place]")
+TEST_CASE("Phase D: 10k hot-key updates allocate ≤ 5 new objects (perf gate)",
+          "[per_txn][phaseD][in_place][perf]")
 {
    ptv_pubapi_db t;
 
@@ -615,13 +615,13 @@ TEST_CASE("Phase D: same-size hot-key updates allocate zero new value_nodes",
    t.db->wait_for_compactor(std::chrono::milliseconds(2000));
    auto baseline_alloc = t.ses->get_total_allocated_objects();
 
-   // 1000 same-size updates in one expect_success txn. Phase D's
+   // 10000 same-size updates in one expect_success txn. Phase D's
    // try_coalesce_in_place fires every iteration after the first promote,
-   // so allocations stay bounded (1 leaf realloc + 1 chain promote, no
-   // per-iter VN allocs).
+   // so allocations stay bounded (1 ver CB + at most 1 leaf realloc + 1
+   // chain promote, no per-iter VN allocs).
    {
       auto tx = t.ses->start_transaction(0, tx_mode::expect_success);
-      for (int i = 0; i < 1000; ++i)
+      for (int i = 0; i < 10000; ++i)
       {
          std::string val(80, 'A' + (i % 26));
          tx.upsert(to_kv("k"), value_view(val.data(), val.size()));
@@ -632,11 +632,12 @@ TEST_CASE("Phase D: same-size hot-key updates allocate zero new value_nodes",
    t.db->wait_for_compactor(std::chrono::milliseconds(5000));
    auto post_alloc = t.ses->get_total_allocated_objects();
 
-   INFO("baseline=" << baseline_alloc << " post_1000_updates="
+   INFO("baseline=" << baseline_alloc << " post_10k_updates="
                     << post_alloc << " delta=" << (post_alloc - baseline_alloc));
    // Expectation: a small handful of new allocations (the new ver CB +
-   // possibly a leaf cline shift), but NOT 1000 of them. Without Phase D
-   // we'd see allocator growth proportional to the update count.
+   // possibly a leaf cline shift), but NOT 10000 of them. Without Phase
+   // D's in-place memcpy we'd see allocator growth proportional to the
+   // update count.
    CHECK(post_alloc - baseline_alloc <= 5);
 
    // Verify the latest value is what we expect.
@@ -646,7 +647,7 @@ TEST_CASE("Phase D: same-size hot-key updates allocate zero new value_nodes",
    REQUIRE(c.seek(to_kv("k")));
    auto v = c.value<std::string>();
    REQUIRE(v.has_value());
-   std::string expected(80, 'A' + (999 % 26));
+   std::string expected(80, 'A' + (9999 % 26));
    CHECK(*v == expected);
 }
 
