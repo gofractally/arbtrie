@@ -472,10 +472,24 @@ namespace psitri
       ///
       /// True iff the topmost chain entry's version matches `version`
       /// AND the existing stored slot is large enough to hold
-      /// `new_val.size()` bytes. Pure read — does not trigger SAL's
-      /// `modify_guard` / `copy_on_write` and so does not bind the
-      /// caller to a write. Use as a guard before
-      /// `coalesce_top_entry`.
+      /// `new_val.size()` bytes. Pure data check — does NOT consider
+      /// memory writability. The caller's subsequent
+      /// `vref.modify()->coalesce_top_entry(...)` routes through
+      /// `modify_guard`, which transparently COWs if the page is
+      /// read-only (e.g. after a sync-time mprotect). The COW
+      /// preserves the chain layout verbatim, so the top entry's
+      /// offset and slot size are identical in the new copy and
+      /// `coalesce_top_entry` works without further adjustment.
+      ///
+      /// Returns false in two distinct situations the caller must
+      /// handle differently:
+      ///   1. Different version on top → caller must APPEND a new
+      ///      chain entry (mvcc_realloc append).
+      ///   2. Same version, but new_val too big for the existing slot →
+      ///      caller must REBUILD the chain at a larger size
+      ///      (mvcc_realloc with replace_last_tag).
+      /// The two cases share fall-through but disambiguate via a
+      /// `latest_version() == version` re-check.
       bool can_coalesce_in_place(uint64_t version, value_view new_val) const noexcept
       {
          if (_is_flat || _is_subtree || _num_versions == 0)

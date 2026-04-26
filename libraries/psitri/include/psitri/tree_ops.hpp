@@ -1543,17 +1543,23 @@ namespace psitri
             if (!vn_ref->is_flat() &&
                 new_view.size() <= value_node::max_inline_entry_size)
             {
-               // Phase D: in-place memcpy if the new value fits the
-               // existing slot AND the top entry already belongs to this
-               // txn. Free path — no allocation. Predicate first (const)
-               // so we don't trigger modify_guard's COW unless we commit.
+               // Phase D three-way dispatch — same shape as
+               // try_mvcc_upsert above:
+               //   (a) same txn_ver + fits existing slot → in-place
+               //       memcpy. modify_guard transparently COWs if the
+               //       VN's page is RO from a prior sync; chain layout
+               //       is preserved verbatim.
+               //   (b) same txn_ver + doesn't fit → rebuild at larger
+               //       size via mvcc_realloc{replace_last_tag}.
+               //   (c) different version on top → append a new entry
+               //       via mvcc_realloc.
                if (vn_ref->can_coalesce_in_place(txn_ver, new_view))
                {
                   vn_ref.modify()->coalesce_top_entry(new_view);
                   return leaf.address();
                }
 
-               // Otherwise: extend or replace via mvcc_realloc.
+               // Predicate failed — disambiguate (b) vs (c).
                bool coalesce = vn_ref->num_versions() > 0 &&
                                vn_ref->latest_version() == txn_ver;
                if (coalesce)
@@ -2200,21 +2206,36 @@ namespace psitri
                      if (vref->is_flat())
                         return false;  // COW fallback
 
-                     // Case B: append to existing value_node via CB relocation.
-                     // Two-tier coalesce:
-                     //   - Same version + new value fits existing slot →
-                     //     in-place memcpy. No allocation, no chain growth.
-                     //   - Same version + doesn't fit → mvcc_realloc with
-                     //     replace_last_tag. One allocation, no chain growth.
-                     //   - Different version → mvcc_realloc with append.
+                     // Case B: append to existing value_node. Three-way
+                     // dispatch on the existing chain's top entry:
+                     //
+                     //   (a) Top is at OUR version + new value fits the
+                     //       existing slot
+                     //         → in-place memcpy (predicate path).
+                     //         If the page is RO from a prior sync's
+                     //         mprotect, modify_guard transparently
+                     //         COWs the value_node first; the chain
+                     //         layout is preserved so the slot offset
+                     //         and size are unchanged in the new copy.
+                     //         0 allocations on writable, 1 on RO.
+                     //   (b) Top is at OUR version + new value too big
+                     //       → REBUILD chain at larger size via
+                     //         mvcc_realloc{replace_last_tag}. Chain
+                     //         length unchanged. 1 allocation.
+                     //   (c) Top is at a different version
+                     //       → APPEND a new chain entry via
+                     //         mvcc_realloc. Chain grows by 1. 1
+                     //         allocation.
                      auto new_val = value.is_view() ? value.view() : value_view();
-                     // Predicate first (const, no side effects); only enter
-                     // modify_guard if we're committing to the in-place write.
                      if (vref->can_coalesce_in_place(version, new_val))
                      {
+                        // (a): predicate first (const, no side effects);
+                        // modify_guard fires only after the decision so
+                        // we don't pay for a COW we won't use.
                         vref.modify()->coalesce_top_entry(new_val);
                         return true;
                      }
+                     // Predicate failed — disambiguate (b) vs (c).
                      bool coalesce =
                          vref->num_versions() > 0 && vref->latest_version() == version;
                      if (coalesce)
