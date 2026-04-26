@@ -58,6 +58,33 @@ namespace
       ~zip_db() { std::filesystem::remove_all(dir); }
    };
 
+   struct temp_tree_edit
+   {
+      explicit temp_tree_edit(write_session& ses)
+          : tx(ses.start_write_transaction(ses.create_temporary_tree()))
+      {
+      }
+
+      void upsert(key_view key, value_view value) { tx.upsert(key, value); }
+      int  remove(key_view key) { return tx.remove(key); }
+
+      uint64_t count_keys() const
+      {
+         auto c = tx.snapshot_cursor();
+         return c.count_keys();
+      }
+
+      void validate()
+      {
+         tree_context ctx(tx.get_tree().copy_root());
+         ctx.validate();
+      }
+
+      write_transaction tx;
+   };
+
+   temp_tree_edit start_temp_edit(zip_db& t) { return temp_tree_edit(*t.ses); }
+
    // ── Key generators ──────────────────────────────────────────
 
    /// Big-endian sequential: 8 bytes, MSB varies slowly
@@ -153,7 +180,7 @@ namespace
       N = std::min(N, (int)keys.size());
       INFO("zip test with " << N << " keys, first key len=" << keys[0].size());
 
-      auto cur = t.ses->create_write_cursor();
+      auto cur = start_temp_edit(t);
 
       // Track which keys are currently in the tree
       std::set<std::string> live;
@@ -167,10 +194,10 @@ namespace
          // Insert key[i]
          {
             auto v = make_value(seq++);
-            cur->upsert(to_key_view(keys[i]), to_value_view(v));
+            cur.upsert(to_key_view(keys[i]), to_value_view(v));
             live.insert(keys[i]);
-            cur->validate();
-            REQUIRE(cur->count_keys() == live.size());
+            cur.validate();
+            REQUIRE(cur.count_keys() == live.size());
          }
 
          // If not the last key in this phase, insert key[i+1] then remove it
@@ -179,33 +206,33 @@ namespace
             // Insert next
             {
                auto v = make_value(seq++);
-               cur->upsert(to_key_view(keys[i + 1]), to_value_view(v));
+               cur.upsert(to_key_view(keys[i + 1]), to_value_view(v));
                live.insert(keys[i + 1]);
-               cur->validate();
-               REQUIRE(cur->count_keys() == live.size());
+               cur.validate();
+               REQUIRE(cur.count_keys() == live.size());
             }
             // Remove it
             {
-               int removed = cur->remove(to_key_view(keys[i + 1]));
+               int removed = cur.remove(to_key_view(keys[i + 1]));
                REQUIRE(removed >= 0);
                live.erase(keys[i + 1]);
-               cur->validate();
-               REQUIRE(cur->count_keys() == live.size());
+               cur.validate();
+               REQUIRE(cur.count_keys() == live.size());
             }
          }
       }
 
       // All N keys should now be in the tree
-      REQUIRE(cur->count_keys() == (uint64_t)N);
+      REQUIRE(cur.count_keys() == (uint64_t)N);
 
       // ── Update phase: change every value (exercises update_value) ──
       for (int i = 0; i < N; ++i)
       {
          auto v = make_value(seq++);
-         cur->upsert(to_key_view(keys[i]), to_value_view(v));
-         cur->validate();
+         cur.upsert(to_key_view(keys[i]), to_value_view(v));
+         cur.validate();
       }
-      REQUIRE(cur->count_keys() == (uint64_t)N);
+      REQUIRE(cur.count_keys() == (uint64_t)N);
 
       // ── Shrinking phase: net -1 per iteration ────────────────
       // Remove keys[N-1] and keys[N-2], reinsert keys[N-2], remove keys[N-3]&[N-2], reinsert [N-3]...
@@ -213,11 +240,11 @@ namespace
       {
          // Remove key[i]
          {
-            int removed = cur->remove(to_key_view(keys[i]));
+            int removed = cur.remove(to_key_view(keys[i]));
             REQUIRE(removed >= 0);
             live.erase(keys[i]);
-            cur->validate();
-            REQUIRE(cur->count_keys() == live.size());
+            cur.validate();
+            REQUIRE(cur.count_keys() == live.size());
          }
 
          // If not the last removal, also remove key[i-1] then reinsert it
@@ -225,25 +252,25 @@ namespace
          {
             // Remove previous
             {
-               int removed = cur->remove(to_key_view(keys[i - 1]));
+               int removed = cur.remove(to_key_view(keys[i - 1]));
                REQUIRE(removed >= 0);
                live.erase(keys[i - 1]);
-               cur->validate();
-               REQUIRE(cur->count_keys() == live.size());
+               cur.validate();
+               REQUIRE(cur.count_keys() == live.size());
             }
             // Reinsert it
             {
                auto v = make_value(seq++);
-               cur->upsert(to_key_view(keys[i - 1]), to_value_view(v));
+               cur.upsert(to_key_view(keys[i - 1]), to_value_view(v));
                live.insert(keys[i - 1]);
-               cur->validate();
-               REQUIRE(cur->count_keys() == live.size());
+               cur.validate();
+               REQUIRE(cur.count_keys() == live.size());
             }
          }
       }
 
       // Tree should be empty
-      REQUIRE(cur->count_keys() == 0);
+      REQUIRE(cur.count_keys() == 0);
       REQUIRE(live.empty());
    }
 
@@ -335,7 +362,7 @@ TEST_CASE("zip: short 3-byte keys with large values only", "[zip]")
       keys.push_back(short_key(i));
 
    // Override: all values are 100 bytes (above 64-byte threshold → value_node)
-   auto cur = t.ses->create_write_cursor();
+   auto cur = start_temp_edit(t);
 
    std::set<std::string> live;
    int                   seq = 0;
@@ -348,60 +375,60 @@ TEST_CASE("zip: short 3-byte keys with large values only", "[zip]")
    // Growing phase
    for (int i = 0; i < N; ++i)
    {
-      cur->upsert(to_key_view(keys[i]), to_value_view(large_val()));
+      cur.upsert(to_key_view(keys[i]), to_value_view(large_val()));
       live.insert(keys[i]);
-      cur->validate();
+      cur.validate();
 
       if (i + 1 < N)
       {
-         cur->upsert(to_key_view(keys[i + 1]), to_value_view(large_val()));
+         cur.upsert(to_key_view(keys[i + 1]), to_value_view(large_val()));
          live.insert(keys[i + 1]);
-         cur->validate();
+         cur.validate();
 
-         cur->remove(to_key_view(keys[i + 1]));
+         cur.remove(to_key_view(keys[i + 1]));
          live.erase(keys[i + 1]);
-         cur->validate();
+         cur.validate();
       }
    }
-   REQUIRE(cur->count_keys() == (uint64_t)N);
+   REQUIRE(cur.count_keys() == (uint64_t)N);
 
    // Update phase: switch values between small (inline) and large (value_node)
    for (int i = 0; i < N; ++i)
    {
       // Alternate: even → small inline, odd → large value_node
       std::string v = (i % 2 == 0) ? std::string(10, 'x') : std::string(100, 'Y');
-      cur->upsert(to_key_view(keys[i]), to_value_view(v));
-      cur->validate();
+      cur.upsert(to_key_view(keys[i]), to_value_view(v));
+      cur.validate();
    }
    // Flip them back
    for (int i = 0; i < N; ++i)
    {
       std::string v = (i % 2 == 0) ? std::string(100, 'Z') : std::string(5, 'w');
-      cur->upsert(to_key_view(keys[i]), to_value_view(v));
-      cur->validate();
+      cur.upsert(to_key_view(keys[i]), to_value_view(v));
+      cur.validate();
    }
 
-   REQUIRE(cur->count_keys() == (uint64_t)N);
+   REQUIRE(cur.count_keys() == (uint64_t)N);
 
    // Shrinking phase
    for (int i = N - 1; i >= 0; --i)
    {
-      cur->remove(to_key_view(keys[i]));
+      cur.remove(to_key_view(keys[i]));
       live.erase(keys[i]);
-      cur->validate();
+      cur.validate();
 
       if (i > 0)
       {
-         cur->remove(to_key_view(keys[i - 1]));
+         cur.remove(to_key_view(keys[i - 1]));
          live.erase(keys[i - 1]);
-         cur->validate();
+         cur.validate();
 
-         cur->upsert(to_key_view(keys[i - 1]), to_value_view(large_val()));
+         cur.upsert(to_key_view(keys[i - 1]), to_value_view(large_val()));
          live.insert(keys[i - 1]);
-         cur->validate();
+         cur.validate();
       }
    }
-   REQUIRE(cur->count_keys() == 0);
+   REQUIRE(cur.count_keys() == 0);
 }
 
 TEST_CASE("zip: shuffled keys stress boundary ordering", "[zip]")

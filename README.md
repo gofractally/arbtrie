@@ -67,7 +67,7 @@ target_link_libraries(myapp PRIVATE psitri::psitri)
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
 
-auto db = psitri::database::create("mydb");
+auto db = psitri::database::open("mydb", psitri::open_mode::create_or_open);
 auto ws = db->start_write_session();
 
 // Transactions commit atomically

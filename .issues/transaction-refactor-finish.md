@@ -104,7 +104,8 @@ mutations through that root read the version from the smart_ptr. At commit,
       working root's `ver` is whatever the published root carried (could be
       null on a fresh database; could be the prior generation's ver — both
       are fine, the txn's writes never reach the tree until commit).
-- [x] Add `transaction::ensure_txn_version()` private helper. If the
+- [x] Add the lazy transaction-version materialization helper, now named
+      `transaction::materialize_txn_version()`. If the
       working root's ver does not yet identify a version this txn owns,
       allocate one and set it on the working root. Idempotent. Call sites:
       - `commit()` — before any `merge_buffer_to_persistent` call when at
@@ -128,7 +129,7 @@ mutations through that root read the version from the smart_ptr. At commit,
 
 - [x] `transaction::abort()` calls `_db->dead_versions().add_dead_version(
       _allocated_ver)` when the txn allocated a ver (i.e. `expect_success`
-      always; `expect_failure` only if `ensure_txn_version` fired).
+      always; `expect_failure` only if lazy version materialization fired).
 - [x] Release the ver CB:
       `_session->release(_allocated_ver_adr)`.
 - [x] Track the allocated ver address on the transaction itself (small new

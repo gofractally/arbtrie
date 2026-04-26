@@ -31,6 +31,40 @@ namespace
       ~test_db() { std::filesystem::remove_all(dir); }
    };
 
+   struct temp_tree_edit
+   {
+      explicit temp_tree_edit(write_session& ses)
+          : tx(ses.start_write_transaction(ses.create_temporary_tree()))
+      {
+      }
+
+      void upsert(key_view key, value_view value) { tx.upsert(key, value); }
+      int  remove(key_view key) { return tx.remove(key); }
+      uint64_t remove_range(key_view lower, key_view upper)
+      {
+         return tx.remove_range(lower, upper);
+      }
+
+      template <ConstructibleBuffer T>
+      std::optional<T> get(key_view key) const
+      {
+         return tx.get<T>(key);
+      }
+
+      int32_t get(key_view key, Buffer auto* buffer) const { return tx.get(key, buffer); }
+
+      cursor snapshot_cursor() const { return tx.snapshot_cursor(); }
+      uint64_t count_keys() const
+      {
+         auto c = snapshot_cursor();
+         return c.count_keys();
+      }
+
+      write_transaction tx;
+   };
+
+   temp_tree_edit start_temp_edit(test_db& t) { return temp_tree_edit(*t.ses); }
+
    std::string gkey(int i)
    {
       char buf[32];
@@ -71,7 +105,7 @@ TEST_CASE("database::create creates new database", "[database][create]")
       auto rses = db->start_read_session();
       auto root = rses->get_root(0);
       REQUIRE(root);
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       std::string buf;
       REQUIRE(c.get(to_key_view(std::string("hello")), &buf) >= 0);
       REQUIRE(buf == "world");
@@ -127,7 +161,7 @@ TEST_CASE("database::set_runtime_config updates config", "[database][config]")
       auto rses = db->start_read_session();
       auto root = rses->get_root(0);
       REQUIRE(root);
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       REQUIRE(c.count_keys() == 100);
    }
 
@@ -206,7 +240,7 @@ TEST_CASE("database constructor rejects wrong file size", "[database][error]")
 TEST_CASE("range_remove with large values (value_node path)", "[range_remove][value_node]")
 {
    test_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
 
@@ -215,11 +249,11 @@ TEST_CASE("range_remove with large values (value_node path)", "[range_remove][va
    {
       auto key = gkey(i);
       auto val = gval(i, 100 + (i % 200));  // 100-300 byte values
-      cur->upsert(to_key_view(key), to_value_view(val));
+      cur.upsert(to_key_view(key), to_value_view(val));
       oracle[key] = val;
    }
 
-   REQUIRE(cur->count_keys() == oracle.size());
+   REQUIRE(cur.count_keys() == oracle.size());
 
    SECTION("remove range in the middle")
    {
@@ -228,7 +262,7 @@ TEST_CASE("range_remove with large values (value_node path)", "[range_remove][va
       auto lo_key = gkey(lo);
       auto hi_key = gkey(hi);
 
-      uint64_t removed = cur->remove_range(lo_key, hi_key);
+      uint64_t removed = cur.remove_range(lo_key, hi_key);
       REQUIRE(removed > 0);
 
       // Update oracle
@@ -236,10 +270,10 @@ TEST_CASE("range_remove with large values (value_node path)", "[range_remove][va
       while (it != oracle.end() && it->first < hi_key)
          it = oracle.erase(it);
 
-      REQUIRE(cur->count_keys() == oracle.size());
+      REQUIRE(cur.count_keys() == oracle.size());
 
       // Verify remaining values are intact
-      auto rc = cur->read_cursor();
+      auto rc = cur.snapshot_cursor();
       for (auto& [key, val] : oracle)
       {
          std::string buf;
@@ -251,9 +285,9 @@ TEST_CASE("range_remove with large values (value_node path)", "[range_remove][va
 
    SECTION("remove all via range")
    {
-      uint64_t removed = cur->remove_range("", max_key);
+      uint64_t removed = cur.remove_range("", max_key);
       REQUIRE(removed == oracle.size());
-      REQUIRE(cur->count_keys() == 0);
+      REQUIRE(cur.count_keys() == 0);
    }
 }
 
@@ -266,7 +300,7 @@ TEST_CASE("range_remove with large values (value_node path)", "[range_remove][va
 TEST_CASE("range_remove across inner boundaries with value_nodes", "[range_remove][value_node]")
 {
    test_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
 
@@ -281,7 +315,7 @@ TEST_CASE("range_remove across inner boundaries with value_nodes", "[range_remov
          snprintf(buf, sizeof(buf), "%s%05d", pfx, i);
          std::string key(buf);
          auto        val = gval(i, 150);  // large value → value_node
-         cur->upsert(to_key_view(key), to_value_view(val));
+         cur.upsert(to_key_view(key), to_value_view(val));
          oracle[key] = val;
       }
    }
@@ -291,17 +325,17 @@ TEST_CASE("range_remove across inner boundaries with value_nodes", "[range_remov
    std::string lo = "aaa/00010";
    std::string hi = "eee/00010";
 
-   uint64_t removed = cur->remove_range(lo, hi);
+   uint64_t removed = cur.remove_range(lo, hi);
    REQUIRE(removed > 0);
 
    auto it = oracle.lower_bound(lo);
    while (it != oracle.end() && it->first < hi)
       it = oracle.erase(it);
 
-   REQUIRE(cur->count_keys() == oracle.size());
+   REQUIRE(cur.count_keys() == oracle.size());
 
    // Verify remaining
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
    for (auto& [key, val] : oracle)
    {
       std::string buf;
@@ -355,7 +389,7 @@ TEST_CASE("range_remove on shared root (snapshot + modify)", "[range_remove][sha
 
    // Verify snapshot is still intact
    {
-      cursor c(snap_root);
+      auto c = snap_root.snapshot_cursor();
       REQUIRE(c.count_keys() == 200 / GAP_SCALE);
    }
 
@@ -363,7 +397,7 @@ TEST_CASE("range_remove on shared root (snapshot + modify)", "[range_remove][sha
    {
       auto root = ses->get_root(0);
       REQUIRE(root);
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       uint64_t count = c.count_keys();
       REQUIRE(count < 200 / GAP_SCALE);
       REQUIRE(count > 0);
@@ -380,7 +414,7 @@ TEST_CASE("range_remove on shared root (snapshot + modify)", "[range_remove][sha
 TEST_CASE("range_remove releases value_nodes correctly", "[range_remove][value_node]")
 {
    test_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
 
@@ -391,7 +425,7 @@ TEST_CASE("range_remove releases value_nodes correctly", "[range_remove][value_n
       // Alternate: small inline value vs large value_node value
       size_t val_size = (i % 3 == 0) ? 200 : 10;
       auto   val      = gval(i, val_size);
-      cur->upsert(to_key_view(key), to_value_view(val));
+      cur.upsert(to_key_view(key), to_value_view(val));
       oracle[key] = val;
    }
 
@@ -399,28 +433,28 @@ TEST_CASE("range_remove releases value_nodes correctly", "[range_remove][value_n
    auto lo = gkey(20 / GAP_SCALE);
    auto hi = gkey(80 / GAP_SCALE);
 
-   uint64_t removed = cur->remove_range(lo, hi);
+   uint64_t removed = cur.remove_range(lo, hi);
    REQUIRE(removed > 0);
 
    auto it = oracle.lower_bound(lo);
    while (it != oracle.end() && it->first < hi)
       it = oracle.erase(it);
 
-   REQUIRE(cur->count_keys() == oracle.size());
+   REQUIRE(cur.count_keys() == oracle.size());
 
    // Insert new keys into the gap — verifies freed space is reclaimed
    for (int i = 1000; i < 1000 + 50 / GAP_SCALE; ++i)
    {
       auto key = gkey(i);
       auto val = gval(i, 150);
-      cur->upsert(to_key_view(key), to_value_view(val));
+      cur.upsert(to_key_view(key), to_value_view(val));
       oracle[key] = val;
    }
 
-   REQUIRE(cur->count_keys() == oracle.size());
+   REQUIRE(cur.count_keys() == oracle.size());
 
    // Verify everything
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
    for (auto& [key, val] : oracle)
    {
       std::string buf;
@@ -505,7 +539,7 @@ TEST_CASE("database::recover rebuilds from segments", "[database][recover]")
       auto rses = db->start_read_session();
       auto root = rses->get_root(0);
       REQUIRE(root);
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       REQUIRE(c.count_keys() == 200);
    }
 
@@ -531,7 +565,7 @@ TEST_CASE("database::reset_reference_counts on live database", "[database][recov
       auto rses = db->start_read_session();
       auto root = rses->get_root(0);
       REQUIRE(root);
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       REQUIRE(c.count_keys() == 200);
    }
 
@@ -544,7 +578,7 @@ TEST_CASE("database::reset_reference_counts on live database", "[database][recov
 TEST_CASE("collapse with inner_prefix subtree", "[coverage][collapse]")
 {
    test_db tdb("collapse_ipn_testdb");
-   auto    cur = tdb.ses->create_write_cursor();
+   auto    cur = start_temp_edit(tdb);
 
    // Group A: 18 keys with long shared prefix → inner_prefix subtree
    std::vector<std::string> group_a;
@@ -557,7 +591,7 @@ TEST_CASE("collapse with inner_prefix subtree", "[coverage][collapse]")
       snprintf(buf, sizeof(buf), "%03d", i);
       k += buf;
       group_a.push_back(k);
-      cur->upsert(to_key_view(k), to_value_view(gval(i, 40)));
+      cur.upsert(to_key_view(k), to_value_view(gval(i, 40)));
    }
 
    // Group B: keys under a different byte to create second branch
@@ -570,22 +604,22 @@ TEST_CASE("collapse with inner_prefix subtree", "[coverage][collapse]")
       snprintf(buf, sizeof(buf), "%03d", i);
       k += buf;
       group_b.push_back(k);
-      cur->upsert(to_key_view(k), to_value_view(gval(i + 100, 40)));
+      cur.upsert(to_key_view(k), to_value_view(gval(i + 100, 40)));
    }
 
-   REQUIRE(cur->count_keys() == 22);
+   REQUIRE(cur.count_keys() == 22);
 
    // Remove all B keys one at a time → triggers merge/promotion paths
    // at the top inner_node, exercising collapse with the inner_prefix subtree
    for (auto& k : group_b)
-      cur->remove(to_key_view(k));
+      cur.remove(to_key_view(k));
 
-   REQUIRE(cur->count_keys() == 18);
+   REQUIRE(cur.count_keys() == 18);
 
    // Verify all A keys survived
    for (auto& k : group_a)
    {
       std::string val;
-      REQUIRE(cur->get(to_key_view(k), &val) >= 0);
+      REQUIRE(cur.get(to_key_view(k), &val) >= 0);
    }
 }

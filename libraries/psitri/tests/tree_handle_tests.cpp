@@ -52,7 +52,7 @@ namespace
       {
          auto root = ses->get_root(root_index);
          REQUIRE(root);
-         cursor c(root);
+         auto   c = root.snapshot_cursor();
          auto   v = c.get<std::string>(key);
          REQUIRE(v.has_value());
          CHECK(*v == expected);
@@ -98,9 +98,9 @@ TEST_CASE("tree_handle: primary handle basic CRUD", "[tree_handle]")
       CHECK_FALSE(v.has_value());
    }
 
-   SECTION("read_cursor iterates all keys")
+   SECTION("snapshot_cursor iterates all keys")
    {
-      auto c = h.read_cursor();
+      auto c = h.snapshot_cursor();
       c.seek_begin();
       std::vector<std::string> keys;
       while (!c.is_end())
@@ -171,7 +171,7 @@ TEST_CASE("tree_handle: primary() matches backward-compat API", "[tree_handle]")
 
    // Verify persisted
    auto rs  = t.db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek("k3");
    REQUIRE(!cur.is_end());
    CHECK(cur.value<std::string>().value_or("") == "v3");
@@ -217,7 +217,7 @@ TEST_CASE("tree_handle: works with micro mode", "[tree_handle]")
 
    // Verify committed
    auto rs  = t.db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek("a");
    CHECK((cur.is_end() || cur.key() != "a"));
    cur.seek("b");
@@ -242,15 +242,15 @@ TEST_CASE("tree_handle: open_subtree reads and modifies subtree", "[tree_handle]
       auto tx = t.ses->start_transaction(0);
       tx.upsert("data", "root_data");
 
-      auto cur = t.ses->create_write_cursor();
+      auto sub_tx = t.ses->start_write_transaction(t.ses->create_temporary_tree());
       for (int i = 0; i < N; ++i)
       {
          char key[32], val[32];
          snprintf(key, sizeof(key), "sub_%03d", i);
          snprintf(val, sizeof(val), "val_%03d", i);
-         cur->upsert(key_view(key, strlen(key)), value_view(val, strlen(val)));
+         sub_tx.upsert(key_view(key, strlen(key)), value_view(val, strlen(val)));
       }
-      tx.upsert("child", cur->take_root());
+      tx.upsert_subtree("child", sub_tx.get_tree());
       tx.commit();
    }
 
@@ -269,7 +269,7 @@ TEST_CASE("tree_handle: open_subtree reads and modifies subtree", "[tree_handle]
       CHECK(*v == "val_000");
 
       // Count keys
-      auto rc = sub.read_cursor();
+      auto rc = sub.snapshot_cursor();
       rc.seek_begin();
       int count = 0;
       while (!rc.is_end())
@@ -298,7 +298,7 @@ TEST_CASE("tree_handle: open_subtree reads and modifies subtree", "[tree_handle]
 
       CHECK_FALSE(sub.get<std::string>("sub_000").has_value());
 
-      auto rc = sub.read_cursor();
+      auto rc = sub.snapshot_cursor();
       rc.seek_begin();
       int count = 0;
       while (!rc.is_end())
@@ -353,7 +353,7 @@ TEST_CASE("tree_handle: create_subtree creates and populates new subtree", "[tre
       REQUIRE(v.has_value());
       CHECK(*v == "val_a");
 
-      auto rc = sub.read_cursor();
+      auto rc = sub.snapshot_cursor();
       rc.seek_begin();
       int count = 0;
       while (!rc.is_end())
@@ -377,12 +377,12 @@ TEST_CASE("tree_handle: nested subtrees (create within open)", "[tree_handle][su
 {
    test_db t;
 
-   // Create outer subtree the old way
+   // Create outer subtree as a detached temporary tree.
    {
       auto tx = t.ses->start_transaction(0);
-      auto cur = t.ses->create_write_cursor();
-      cur->upsert("outer_data", "hello");
-      tx.upsert("outer", cur->take_root());
+      auto sub_tx = t.ses->start_write_transaction(t.ses->create_temporary_tree());
+      sub_tx.upsert("outer_data", "hello");
+      tx.upsert_subtree("outer", sub_tx.get_tree());
       tx.commit();
    }
 
@@ -408,18 +408,13 @@ TEST_CASE("tree_handle: nested subtrees (create within open)", "[tree_handle][su
    // Verify nested structure persisted
    {
       auto root = t.ses->get_root(0);
-      cursor c(root);
-      REQUIRE(c.seek("outer"));
-      REQUIRE(c.is_subtree());
+      auto outer = root.get_subtree("outer");
+      REQUIRE(outer);
 
-      auto outer_root = c.subtree();
-      cursor oc(outer_root);
-      REQUIRE(oc.seek("inner_tree"));
-      REQUIRE(oc.is_subtree());
+      auto inner = outer.get_subtree("inner_tree");
+      REQUIRE(inner);
 
-      auto inner_root = oc.subtree();
-      cursor ic(inner_root);
-      auto v = ic.get<std::string>("deep_key");
+      auto v = inner.get<std::string>("deep_key");
       REQUIRE(v.has_value());
       CHECK(*v == "deep_val");
    }
@@ -438,10 +433,10 @@ TEST_CASE("tree_handle: open_subtree deduplicates change_sets", "[tree_handle][s
    // Create tree with subtree
    {
       auto tx = t.ses->start_transaction(0);
-      auto cur = t.ses->create_write_cursor();
-      cur->upsert("a", "1");
-      cur->upsert("b", "2");
-      tx.upsert("child", cur->take_root());
+      auto sub_tx = t.ses->start_write_transaction(t.ses->create_temporary_tree());
+      sub_tx.upsert("a", "1");
+      sub_tx.upsert("b", "2");
+      tx.upsert_subtree("child", sub_tx.get_tree());
       tx.commit();
    }
 
@@ -499,9 +494,9 @@ TEST_CASE("tree_handle: transaction_frame_ref open/create_subtree", "[tree_handl
    // Create tree with a subtree
    {
       auto tx = t.ses->start_transaction(0);
-      auto cur = t.ses->create_write_cursor();
-      cur->upsert("data", "value");
-      tx.upsert("existing_sub", cur->take_root());
+      auto sub_tx = t.ses->start_write_transaction(t.ses->create_temporary_tree());
+      sub_tx.upsert("data", "value");
+      tx.upsert_subtree("existing_sub", sub_tx.get_tree());
       tx.commit();
    }
 
@@ -561,7 +556,7 @@ TEST_CASE("tree_handle: remove_range works in batch mode", "[tree_handle]")
    uint64_t removed = h.remove_range("b", "d");
    CHECK(removed == 2);  // removes b, c
 
-   auto rc = h.read_cursor();
+   auto rc = h.snapshot_cursor();
    rc.seek_begin();
    std::vector<std::string> keys;
    while (!rc.is_end())
@@ -681,13 +676,13 @@ TEST_CASE("tree_handle: multiple subtree write-back on commit", "[tree_handle][s
    // Create tree with two subtrees
    {
       auto tx = t.ses->start_transaction(0);
-      auto cur1 = t.ses->create_write_cursor();
-      cur1->upsert("x", "10");
-      tx.upsert("sub_1", cur1->take_root());
+      auto sub_tx1 = t.ses->start_write_transaction(t.ses->create_temporary_tree());
+      sub_tx1.upsert("x", "10");
+      tx.upsert_subtree("sub_1", sub_tx1.get_tree());
 
-      auto cur2 = t.ses->create_write_cursor();
-      cur2->upsert("y", "20");
-      tx.upsert("sub_2", cur2->take_root());
+      auto sub_tx2 = t.ses->start_write_transaction(t.ses->create_temporary_tree());
+      sub_tx2.upsert("y", "20");
+      tx.upsert_subtree("sub_2", sub_tx2.get_tree());
 
       tx.commit();
    }
@@ -710,24 +705,18 @@ TEST_CASE("tree_handle: multiple subtree write-back on commit", "[tree_handle][s
    // Verify both subtrees were written back
    {
       auto root = t.ses->get_root(0);
-      cursor c(root);
-
-      c.seek("sub_1");
-      REQUIRE(c.is_subtree());
-      auto sub1 = c.subtree();
-      cursor c1(sub1);
-      auto v = c1.get<std::string>("x");
+      auto sub1 = root.get_subtree("sub_1");
+      REQUIRE(sub1);
+      auto v = sub1.get<std::string>("x");
       REQUIRE(v.has_value());
       CHECK(*v == "11");
-      v = c1.get<std::string>("x2");
+      v = sub1.get<std::string>("x2");
       REQUIRE(v.has_value());
       CHECK(*v == "12");
 
-      c.seek("sub_2");
-      REQUIRE(c.is_subtree());
-      auto sub2 = c.subtree();
-      cursor c2(sub2);
-      v = c2.get<std::string>("y");
+      auto sub2 = root.get_subtree("sub_2");
+      REQUIRE(sub2);
+      v = sub2.get<std::string>("y");
       REQUIRE(v.has_value());
       CHECK(*v == "21");
    }
@@ -889,11 +878,9 @@ TEST_CASE("multi-root: subtrees within additional roots", "[tree_handle][multi_r
 
    // Verify subtree within root 5
    auto root = t.ses->get_root(5);
-   cursor c(root);
-   REQUIRE(c.seek("nested"));
-   REQUIRE(c.is_subtree());
-   cursor sc(c.subtree());
-   auto v = sc.get<std::string>("inner_key");
+   auto nested = root.get_subtree("nested");
+   REQUIRE(nested);
+   auto v = nested.get<std::string>("inner_key");
    REQUIRE(v.has_value());
    CHECK(*v == "inner_val");
 }
@@ -951,7 +938,7 @@ TEST_CASE("multi-root: read operations via tree_handle", "[tree_handle][multi_ro
       REQUIRE(!ub.is_end());
       CHECK(ub.key() == "cherry");
 
-      auto rc = r3.read_cursor();
+      auto rc = r3.snapshot_cursor();
       rc.seek_begin();
       int count = 0;
       while (!rc.is_end())

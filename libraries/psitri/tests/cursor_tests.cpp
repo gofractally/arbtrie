@@ -34,6 +34,24 @@ namespace
       ~cursor_test_db() { std::filesystem::remove_all(dir); }
    };
 
+   struct temp_tree_edit
+   {
+      explicit temp_tree_edit(write_session& ses)
+          : tx(ses.start_write_transaction(ses.create_temporary_tree()))
+      {
+      }
+
+      void insert(key_view key, value_view value) { tx.insert(key, value); }
+      void upsert(key_view key, value_view value) { tx.upsert(key, value); }
+      int  remove(key_view key) { return tx.remove(key); }
+
+      cursor snapshot_cursor() const { return tx.snapshot_cursor(); }
+
+      write_transaction tx;
+   };
+
+   temp_tree_edit start_temp_edit(cursor_test_db& t) { return temp_tree_edit(*t.ses); }
+
    std::string make_key(int i)
    {
       char buf[32];
@@ -86,7 +104,7 @@ namespace
 TEST_CASE("cursor: iteration after multiple leaf splits", "[cursor][structural]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    // Insert enough keys to force several leaf splits (max_leaf_size=2048)
    // Each entry ~5 bytes overhead + key + value data, so ~200 entries per leaf
@@ -97,11 +115,11 @@ TEST_CASE("cursor: iteration after multiple leaf splits", "[cursor][structural]"
    {
       auto k = make_key(i);
       expected.push_back(k);
-      cur->upsert(to_key_view(k), to_value_view(make_value(i)));
+      cur.upsert(to_key_view(k), to_value_view(make_value(i)));
    }
    std::sort(expected.begin(), expected.end());
 
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
 
    // Forward and backward must agree across split boundaries
    auto forward  = collect_keys_forward(rc);
@@ -129,7 +147,7 @@ TEST_CASE("cursor: iteration after multiple leaf splits", "[cursor][structural]"
 TEST_CASE("cursor: iteration over 256-way fan-out at root", "[cursor][structural]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    // Create keys with every possible first byte (0x00..0xFF)
    std::vector<std::string> expected;
@@ -138,11 +156,11 @@ TEST_CASE("cursor: iteration over 256-way fan-out at root", "[cursor][structural
       std::string key(1, static_cast<char>(b));
       key += "suffix";
       expected.push_back(key);
-      cur->insert(key_view(key.data(), key.size()), to_value_view(std::to_string(b)));
+      cur.insert(key_view(key.data(), key.size()), to_value_view(std::to_string(b)));
    }
    std::sort(expected.begin(), expected.end());
 
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
    auto keys = collect_keys_forward(rc);
 
    REQUIRE(keys.size() == 256);
@@ -172,7 +190,7 @@ TEST_CASE("cursor: iteration over 256-way fan-out at root", "[cursor][structural
 TEST_CASE("cursor: correctness across collapse boundary", "[cursor][structural]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    // Insert 30 keys with distinct first bytes to create inner node branches
    const int START = 30;
@@ -183,12 +201,12 @@ TEST_CASE("cursor: correctness across collapse boundary", "[cursor][structural]"
       std::string key(1, static_cast<char>(i));
       key += "-data";
       all_keys.push_back(key);
-      cur->upsert(key_view(key.data(), key.size()), to_value("val"));
+      cur.upsert(key_view(key.data(), key.size()), to_value("val"));
    }
    std::sort(all_keys.begin(), all_keys.end());
 
    // Verify iteration with >24 descendants (no collapse)
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
    REQUIRE(collect_keys_forward(rc).size() == START);
 
    // Remove keys one at a time from 30 down through the collapse threshold (24)
@@ -196,10 +214,10 @@ TEST_CASE("cursor: correctness across collapse boundary", "[cursor][structural]"
    for (int remove_count = 0; remove_count < 10; ++remove_count)
    {
       auto& key_to_remove = all_keys.back();
-      cur->remove(key_view(key_to_remove.data(), key_to_remove.size()));
+      cur.remove(key_view(key_to_remove.data(), key_to_remove.size()));
       all_keys.pop_back();
 
-      rc = cur->read_cursor();
+      rc = cur.snapshot_cursor();
       auto keys = collect_keys_forward(rc);
 
       INFO("after removing " << (remove_count + 1) << " keys, remaining=" << all_keys.size());
@@ -223,7 +241,7 @@ TEST_CASE("cursor: correctness across collapse boundary", "[cursor][structural]"
 TEST_CASE("cursor: inner_prefix_node creation and traversal", "[cursor][structural]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    // Phase 1: Insert many keys with long shared prefix
    // This creates inner_prefix_nodes with the common prefix extracted
@@ -233,7 +251,7 @@ TEST_CASE("cursor: inner_prefix_node creation and traversal", "[cursor][structur
    {
       std::string key = prefix + make_key(i);
       keys.push_back(key);
-      cur->upsert(to_key_view(key), to_value_view(make_value(i)));
+      cur.upsert(to_key_view(key), to_value_view(make_value(i)));
    }
 
    // Phase 2: Insert keys that DON'T share the prefix
@@ -242,7 +260,7 @@ TEST_CASE("cursor: inner_prefix_node creation and traversal", "[cursor][structur
    {
       std::string key = "different/prefix/" + make_key(i);
       keys.push_back(key);
-      cur->upsert(to_key_view(key), to_value_view(make_value(i + 1000)));
+      cur.upsert(to_key_view(key), to_value_view(make_value(i + 1000)));
    }
 
    // Phase 3: Insert keys that partially match the prefix
@@ -250,12 +268,12 @@ TEST_CASE("cursor: inner_prefix_node creation and traversal", "[cursor][structur
    {
       std::string key = "very/long/different/" + make_key(i);
       keys.push_back(key);
-      cur->upsert(to_key_view(key), to_value_view(make_value(i + 2000)));
+      cur.upsert(to_key_view(key), to_value_view(make_value(i + 2000)));
    }
 
    std::sort(keys.begin(), keys.end());
 
-   auto rc         = cur->read_cursor();
+   auto rc         = cur.snapshot_cursor();
    auto forward    = collect_keys_forward(rc);
    auto backward   = collect_keys_backward(rc);
 
@@ -281,14 +299,14 @@ TEST_CASE("cursor: inner_prefix_node creation and traversal", "[cursor][structur
 TEST_CASE("cursor: interleaved next/prev across leaf boundaries", "[cursor][structural]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    // Force multiple leaf splits with sequential keys
    const int N = 500 / CURSOR_SCALE;
    for (int i = 0; i < N; ++i)
-      cur->upsert(to_key_view(make_key(i)), to_value_view(make_value(i)));
+      cur.upsert(to_key_view(make_key(i)), to_value_view(make_value(i)));
 
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
 
    // Navigate to middle of the tree (likely near a leaf boundary)
    rc.lower_bound(to_key_view(make_key(N / 2)));
@@ -323,11 +341,11 @@ TEST_CASE("cursor: interleaved next/prev across leaf boundaries", "[cursor][stru
 TEST_CASE("cursor: iteration after bulk remove triggers collapse", "[cursor][structural]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    const int N = 500 / CURSOR_SCALE;
    for (int i = 0; i < N; ++i)
-      cur->upsert(to_key_view(make_key(i)), to_value_view(make_value(i)));
+      cur.upsert(to_key_view(make_key(i)), to_value_view(make_value(i)));
 
    // Remove 90% of keys - this will trigger many collapses
    std::mt19937 rng(42);
@@ -343,12 +361,12 @@ TEST_CASE("cursor: iteration after bulk remove triggers collapse", "[cursor][str
    for (int i = 0; i < to_remove; ++i)
    {
       auto k = make_key(indices[i]);
-      cur->remove(to_key_view(k));
+      cur.remove(to_key_view(k));
       remaining.erase(k);
    }
 
    // Verify cursor correctly iterates the sparse remaining keys
-   auto rc   = cur->read_cursor();
+   auto rc   = cur.snapshot_cursor();
    auto keys = collect_keys_forward(rc);
 
    REQUIRE(keys.size() == remaining.size());
@@ -385,7 +403,7 @@ TEST_CASE("cursor: COW snapshot isolation during heavy mutation", "[cursor][stru
 
    // Take a snapshot
    auto root = t.ses->get_root(0);
-   cursor snapshot(root);
+   auto snapshot = root.snapshot_cursor();
    auto snapshot_keys = collect_keys_forward(snapshot);
    REQUIRE(snapshot_keys.size() == static_cast<size_t>(N));
 
@@ -425,7 +443,7 @@ TEST_CASE("cursor: COW snapshot isolation during heavy mutation", "[cursor][stru
 TEST_CASE("cursor: iteration with mixed inline and value_node values", "[cursor][structural]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    // Create entries that alternate between inline (<=64 bytes) and value_node (>64 bytes)
    const int N = 100 / CURSOR_SCALE;
@@ -443,10 +461,10 @@ TEST_CASE("cursor: iteration with mixed inline and value_node values", "[cursor]
          val = std::string(200 + i, static_cast<char>('A' + (i % 26)));  // large value_node
 
       expected[k] = val;
-      cur->upsert(to_key_view(k), to_value_view(val));
+      cur.upsert(to_key_view(k), to_value_view(val));
    }
 
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
 
    // Forward iteration - verify each value matches
    rc.seek_begin();
@@ -527,7 +545,7 @@ TEST_CASE("cursor: complex tree survives reopen", "[cursor][persistence]")
       auto root = ses->get_root(0);
       REQUIRE(root);
 
-      cursor rc(root);
+      auto rc = root.snapshot_cursor();
 
       // Verify count
       REQUIRE(rc.count_keys() == expected.size());
@@ -560,13 +578,13 @@ TEST_CASE("cursor: complex tree survives reopen", "[cursor][persistence]")
 TEST_CASE("cursor: count_keys matches manual iteration for random ranges", "[cursor]")
 {
    cursor_test_db t;
-   auto           cur = t.ses->create_write_cursor();
+   auto           cur = start_temp_edit(t);
 
    const int N = 500 / CURSOR_SCALE;
    for (int i = 0; i < N; ++i)
-      cur->upsert(to_key_view(make_key(i)), to_value_view(make_value(i)));
+      cur.upsert(to_key_view(make_key(i)), to_value_view(make_value(i)));
 
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
 
    std::mt19937 rng(42);
    for (int trial = 0; trial < 50; ++trial)

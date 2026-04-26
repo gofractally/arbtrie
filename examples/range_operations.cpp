@@ -29,7 +29,7 @@ int main()
    // --- O(log n) range count ---
    // count_keys uses descendant counters in inner nodes — no leaf scanning
    auto rs     = db->start_read_session();
-   auto cursor = rs->create_cursor(0);
+   auto cursor = rs->snapshot_cursor(0);
 
    uint64_t total = cursor.count_keys();
    uint64_t range = cursor.count_keys("key/01000", "key/02000");

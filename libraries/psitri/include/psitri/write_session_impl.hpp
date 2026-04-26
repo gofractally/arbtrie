@@ -36,21 +36,49 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline sal::smart_ptr<sal::alloc_header>
-   basic_write_session<LockPolicy>::get_root(uint32_t root_index)
+   inline tree basic_write_session<LockPolicy>::get_root(uint32_t root_index)
    {
-      return this->_allocator_session->template get_root<>(
-          sal::root_object_number(root_index));
+      return tree(this->_allocator_session->template get_root<>(
+          sal::root_object_number(root_index)));
+   }
+
+   template <class LockPolicy>
+   inline tree basic_write_session<LockPolicy>::create_temporary_tree()
+   {
+      return tree(this->_allocator_session);
+   }
+
+   template <class LockPolicy>
+   inline write_transaction basic_write_session<LockPolicy>::start_write_transaction(
+       tree base, tx_mode mode)
+   {
+      auto root            = std::move(base).take_root();
+      bool has_txn_version = false;
+      if (mode == tx_mode::expect_success)
+      {
+         root            = make_unique_root(std::move(root));
+         has_txn_version = true;
+      }
+
+      auto tx = transaction(
+          this->_allocator_session,
+          std::move(root),
+          {},
+          {},
+          mode);
+      tx._ws              = this;
+      tx._has_txn_version = has_txn_version;
+      return write_transaction(std::move(tx));
    }
 
    template <class LockPolicy>
    inline void basic_write_session<LockPolicy>::set_root(
-       uint32_t                          root_index,
-       sal::smart_ptr<sal::alloc_header> root,
-       sal::sync_type                    sync)
+       uint32_t       root_index,
+       tree           root,
+       sal::sync_type sync)
    {
       this->_allocator_session->set_root(
-          sal::root_object_number(root_index), std::move(root), sync);
+          sal::root_object_number(root_index), root.take_root(), sync);
    }
 
    template <class LockPolicy>
@@ -130,7 +158,7 @@ namespace psitri
       bool has_txn_version = false;
       if (mode == tx_mode::expect_success)
       {
-         root            = make_unique_root(std::move(root));
+         root            = tree(make_unique_root(std::move(root)));
          has_txn_version = true;
       }
 
@@ -380,7 +408,7 @@ namespace psitri
       _held_locks.clear();
    }
 
-   inline void transaction::ensure_txn_version()
+   inline void transaction::materialize_txn_version()
    {
       if (_has_txn_version)
          return;

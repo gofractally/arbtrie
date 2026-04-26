@@ -152,7 +152,7 @@ namespace psitri
     *
     * Typical usage (default policy):
     * @code
-    *   auto db = psitri::database::create("mydb");
+    *   auto db = psitri::database::open("mydb", psitri::open_mode::create_or_open);
     *   auto ws = db->start_write_session();
     *   auto tx = ws->start_transaction(0);
     *   tx.upsert("key", "value");
@@ -186,8 +186,11 @@ namespace psitri
           recovery_mode         recovery = recovery_mode::none);
 
       /**
-       * @brief Create a new database. Fails if the database already exists.
-       * @deprecated Use database::open(dir, open_mode::create_only) instead.
+       * @brief Create-only convenience helper. Fails if the database already exists.
+       *
+       * Equivalent to database::open(dir, open_mode::create_only, cfg).
+       * Prefer database::open() in user-facing examples so the open mode is
+       * visible at the call site.
        */
       static std::shared_ptr<basic_database> create(std::filesystem::path dir,
                                                     const runtime_config& = {});

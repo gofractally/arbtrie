@@ -104,10 +104,11 @@ Object Data                       User-defined node content
 |----------|-------|-------|
 | Segment size | 32 MB | Contiguous mmap region |
 | Max segments | ~1 million | 32 TB max database |
-| Max threads | 64 | Concurrent sessions |
+| Allocator session slots | 64 | 50 application write sessions plus 14 reserved backend slots |
 | Max object size | 16 MB | Half a segment |
 | Cacheline | 64 bytes | Allocation alignment |
 | Max ref count | 2,097,088 | 21-bit field minus 64 |
+| Write-session buffer | 32 MB | One per active write session; flushed/recycled on session close |
 
 ### Control Block (8 bytes, atomic)
 

@@ -2,6 +2,11 @@
 
 PsiTriMDBX provides an MDBX-compatible API backed by PsiTri's DWAL (Durable Write-Ahead Log) layer. Existing applications that use the libmdbx C or C++ API can switch to PsiTri by relinking — no code changes required for standard operations.
 
+Transaction and cursor behavior follows the PsiTri [Transaction and Cursor
+Contract](transaction-contract.md). In particular, read-write MDBX
+transactions read their own writes through current-state cursors, while
+read-only MDBX transactions use explicit snapshot lifetimes.
+
 ## Quick Migration
 
 **Before (native libmdbx):**

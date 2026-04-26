@@ -7,6 +7,7 @@
 #include <psitri/node/value_node.hpp>
 #include <psitri/value_type.hpp>
 #include <sal/smart_ptr.hpp>
+#include <utility>
 
 namespace psitri
 {
@@ -184,6 +185,15 @@ namespace psitri
 
       template <ConstructibleBuffer ConstructibleBufferType>
       std::optional<ConstructibleBufferType> get(key_view key) const;
+
+      bool get(key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         cursor c(_node);
+         if (!c.seek(key) || c.is_subtree())
+            return false;
+         c.get_value(std::forward<decltype(lambda)>(lambda));
+         return true;
+      }
 
       /**
        * Get the value at the specified key into a buffer

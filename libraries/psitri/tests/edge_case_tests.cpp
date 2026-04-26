@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 #include <map>
 #include <random>
+#include <set>
 #include <string>
 #include <psitri/database.hpp>
 #include <psitri/database_impl.hpp>
@@ -30,6 +31,44 @@ namespace
 
       ~edge_db() { std::filesystem::remove_all(dir); }
    };
+
+   struct temp_tree_edit
+   {
+      explicit temp_tree_edit(write_session& ses)
+          : tx(ses.start_write_transaction(ses.create_temporary_tree()))
+      {
+      }
+
+      void insert(key_view key, value_view value) { tx.insert(key, value); }
+      void upsert(key_view key, value_view value) { tx.upsert(key, value); }
+      void upsert_subtree(key_view key, tree subtree)
+      {
+         tx.upsert_subtree(key, std::move(subtree));
+      }
+      int remove(key_view key) { return tx.remove(key); }
+
+      template <ConstructibleBuffer T>
+      std::optional<T> get(key_view key) const
+      {
+         return tx.get<T>(key);
+      }
+
+      int32_t get(key_view key, Buffer auto* buffer) const { return tx.get(key, buffer); }
+
+      bool is_subtree(key_view key) const { return tx.is_subtree(key); }
+      tree get_subtree(key_view key) const { return tx.get_subtree(key); }
+
+      cursor snapshot_cursor() const { return tx.snapshot_cursor(); }
+      uint64_t count_keys() const
+      {
+         auto c = snapshot_cursor();
+         return c.count_keys();
+      }
+
+      write_transaction tx;
+   };
+
+   temp_tree_edit start_temp_edit(edge_db& t) { return temp_tree_edit(*t.ses); }
 }  // namespace
 
 // ============================================================
@@ -42,37 +81,37 @@ namespace
 TEST_CASE("edge: value at inline/value_node boundary (64 bytes)", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    // Exactly 64 bytes: should be inline
    std::string val_64(64, 'X');
-   cur->upsert(to_key("k64"), to_value_view(val_64));
+   cur.upsert(to_key("k64"), to_value_view(val_64));
 
    // 65 bytes: should be value_node
    std::string val_65(65, 'Y');
-   cur->upsert(to_key("k65"), to_value_view(val_65));
+   cur.upsert(to_key("k65"), to_value_view(val_65));
 
    // 63 bytes: definitely inline
    std::string val_63(63, 'Z');
-   cur->upsert(to_key("k63"), to_value_view(val_63));
+   cur.upsert(to_key("k63"), to_value_view(val_63));
 
    // Verify all retrieve correctly
-   REQUIRE(*cur->get<std::string>(to_key("k64")) == val_64);
-   REQUIRE(*cur->get<std::string>(to_key("k65")) == val_65);
-   REQUIRE(*cur->get<std::string>(to_key("k63")) == val_63);
+   REQUIRE(*cur.get<std::string>(to_key("k64")) == val_64);
+   REQUIRE(*cur.get<std::string>(to_key("k65")) == val_65);
+   REQUIRE(*cur.get<std::string>(to_key("k63")) == val_63);
 
    // Transition: update inline → value_node
    std::string val_big(200, 'A');
-   cur->upsert(to_key("k64"), to_value_view(val_big));
-   REQUIRE(*cur->get<std::string>(to_key("k64")) == val_big);
+   cur.upsert(to_key("k64"), to_value_view(val_big));
+   REQUIRE(*cur.get<std::string>(to_key("k64")) == val_big);
 
    // Transition: update value_node → inline
-   cur->upsert(to_key("k65"), to_value("tiny"));
-   REQUIRE(*cur->get<std::string>(to_key("k65")) == "tiny");
+   cur.upsert(to_key("k65"), to_value("tiny"));
+   REQUIRE(*cur.get<std::string>(to_key("k65")) == "tiny");
 
    // Transition: update value_node → null
-   cur->upsert(to_key("k64"), value_view(nullptr, 0));
-   auto result = cur->get<std::string>(to_key("k64"));
+   cur.upsert(to_key("k64"), value_view(nullptr, 0));
+   auto result = cur.get<std::string>(to_key("k64"));
    REQUIRE(result.has_value());
    REQUIRE(result->empty());
 }
@@ -87,7 +126,7 @@ TEST_CASE("edge: value at inline/value_node boundary (64 bytes)", "[edge_case][s
 TEST_CASE("edge: pack leaf to split point with minimal keys", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    // Insert keys until we definitely exceed a single leaf's capacity
    // 3-byte keys: "000" to "999" (1000 keys, ~8 bytes each = ~8000 bytes)
@@ -98,16 +137,16 @@ TEST_CASE("edge: pack leaf to split point with minimal keys", "[edge_case][struc
       char key[4];
       snprintf(key, sizeof(key), "%03d", i);
       std::string k(key), v(key);
-      cur->upsert(to_key_view(k), to_value_view(v));
+      cur.upsert(to_key_view(k), to_value_view(v));
       oracle[k] = v;
    }
 
-   REQUIRE(cur->count_keys() == 1000);
+   REQUIRE(cur.count_keys() == 1000);
 
    // Verify every key survives the splits
    for (auto& [k, v] : oracle)
    {
-      auto result = cur->get<std::string>(to_key_view(k));
+      auto result = cur.get<std::string>(to_key_view(k));
       INFO("key: " << k);
       REQUIRE(result.has_value());
       REQUIRE(*result == v);
@@ -121,7 +160,7 @@ TEST_CASE("edge: pack leaf to split point with minimal keys", "[edge_case][struc
 TEST_CASE("edge: leaf with mix of inline and value_node near capacity", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    // Insert keys where every other one has a large value (value_node)
    // The leaf still needs to track the address, and the value_node
@@ -136,14 +175,14 @@ TEST_CASE("edge: leaf with mix of inline and value_node near capacity", "[edge_c
       else
          val = std::string(500, static_cast<char>('A' + (i % 26)));  // value_node
 
-      cur->upsert(to_key_view(k), to_value_view(val));
+      cur.upsert(to_key_view(k), to_value_view(val));
       oracle[k] = val;
    }
 
    // Verify all values survive splits correctly
    for (auto& [k, v] : oracle)
    {
-      auto result = cur->get<std::string>(to_key_view(k));
+      auto result = cur.get<std::string>(to_key_view(k));
       INFO("key: " << k);
       REQUIRE(result.has_value());
       REQUIRE(*result == v);
@@ -157,7 +196,7 @@ TEST_CASE("edge: leaf with mix of inline and value_node near capacity", "[edge_c
 TEST_CASE("edge: binary keys with embedded null bytes", "[edge_case]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    // Keys containing null bytes - tests that comparisons use size, not strlen
    std::string k1("a\0b", 3);
@@ -166,29 +205,29 @@ TEST_CASE("edge: binary keys with embedded null bytes", "[edge_case]")
    std::string k4("a", 1);     // shorter prefix
    std::string k5("a\0b\0", 4);  // k1 with extra null
 
-   cur->insert(key_view(k1.data(), k1.size()), to_value("v1"));
-   cur->insert(key_view(k2.data(), k2.size()), to_value("v2"));
-   cur->insert(key_view(k3.data(), k3.size()), to_value("v3"));
-   cur->insert(key_view(k4.data(), k4.size()), to_value("v4"));
-   cur->insert(key_view(k5.data(), k5.size()), to_value("v5"));
+   cur.insert(key_view(k1.data(), k1.size()), to_value("v1"));
+   cur.insert(key_view(k2.data(), k2.size()), to_value("v2"));
+   cur.insert(key_view(k3.data(), k3.size()), to_value("v3"));
+   cur.insert(key_view(k4.data(), k4.size()), to_value("v4"));
+   cur.insert(key_view(k5.data(), k5.size()), to_value("v5"));
 
-   REQUIRE(cur->count_keys() == 5);
+   REQUIRE(cur.count_keys() == 5);
 
    // Each key must be independently retrievable
    std::string buf;
-   REQUIRE(cur->get(key_view(k1.data(), k1.size()), &buf) >= 0);
+   REQUIRE(cur.get(key_view(k1.data(), k1.size()), &buf) >= 0);
    REQUIRE(buf == "v1");
-   REQUIRE(cur->get(key_view(k2.data(), k2.size()), &buf) >= 0);
+   REQUIRE(cur.get(key_view(k2.data(), k2.size()), &buf) >= 0);
    REQUIRE(buf == "v2");
-   REQUIRE(cur->get(key_view(k3.data(), k3.size()), &buf) >= 0);
+   REQUIRE(cur.get(key_view(k3.data(), k3.size()), &buf) >= 0);
    REQUIRE(buf == "v3");
-   REQUIRE(cur->get(key_view(k4.data(), k4.size()), &buf) >= 0);
+   REQUIRE(cur.get(key_view(k4.data(), k4.size()), &buf) >= 0);
    REQUIRE(buf == "v4");
-   REQUIRE(cur->get(key_view(k5.data(), k5.size()), &buf) >= 0);
+   REQUIRE(cur.get(key_view(k5.data(), k5.size()), &buf) >= 0);
    REQUIRE(buf == "v5");
 
    // Iteration must produce sorted byte order
-   auto rc = cur->read_cursor();
+   auto rc = cur.snapshot_cursor();
    rc.seek_begin();
    std::string prev;
    int count = 0;
@@ -213,7 +252,7 @@ TEST_CASE("edge: binary keys with embedded null bytes", "[edge_case]")
 TEST_CASE("edge: prefix chain insert/remove structural integrity", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    // Build a chain where each key is a prefix of the next
    std::vector<std::string> chain;
@@ -225,31 +264,31 @@ TEST_CASE("edge: prefix chain insert/remove structural integrity", "[edge_case][
    }
 
    for (auto& k : chain)
-      cur->insert(to_key_view(k), to_value_view(k));
+      cur.insert(to_key_view(k), to_value_view(k));
 
-   REQUIRE(cur->count_keys() == chain.size());
+   REQUIRE(cur.count_keys() == chain.size());
 
    // Remove from the middle - this forces prefix node restructuring
    // because the prefix shared between shorter and longer keys changes
    for (int i = 10; i < 20; ++i)
    {
-      cur->remove(to_key_view(chain[i]));
+      cur.remove(to_key_view(chain[i]));
    }
 
    // Verify surviving keys
    for (int i = 0; i < 10; ++i)
    {
-      auto result = cur->get<std::string>(to_key_view(chain[i]));
+      auto result = cur.get<std::string>(to_key_view(chain[i]));
       REQUIRE(result.has_value());
       REQUIRE(*result == chain[i]);
    }
    for (int i = 10; i < 20; ++i)
    {
-      REQUIRE_FALSE(cur->get<std::string>(to_key_view(chain[i])).has_value());
+      REQUIRE_FALSE(cur.get<std::string>(to_key_view(chain[i])).has_value());
    }
    for (size_t i = 20; i < chain.size(); ++i)
    {
-      auto result = cur->get<std::string>(to_key_view(chain[i]));
+      auto result = cur.get<std::string>(to_key_view(chain[i]));
       REQUIRE(result.has_value());
       REQUIRE(*result == chain[i]);
    }
@@ -262,7 +301,7 @@ TEST_CASE("edge: prefix chain insert/remove structural integrity", "[edge_case][
 TEST_CASE("edge: very long shared prefix forces deep inner_prefix_node", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    // 500-byte common prefix (tests prefix storage limits)
    std::string prefix(500, 'P');
@@ -275,20 +314,20 @@ TEST_CASE("edge: very long shared prefix forces deep inner_prefix_node", "[edge_
       snprintf(suffix, sizeof(suffix), "%04d", i);
       std::string key = prefix + suffix;
       std::string val = std::to_string(i);
-      cur->upsert(to_key_view(key), to_value_view(val));
+      cur.upsert(to_key_view(key), to_value_view(val));
       oracle[key] = val;
    }
 
    // Add a key that shares only part of the prefix
    // This forces the prefix node to split its stored prefix
    std::string partial = prefix.substr(0, 250) + "DIFFERENT/key";
-   cur->upsert(to_key_view(partial), to_value("split"));
+   cur.upsert(to_key_view(partial), to_value("split"));
    oracle[partial] = "split";
 
    // Verify all keys
    for (auto& [k, v] : oracle)
    {
-      auto result = cur->get<std::string>(to_key_view(k));
+      auto result = cur.get<std::string>(to_key_view(k));
       INFO("key length: " << k.size());
       REQUIRE(result.has_value());
       REQUIRE(*result == v);
@@ -306,7 +345,7 @@ TEST_CASE("edge: very long shared prefix forces deep inner_prefix_node", "[edge_
 TEST_CASE("edge: rapid insert-remove cycling stresses cline ref counting", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
    std::mt19937 rng(42424);
@@ -324,21 +363,21 @@ TEST_CASE("edge: rapid insert-remove cycling stresses cline ref counting", "[edg
       {
          // Insert with large value (creates value_node → cline ref)
          std::string val(100, static_cast<char>('A' + (c % 26)));
-         cur->upsert(to_key_view(key), to_value_view(val));
+         cur.upsert(to_key_view(key), to_value_view(val));
          oracle[key] = val;
       }
       else
       {
-         cur->remove(to_key_view(key));
+         cur.remove(to_key_view(key));
          oracle.erase(key);
       }
    }
 
    // Verify final state
-   REQUIRE(cur->count_keys() == oracle.size());
+   REQUIRE(cur.count_keys() == oracle.size());
    for (auto& [k, v] : oracle)
    {
-      auto result = cur->get<std::string>(to_key_view(k));
+      auto result = cur.get<std::string>(to_key_view(k));
       INFO("key: " << k);
       REQUIRE(result.has_value());
       REQUIRE(*result == v);
@@ -355,7 +394,7 @@ TEST_CASE("edge: rapid insert-remove cycling stresses cline ref counting", "[edg
 TEST_CASE("edge: per-branch heavy mutation stresses replace_branch", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
 
@@ -371,7 +410,7 @@ TEST_CASE("edge: per-branch heavy mutation stresses replace_branch", "[edge_case
             std::string key(1, static_cast<char>('A' + branch));
             key += std::to_string(pass * 100 + i);
             std::string val = "v" + std::to_string(pass * 100 + i);
-            cur->upsert(to_key_view(key), to_value_view(val));
+            cur.upsert(to_key_view(key), to_value_view(val));
             oracle[key] = val;
          }
          // Remove half of what we just added
@@ -379,17 +418,17 @@ TEST_CASE("edge: per-branch heavy mutation stresses replace_branch", "[edge_case
          {
             std::string key(1, static_cast<char>('A' + branch));
             key += std::to_string(pass * 100 + i);
-            cur->remove(to_key_view(key));
+            cur.remove(to_key_view(key));
             oracle.erase(key);
          }
       }
    }
 
    // Verify oracle match
-   REQUIRE(cur->count_keys() == oracle.size());
+   REQUIRE(cur.count_keys() == oracle.size());
    for (auto& [k, v] : oracle)
    {
-      auto result = cur->get<std::string>(to_key_view(k));
+      auto result = cur.get<std::string>(to_key_view(k));
       INFO("key: " << k);
       REQUIRE(result.has_value());
       REQUIRE(*result == v);
@@ -403,7 +442,7 @@ TEST_CASE("edge: per-branch heavy mutation stresses replace_branch", "[edge_case
 TEST_CASE("edge: empty values through split and collapse", "[edge_case][structural]")
 {
    edge_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    cur = start_temp_edit(t);
 
    // Insert enough empty-value keys to force leaf splits
    std::set<std::string> keys;
@@ -412,11 +451,11 @@ TEST_CASE("edge: empty values through split and collapse", "[edge_case][structur
       char buf[8];
       snprintf(buf, sizeof(buf), "%04d", i);
       std::string k(buf);
-      cur->upsert(to_key_view(k), value_view(nullptr, 0));
+      cur.upsert(to_key_view(k), value_view(nullptr, 0));
       keys.insert(k);
    }
 
-   REQUIRE(cur->count_keys() == 500);
+   REQUIRE(cur.count_keys() == 500);
 
    // Remove most keys (force collapses)
    for (int i = 0; i < 480; ++i)
@@ -424,15 +463,15 @@ TEST_CASE("edge: empty values through split and collapse", "[edge_case][structur
       char buf[8];
       snprintf(buf, sizeof(buf), "%04d", i);
       std::string k(buf);
-      cur->remove(to_key_view(k));
+      cur.remove(to_key_view(k));
       keys.erase(k);
    }
 
    // Verify surviving empty-value keys are readable
-   REQUIRE(cur->count_keys() == keys.size());
+   REQUIRE(cur.count_keys() == keys.size());
    for (auto& k : keys)
    {
-      auto result = cur->get<std::string>(to_key_view(k));
+      auto result = cur.get<std::string>(to_key_view(k));
       REQUIRE(result.has_value());
       REQUIRE(result->empty());
    }
@@ -447,24 +486,24 @@ TEST_CASE("edge: subtree values survive leaf splits", "[edge_case][structural]")
    edge_db t;
 
    // Create a subtree
-   auto sub_cursor = t.ses->create_write_cursor();
+   auto sub_tx = t.ses->start_write_transaction(t.ses->create_temporary_tree());
    for (int i = 0; i < 10; ++i)
-      sub_cursor->upsert(to_key_view("sub-" + std::to_string(i)),
-                         to_value_view("sub-val-" + std::to_string(i)));
-   auto subtree_root = sub_cursor->root();
+      sub_tx.upsert(to_key_view("sub-" + std::to_string(i)),
+                    to_value_view("sub-val-" + std::to_string(i)));
+   auto subtree = sub_tx.get_tree();
 
    // Insert the subtree along with many regular keys to force leaf splits
-   auto cur = t.ses->create_write_cursor();
-   cur->upsert(to_key("subtree-holder"), std::move(subtree_root));
+   auto cur = start_temp_edit(t);
+   cur.upsert_subtree(to_key("subtree-holder"), std::move(subtree));
 
    // Add enough keys to force the leaf containing the subtree to split
    for (int i = 0; i < 500; ++i)
-      cur->upsert(to_key_view("data-" + std::to_string(i)),
-                  to_value_view("val-" + std::to_string(i)));
+      cur.upsert(to_key_view("data-" + std::to_string(i)),
+                 to_value_view("val-" + std::to_string(i)));
 
    // Verify the subtree is still accessible and valid
-   REQUIRE(cur->is_subtree(to_key("subtree-holder")));
-   auto recovered = cur->get_subtree_cursor(to_key("subtree-holder"));
+   REQUIRE(cur.is_subtree(to_key("subtree-holder")));
+   auto recovered = cur.get_subtree(to_key("subtree-holder"));
    for (int i = 0; i < 10; ++i)
    {
       auto result = recovered.get<std::string>(to_key_view("sub-" + std::to_string(i)));
@@ -475,7 +514,7 @@ TEST_CASE("edge: subtree values survive leaf splits", "[edge_case][structural]")
    // Regular keys also intact
    for (int i = 0; i < 500; ++i)
    {
-      auto result = cur->get<std::string>(to_key_view("data-" + std::to_string(i)));
+      auto result = cur.get<std::string>(to_key_view("data-" + std::to_string(i)));
       REQUIRE(result.has_value());
    }
 }

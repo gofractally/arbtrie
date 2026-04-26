@@ -4,6 +4,8 @@
 #include <numeric>
 #include <random>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <psitri/database.hpp>
 #include <psitri/database_impl.hpp>
 #include <psitri/transaction.hpp>
@@ -13,6 +15,14 @@
 #include <psitri/value_type.hpp>
 
 using namespace psitri;
+
+static_assert(std::is_copy_constructible_v<tree>);
+static_assert(std::is_move_constructible_v<tree>);
+static_assert(std::is_same_v<decltype(std::declval<read_session&>().get_root(0)), tree>);
+static_assert(std::is_same_v<decltype(std::declval<write_session&>().get_root(0)), tree>);
+static_assert(std::is_same_v<decltype(std::declval<tree&>().get_subtree(std::declval<key_view>())), tree>);
+static_assert(std::is_same_v<decltype(std::declval<transaction&>().get_subtree(std::declval<key_view>())), tree>);
+static_assert(std::is_same_v<decltype(std::declval<write_transaction&>().get_subtree(std::declval<key_view>())), tree>);
 
 constexpr int SCALE = 1;
 
@@ -49,76 +59,78 @@ namespace
 }  // namespace
 
 // ============================================================
-// write_cursor tests
+// detached tree write transaction tests
 // ============================================================
 
-TEST_CASE("write_cursor basic CRUD", "[public-api][write-cursor]")
+TEST_CASE("write_transaction basic CRUD on detached tree", "[public-api][write-transaction]")
 {
    test_db t;
 
-   auto cur = t.ses->create_write_cursor();
+   auto temp = t.ses->create_temporary_tree();
+   auto edit = t.ses->start_write_transaction(std::move(temp));
 
    SECTION("insert and get")
    {
-      cur->insert(to_key("hello"), to_value("world"));
-      auto val = cur->get<std::string>(to_key("hello"));
+      edit.insert(to_key("hello"), to_value("world"));
+      auto val = edit.get<std::string>(to_key("hello"));
       REQUIRE(val.has_value());
       REQUIRE(*val == "world");
    }
 
    SECTION("update existing key")
    {
-      cur->insert(to_key("key"), to_value("v1"));
-      cur->update(to_key("key"), to_value("v2"));
-      auto val = cur->get<std::string>(to_key("key"));
+      edit.insert(to_key("key"), to_value("v1"));
+      edit.update(to_key("key"), to_value("v2"));
+      auto val = edit.get<std::string>(to_key("key"));
       REQUIRE(*val == "v2");
    }
 
    SECTION("upsert inserts new and updates existing")
    {
-      cur->upsert(to_key("key"), to_value("v1"));
-      auto val = cur->get<std::string>(to_key("key"));
+      edit.upsert(to_key("key"), to_value("v1"));
+      auto val = edit.get<std::string>(to_key("key"));
       REQUIRE(*val == "v1");
 
-      cur->upsert(to_key("key"), to_value("v2"));
-      val = cur->get<std::string>(to_key("key"));
+      edit.upsert(to_key("key"), to_value("v2"));
+      val = edit.get<std::string>(to_key("key"));
       REQUIRE(*val == "v2");
    }
 
    SECTION("remove existing key")
    {
-      cur->insert(to_key("key"), to_value("value"));
-      int removed = cur->remove(to_key("key"));
+      edit.insert(to_key("key"), to_value("value"));
+      int removed = edit.remove(to_key("key"));
       REQUIRE(removed >= 0);
-      auto val = cur->get<std::string>(to_key("key"));
+      auto val = edit.get<std::string>(to_key("key"));
       REQUIRE_FALSE(val.has_value());
    }
 
    SECTION("remove nonexistent returns -1")
    {
-      REQUIRE(cur->remove(to_key("missing")) == -1);
+      REQUIRE(edit.remove(to_key("missing")) == -1);
    }
 
    SECTION("get nonexistent returns nullopt")
    {
-      auto val = cur->get<std::string>(to_key("missing"));
+      auto val = edit.get<std::string>(to_key("missing"));
       REQUIRE_FALSE(val.has_value());
    }
 }
 
-TEST_CASE("write_cursor read_cursor iteration", "[public-api][write-cursor]")
+TEST_CASE("write_transaction cursor iteration", "[public-api][write-transaction]")
 {
    test_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    temp = t.ses->create_temporary_tree();
+   auto    edit = t.ses->start_write_transaction(std::move(temp));
 
    // Insert keys in random order
-   cur->insert(to_key("cherry"), to_value("3"));
-   cur->insert(to_key("apple"), to_value("1"));
-   cur->insert(to_key("banana"), to_value("2"));
-   cur->insert(to_key("date"), to_value("4"));
+   edit.insert(to_key("cherry"), to_value("3"));
+   edit.insert(to_key("apple"), to_value("1"));
+   edit.insert(to_key("banana"), to_value("2"));
+   edit.insert(to_key("date"), to_value("4"));
 
    // Iterate and verify sorted order
-   auto rc = cur->read_cursor();
+   auto rc = edit.snapshot_cursor();
    rc.seek_begin();
 
    std::vector<std::string> keys;
@@ -135,20 +147,170 @@ TEST_CASE("write_cursor read_cursor iteration", "[public-api][write-cursor]")
    REQUIRE(keys[3] == "date");
 }
 
-TEST_CASE("write_cursor get into buffer", "[public-api][write-cursor]")
+TEST_CASE("write_transaction get into buffer", "[public-api][write-transaction]")
 {
    test_db t;
-   auto    cur = t.ses->create_write_cursor();
+   auto    temp = t.ses->create_temporary_tree();
+   auto    edit = t.ses->start_write_transaction(std::move(temp));
 
-   cur->insert(to_key("key"), to_value("hello world"));
+   edit.insert(to_key("key"), to_value("hello world"));
 
    std::string buf;
-   int32_t     result = cur->get(to_key("key"), &buf);
+   int32_t     result = edit.get(to_key("key"), &buf);
    REQUIRE(result >= 0);
    REQUIRE(buf == "hello world");
 
-   result = cur->get(to_key("missing"), &buf);
+   result = edit.get(to_key("missing"), &buf);
    REQUIRE(result < 0);
+}
+
+TEST_CASE("contract: detached tree edits are stored explicitly", "[public-api][contract][tree]")
+{
+   test_db t("contract_detached_tree_testdb");
+
+   auto profile = t.ses->create_temporary_tree();
+   auto edit    = t.ses->start_write_transaction(
+      std::move(profile), tx_mode::expect_success);
+
+   edit.upsert(to_key("field1"), to_value("value1"));
+   edit.upsert(to_key("field2"), to_value("value2"));
+
+   bool saw_field1 = edit.get(to_key("field1"), [](value_view value) {
+      CHECK(value == "value1");
+   });
+   REQUIRE(saw_field1);
+
+   profile = edit.get_tree();
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert_subtree(to_key("profile"), std::move(profile));
+      tx.commit();
+   }
+
+   auto rs       = t.db->start_read_session();
+   auto root     = rs->get_root(0);
+   auto restored = root.get_subtree(to_key("profile"));
+   REQUIRE(restored);
+
+   auto field1 = restored.get<std::string>(to_key("field1"));
+   REQUIRE(field1.has_value());
+   CHECK(*field1 == "value1");
+
+   std::string field2;
+   REQUIRE(restored.get(to_key("field2"), &field2) >= 0);
+   CHECK(field2 == "value2");
+}
+
+TEST_CASE("contract: edited tree can be published to a root", "[public-api][contract][tree]")
+{
+   test_db t("contract_tree_set_root_testdb");
+
+   auto temp = t.ses->create_temporary_tree();
+   auto edit = t.ses->start_write_transaction(std::move(temp));
+   edit.upsert(to_key("name"), to_value("detached"));
+   temp = edit.get_tree();
+
+   t.ses->set_root(3, std::move(temp));
+
+   auto rs  = t.db->start_read_session();
+   auto cur = rs->snapshot_cursor(3);
+   REQUIRE(cur.seek(to_key("name")));
+   auto value = cur.value<std::string>();
+   REQUIRE(value.has_value());
+   CHECK(*value == "detached");
+}
+
+TEST_CASE("contract: root snapshot can be edited and published elsewhere",
+          "[public-api][contract][tree]")
+{
+   test_db t("contract_root_snapshot_edit_testdb");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("name"), to_value("root-zero"));
+      tx.commit();
+   }
+
+   auto root_snapshot = t.ses->get_root(0);
+   REQUIRE(root_snapshot);
+
+   auto edit = t.ses->start_write_transaction(root_snapshot);
+   edit.update(to_key("name"), to_value("root-two"));
+   auto edited = edit.get_tree();
+
+   t.ses->set_root(2, std::move(edited));
+
+   CHECK(root_snapshot.get<std::string>(to_key("name")) ==
+         std::optional<std::string>("root-zero"));
+   CHECK(t.ses->get_root(0).get<std::string>(to_key("name")) ==
+         std::optional<std::string>("root-zero"));
+   CHECK(t.ses->get_root(2).get<std::string>(to_key("name")) ==
+         std::optional<std::string>("root-two"));
+}
+
+TEST_CASE("contract: copied tree handles can be stored in multiple places",
+          "[public-api][contract][tree]")
+{
+   test_db t("contract_tree_copy_store_testdb");
+
+   auto tree_value = t.ses->create_temporary_tree();
+   auto edit = t.ses->start_write_transaction(std::move(tree_value));
+   edit.upsert(to_key("color"), to_value("blue"));
+   tree_value = edit.get_tree();
+
+   auto tree_copy = tree_value;
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert_subtree(to_key("copy-a"), tree_value);
+      tx.upsert_subtree(to_key("copy-b"), std::move(tree_copy));
+      tx.commit();
+   }
+   t.ses->set_root(4, tree_value);
+
+   auto changed_edit = t.ses->start_write_transaction(tree_value);
+   changed_edit.update(to_key("color"), to_value("red"));
+   auto changed = changed_edit.get_tree();
+   t.ses->set_root(3, std::move(changed));
+
+   auto root = t.ses->get_root(0);
+   auto copy_a = root.get_subtree(to_key("copy-a"));
+   auto copy_b = root.get_subtree(to_key("copy-b"));
+   REQUIRE(copy_a);
+   REQUIRE(copy_b);
+   CHECK(copy_a.get<std::string>(to_key("color")) ==
+         std::optional<std::string>("blue"));
+   CHECK(copy_b.get<std::string>(to_key("color")) ==
+         std::optional<std::string>("blue"));
+   CHECK(t.ses->get_root(3).get<std::string>(to_key("color")) ==
+         std::optional<std::string>("red"));
+   CHECK(t.ses->get_root(4).get<std::string>(to_key("color")) ==
+         std::optional<std::string>("blue"));
+}
+
+TEST_CASE("contract: snapshot_cursor is explicit read-only pinning", "[public-api][contract][cursor]")
+{
+   test_db t("contract_snapshot_cursor_testdb");
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("key"), to_value("v1"));
+      tx.commit();
+   }
+
+   auto rs       = t.db->start_read_session();
+   auto snapshot = rs->snapshot_cursor(0);
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("key"), to_value("v2"));
+      tx.commit();
+   }
+
+   REQUIRE(snapshot.seek(to_key("key")));
+   auto value = snapshot.value<std::string>();
+   REQUIRE(value.has_value());
+   CHECK(*value == "v1");
 }
 
 // ============================================================
@@ -169,10 +331,30 @@ TEST_CASE("transaction commit persists root", "[public-api][transaction]")
    auto root = t.ses->get_root(0);
    REQUIRE(root);
 
-   cursor c(root);
    std::string buf;
-   REQUIRE(c.get(to_key("persisted"), &buf) >= 0);
+   REQUIRE(root.get(to_key("persisted"), &buf) >= 0);
    REQUIRE(buf == "yes");
+}
+
+TEST_CASE("contract: transaction get callback is zero-copy point read",
+          "[public-api][contract][transaction]")
+{
+   test_db t("contract_tx_get_callback_testdb");
+
+   auto tx = t.ses->start_transaction(0);
+   tx.upsert(to_key("field"), to_value("value"));
+
+   bool found = tx.get(to_key("field"), [](value_view value) {
+      CHECK(value == "value");
+   });
+   REQUIRE(found);
+
+   bool missing = tx.get(to_key("missing"), [](value_view) {
+      FAIL("missing key should not call callback");
+   });
+   REQUIRE_FALSE(missing);
+
+   tx.commit();
 }
 
 TEST_CASE("transaction abort discards changes", "[public-api][transaction]")
@@ -197,11 +379,10 @@ TEST_CASE("transaction abort discards changes", "[public-api][transaction]")
    auto root = t.ses->get_root(0);
    REQUIRE(root);
 
-   cursor c(root);
    std::string buf;
-   REQUIRE(c.get(to_key("base"), &buf) >= 0);
+   REQUIRE(root.get(to_key("base"), &buf) >= 0);
    REQUIRE(buf == "original");
-   REQUIRE(c.get(to_key("discarded"), &buf) < 0);
+   REQUIRE(root.get(to_key("discarded"), &buf) < 0);
 }
 
 TEST_CASE("transaction destructor aborts", "[public-api][transaction]")
@@ -221,10 +402,9 @@ TEST_CASE("transaction destructor aborts", "[public-api][transaction]")
    }
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
    std::string buf;
-   REQUIRE(c.get(to_key("base"), &buf) >= 0);
-   REQUIRE(c.get(to_key("lost"), &buf) < 0);
+   REQUIRE(root.get(to_key("base"), &buf) >= 0);
+   REQUIRE(root.get(to_key("lost"), &buf) < 0);
 }
 
 TEST_CASE("transaction sub_transaction commit", "[public-api][transaction]")
@@ -249,9 +429,8 @@ TEST_CASE("transaction sub_transaction commit", "[public-api][transaction]")
 
    // Both persisted
    auto root = t.ses->get_root(0);
-   cursor c(root);
-   REQUIRE(c.get(to_key("outer"), &buf) >= 0);
-   REQUIRE(c.get(to_key("inner"), &buf) >= 0);
+   REQUIRE(root.get(to_key("outer"), &buf) >= 0);
+   REQUIRE(root.get(to_key("inner"), &buf) >= 0);
 }
 
 TEST_CASE("transaction sub_transaction abort", "[public-api][transaction]")
@@ -275,7 +454,7 @@ TEST_CASE("transaction sub_transaction abort", "[public-api][transaction]")
    tx.commit();
 }
 
-TEST_CASE("transaction read_cursor snapshot", "[public-api][transaction]")
+TEST_CASE("transaction snapshot_cursor iteration", "[public-api][transaction]")
 {
    test_db t;
 
@@ -284,7 +463,7 @@ TEST_CASE("transaction read_cursor snapshot", "[public-api][transaction]")
    tx.upsert(to_key("b"), to_value("2"));
    tx.upsert(to_key("c"), to_value("3"));
 
-   auto rc = tx.read_cursor();
+   auto rc = tx.snapshot_cursor();
    rc.seek_begin();
 
    int count = 0;
@@ -313,19 +492,18 @@ TEST_CASE("session set_root and get_root round-trip", "[public-api][session]")
 {
    test_db t;
 
-   // Build a tree via write_cursor
-   auto cur = t.ses->create_write_cursor();
-   cur->insert(to_key("key"), to_value("value"));
-   auto root = cur->root();
+   auto root = t.ses->create_temporary_tree();
+   auto edit = t.ses->start_write_transaction(std::move(root));
+   edit.insert(to_key("key"), to_value("value"));
+   root = edit.get_tree();
 
    // Save and reload
-   t.ses->set_root(0, root, sal::sync_type::none);
+   t.ses->set_root(0, std::move(root), sal::sync_type::none);
    auto loaded = t.ses->get_root(0);
    REQUIRE(loaded);
 
-   cursor c(loaded);
    std::string buf;
-   REQUIRE(c.get(to_key("key"), &buf) >= 0);
+   REQUIRE(loaded.get(to_key("key"), &buf) >= 0);
    REQUIRE(buf == "value");
 }
 
@@ -349,16 +527,14 @@ TEST_CASE("multiple independent roots", "[public-api][session]")
    std::string buf;
 
    auto r0 = t.ses->get_root(0);
-   cursor c0(r0);
-   REQUIRE(c0.get(to_key("root0_key"), &buf) >= 0);
+   REQUIRE(r0.get(to_key("root0_key"), &buf) >= 0);
    REQUIRE(buf == "root0_val");
-   REQUIRE(c0.get(to_key("root1_key"), &buf) < 0);
+   REQUIRE(r0.get(to_key("root1_key"), &buf) < 0);
 
    auto r1 = t.ses->get_root(1);
-   cursor c1(r1);
-   REQUIRE(c1.get(to_key("root1_key"), &buf) >= 0);
+   REQUIRE(r1.get(to_key("root1_key"), &buf) >= 0);
    REQUIRE(buf == "root1_val");
-   REQUIRE(c1.get(to_key("root0_key"), &buf) < 0);
+   REQUIRE(r1.get(to_key("root0_key"), &buf) < 0);
 }
 
 // ============================================================
@@ -388,7 +564,7 @@ TEST_CASE("database reopen preserves data", "[public-api][database]")
       auto root = ses->get_root(0);
       REQUIRE(root);
 
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       std::string buf;
       REQUIRE(c.get(to_key("survive"), &buf) >= 0);
       REQUIRE(buf == "reopen");
@@ -418,7 +594,7 @@ TEST_CASE("bulk insert and verify", "[public-api][bulk]")
 
    // Verify all via get
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    for (int i = 0; i < N; ++i)
    {
       std::string key = "key_" + std::to_string(i);
@@ -473,7 +649,7 @@ TEST_CASE("bulk insert then remove all", "[public-api][bulk]")
    auto root = t.ses->get_root(0);
    if (root)
    {
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       c.seek_begin();
       REQUIRE(c.is_end());
    }
@@ -555,7 +731,7 @@ TEST_CASE("remove nonexistent keys does not leak references", "[public-api][remo
    // Verify original keys still present and refs are clean
    t.validate_unique_refs();
    {
-      cursor c(t.ses->get_root(0));
+      auto c = t.ses->get_root(0).snapshot_cursor();
       c.seek_begin();
       int count = 0;
       if (!c.is_end())
@@ -605,7 +781,7 @@ TEST_CASE("batched remove across multiple transactions", "[public-api][remove][r
    auto root = t.ses->get_root(0);
    if (root)
    {
-      cursor c(root);
+      auto c = root.snapshot_cursor();
       c.seek_begin();
       REQUIRE(c.is_end());
    }
@@ -638,7 +814,7 @@ TEST_CASE("remove same key repeatedly does not leak references", "[public-api][r
       tx.commit();
    }
 
-   cursor c(t.ses->get_root(0));
+   auto c = t.ses->get_root(0).snapshot_cursor();
    auto val = c.get<std::string>(to_key_view("thekey"));
    REQUIRE(val.has_value());
    REQUIRE(*val == "restored");
@@ -675,7 +851,7 @@ TEST_CASE("high-frequency insert/remove on overlapping keys", "[public-api][remo
    }
 
    // Verify tree is consistent: can iterate without crash
-   cursor c(t.ses->get_root(0));
+   auto c = t.ses->get_root(0).snapshot_cursor();
    c.seek_begin();
    int count = 0;
    if (!c.is_end())
@@ -719,7 +895,7 @@ static int count_keys(test_db& t)
 {
    auto root = t.ses->get_root(0);
    if (!root) return 0;
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    c.seek_begin();
    int count = 0;
    if (!c.is_end())
@@ -1330,7 +1506,7 @@ TEST_CASE("leak: snapshot held during remove - no orphans after release",
    // But allocated objects may be non-zero because snapshot holds refs
    // The snapshot should still be readable
    {
-      cursor c(snapshot);
+      auto c = snapshot.snapshot_cursor();
       c.seek_begin();
       int snap_count = 0;
       if (!c.is_end())
@@ -1619,7 +1795,7 @@ TEST_CASE("micro transaction basic upsert and get", "[public-api][transaction][m
 
    // Persisted
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("hello"), &buf) >= 0);
    REQUIRE(buf == "world");
@@ -1663,7 +1839,7 @@ TEST_CASE("micro transaction overwrite value", "[public-api][transaction][micro]
    tx.commit();
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("key"), &buf) >= 0);
    REQUIRE(buf == "second");
@@ -1702,7 +1878,7 @@ TEST_CASE("micro transaction remove", "[public-api][transaction][micro]")
 
    // Verify persistent tree
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("a"), &buf) >= 0);
    REQUIRE(c.get(to_key("b"), &buf) < 0);  // removed
@@ -1744,7 +1920,7 @@ TEST_CASE("micro transaction remove then re-insert", "[public-api][transaction][
    }
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("key"), &buf) >= 0);
    REQUIRE(buf == "resurrected");
@@ -1770,7 +1946,7 @@ TEST_CASE("micro transaction abort discards all changes", "[public-api][transact
 
    // Persistent tree unchanged
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("existing"), &buf) >= 0);
    REQUIRE(buf == "keep");
@@ -1797,7 +1973,7 @@ TEST_CASE("micro transaction sub_transaction commit", "[public-api][transaction]
    tx.commit();
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("outer"), &buf) >= 0);
    REQUIRE(c.get(to_key("inner"), &buf) >= 0);
@@ -1822,7 +1998,7 @@ TEST_CASE("micro transaction sub_transaction abort", "[public-api][transaction][
    tx.commit();
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("outer"), &buf) >= 0);
    REQUIRE(c.get(to_key("inner_lost"), &buf) < 0);
@@ -1877,7 +2053,7 @@ TEST_CASE("micro transaction nested sub_transactions two levels", "[public-api][
    tx.commit();
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("L0"), &buf) >= 0);
    REQUIRE(c.get(to_key("L1"), &buf) >= 0);
@@ -1963,7 +2139,7 @@ TEST_CASE("micro transaction many keys merge to persistent tree", "[public-api][
    tx.commit();
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    for (int i = 0; i < N; ++i)
    {
@@ -2037,7 +2213,7 @@ TEST_CASE("micro transaction with pre-existing persistent data", "[public-api][t
 
    // Verify persistent tree
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
 
    // Updated keys
@@ -2100,7 +2276,7 @@ TEST_CASE("batch sub_transaction still works via frame_ref", "[public-api][trans
    tx.commit();
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("batch_outer"), &buf) >= 0);
    REQUIRE(c.get(to_key("batch_inner"), &buf) >= 0);
@@ -2167,7 +2343,7 @@ TEST_CASE("micro remove_range small uses tombstones", "[public-api][transaction]
 
    // Verify persistent tree
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("a"), &buf) >= 0);
    REQUIRE(c.get(to_key("d"), &buf) >= 0);
@@ -2205,7 +2381,7 @@ TEST_CASE("micro remove_range also removes buffer inserts in range",
    }
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("e"), &buf) >= 0);
    REQUIRE(c.get(to_key("f"), &buf) < 0);
@@ -2277,7 +2453,7 @@ TEST_CASE("micro remove_range large triggers merge-then-delegate",
 
    // Verify persistent tree
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("word_0000"), &buf) >= 0);
    REQUIRE(c.get(to_key("word_0299"), &buf) >= 0);
@@ -2346,7 +2522,7 @@ TEST_CASE("micro sub_transaction with large range remove then abort",
 
    // Verify: all original keys intact, plus parent_key
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("k_0200"), &buf) >= 0);
    REQUIRE(c.get(to_key("parent_key"), &buf) >= 0);
@@ -2405,7 +2581,7 @@ TEST_CASE("micro nested sub_transaction: inner merge, outer abort",
    }
 
    auto root = t.ses->get_root(0);
-   cursor c(root);
+   auto c = root.snapshot_cursor();
    std::string buf;
    REQUIRE(c.get(to_key("n_0200"), &buf) >= 0);
    REQUIRE(c.get(to_key("L0_key"), &buf) >= 0);

@@ -25,7 +25,7 @@ First wave:
 
 Second wave (transaction-refactor-finish):
 - Phase A — per-txn version threading via `smart_ptr`'s `_ver` (3aa21c3). `make_unique_root` as the explicit state-transition primitive; `give(addr)` preserves `_ver`; tree_context's COW update path uses chain extension on existing value_nodes.
-- Phase B — lazy version allocation for `expect_failure` + cursor snapshot version (2f60d13). `ensure_txn_version` plugged into the buffer-flush funnel; cursors inherit the snapshot's version from `smart_ptr.ver()`.
+- Phase B — lazy version allocation for `expect_failure` + cursor snapshot version (2f60d13). The lazy version materialization helper, now named `materialize_txn_version`, is plugged into the buffer-flush funnel; cursors inherit the snapshot's version from `smart_ptr.ver()`.
 - Phase C — `_has_txn_version` flag distinguishes "txn owns its ver" from "inherited slot ver"; expect_failure aborts that allocated a ver release it cleanly (bbe9aa5).
 - Phase D — in-place coalesce: `value_node::try_coalesce_in_place` memcpy fast path for same/smaller updates with matching version (5881120). 1000 hot-key updates allocate ≤ 5 new objects.
 - Phase E — type-erased `held_lock` removes the `std::mutex*` hardcode (aa40f88). Multi-root locking now matches whatever LockPolicy the bound write_session uses.

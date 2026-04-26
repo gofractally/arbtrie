@@ -51,6 +51,12 @@ namespace psitri::dwal
       return _inner->get(key);
    }
 
+   template <class LockPolicy>
+   owned_merge_cursor basic_transaction<LockPolicy>::root_handle::create_cursor() const
+   {
+      return _inner->create_cursor();
+   }
+
    // ── transaction construction ─────────────────────────────────────
 
    template <class LockPolicy>
@@ -184,6 +190,14 @@ namespace psitri::dwal
    basic_transaction<LockPolicy>::get(uint32_t root_index, std::string_view key)
    {
       return root(root_index).get(key);
+   }
+
+   template <class LockPolicy>
+   owned_merge_cursor basic_transaction<LockPolicy>::create_cursor(uint32_t root_index) const
+   {
+      auto it = _handles.find(root_index);
+      assert(it != _handles.end() && "root_index not declared in transaction");
+      return it->second.create_cursor();
    }
 
    // ── commit ───────────────────────────────────────────────────────

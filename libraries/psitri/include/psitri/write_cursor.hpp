@@ -1,6 +1,8 @@
 #pragma once
 #include <psitri/cursor.hpp>
+#include <psitri/tree.hpp>
 #include <psitri/tree_ops.hpp>
+#include <utility>
 
 namespace psitri
 {
@@ -57,12 +59,22 @@ namespace psitri
          _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(tid));
       }
 
+      void upsert_subtree(key_view key, tree subtree)
+      {
+         upsert(key, std::move(subtree).take_root());
+      }
+
       /// Sorted variant of subtree upsert.
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          auto tid = subtree_root.get_tree_id();
          subtree_root.take();  // release ownership without decrementing ref
          _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type::make_subtree(tid));
+      }
+
+      void upsert_subtree_sorted(key_view key, tree subtree)
+      {
+         upsert_sorted(key, std::move(subtree).take_root());
       }
 
       /// Remove key. Returns size of removed value, or -1 if not found.
@@ -91,6 +103,12 @@ namespace psitri
       {
          cursor c(_ctx.get_root());
          return c.get<T>(key);
+      }
+
+      bool get(key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         cursor c(_ctx.get_root());
+         return c.get(key, std::forward<decltype(lambda)>(lambda));
       }
 
       /// Point lookup into a buffer. Returns bytes read, or cursor::value_not_found.

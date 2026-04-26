@@ -11,6 +11,8 @@
 
 namespace psitri::dwal
 {
+   class owned_merge_cursor;
+
    template <class LockPolicy>
    class basic_dwal_database;
 
@@ -50,6 +52,7 @@ namespace psitri::dwal
 
          // ── Reads (always allowed) ─────────────────────────────────
          lookup_result get(std::string_view key) const;
+         owned_merge_cursor create_cursor() const;
 
          bool     writable() const noexcept { return _writable; }
          uint32_t index() const noexcept { return _root_index; }
@@ -91,6 +94,7 @@ namespace psitri::dwal
       void               remove_range(uint32_t root_index, std::string_view low,
                                       std::string_view high);
       lookup_result      get(uint32_t root_index, std::string_view key);
+      owned_merge_cursor create_cursor(uint32_t root_index) const;
 
       // ── Transaction control ───────────────────────────────────────
 

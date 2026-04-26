@@ -43,6 +43,7 @@
 
 #if defined(KV_ENGINE_DWAL)
 #include <psitri/database.hpp>
+#include <psitri/database_impl.hpp>
 #include <psitri/dwal/dwal_database.hpp>
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/merge_cursor.hpp>

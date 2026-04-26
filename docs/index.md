@@ -109,7 +109,7 @@ Use PsiTri as a persistent storage backend for DuckDB's SQL engine. Same DuckDB 
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
 
-auto db  = psitri::database::create("my_database");
+auto db  = psitri::database::open("my_database", psitri::open_mode::create_or_open);
 auto ses = db->start_write_session();
 
 // Insert data in a transaction

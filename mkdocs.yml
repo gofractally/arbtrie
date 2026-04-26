@@ -100,6 +100,7 @@ nav:
   - Getting Started:
       - Quick Start: getting-started/quickstart.md
       - Examples: examples.md
+      - Transaction Contract: getting-started/transaction-contract.md
       - RocksDB Migration: getting-started/rocksdb-migration.md
       - MDBX Migration: getting-started/mdbx-migration.md
       - SQLite Migration: getting-started/sqlite-migration.md

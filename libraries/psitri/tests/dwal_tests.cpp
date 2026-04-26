@@ -1366,7 +1366,7 @@ TEST_CASE("merge_pool drains RO btree into PsiTri", "[dwal]")
 
    // Verify data was merged into PsiTri.
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek_begin();
 
    REQUIRE_FALSE(cur.is_end());
@@ -1441,7 +1441,7 @@ TEST_CASE("merge_pool handles tombstones during drain", "[dwal]")
 
    // Verify merged state.
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek_begin();
 
    // "aaa" should be overwritten.
@@ -1514,7 +1514,7 @@ TEST_CASE("direct COW cursor refresh releases old tree", "[dwal][leak]")
    REQUIRE(baseline > 0);
 
    // Create a cursor (holds a root ref).
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    // Do several rounds of writes + cursor refresh.
    for (int round = 0; round < 10; ++round)
@@ -1577,7 +1577,7 @@ TEST_CASE("direct COW concurrent read+write doesn't leak", "[dwal][leak]")
    auto reader = std::thread([&]()
    {
       auto rs  = db->start_read_session();
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       int ops = 0;
       while (!done.load(std::memory_order_relaxed))
       {
@@ -2173,7 +2173,7 @@ TEST_CASE("merge_cursor iterates across RW + RO + Tri", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    // RO layer.
    psitri::dwal::btree_layer ro;
@@ -2231,7 +2231,7 @@ TEST_CASE("merge_cursor RW tombstone shadows Tri key", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer rw;
    rw.store_tombstone("b");
@@ -2262,7 +2262,7 @@ TEST_CASE("merge_cursor RW range tombstone shadows Tri range", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer rw;
    rw.tombstones.add("b", "d");  // [b,d) tombstoned
@@ -2290,7 +2290,7 @@ TEST_CASE("merge_cursor prev across RW + RO + Tri", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_data("bbb", "ro");
@@ -2925,7 +2925,7 @@ TEST_CASE("merge_cursor count_keys with RW+RO+Tri", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_data("b", "2");
@@ -3402,7 +3402,7 @@ TEST_CASE("merge_cursor upper_bound with RO and Tri layers", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_data("b", "RO_B");
@@ -3484,7 +3484,7 @@ TEST_CASE("merge_cursor RO tombstone shadows Tri in forward scan", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_tombstone("b");  // RO tombstone shadows Tri's "b"
@@ -3515,7 +3515,7 @@ TEST_CASE("merge_cursor RO range tombstone shadows Tri in forward scan", "[dwal]
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.tombstones.add("b", "d");  // [b,d) tombstoned
@@ -3545,7 +3545,7 @@ TEST_CASE("merge_cursor backward with RW tombstone + RO + Tri", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_data("b", "RO_B");  // shadows Tri b
@@ -3604,7 +3604,7 @@ TEST_CASE("merge_cursor backward with RO tombstone shadows Tri", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_tombstone("b");
@@ -3633,7 +3633,7 @@ TEST_CASE("merge_cursor backward RW shadows duplicate in RO and Tri", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_data("shared", "ro");
@@ -3667,7 +3667,7 @@ TEST_CASE("merge_cursor backward RO shadows duplicate in Tri", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::btree_layer ro;
    ro.store_data("shared", "ro");
@@ -3762,7 +3762,7 @@ TEST_CASE("merge_cursor lower_bound with Tri layer only", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::merge_cursor mc(nullptr, nullptr, std::move(cur));
 
@@ -3788,7 +3788,7 @@ TEST_CASE("merge_cursor is_subtree from Tri layer", "[dwal]")
    }
 
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
 
    psitri::dwal::merge_cursor mc(nullptr, nullptr, std::move(cur));
    mc.seek_begin();
@@ -3845,7 +3845,7 @@ TEST_CASE("dwal recover RO WAL replays all op types into tri", "[dwal][recovery]
    // Verify key1 was upserted into PsiTri.
    {
       auto rs  = db->start_read_session();
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       std::string buf;
       CHECK(cur.get(psitri::key_view("key1", 4), &buf) >= 0);
       CHECK(buf == "val1");
@@ -4274,7 +4274,7 @@ TEST_CASE("dwal recover with both RO and RW WALs for same root", "[dwal][recover
    // RO WAL data should be in PsiTri.
    {
       auto rs  = db->start_read_session();
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       std::string buf;
       CHECK(cur.get(psitri::key_view("ro_key", 6), &buf) >= 0);
       CHECK(buf == "ro_val");
@@ -4320,7 +4320,7 @@ TEST_CASE("dwal recover with multiple roots", "[dwal][recovery]")
    // Root 0 data in PsiTri.
    {
       auto rs  = db->start_read_session();
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       std::string buf;
       CHECK(cur.get(psitri::key_view("r0_key", 6), &buf) >= 0);
    }

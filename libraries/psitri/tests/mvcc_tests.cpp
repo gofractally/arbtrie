@@ -1307,7 +1307,7 @@ TEST_CASE("defrag_tree via write_session", "[defrag]")
 
    // Data should still be readable
    auto rs = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.lower_bound("k0000");
    REQUIRE(!cur.is_end());
 
@@ -1432,7 +1432,7 @@ TEST_CASE("version entries accumulate then clean up after snapshot release", "[m
 
    // Step 2: Take a snapshot to hold old versions alive
    auto rs       = db->start_read_session();
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
 
    // Step 3: MVCC-update all keys multiple rounds — accumulates version entries
    for (int round = 1; round <= num_rounds; ++round)
@@ -1523,7 +1523,7 @@ TEST_CASE("version entries accumulate then clean up after snapshot release", "[m
 
    // Step 9: Verify data is still correct — latest values readable
    {
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       for (int i = 0; i < num_keys; ++i)
       {
          char key[16], expected[32];
@@ -1557,14 +1557,14 @@ TEST_CASE("held snapshot prevents version cleanup", "[mvcc_lifecycle]")
    }
 
    // Take snapshot at version 1
-   auto snapshot_v1 = rs->create_cursor(0);
+   auto snapshot_v1 = rs->snapshot_cursor(0);
 
    // MVCC-update both keys
    ws->mvcc_upsert(0, "key_a", "val_a_v1");
    ws->mvcc_upsert(0, "key_b", "val_b_v1");
 
    // Take snapshot at version 3
-   auto snapshot_v3 = rs->create_cursor(0);
+   auto snapshot_v3 = rs->snapshot_cursor(0);
 
    // MVCC-update again
    ws->mvcc_upsert(0, "key_a", "val_a_v2");
@@ -1627,7 +1627,7 @@ TEST_CASE("held snapshot prevents version cleanup", "[mvcc_lifecycle]")
    }
 
    // Latest values still correct
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek("key_a");
    REQUIRE(!cur.is_end());
    CHECK(cur.value<std::string>().value_or("") == "val_a_v2");
@@ -1685,7 +1685,7 @@ TEST_CASE("snapshot survives many MVCC writes and defrag", "[mvcc_snapshot][stre
 
    // Step 2: Take a snapshot — this will be held while mutations accumulate
    auto rs       = db->start_read_session();
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
 
    // Compute expected hash from the snapshot state
    uint64_t expected_hash = hash_tree_contents(snapshot);
@@ -1745,7 +1745,7 @@ TEST_CASE("snapshot survives many MVCC writes and defrag", "[mvcc_snapshot][stre
    CHECK(snapshot.value<std::string>().value_or("") == "val_0049_v0");
 
    // Step 6: Verify the LATEST values are correct too
-   auto latest = rs->create_cursor(0);
+   auto latest = rs->snapshot_cursor(0);
    latest.seek("key_0000");
    REQUIRE(!latest.is_end());
    char expected_latest[32];
@@ -1782,7 +1782,7 @@ TEST_CASE("snapshot survives COW epoch transitions", "[mvcc_snapshot][stress]")
 
    // Take snapshot after initial seed
    auto rs       = db->start_read_session();
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
    uint64_t expected_hash = hash_tree_contents(snapshot);
 
    // Run multiple epochs: MVCC writes, then a COW batch (epoch boundary)
@@ -1861,7 +1861,7 @@ TEST_CASE("multiple snapshots at different versions coexist", "[mvcc_snapshot][s
    for (int ver = 0; ver < num_versions; ++ver)
    {
       // Take snapshot
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       uint64_t h = hash_tree_contents(cur);
       snapshots.push_back({std::move(cur), h});
 
@@ -1877,7 +1877,7 @@ TEST_CASE("multiple snapshots at different versions coexist", "[mvcc_snapshot][s
 
    // Take final snapshot
    {
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       uint64_t h = hash_tree_contents(cur);
       snapshots.push_back({std::move(cur), h});
    }
@@ -1935,7 +1935,7 @@ TEST_CASE("automatic version reclamation pipeline", "[mvcc_lifecycle]")
    }
 
    // Step 2: Take snapshot (holds version 1 alive)
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
 
    // Step 3: MVCC-update all keys multiple rounds
    for (int round = 1; round <= num_rounds; ++round)
@@ -1984,7 +1984,7 @@ TEST_CASE("automatic version reclamation pipeline", "[mvcc_lifecycle]")
 
    // Step 7: Latest values still readable
    {
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       for (int i = 0; i < num_keys; ++i)
       {
          char key[16], expected[32];
@@ -2064,7 +2064,7 @@ TEST_CASE("epoch boundary triggers COW maintenance and bounds version bloat",
    // Verify latest values
    {
       auto rs  = db->start_read_session();
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       for (int i = 0; i < num_keys; ++i)
       {
          char key[16], expected[32];
@@ -2181,7 +2181,7 @@ TEST_CASE("dictionary MVCC random update throughput", "[mvcc_bench]")
 
    // Spot-check a value
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek(words[0]);
    REQUIRE(!cur.is_end());
 
@@ -2228,7 +2228,7 @@ TEST_CASE("dictionary COW random update throughput", "[mvcc_bench]")
 
    // Spot-check
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek(words[0]);
    REQUIRE(!cur.is_end());
 
@@ -2290,7 +2290,7 @@ TEST_CASE("dictionary single-key hot update throughput", "[mvcc_bench]")
 
    // Verify latest value
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek(hot_key);
    REQUIRE(!cur.is_end());
 

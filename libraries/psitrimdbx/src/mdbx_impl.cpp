@@ -14,12 +14,14 @@
 #include <psitri/write_session.hpp>
 #include <psitri/write_session_impl.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -185,6 +187,56 @@ static bool dupsort_decode(std::string_view composite,
    return false;
 }
 
+/// Transaction-owned storage for slices returned through the MDBX API.
+///
+/// Native MDBX usually returns pointers into mmap'd pages, so callers commonly
+/// keep returned MDBX_val slices after closing a short-lived cursor. PsiTri
+/// cursors materialize values, so the compatibility layer must keep those bytes
+/// alive for the transaction rather than tying them to a cursor object.
+class returned_slice_arena
+{
+ public:
+   MDBX_val hold(std::string_view bytes)
+   {
+      if (bytes.empty())
+         return {&empty_, 0};
+
+      char* dst = allocate(bytes.size());
+      std::memcpy(dst, bytes.data(), bytes.size());
+      return {dst, bytes.size()};
+   }
+
+   void clear() { chunks_.clear(); }
+
+ private:
+   struct chunk
+   {
+      std::unique_ptr<char[]> data;
+      size_t                  capacity = 0;
+      size_t                  used     = 0;
+   };
+
+   static constexpr size_t default_chunk_size = 1024 * 1024;
+
+   char* allocate(size_t bytes)
+   {
+      if (chunks_.empty()
+          || chunks_.back().capacity - chunks_.back().used < bytes)
+      {
+         const size_t capacity = std::max(default_chunk_size, bytes);
+         chunks_.push_back({std::make_unique<char[]>(capacity), capacity, 0});
+      }
+
+      auto& chunk = chunks_.back();
+      char* ptr = chunk.data.get() + chunk.used;
+      chunk.used += bytes;
+      return ptr;
+   }
+
+   std::vector<chunk> chunks_;
+   char               empty_ = '\0';
+};
+
 /// Cursor state for a single DBI — either merge cursor or direct.
 struct cursor_state
 {
@@ -267,6 +319,19 @@ struct MDBX_txn
    std::unique_ptr<psitri::dwal::transaction>      write_tx;
    std::vector<uint32_t>                           write_roots; // roots opened for writing
 
+   struct dbi_registry_change
+   {
+      MDBX_dbi dbi      = 0;
+      dbi_info old_info = {};
+      bool     had_old  = false;
+   };
+   std::vector<dbi_registry_change> dbi_changes;
+
+   // Cursor storage is owned by the transaction. mdbx_cursor_close() resets
+   // and returns cursors to this intrusive free list instead of deleting them.
+   std::vector<std::unique_ptr<MDBX_cursor>> cursor_storage;
+   MDBX_cursor*                             free_cursors = nullptr;
+
    // RO transaction (mutable: lazily created even from const mdbx_get)
    mutable std::unique_ptr<psitri::dwal::dwal_read_session> read_session;
 
@@ -274,8 +339,10 @@ struct MDBX_txn
    // For reads within a RW txn, we use the transaction's get() method.
    // For RO txns, we use the read session.
 
-   // Value buffer for get() return — kept alive until next get()
-   std::string get_buf;
+   // Returned MDBX_val key/value bytes. Native MDBX exposes mmap-backed slices
+   // that remain usable for the transaction lifetime; this arena preserves that
+   // contract for materialized PsiTri reads and cursor results.
+   mutable returned_slice_arena returned_slices;
 
    bool committed = false;
    bool aborted   = false;
@@ -288,8 +355,10 @@ struct MDBX_cursor
    MDBX_txn* txn  = nullptr;
    MDBX_dbi  dbi  = 0;
    bool      is_dupsort = false;
+   bool      open = false;
+   MDBX_cursor* next_free = nullptr;
 
-   std::unique_ptr<cursor_state> state;
+   std::optional<cursor_state> state;
 };
 
 // ════════════════════════════════════════════════════════════════════
@@ -300,6 +369,21 @@ static std::string_view to_sv(const MDBX_val* v)
 {
    return v ? std::string_view(static_cast<const char*>(v->iov_base), v->iov_len)
             : std::string_view{};
+}
+
+static MDBX_val hold_txn_slice(const MDBX_txn* txn, std::string_view bytes)
+{
+   return const_cast<MDBX_txn*>(txn)->returned_slices.hold(bytes);
+}
+
+static void assign_cursor_result(MDBX_cursor* cursor, MDBX_val* key,
+                                 MDBX_val* data)
+{
+   auto& st = *cursor->state;
+   if (key)
+      *key = hold_txn_slice(cursor->txn, st.key_buf);
+   if (data)
+      *data = hold_txn_slice(cursor->txn, st.val_buf);
 }
 
 static uint32_t dbi_root_index(MDBX_env* env, MDBX_dbi dbi)
@@ -316,6 +400,128 @@ static bool dbi_is_dupsort(MDBX_env* env, MDBX_dbi dbi)
    if (dbi >= env->dbis.size())
       return false;
    return env->dbis[dbi].is_dupsort;
+}
+
+static constexpr unsigned max_named_dbs()
+{
+   // DBI 0 is metadata, DBI 1 is the unnamed default DB, and named DBIs map
+   // to root_index = dbi + 1. Root 2 is currently unused by this shim.
+   return psitri::num_top_roots - 3;
+}
+
+static psitri::dwal::read_mode read_mode_for_txn(const MDBX_txn* txn)
+{
+   if (!txn || !txn->is_readonly())
+      return psitri::dwal::read_mode::latest;
+
+   static constexpr psitri::dwal::read_mode modes[] = {
+      psitri::dwal::read_mode::buffered,
+      psitri::dwal::read_mode::latest,
+      psitri::dwal::read_mode::trie,
+   };
+   return modes[txn->env->read_mode];
+}
+
+static std::vector<uint32_t> all_mdbx_write_roots(MDBX_env* env)
+{
+   std::vector<uint32_t> roots;
+   roots.reserve(env->max_dbs + 2);
+   roots.push_back(0); // catalog
+   roots.push_back(1); // unnamed default DB
+
+   const uint32_t highest_named_root =
+      std::min<uint32_t>(psitri::num_top_roots - 1, env->max_dbs + 2);
+   for (uint32_t root = 3; root <= highest_named_root; ++root)
+      roots.push_back(root);
+
+   return roots;
+}
+
+static bool txn_covers_root(const MDBX_txn* txn, uint32_t root_idx)
+{
+   if (!txn)
+      return false;
+   for (auto ri : txn->write_roots)
+      if (ri == root_idx)
+         return true;
+   return false;
+}
+
+static psitri::dwal::owned_merge_cursor make_txn_cursor(const MDBX_txn* txn,
+                                                        uint32_t        root_idx)
+{
+   if (!txn->is_readonly() && txn->write_tx)
+      return txn->write_tx->create_cursor(root_idx);
+
+   return txn->env->dwal_db->create_cursor(root_idx, read_mode_for_txn(txn));
+}
+
+static MDBX_cursor* acquire_cursor(MDBX_txn* txn)
+{
+   if (txn->free_cursors)
+   {
+      MDBX_cursor* c = txn->free_cursors;
+      txn->free_cursors = c->next_free;
+      c->next_free = nullptr;
+      c->open = true;
+      return c;
+   }
+
+   txn->cursor_storage.push_back(std::make_unique<MDBX_cursor>());
+   MDBX_cursor* c = txn->cursor_storage.back().get();
+   c->open = true;
+   return c;
+}
+
+static void release_cursor(MDBX_cursor* cursor)
+{
+   if (!cursor || !cursor->open)
+      return;
+
+   MDBX_txn* txn = cursor->txn;
+   cursor->state.reset();
+   cursor->dbi = 0;
+   cursor->is_dupsort = false;
+   cursor->open = false;
+
+   if (!txn)
+      return;
+
+   cursor->next_free = txn->free_cursors;
+   txn->free_cursors = cursor;
+}
+
+static void rollback_dbi_registry_changes(MDBX_txn* txn)
+{
+   if (!txn || txn->dbi_changes.empty())
+      return;
+
+   std::unique_lock lk(txn->env->dbi_mutex);
+   for (auto it = txn->dbi_changes.rbegin(); it != txn->dbi_changes.rend(); ++it)
+   {
+      if (it->dbi >= txn->env->dbis.size())
+         continue;
+
+      auto& slot = txn->env->dbis[it->dbi];
+      if (it->had_old)
+      {
+         if (!slot.name.empty())
+            txn->env->name_to_dbi.erase(slot.name);
+         slot = it->old_info;
+         if (!slot.name.empty())
+            txn->env->name_to_dbi[slot.name] = it->dbi;
+      }
+      else
+      {
+         if (!slot.name.empty())
+            txn->env->name_to_dbi.erase(slot.name);
+         slot.name.clear();
+         slot.root_index = UINT32_MAX;
+         slot.flags = 0;
+         slot.is_dupsort = false;
+      }
+   }
+   txn->dbi_changes.clear();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -424,7 +630,7 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       try
       {
          auto rs = env->db->start_read_session();
-         auto cur = rs->create_cursor(0);
+         auto cur = rs->snapshot_cursor(0);
          if (cur.seek_begin())
          {
             do
@@ -526,6 +732,8 @@ int mdbx_env_set_maxdbs(MDBX_env* env, MDBX_dbi dbs)
 {
    if (!env || env->opened)
       return MDBX_EINVAL;
+   if (dbs > max_named_dbs())
+      return MDBX_DBS_FULL;
    env->max_dbs = dbs;
    return MDBX_SUCCESS;
 }
@@ -616,7 +824,7 @@ int mdbx_txn_begin_ex(MDBX_env* env, MDBX_txn* parent,
 
    try
    {
-      auto* t      = new MDBX_txn();
+      auto t       = std::make_unique<MDBX_txn>();
       t->env       = env;
       t->txn_flags = flags;
       t->context   = context;
@@ -627,41 +835,24 @@ int mdbx_txn_begin_ex(MDBX_env* env, MDBX_txn* parent,
          t->read_session = std::make_unique<psitri::dwal::dwal_read_session>(
             env->dwal_db->start_read_session());
       }
-      // RW transaction created lazily when first DBI is used,
-      // because we need to know which roots to lock.
+      else
+      {
+         // DWAL wants a transaction's root set declared up front. MDBX DBIs
+         // can be touched lazily, so the compatibility layer enlists every
+         // root that could belong to a DBI for this environment. This avoids
+         // committing partial work when a transaction later touches another DBI.
+         t->write_roots = all_mdbx_write_roots(env);
+         t->write_tx = std::make_unique<psitri::dwal::transaction>(
+            *env->dwal_db, t->write_roots);
+      }
 
-      *txn = t;
+      *txn = t.release();
       return MDBX_SUCCESS;
    }
    catch (...)
    {
       return MDBX_ENOMEM;
    }
-}
-
-/// Ensure the write transaction is created with the right roots.
-/// Called lazily before the first mutation or get in an RW txn.
-static int ensure_write_tx(MDBX_txn* txn, uint32_t root_index)
-{
-   if (!txn || txn->is_readonly())
-      return MDBX_BAD_TXN;
-
-   if (txn->write_tx)
-   {
-      // Check if this root is already part of the transaction
-      for (auto ri : txn->write_roots)
-         if (ri == root_index)
-            return MDBX_SUCCESS;
-
-      // Root not yet included — we need to commit-and-recreate
-      // or just add it. For simplicity, we use single-root transactions
-      // per operation for now, but the multi-root transaction approach
-      // is better. Let's use single-root dwal_transactions instead.
-      // Actually, since MDBX serializes writers, we hold the global
-      // write lock anyway. We can use per-operation transactions.
-   }
-
-   return MDBX_SUCCESS;
 }
 
 int mdbx_txn_commit_ex(MDBX_txn* txn, MDBX_commit_latency* latency)
@@ -681,12 +872,14 @@ int mdbx_txn_commit_ex(MDBX_txn* txn, MDBX_commit_latency* latency)
          txn->write_tx->commit();
       }
 
+      txn->dbi_changes.clear();
       txn->committed = true;
       delete txn;
       return MDBX_SUCCESS;
    }
    catch (...)
    {
+      rollback_dbi_registry_changes(txn);
       txn->aborted = true;
       delete txn;
       return MDBX_PANIC;
@@ -708,12 +901,14 @@ int mdbx_txn_abort(MDBX_txn* txn)
       if (txn->write_tx)
          txn->write_tx->abort();
 
+      rollback_dbi_registry_changes(txn);
       txn->aborted = true;
       delete txn;
       return MDBX_SUCCESS;
    }
    catch (...)
    {
+      rollback_dbi_registry_changes(txn);
       delete txn;
       return MDBX_PANIC;
    }
@@ -724,6 +919,7 @@ int mdbx_txn_reset(MDBX_txn* txn)
    if (!txn || !txn->is_readonly())
       return MDBX_BAD_TXN;
    // Don't destroy the session — just mark as reset. Renew will refresh it.
+   txn->returned_slices.clear();
    return MDBX_SUCCESS;
 }
 
@@ -733,6 +929,7 @@ int mdbx_txn_renew(MDBX_txn* txn)
       return MDBX_BAD_TXN;
    try
    {
+      txn->returned_slices.clear();
       if (!txn->read_session)
          txn->read_session = std::make_unique<psitri::dwal::dwal_read_session>(
             txn->env->dwal_db->start_read_session());
@@ -811,23 +1008,27 @@ int mdbx_dbi_open(MDBX_txn* txn, const char* name,
          return MDBX_DBS_FULL;
 
       *dbi = env->allocate_dbi(sname, flags);
+      txn->dbi_changes.push_back({*dbi, {}, false});
    }
 
-   // Persist the DBI name→flags mapping directly to PsiTri root 0 (catalog).
-   // We write directly to PsiTri (bypassing DWAL) to ensure the catalog
-   // survives restart without depending on WAL recovery.
+   // Persist the DBI name→flags mapping through the active MDBX/DWAL
+   // transaction. This keeps DBI creation rollbackable.
    try
    {
-      auto ws = env->db->start_write_session();
-      auto wt = ws->start_transaction(0);
+      int rc = ensure_rw_root(txn, 0);
+      if (rc != MDBX_SUCCESS)
+      {
+         rollback_dbi_registry_changes(txn);
+         return rc;
+      }
       uint32_t f = flags;
       std::string_view fv(reinterpret_cast<const char*>(&f), sizeof(f));
-      wt.upsert(sname, fv);
-      wt.commit();
+      txn->write_tx->upsert(0, sname, fv);
    }
    catch (...)
    {
-      // Non-fatal: catalog entry not persisted.
+      rollback_dbi_registry_changes(txn);
+      return MDBX_PANIC;
    }
 
    return MDBX_SUCCESS;
@@ -855,15 +1056,7 @@ int mdbx_dbi_stat(const MDBX_txn* txn, MDBX_dbi dbi,
    try
    {
       // Count entries by iterating a cursor.
-      static constexpr psitri::dwal::read_mode modes[] = {
-         psitri::dwal::read_mode::buffered,
-         psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::trie,
-      };
-      auto mode = txn->is_readonly() ? modes[txn->env->read_mode]
-                                     : psitri::dwal::read_mode::latest;
-      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode,
-                                                  /*skip_rw_lock=*/!txn->is_readonly());
+      auto mc = make_txn_cursor(txn, root_idx);
       uint64_t count = 0;
       if (mc->seek_begin())
       {
@@ -897,8 +1090,7 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
    try
    {
       // Clear: remove all entries by iterating with a cursor.
-      auto mc = txn->env->dwal_db->create_cursor(root_idx, psitri::dwal::read_mode::latest,
-                                               /*skip_rw_lock=*/true);
+      auto mc = make_txn_cursor(txn, root_idx);
       std::vector<std::string> keys_to_remove;
       if (mc->seek_begin())
       {
@@ -912,22 +1104,29 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
 
       if (del)
       {
-         // Remove the DBI entry from PsiTri root 0 (catalog) directly.
-         std::shared_lock lk(txn->env->dbi_mutex);
+         // Remove the DBI entry through the active transaction so abort can
+         // restore both the catalog and the in-memory DBI registry.
+         std::unique_lock lk(txn->env->dbi_mutex);
          if (dbi < txn->env->dbis.size() && !txn->env->dbis[dbi].name.empty())
          {
-            auto name = txn->env->dbis[dbi].name;
-            lk.unlock();
-
-            auto ws = txn->env->db->start_write_session();
-            auto wt = ws->start_transaction(0);
-            wt.remove(name);
-            wt.commit();
-
-            std::unique_lock wlk(txn->env->dbi_mutex);
+            auto old = txn->env->dbis[dbi];
+            auto name = old.name;
+            txn->dbi_changes.push_back({dbi, old, true});
             txn->env->name_to_dbi.erase(name);
             txn->env->dbis[dbi].name.clear();
             txn->env->dbis[dbi].root_index = UINT32_MAX;
+            txn->env->dbis[dbi].flags = 0;
+            txn->env->dbis[dbi].is_dupsort = false;
+
+            lk.unlock();
+
+            int rc = ensure_rw_root(txn, 0);
+            if (rc != MDBX_SUCCESS)
+            {
+               rollback_dbi_registry_changes(txn);
+               return rc;
+            }
+            txn->write_tx->remove(0, name);
          }
       }
 
@@ -935,6 +1134,7 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
    }
    catch (...)
    {
+      rollback_dbi_registry_changes(txn);
       return MDBX_PANIC;
    }
 }
@@ -975,9 +1175,7 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
       {
          // DUPSORT: find the first composite key with this key prefix.
          auto prefix = dupsort_key_prefix(key_sv);
-         bool writer = !txn->is_readonly() && txn->write_tx;
-         auto mc = txn->env->dwal_db->create_cursor(
-            root_idx, psitri::dwal::read_mode::latest, writer);
+         auto mc = make_txn_cursor(txn, root_idx);
          if (!mc->lower_bound(prefix) || mc->is_end())
             return MDBX_NOTFOUND;
 
@@ -991,9 +1189,7 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
          if (!dupsort_decode(found, dk, dv))
             return MDBX_NOTFOUND;
 
-         mtxn->get_buf = std::move(dv);
-         data->iov_base = mtxn->get_buf.data();
-         data->iov_len  = mtxn->get_buf.size();
+         *data = hold_txn_slice(mtxn, dv);
          return MDBX_SUCCESS;
       }
 
@@ -1004,9 +1200,9 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
          if (!result.found)
             return MDBX_NOTFOUND;
 
-         mtxn->get_buf.assign(result.value.data.data(), result.value.data.size());
-         data->iov_base = mtxn->get_buf.data();
-         data->iov_len  = mtxn->get_buf.size();
+         *data = hold_txn_slice(
+            mtxn,
+            std::string_view(result.value.data.data(), result.value.data.size()));
          return MDBX_SUCCESS;
       }
       else
@@ -1028,9 +1224,7 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
          if (!result.found)
             return MDBX_NOTFOUND;
 
-         mtxn->get_buf = std::move(result.value);
-         data->iov_base = mtxn->get_buf.data();
-         data->iov_len  = mtxn->get_buf.size();
+         *data = hold_txn_slice(mtxn, result.value);
          return MDBX_SUCCESS;
       }
    }
@@ -1053,9 +1247,7 @@ int mdbx_get_ex(const MDBX_txn* txn, MDBX_dbi dbi,
          auto key_sv = to_sv(key);
          auto prefix = dupsort_key_prefix(key_sv);
          auto upper  = dupsort_key_upper(key_sv);
-         bool writer = !txn->is_readonly() && txn->write_tx;
-         auto mc = txn->env->dwal_db->create_cursor(
-            dbi_root_index(txn->env, dbi), psitri::dwal::read_mode::latest, writer);
+         auto mc = make_txn_cursor(txn, dbi_root_index(txn->env, dbi));
          size_t n = 0;
          if (mc->lower_bound(prefix))
          {
@@ -1072,44 +1264,16 @@ int mdbx_get_ex(const MDBX_txn* txn, MDBX_dbi dbi,
    return rc;
 }
 
-/// Ensure a write transaction exists that covers the given root.
-/// Uses a single-root dwal::transaction for simplicity — MDBX serializes
-/// writers anyway (only one RW txn at a time).
+/// Ensure the write transaction covers the given root.
 static int ensure_rw_root(MDBX_txn* txn, uint32_t root_idx)
 {
    if (!txn || txn->is_readonly())
       return MDBX_BAD_TXN;
 
    if (!txn->write_tx)
-   {
-      // Create a single-root write transaction
-      txn->write_tx = std::make_unique<psitri::dwal::transaction>(
-         *txn->env->dwal_db, std::vector<uint32_t>{root_idx});
-      txn->write_roots.push_back(root_idx);
-      return MDBX_SUCCESS;
-   }
+      return MDBX_BAD_TXN;
 
-   // Check if root is already in the transaction
-   for (auto ri : txn->write_roots)
-      if (ri == root_idx)
-         return MDBX_SUCCESS;
-
-   // Need to add a new root — commit existing and start fresh with both
-   // This is a limitation: MDBX_txn maps to a single dwal::transaction,
-   // but dwal::transaction requires roots declared upfront.
-   // Solution: commit current, start new with expanded root set.
-   try
-   {
-      txn->write_tx->commit();
-      txn->write_roots.push_back(root_idx);
-      txn->write_tx = std::make_unique<psitri::dwal::transaction>(
-         *txn->env->dwal_db, txn->write_roots);
-      return MDBX_SUCCESS;
-   }
-   catch (...)
-   {
-      return MDBX_PANIC;
-   }
+   return txn_covers_root(txn, root_idx) ? MDBX_SUCCESS : MDBX_DBS_FULL;
 }
 
 int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
@@ -1149,15 +1313,8 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
          {
             // Check if any entry with this key exists
             auto prefix = dupsort_key_prefix(key_sv);
-            auto upper  = dupsort_key_upper(key_sv);
-            // Use lower_bound to check if any composite starts with this key
-            // We need a cursor for this — use get_latest range check
-            auto result = txn->write_tx->get(root_idx, prefix);
-            // A prefix match means: result key starts with our prefix
-            // Actually, we need a range scan. Simpler: just lower_bound.
-            // For now, do a cursor-based check.
-            auto mc = txn->env->dwal_db->create_cursor(
-               root_idx, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true);
+            // Use lower_bound to check if any composite starts with this key.
+            auto mc = make_txn_cursor(txn, root_idx);
             if (mc->lower_bound(prefix) && !mc->is_end())
             {
                auto found_key = mc->key();
@@ -1177,8 +1334,9 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
          auto result = txn->write_tx->get(root_idx, key_sv);
          if (result.found)
          {
-            data->iov_base = const_cast<char*>(result.value.data.data());
-            data->iov_len  = result.value.data.size();
+            *data = hold_txn_slice(
+               txn,
+               std::string_view(result.value.data.data(), result.value.data.size()));
             return MDBX_KEYEXIST;
          }
       }
@@ -1276,16 +1434,10 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
 
    try
    {
-      auto* c = new MDBX_cursor();
+      auto* c = acquire_cursor(txn);
       c->txn  = txn;
       c->dbi  = dbi;
       c->is_dupsort = dbi_is_dupsort(txn->env, dbi);
-
-      // Always use latest mode — committed data lives in the RW layer
-      // until a swap happens (which may not occur for small transactions).
-      // MDBX serializes writers, so only one writer exists at a time,
-      // making it safe for RO reads to see the RW layer.
-      auto mode = psitri::dwal::read_mode::latest;
 
       // Ensure root is writable if RW
       if (!txn->is_readonly())
@@ -1293,15 +1445,13 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
          int rc = ensure_rw_root(txn, root_idx);
          if (rc != MDBX_SUCCESS)
          {
-            delete c;
+            release_cursor(c);
             return rc;
          }
       }
 
-      // Skip the RW lock if the writer thread already holds it.
-      bool writer = !txn->is_readonly() && txn->write_tx;
-      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
-      c->state = std::make_unique<cursor_state>(std::move(mc), c->is_dupsort);
+      auto mc = make_txn_cursor(txn, root_idx);
+      c->state.emplace(std::move(mc), c->is_dupsort);
 
       *cursor = c;
       return MDBX_SUCCESS;
@@ -1314,7 +1464,7 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
 
 void mdbx_cursor_close(MDBX_cursor* cursor)
 {
-   delete cursor;
+   release_cursor(cursor);
 }
 
 int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
@@ -1492,10 +1642,7 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
                   st.sync_key_val();
                   return MDBX_NOTFOUND;
                }
-               if (key)
-                  *key = st.key_val();
-               if (data)
-                  *data = st.data_val();
+               assign_cursor_result(cursor, key, data);
                return MDBX_SUCCESS;
             }
             // Hit end — restore
@@ -1519,10 +1666,7 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
                   st.sync_key_val();
                   return MDBX_NOTFOUND;
                }
-               if (key)
-                  *key = st.key_val();
-               if (data)
-                  *data = st.data_val();
+               assign_cursor_result(cursor, key, data);
                return MDBX_SUCCESS;
             }
             mc->seek(saved_raw);
@@ -1570,10 +1714,7 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
       if (!st.valid)
          return MDBX_NOTFOUND;
 
-      if (key)
-         *key = st.key_val();
-      if (data)
-         *data = st.data_val();
+      assign_cursor_result(cursor, key, data);
 
       return MDBX_SUCCESS;
    }
@@ -1645,10 +1786,7 @@ int mdbx_cursor_count(const MDBX_cursor* cursor, size_t* count)
    auto upper  = dupsort_key_upper(st.key_buf);
 
    // Save cursor position, create a temp cursor to count
-   bool writer = !cursor->txn->is_readonly() && cursor->txn->write_tx;
-   auto temp_mc = cursor->txn->env->dwal_db->create_cursor(
-      dbi_root_index(cursor->txn->env, cursor->dbi),
-      psitri::dwal::read_mode::latest, writer);
+   auto temp_mc = make_txn_cursor(cursor->txn, dbi_root_index(cursor->txn->env, cursor->dbi));
 
    size_t n = 0;
    if (temp_mc->lower_bound(prefix))
@@ -1673,15 +1811,7 @@ int mdbx_cursor_on_first(const MDBX_cursor* cursor)
 
    auto current_key = cursor->state->mc->key();
    auto root_idx    = dbi_root_index(cursor->txn->env, cursor->dbi);
-   static constexpr psitri::dwal::read_mode modes[] = {
-      psitri::dwal::read_mode::buffered,
-      psitri::dwal::read_mode::latest,
-      psitri::dwal::read_mode::trie,
-   };
-   auto mode = cursor->txn->is_readonly() ? modes[cursor->txn->env->read_mode]
-                                           : psitri::dwal::read_mode::latest;
-   auto tmp = cursor->txn->env->dwal_db->create_cursor(
-       root_idx, mode, /*skip_rw_lock=*/!cursor->txn->is_readonly());
+   auto tmp = make_txn_cursor(cursor->txn, root_idx);
    if (tmp->seek_begin() && tmp->key() == current_key)
       return MDBX_RESULT_TRUE;
    return MDBX_RESULT_FALSE;
@@ -1696,15 +1826,7 @@ int mdbx_cursor_on_last(const MDBX_cursor* cursor)
 
    auto current_key = cursor->state->mc->key();
    auto root_idx    = dbi_root_index(cursor->txn->env, cursor->dbi);
-   static constexpr psitri::dwal::read_mode modes[] = {
-      psitri::dwal::read_mode::buffered,
-      psitri::dwal::read_mode::latest,
-      psitri::dwal::read_mode::trie,
-   };
-   auto mode = cursor->txn->is_readonly() ? modes[cursor->txn->env->read_mode]
-                                           : psitri::dwal::read_mode::latest;
-   auto tmp = cursor->txn->env->dwal_db->create_cursor(
-       root_idx, mode, /*skip_rw_lock=*/!cursor->txn->is_readonly());
+   auto tmp = make_txn_cursor(cursor->txn, root_idx);
    if (tmp->seek_last() && tmp->key() == current_key)
       return MDBX_RESULT_TRUE;
    return MDBX_RESULT_FALSE;
@@ -1722,16 +1844,9 @@ int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
    try
    {
       cursor->txn = txn;
-      static constexpr psitri::dwal::read_mode modes[] = {
-         psitri::dwal::read_mode::buffered,
-         psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::trie,
-      };
-      auto mode = txn->is_readonly() ? modes[txn->env->read_mode]
-                                     : psitri::dwal::read_mode::latest;
-      bool writer = !txn->is_readonly() && txn->write_tx;
-      auto mc = txn->env->dwal_db->create_cursor(root_idx, mode, writer);
-      cursor->state = std::make_unique<cursor_state>(std::move(mc), cursor->is_dupsort);
+      auto mc = make_txn_cursor(txn, root_idx);
+      cursor->state.reset();
+      cursor->state.emplace(std::move(mc), cursor->is_dupsort);
       return MDBX_SUCCESS;
    }
    catch (...)
@@ -2225,15 +2340,7 @@ namespace mdbx
          return false;
       auto current_key = handle_->state->mc->key();
       auto root_idx    = dbi_root_index(handle_->txn->env, handle_->dbi);
-      static constexpr psitri::dwal::read_mode modes[] = {
-         psitri::dwal::read_mode::buffered,
-         psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::trie,
-      };
-      auto mode = handle_->txn->is_readonly() ? modes[handle_->txn->env->read_mode]
-                                               : psitri::dwal::read_mode::latest;
-      auto tmp = handle_->txn->env->dwal_db->create_cursor(
-          root_idx, mode, /*skip_rw_lock=*/!handle_->txn->is_readonly());
+      auto tmp = make_txn_cursor(handle_->txn, root_idx);
       return tmp->seek_begin() && tmp->key() == current_key;
    }
 
@@ -2243,15 +2350,7 @@ namespace mdbx
          return false;
       auto current_key = handle_->state->mc->key();
       auto root_idx    = dbi_root_index(handle_->txn->env, handle_->dbi);
-      static constexpr psitri::dwal::read_mode modes[] = {
-         psitri::dwal::read_mode::buffered,
-         psitri::dwal::read_mode::latest,
-         psitri::dwal::read_mode::trie,
-      };
-      auto mode = handle_->txn->is_readonly() ? modes[handle_->txn->env->read_mode]
-                                               : psitri::dwal::read_mode::latest;
-      auto tmp = handle_->txn->env->dwal_db->create_cursor(
-          root_idx, mode, /*skip_rw_lock=*/!handle_->txn->is_readonly());
+      auto tmp = make_txn_cursor(handle_->txn, root_idx);
       return tmp->seek_last() && tmp->key() == current_key;
    }
 

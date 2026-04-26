@@ -7,6 +7,7 @@
 namespace psitri
 {
    class transaction;
+   class write_transaction;
 
    template <class LockPolicy>
    class basic_write_session;
@@ -76,6 +77,12 @@ namespace psitri
        */
       transaction start_transaction(uint32_t root_index,
                                     tx_mode  mode = tx_mode::expect_success);
+
+      write_transaction start_write_transaction(
+          tree    base,
+          tx_mode mode = tx_mode::expect_success);
+
+      tree create_temporary_tree();
 
       /// Convert any root smart_ptr (shared or unique) into one that is
       /// uniquely owned by this writer for further mutation. Allocates a
@@ -171,11 +178,11 @@ namespace psitri
       /** @name Root Management */
       ///@{
 
-      sal::smart_ptr<sal::alloc_header> get_root(uint32_t root_index);
+      tree get_root(uint32_t root_index);
 
-      void set_root(uint32_t                          root_index,
-                    sal::smart_ptr<sal::alloc_header> root,
-                    sal::sync_type                    sync = sal::sync_type::none);
+      void set_root(uint32_t       root_index,
+                    tree           root,
+                    sal::sync_type sync = sal::sync_type::none);
 
       /// Create a reference-counted smart_ptr from a raw ptr_address.
       sal::smart_ptr<sal::alloc_header> make_ptr(sal::ptr_address addr, bool retain = false)
