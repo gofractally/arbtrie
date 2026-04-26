@@ -1545,9 +1545,13 @@ namespace psitri
             {
                // Phase D: in-place memcpy if the new value fits the
                // existing slot AND the top entry already belongs to this
-               // txn. Free path — no allocation.
-               if (vn_ref.modify()->try_coalesce_in_place(txn_ver, new_view))
+               // txn. Free path — no allocation. Predicate first (const)
+               // so we don't trigger modify_guard's COW unless we commit.
+               if (vn_ref->can_coalesce_in_place(txn_ver, new_view))
+               {
+                  vn_ref.modify()->coalesce_top_entry(new_view);
                   return leaf.address();
+               }
 
                // Otherwise: extend or replace via mvcc_realloc.
                bool coalesce = vn_ref->num_versions() > 0 &&
@@ -2204,8 +2208,13 @@ namespace psitri
                      //     replace_last_tag. One allocation, no chain growth.
                      //   - Different version → mvcc_realloc with append.
                      auto new_val = value.is_view() ? value.view() : value_view();
-                     if (vref.modify()->try_coalesce_in_place(version, new_val))
+                     // Predicate first (const, no side effects); only enter
+                     // modify_guard if we're committing to the in-place write.
+                     if (vref->can_coalesce_in_place(version, new_val))
+                     {
+                        vref.modify()->coalesce_top_entry(new_val);
                         return true;
+                     }
                      bool coalesce =
                          vref->num_versions() > 0 && vref->latest_version() == version;
                      if (coalesce)

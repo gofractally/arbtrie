@@ -468,40 +468,48 @@ namespace psitri
          return entry_version(entries()[_num_versions - 1]);
       }
 
-      /// Phase D in-place coalesce: if the topmost chain entry's version
-      /// matches the caller's `version` and the existing stored slot can
-      /// hold `new_val.size()` bytes (i.e. new_val.size() <= prior stored
-      /// size), overwrite the slot's bytes in place and return true.
-      /// Caller can skip the mvcc_realloc path entirely on a hit.
+      /// Phase D in-place coalesce — predicate (const).
       ///
-      /// Constraints/safety: only fires for non-flat, non-subtree value
-      /// chains. Updates the stored_value's size field if shrinking; the
-      /// caller's stripe lock (or modify_lock for COW) provides exclusion
-      /// — no concurrent writer exists, and snapshot readers are at
-      /// versions strictly less than `version` so they don't read the
-      /// top entry.
-      ///
-      /// Returns false if the coalesce condition isn't satisfied; the
-      /// caller should fall through to mvcc_realloc with replace_last_tag.
-      PSITRI_NO_SANITIZE_ALIGNMENT
-      bool try_coalesce_in_place(uint64_t version, value_view new_val) noexcept
+      /// True iff the topmost chain entry's version matches `version`
+      /// AND the existing stored slot is large enough to hold
+      /// `new_val.size()` bytes. Pure read — does not trigger SAL's
+      /// `modify_guard` / `copy_on_write` and so does not bind the
+      /// caller to a write. Use as a guard before
+      /// `coalesce_top_entry`.
+      bool can_coalesce_in_place(uint64_t version, value_view new_val) const noexcept
       {
          if (_is_flat || _is_subtree || _num_versions == 0)
             return false;
          if (latest_version() != version)
             return false;
-         uint64_t top = entries()[_num_versions - 1];
-         int16_t  off = entry_offset(top);
+         int16_t off = entry_offset(entries()[_num_versions - 1]);
          if (off < offset_data_start)
-            return false;  // tombstone or null — would need to allocate slot
-         auto* sv = reinterpret_cast<stored_value*>(
-             const_cast<uint8_t*>(tail()) - off);
-         if (new_val.size() > sv->size)
-            return false;  // doesn't fit; caller must realloc
+            return false;  // tombstone/null slot — would need to allocate
+         const stored_value* sv = get_stored_value_ptr(off);
+         return new_val.size() <= sv->size;
+      }
+
+      /// Phase D in-place coalesce — mutation.
+      ///
+      /// Overwrites the topmost chain entry's value bytes in place.
+      /// Precondition: caller must have already verified
+      /// `can_coalesce_in_place(version, new_val)` returned true. Caller
+      /// must reach this through a `modify_guard` (e.g. via
+      /// `vref.modify()->coalesce_top_entry(...)`) so the write goes
+      /// through SAL's `can_modify` / `copy_on_write` protocol. All
+      /// mutations are within the value_node's own allocation, which
+      /// the guard authorized.
+      PSITRI_NO_SANITIZE_ALIGNMENT
+      void coalesce_top_entry(value_view new_val) noexcept
+      {
+         assert(_num_versions > 0 && !_is_flat && !_is_subtree);
+         int16_t off = entry_offset(entries()[_num_versions - 1]);
+         assert(off >= offset_data_start);
+         auto* sv = reinterpret_cast<stored_value*>(tail() - off);
+         assert(new_val.size() <= sv->size);
          sv->size = new_val.size();
          if (!new_val.empty())
             std::memcpy(sv->data, new_val.data(), new_val.size());
-         return true;
       }
 
       /// Check if this node has any entries with dead versions.
