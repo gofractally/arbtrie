@@ -468,6 +468,42 @@ namespace psitri
          return entry_version(entries()[_num_versions - 1]);
       }
 
+      /// Phase D in-place coalesce: if the topmost chain entry's version
+      /// matches the caller's `version` and the existing stored slot can
+      /// hold `new_val.size()` bytes (i.e. new_val.size() <= prior stored
+      /// size), overwrite the slot's bytes in place and return true.
+      /// Caller can skip the mvcc_realloc path entirely on a hit.
+      ///
+      /// Constraints/safety: only fires for non-flat, non-subtree value
+      /// chains. Updates the stored_value's size field if shrinking; the
+      /// caller's stripe lock (or modify_lock for COW) provides exclusion
+      /// — no concurrent writer exists, and snapshot readers are at
+      /// versions strictly less than `version` so they don't read the
+      /// top entry.
+      ///
+      /// Returns false if the coalesce condition isn't satisfied; the
+      /// caller should fall through to mvcc_realloc with replace_last_tag.
+      PSITRI_NO_SANITIZE_ALIGNMENT
+      bool try_coalesce_in_place(uint64_t version, value_view new_val) noexcept
+      {
+         if (_is_flat || _is_subtree || _num_versions == 0)
+            return false;
+         if (latest_version() != version)
+            return false;
+         uint64_t top = entries()[_num_versions - 1];
+         int16_t  off = entry_offset(top);
+         if (off < offset_data_start)
+            return false;  // tombstone or null — would need to allocate slot
+         auto* sv = reinterpret_cast<stored_value*>(
+             const_cast<uint8_t*>(tail()) - off);
+         if (new_val.size() > sv->size)
+            return false;  // doesn't fit; caller must realloc
+         sv->size = new_val.size();
+         if (!new_val.empty())
+            std::memcpy(sv->data, new_val.data(), new_val.size());
+         return true;
+      }
+
       /// Check if this node has any entries with dead versions.
       bool has_dead_entries(const live_range_map::snapshot* dead) const noexcept
       {

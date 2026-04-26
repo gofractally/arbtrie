@@ -1543,6 +1543,13 @@ namespace psitri
             if (!vn_ref->is_flat() &&
                 new_view.size() <= value_node::max_inline_entry_size)
             {
+               // Phase D: in-place memcpy if the new value fits the
+               // existing slot AND the top entry already belongs to this
+               // txn. Free path — no allocation.
+               if (vn_ref.modify()->try_coalesce_in_place(txn_ver, new_view))
+                  return leaf.address();
+
+               // Otherwise: extend or replace via mvcc_realloc.
                bool coalesce = vn_ref->num_versions() > 0 &&
                                vn_ref->latest_version() == txn_ver;
                if (coalesce)
@@ -2190,11 +2197,15 @@ namespace psitri
                         return false;  // COW fallback
 
                      // Case B: append to existing value_node via CB relocation.
-                     // Coalesce: if the topmost chain entry's version matches
-                     // ours (caller is updating the same key twice with the
-                     // same version, e.g. inside a per-txn version scope),
-                     // replace the top entry instead of growing the chain.
+                     // Two-tier coalesce:
+                     //   - Same version + new value fits existing slot →
+                     //     in-place memcpy. No allocation, no chain growth.
+                     //   - Same version + doesn't fit → mvcc_realloc with
+                     //     replace_last_tag. One allocation, no chain growth.
+                     //   - Different version → mvcc_realloc with append.
                      auto new_val = value.is_view() ? value.view() : value_view();
+                     if (vref.modify()->try_coalesce_in_place(version, new_val))
+                        return true;
                      bool coalesce =
                          vref->num_versions() > 0 && vref->latest_version() == version;
                      if (coalesce)

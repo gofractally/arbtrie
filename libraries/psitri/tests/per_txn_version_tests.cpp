@@ -595,6 +595,105 @@ TEST_CASE("Phase C: expect_failure aborted after forced flush releases version",
    }
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Phase D: in-place coalesce fast paths
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Phase D: same-size hot-key updates allocate zero new value_nodes",
+          "[per_txn][phaseD][in_place]")
+{
+   ptv_pubapi_db t;
+
+   // Seed with a value_node-forcing payload (>64 bytes).
+   std::string fixed_size(80, 'X');
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), value_view(fixed_size.data(), fixed_size.size()));
+      tx.commit();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(2000));
+   auto baseline_alloc = t.ses->get_total_allocated_objects();
+
+   // 1000 same-size updates in one expect_success txn. Phase D's
+   // try_coalesce_in_place fires every iteration after the first promote,
+   // so allocations stay bounded (1 leaf realloc + 1 chain promote, no
+   // per-iter VN allocs).
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_success);
+      for (int i = 0; i < 1000; ++i)
+      {
+         std::string val(80, 'A' + (i % 26));
+         tx.upsert(to_kv("k"), value_view(val.data(), val.size()));
+      }
+      tx.commit();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(5000));
+   auto post_alloc = t.ses->get_total_allocated_objects();
+
+   INFO("baseline=" << baseline_alloc << " post_1000_updates="
+                    << post_alloc << " delta=" << (post_alloc - baseline_alloc));
+   // Expectation: a small handful of new allocations (the new ver CB +
+   // possibly a leaf cline shift), but NOT 1000 of them. Without Phase D
+   // we'd see allocator growth proportional to the update count.
+   CHECK(post_alloc - baseline_alloc <= 5);
+
+   // Verify the latest value is what we expect.
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   cursor c(root);
+   REQUIRE(c.seek(to_kv("k")));
+   auto v = c.value<std::string>();
+   REQUIRE(v.has_value());
+   std::string expected(80, 'A' + (999 % 26));
+   CHECK(*v == expected);
+}
+
+TEST_CASE("Phase D: smaller-size updates also coalesce in place",
+          "[per_txn][phaseD][in_place]")
+{
+   ptv_pubapi_db t;
+
+   // Seed with an 80-byte value (forces value_node).
+   std::string seed(80, 'S');
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), value_view(seed.data(), seed.size()));
+      tx.commit();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(2000));
+   auto baseline_alloc = t.ses->get_total_allocated_objects();
+
+   // Update with progressively smaller values within the slot's capacity.
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_success);
+      for (int sz = 70; sz >= 1; --sz)
+      {
+         std::string val(sz, 'B');
+         tx.upsert(to_kv("k"), value_view(val.data(), val.size()));
+      }
+      tx.commit();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(5000));
+   auto post_alloc = t.ses->get_total_allocated_objects();
+
+   INFO("baseline=" << baseline_alloc << " post_smaller_updates=" << post_alloc);
+   CHECK(post_alloc - baseline_alloc <= 5);
+
+   // Final value: the last (1-byte) update.
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   cursor c(root);
+   REQUIRE(c.seek(to_kv("k")));
+   auto v = c.value<std::string>();
+   REQUIRE(v.has_value());
+   CHECK(v->size() == 1);
+   CHECK(*v == "B");
+}
+
 TEST_CASE("Phase A: cross-txn updates leave the latest value visible",
           "[per_txn][phaseA]")
 {
