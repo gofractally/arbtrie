@@ -310,6 +310,15 @@ namespace psitri
    }
    inline cursor::cursor(sal::smart_ptr<sal::alloc_header> n) : _node(std::move(n))
    {
+      // Inherit the snapshot's version from the smart_ptr's _ver. With
+      // per-txn versioning, value_node chains may carry entries at
+      // versions higher than this snapshot — the cursor must filter by
+      // its snapshot version to preserve isolation. If no _ver is
+      // attached (raw / pre-Phase-A roots), fall back to UINT64_MAX
+      // which means "see the latest entry."
+      if (_node.ver() != sal::null_ptr_address)
+         _version = _node.session()->read_custom_cb(_node.ver());
+
       _path_back         = _path.data();
       _path_back->branch = branch_number(-1);
       _key_len           = 0;

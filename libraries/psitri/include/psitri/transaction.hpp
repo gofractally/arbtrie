@@ -737,6 +737,13 @@ namespace psitri
 
       void merge_buffer_to_persistent(change_set& cs)
       {
+         // First tree-touching action for an expect_failure txn — ensure
+         // a per-txn version is attached to the working root before any
+         // COW write fires. No-op if a ver was already allocated (either
+         // expect_success at start_transaction, or an earlier flush in
+         // this same expect_failure txn).
+         ensure_txn_version();
+
          auto it  = cs.buffer->begin();
          auto end = cs.buffer->end();
          for (; it != end; ++it)
@@ -782,6 +789,15 @@ namespace psitri
       // Defined in write_session_impl.hpp (needs write_session access)
       void commit_additional_roots();
       void abort_additional_roots() noexcept;
+
+      /// Lazy per-txn version allocation for expect_failure mode. If the
+      /// primary working root doesn't yet carry a ver (txn has done no
+      /// tree-touching work), allocate one via make_unique_root and
+      /// attach it. Idempotent — no-op when a ver is already attached.
+      /// Plugged into merge_buffer_to_persistent so the first tree-touch
+      /// path in expect_failure ensures the version exists before any
+      /// COW write fires.
+      void ensure_txn_version();
    };
 
    // ═════════════════════════════════════════════════════════════════════

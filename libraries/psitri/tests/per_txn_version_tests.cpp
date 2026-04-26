@@ -329,6 +329,130 @@ TEST_CASE("Phase A: 100 updates to one key in one txn coalesce to ≤ 2 chain en
    CHECK(*v == expected);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Phase B: lazy version allocation for expect_failure
+// ════════════════════════════════════════════════════════════════════
+
+namespace
+{
+   uint64_t global_version_of(database& db)
+   {
+      // Read the database's global_version atomic via the public stats
+      // path. There's no direct accessor, so we infer it from a no-op
+      // read_session start (which doesn't bump). Instead use the stats
+      // dump's running counter — actually, simplest is to start a
+      // throwaway expect_success txn, observe ver, abort, and convert.
+      //
+      // Cleanest: the tx's primary().get_stats().total_version_entries
+      // doesn't directly tell us the global. Use a sentinel txn to
+      // sample by allocating a ver and inspecting it.
+      auto ws       = db.start_write_session();
+      auto tx       = ws->start_transaction(0, tx_mode::expect_success);
+      auto root     = tx.primary().read_cursor().get_root();
+      uint64_t ver  = 0;
+      if (root.ver() != sal::null_ptr_address)
+         ver = root.session()->read_custom_cb(root.ver());
+      tx.abort();
+      return ver;
+   }
+}
+
+TEST_CASE("Phase B: expect_failure with no writes does not bump global_version",
+          "[per_txn][phaseB][lazy]")
+{
+   ptv_pubapi_db t;
+
+   auto before = global_version_of(*t.db);
+   for (int i = 0; i < 100; ++i)
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      tx.abort();
+   }
+   auto after = global_version_of(*t.db);
+
+   // Each global_version_of() bumps once (it starts a sentinel
+   // expect_success txn). 100 expect_failure aborts in between should
+   // bump zero times. So delta == 1 (the second sentinel call).
+   INFO("global_version delta: " << (after - before));
+   CHECK(after - before == 1);
+}
+
+TEST_CASE("Phase B: expect_failure with reads only does not bump global_version",
+          "[per_txn][phaseB][lazy]")
+{
+   ptv_pubapi_db t;
+
+   // Seed a key so reads have something to find.
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), to_vv("seed"));
+      tx.commit();
+   }
+
+   auto before = global_version_of(*t.db);
+   for (int i = 0; i < 50; ++i)
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      auto v  = tx.get<std::string>(to_kv("k"));
+      REQUIRE(v.has_value());
+      tx.abort();
+   }
+   auto after = global_version_of(*t.db);
+
+   INFO("global_version delta after read-only aborts: " << (after - before));
+   CHECK(after - before == 1);  // just the sentinel, no per-txn bump
+}
+
+TEST_CASE("Phase B: expect_failure with writes commits and bumps once",
+          "[per_txn][phaseB][lazy]")
+{
+   ptv_pubapi_db t;
+
+   auto before = global_version_of(*t.db);
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      tx.upsert(to_kv("a"), to_vv("1"));
+      tx.upsert(to_kv("b"), to_vv("2"));
+      tx.commit();
+   }
+   auto after = global_version_of(*t.db);
+
+   // 2 sentinels + 1 actual commit = 3 bumps total.
+   // Delta from sentinel-to-sentinel = (sentinel + actual + sentinel) -
+   // (sentinel) = sentinel + actual + sentinel - sentinel = sentinel +
+   // actual = 2. Wait let me think again...
+   //
+   // before: sentinel1 fires, ver = N+1.
+   // tx commit: ver = N+2.
+   // after: sentinel2 fires, ver = N+3. Reads N+3.
+   // delta = N+3 - N+1 = 2.
+   CHECK(after - before == 2);
+
+   // Verify writes are persisted.
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   cursor c(root);
+   REQUIRE(c.seek(to_kv("a")));
+   CHECK(c.value<std::string>().value_or("") == "1");
+}
+
+TEST_CASE("Phase B: 1000 start+abort cycles in expect_failure produce zero delta",
+          "[per_txn][phaseB][lazy]")
+{
+   ptv_pubapi_db t;
+
+   auto before = global_version_of(*t.db);
+   for (int i = 0; i < 1000; ++i)
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      tx.abort();
+   }
+   auto after = global_version_of(*t.db);
+
+   // Just the 2 sentinel calls. 1000 aborts contribute nothing.
+   CHECK(after - before == 1);
+}
+
 TEST_CASE("Phase A: cross-txn updates leave the latest value visible",
           "[per_txn][phaseA]")
 {
