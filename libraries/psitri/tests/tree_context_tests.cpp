@@ -490,11 +490,10 @@ TEST_CASE("tree_context-subtree-collapse", "[tree_context][remove][collapse]")
 }
 
 // Heavy stress benchmark: 30 rounds × 1M random-key inserts + bulk lookups.
-// Tagged !benchmark to exclude from regular test runs (run_tests.sh
-// excludes [benchmark]). The test has a known SIGBUS failure mode under
-// sustained insert pressure — see BUGS.md "tree_context Dense Random
-// SIGBUS." Run explicitly with: psitri-tests "tree_context" if you want
-// to repro the benchmark + the bug.
+// Tagged !benchmark to keep it out of default tag groups (run_tests.sh
+// excludes [benchmark] from group runs), but it now exits cleanly —
+// the prior SIGBUS in segment::sync was fixed in segment_impl.hpp by
+// guarding the nothing-to-sync case.
 TEST_CASE("tree_context", "[tree_context][!benchmark]")
 {
    sal::set_current_thread_name("main");

@@ -2,15 +2,17 @@
 
 ## Open
 
-### 1. `tree_context` Dense Random SIGBUS in segment::sync
-- **Repro**: `psitri-tests "tree_context"` (excluded from default runs via `[!benchmark]`)
-- **File**: `libraries/psitri/tests/tree_context_tests.cpp:498` (TEST_CASE "tree_context")
-- **Crash site**: `sal::mapped_memory::segment::sync` (segment_impl.hpp:12) — EXC_BAD_ACCESS code=2 (write fault) on a high-memory address (~0x7801ffffc0). Reproducible 3-of-3 runs.
-- **Diagnosis**: The sync path writes a sync_header at `data + alloc_pos` and the user_data follows. The `data` pointer is per-segment; if the segment was grown via mremap and the segment's `data` field hadn't been updated to the new mapping address, this write hits an unmapped page → SIGBUS. Confirmed via lldb: stack frame is `segment::sync + 168`, address is in an unmapped high range.
-- **Mitigation**: Tagged `[!benchmark]` so it doesn't gate normal test runs.
-- **Out of scope for transaction-refactor**: this is a SAL-level segment-growth/remap protocol bug, independent of the COW/MVCC refactor. Fix needs to ensure all live `segment*` references see the post-mremap `data` pointer (or use a stable handle that hides the remap).
+(none)
 
 ## Fixed (recent)
+
+### `tree_context` Dense Random SIGBUS in segment::sync
+- **Repro**: `psitri-tests "tree_context"` (now passes 3-of-3 consecutive runs)
+- **Crash site**: `sal::mapped_memory::segment::sync` (segment_impl.hpp:12) — EXC_BAD_ACCESS code=2 (write fault) on a high-memory address. The faulting instruction is the placement-new of a `sync_header` at `data + alloc_pos`.
+- **Root cause**: NOT segment remap (initial misdiagnosis). The actual bug is in `allocator_session::sync`'s dirty-segment drain loop, which calls `segment::sync` on each popped segment without checking whether there's anything to sync. A finalized segment whose tail was already mprotect'd to PROT_READ by a prior sync would get a second sync attempt, and the placement-new of `sync_header` writes into the now-read-only footer area (the address `~0x7801ffffc0` is exactly `segment_base + (segment_size - 64)`).
+- **Fix**: Added a "nothing to sync" guard at the top of `segment::sync`: `if (alloc_pos <= _first_writable_page * page_size) return 0;`. The active-segment branch in `allocator_session::sync` already had this guard externally (`not is_finalized() and alloc_pos > first_write_pos`); the drain loop did not. Putting the guard inside `segment::sync` covers both paths.
+- **Diagnosis evidence**: lldb confirmed the faulting instruction was `strh wzr, [x28]` with `x28 = 0x7801ffffc0`. Frame stack: `segment::sync + 168` ← `allocator_session::sync + 312` ← test body.
+- **Original misdiagnosis**: Initially attributed to a `mapping::resize` silent-move dangling pointer. That mechanism does exist in `mapping.cpp` and is dangerous, but no `mapping` consumer grows during runtime — so it wasn't the SIGBUS source. Fixed BUGS.md narrative accordingly.
 
 ### `database::get_stats().total_live_objects` returns 0 after writes (9beb37b)
 - **Repro**: `psitri-tests "database dump and get_stats"`

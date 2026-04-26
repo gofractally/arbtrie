@@ -11,7 +11,26 @@ namespace sal
       /// POD and <= 44 bytes
       uint64_t segment::sync(sync_type st, const runtime_config& cfg, std::span<char> user_data)
       {
-         auto  alloc_pos = get_alloc_pos();
+         auto alloc_pos = get_alloc_pos();
+
+         // Nothing-to-sync guard. If alloc_pos hasn't advanced past the
+         // current _first_writable_page, the caller is asking us to sync
+         // a segment that's already fully synced (typically: a finalized
+         // segment popped from the dirty queue whose tail was already
+         // mprotect'd to PROT_READ on a prior sync). The placement-new
+         // below would write a sync_header at `data + alloc_pos` — which
+         // is now in a read-only page → EXC_BAD_ACCESS / SIGBUS.
+         //
+         // The active-segment caller (`allocator_session::sync`) checks
+         // this externally via `not is_finalized() and alloc_pos >
+         // first_write_pos`, but the dirty-queue drain loop does not.
+         // Guard here so any caller is safe.
+         uint32_t cur_first_writable_page_pos =
+             uint32_t(_first_writable_page.load(std::memory_order_relaxed))
+             << system_config::os_page_size_log2;
+         if (alloc_pos <= cur_first_writable_page_pos)
+            return 0;
+
          char* alloc_ptr = data + alloc_pos;
 
          uint32_t next_page_pos =
