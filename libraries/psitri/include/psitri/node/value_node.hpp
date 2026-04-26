@@ -238,6 +238,43 @@ namespace psitri
          append_data_entry(version, new_val);
       }
 
+      /// Tag-dispatched ctor variant: copy existing value_node but **drop
+      /// the last entry**, then append a new data version. Used by per-txn
+      /// coalescing — when a transaction writes the same key twice, the
+      /// second write replaces the first instead of growing the chain.
+      struct replace_last_tag {};
+
+      value_node(uint32_t asize, ptr_address_seq seq,
+                 const value_node* src, uint64_t version, value_view new_val,
+                 replace_last_tag)
+          : node(asize, type_id, seq),
+            _alloc_pos(0),
+            _num_versions(0),
+            _num_next(src->_num_next),
+            _is_subtree(0),
+            _is_flat(0)
+      {
+         std::memcpy(next_ptrs(), src->next_ptrs(), _num_next * sizeof(value_next_ptr));
+         copy_entries_skip_last(src);
+         append_data_entry(version, new_val);
+      }
+
+      /// Tag-dispatched ctor variant: replace-last with a tombstone.
+      value_node(uint32_t asize, ptr_address_seq seq,
+                 const value_node* src, uint64_t version, std::nullptr_t,
+                 replace_last_tag)
+          : node(asize, type_id, seq),
+            _alloc_pos(0),
+            _num_versions(0),
+            _num_next(src->_num_next),
+            _is_subtree(src->_is_subtree),
+            _is_flat(0)
+      {
+         std::memcpy(next_ptrs(), src->next_ptrs(), _num_next * sizeof(value_next_ptr));
+         copy_entries_skip_last(src);
+         entries()[_num_versions++] = pack_entry(version, offset_tombstone);
+      }
+
       /// MVCC: copy existing value_node, strip dead entries, append new data version.
       value_node(uint32_t asize, ptr_address_seq seq,
                  const value_node* src, uint64_t version, value_view new_val,
@@ -698,6 +735,46 @@ namespace psitri
             else
             {
                // Tombstone, null, zero-length — no data to copy
+               entries()[_num_versions++] = se[i];
+            }
+         }
+      }
+
+      /// Copy all but the LAST entry from src. Used by per-txn coalescing
+      /// where the new top entry replaces the prior top entry rather than
+      /// growing the chain. The dropped entry's value data is not copied
+      /// (it is not reachable from the destination).
+      PSITRI_NO_SANITIZE_ALIGNMENT
+      void copy_entries_skip_last(const value_node* src) noexcept
+      {
+         if (src->_num_versions == 0)
+            return;
+         const uint64_t* se   = src->entries();
+         uint8_t         last = src->_num_versions - 1;
+         for (uint8_t i = 0; i < last; ++i)
+         {
+            int16_t off = entry_offset(se[i]);
+            if (off >= offset_data_start)
+            {
+               const stored_value* sv = src->get_stored_value_ptr(off);
+               if (src->_is_subtree)
+               {
+                  tree_id tid;
+                  std::memcpy(&tid, sv->data, sizeof(tree_id));
+                  int16_t new_off = alloc_tree_id_data(tid);
+                  entries()[_num_versions++] =
+                      pack_entry(entry_version(se[i]), new_off);
+               }
+               else
+               {
+                  value_view v(reinterpret_cast<const char*>(sv->data), sv->size);
+                  int16_t    new_off = alloc_value_data(v);
+                  entries()[_num_versions++] =
+                      pack_entry(entry_version(se[i]), new_off);
+               }
+            }
+            else
+            {
                entries()[_num_versions++] = se[i];
             }
          }

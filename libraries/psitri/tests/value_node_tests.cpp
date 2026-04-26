@@ -284,3 +284,83 @@ TEST_CASE("value_node struct size", "[value_node]")
 {
    CHECK(sizeof(psitri::value_node) == 16);
 }
+
+namespace
+{
+   // Helpers to construct value_node variants on a heap-allocated, aligned
+   // buffer. Lifetime is managed via ValueNodeDeleter.
+   ValueNodePtr append_version(const psitri::value_node* src, uint64_t version,
+                               psitri::value_view new_val)
+   {
+      uint32_t asize  = psitri::value_node::alloc_size(src, version, new_val);
+      void*    buffer = std::aligned_alloc(64, asize);
+      REQUIRE(buffer != nullptr);
+      std::memset(buffer, 0, asize);
+      psitri::ptr_address_seq seq = {psitri::ptr_address(0), 0};
+      auto* node =
+          new (buffer) psitri::value_node(asize, seq, src, version, new_val);
+      return ValueNodePtr(node);
+   }
+
+   ValueNodePtr replace_last_version(const psitri::value_node* src, uint64_t version,
+                                     psitri::value_view new_val)
+   {
+      // Same alloc_size as append (over-allocates by ~one entry slot;
+      // not worth a separate overload). Construction uses replace_last_tag.
+      uint32_t asize  = psitri::value_node::alloc_size(src, version, new_val);
+      void*    buffer = std::aligned_alloc(64, asize);
+      REQUIRE(buffer != nullptr);
+      std::memset(buffer, 0, asize);
+      psitri::ptr_address_seq seq = {psitri::ptr_address(0), 0};
+      auto* node = new (buffer) psitri::value_node(
+          asize, seq, src, version, new_val,
+          psitri::value_node::replace_last_tag{});
+      return ValueNodePtr(node);
+   }
+}
+
+TEST_CASE("value_node coalesce: append vs replace_last", "[value_node][coalesce]")
+{
+   // Build a value_node with version 1 — single entry chain
+   auto v0 = create_value_node(psitri::value_view("v1", 2));
+   REQUIRE(v0->num_versions() == 1);
+   CHECK(v0->latest_version() == 0);  // initial version is 0
+
+   // Append v=42 (regular append) — chain grows to 2 entries
+   auto v1 = append_version(v0.get(), 42, psitri::value_view("v42", 3));
+   REQUIRE(v1->num_versions() == 2);
+   CHECK(v1->latest_version() == 42);
+
+   // Now replace-last from v1 with v=42 (same txn, second update)
+   auto v2 = replace_last_version(v1.get(), 42, psitri::value_view("v42b", 4));
+   REQUIRE(v2->num_versions() == 2);  // still 2, not 3
+   CHECK(v2->latest_version() == 42);
+   // Top entry should be the new value, not the prior v=42 value
+   psitri::value_view latest = v2->get_data();
+   REQUIRE(latest.size() == 4);
+   CHECK(std::string(latest.data(), latest.size()) == "v42b");
+
+   // The entry below the top should still be the original (version 0)
+   CHECK(v2->get_entry_version(0) == 0);
+
+   // Replacing again — chain still 2 entries
+   auto v3 = replace_last_version(v2.get(), 42, psitri::value_view("v42c", 4));
+   REQUIRE(v3->num_versions() == 2);
+   CHECK(v3->latest_version() == 42);
+   psitri::value_view final = v3->get_data();
+   CHECK(std::string(final.data(), final.size()) == "v42c");
+}
+
+TEST_CASE("value_node coalesce: replace_last on single-version source", "[value_node][coalesce]")
+{
+   // Edge case: source has exactly one entry. replace_last drops it,
+   // append adds the new one. Result should still be 1 entry.
+   auto v0 = create_value_node(psitri::value_view("orig", 4));
+   REQUIRE(v0->num_versions() == 1);
+
+   auto v1 = replace_last_version(v0.get(), 5, psitri::value_view("new", 3));
+   REQUIRE(v1->num_versions() == 1);
+   CHECK(v1->latest_version() == 5);
+   psitri::value_view final = v1->get_data();
+   CHECK(std::string(final.data(), final.size()) == "new");
+}
