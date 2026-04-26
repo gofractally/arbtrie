@@ -126,9 +126,13 @@ namespace psitri
       // expect_failure defers this transition until the first tree touch
       // (commit replay or forced flush), so a txn that never writes burns
       // no global_version and no ver CB.
-      auto root = get_root(root_index);
+      auto root            = get_root(root_index);
+      bool has_txn_version = false;
       if (mode == tx_mode::expect_success)
-         root = make_unique_root(std::move(root));
+      {
+         root            = make_unique_root(std::move(root));
+         has_txn_version = true;
+      }
 
       auto tx = transaction(
           this->_allocator_session, std::move(root),
@@ -148,6 +152,7 @@ namespace psitri
       tx._ws                 = self;
       tx.cs_at(0).root_index = root_index;
       tx._max_held_root      = root_index;
+      tx._has_txn_version    = has_txn_version;
       return tx;
    }
 
@@ -367,13 +372,13 @@ namespace psitri
 
    inline void transaction::ensure_txn_version()
    {
-      auto& cs = cs_at(_primary_index);
-      if (cs.cursor->root().ver() != sal::null_ptr_address)
-         return;  // already has a per-txn ver
-      // Take the working root, mint a unique version onto it, put it back.
-      auto root      = cs.cursor->take_root();
-      auto with_ver  = _ws->make_unique_root(std::move(root));
+      if (_has_txn_version)
+         return;
+      auto& cs       = cs_at(_primary_index);
+      auto  root     = cs.cursor->take_root();
+      auto  with_ver = _ws->make_unique_root(std::move(root));
       cs.cursor.emplace(std::move(with_ver));
+      _has_txn_version = true;
    }
 
 }  // namespace psitri

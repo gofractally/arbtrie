@@ -453,6 +453,148 @@ TEST_CASE("Phase B: 1000 start+abort cycles in expect_failure produce zero delta
    CHECK(after - before == 1);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Phase C: abort releases the version
+// ════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Phase C: aborted expect_success txn registers ver as dead",
+          "[per_txn][phaseC][abort]")
+{
+   ptv_pubapi_db t;
+
+   // Seed so the slot has a published ver to compare against.
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), to_vv("v0"));
+      tx.commit();
+   }
+
+   // Sample dead_versions before. Aborted versions should appear in
+   // the snapshot after abort.
+   t.db->wait_for_compactor(std::chrono::milliseconds(500));
+   auto dead_before = t.db->dead_versions().load_snapshot();
+   uint64_t dead_count_before = 0;
+   if (dead_before)
+      dead_count_before = dead_before->num_ranges();
+
+   // Run an expect_success txn that does some work then aborts.
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_success);
+      tx.upsert(to_kv("k2"), to_vv("v_aborted"));
+      tx.abort();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(500));
+   auto dead_after = t.db->dead_versions().load_snapshot();
+   uint64_t dead_count_after = 0;
+   if (dead_after)
+      dead_count_after = dead_after->num_ranges();
+
+   INFO("dead version count before/after abort: "
+        << dead_count_before << " / " << dead_count_after);
+   CHECK(dead_count_after > dead_count_before);
+
+   // Verify the aborted write didn't make it.
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      auto v  = tx.get<std::string>(to_kv("k2"));
+      CHECK(!v.has_value());
+      tx.abort();
+   }
+}
+
+TEST_CASE("Phase C: aborted expect_success txn with many mutations leaves no leaks",
+          "[per_txn][phaseC][abort]")
+{
+   ptv_pubapi_db t;
+
+   // Seed a known baseline.
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("baseline"), to_vv("seed"));
+      tx.commit();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(2000));
+   auto baseline_alloc = t.ses->get_total_allocated_objects();
+
+   // Run a fat expect_success txn doing 1000 mutations, then abort.
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_success);
+      for (int i = 0; i < 1000; ++i)
+      {
+         char key[32];
+         std::snprintf(key, sizeof(key), "ephemeral_%04d", i);
+         tx.upsert(key_view(key, std::strlen(key)), to_vv("ephemeral"));
+      }
+      tx.abort();
+   }
+
+   // Compactor drains the released pages.
+   t.db->wait_for_compactor(std::chrono::milliseconds(5000));
+
+   auto post_abort_alloc = t.ses->get_total_allocated_objects();
+   INFO("baseline=" << baseline_alloc << " post_abort=" << post_abort_alloc);
+   // Allocated count should return to baseline (or very close — defrag
+   // may leave slack). Allow a small slop for compactor lag.
+   CHECK(post_abort_alloc <= baseline_alloc + 2);
+
+   // Verify the aborted writes didn't persist.
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      auto v  = tx.get<std::string>(to_kv("ephemeral_0500"));
+      CHECK(!v.has_value());
+      tx.abort();
+   }
+}
+
+TEST_CASE("Phase C: expect_failure aborted after forced flush releases version",
+          "[per_txn][phaseC][abort]")
+{
+   ptv_pubapi_db t;
+
+   // Seed with enough keys to cross the tombstone_threshold (256) so a
+   // remove_range forces a buffer flush in expect_failure.
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         char key[32];
+         std::snprintf(key, sizeof(key), "k%05d", i);
+         tx.upsert(key_view(key, std::strlen(key)), to_vv("v"));
+      }
+      tx.commit();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(2000));
+   auto dead_before = t.db->dead_versions().load_snapshot();
+   uint64_t dead_count_before = dead_before ? dead_before->num_ranges() : 0;
+
+   // expect_failure txn that triggers a forced flush via remove_range,
+   // then aborts. Should still release the lazily-allocated ver.
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      tx.remove_range(to_kv("k00000"), to_kv("k99999"));
+      tx.abort();
+   }
+
+   t.db->wait_for_compactor(std::chrono::milliseconds(500));
+   auto dead_after = t.db->dead_versions().load_snapshot();
+   uint64_t dead_count_after = dead_after ? dead_after->num_ranges() : 0;
+
+   INFO("dead version count before/after expect_failure abort: "
+        << dead_count_before << " / " << dead_count_after);
+   CHECK(dead_count_after > dead_count_before);
+
+   // Verify the removes were rolled back.
+   {
+      auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
+      auto v  = tx.get<std::string>(to_kv("k00100"));
+      CHECK(v.has_value());
+      tx.abort();
+   }
+}
+
 TEST_CASE("Phase A: cross-txn updates leave the latest value visible",
           "[per_txn][phaseA]")
 {

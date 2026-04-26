@@ -727,10 +727,14 @@ namespace psitri
          }
          else
          {
+            // Forced flush path: cursor->remove_range is a tree-touching
+            // op. Ensure a per-txn ver is attached even when the buffer
+            // happens to be empty (merge_buffer_to_persistent only fires
+            // when there's something to flush).
             if (!cs.buffer->empty())
-            {
                merge_buffer_to_persistent(cs);
-            }
+            else
+               ensure_txn_version();
             return cs.cursor->remove_range(lower, upper);
          }
       }
@@ -785,6 +789,13 @@ namespace psitri
       };
       std::vector<held_lock> _held_locks;
       uint32_t               _max_held_root = 0;
+
+      // Has this txn allocated its own per-txn version yet? Set true by
+      // start_transaction(expect_success) (which calls make_unique_root
+      // up front) and by the lazy ensure_txn_version path. Distinguishes
+      // "the working root carries my ver" from "the working root carries
+      // an inherited published ver from get_root."
+      bool _has_txn_version = false;
 
       // Defined in write_session_impl.hpp (needs write_session access)
       void commit_additional_roots();
