@@ -43,7 +43,7 @@ namespace sal
          if (*_ro == null_root_index)
             return;
          _session->transaction_abort(_ro);
-         _adr.give(null_ptr_address);
+         _adr = smart_ptr<alloc_header>{};  // release root + ver as a unit
          _ro = null_root_index;
       }
 

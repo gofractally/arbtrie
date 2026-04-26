@@ -93,21 +93,54 @@ namespace psitri
    }
 
    template <class LockPolicy>
+   inline sal::smart_ptr<sal::alloc_header>
+   basic_write_session<LockPolicy>::make_unique_root(
+       sal::smart_ptr<sal::alloc_header> root)
+   {
+      auto session = this->_allocator_session;
+      auto ver_num =
+          this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
+      auto ver_adr   = session->alloc_custom_cb(ver_num);
+      auto prior_ver = root.ver();
+      root.set_ver(ver_adr);
+      if (prior_ver != sal::null_ptr_address)
+         session->release(prior_ver);
+      return root;
+   }
+
+   template <class LockPolicy>
    inline transaction basic_write_session<LockPolicy>::start_transaction(
        uint32_t root_index, tx_mode mode)
    {
-      auto  session = this->_allocator_session;
-      auto* self    = this;
+      auto* self = this;
 
       auto& lock = this->_db->modify_lock(root_index);
       lock.lock();
 
+      // Single state transition: get the published root, and (for
+      // expect_success) convert it to a uniquely-owned root by attaching
+      // a fresh version. From this point forward the working root carries
+      // the txn's version through every COW operation; no other code path
+      // needs to allocate or move the version.
+      //
+      // expect_failure defers this transition until the first tree touch
+      // (commit replay or forced flush), so a txn that never writes burns
+      // no global_version and no ver CB.
       auto root = get_root(root_index);
-      auto tx   = transaction(
-          session, std::move(root),
+      if (mode == tx_mode::expect_success)
+         root = make_unique_root(std::move(root));
+
+      auto tx = transaction(
+          this->_allocator_session, std::move(root),
           [self, root_index, &lock](sal::smart_ptr<sal::alloc_header> new_root)
           {
-             self->publish_root(root_index, std::move(new_root));
+             // The new_root carries the txn's ver from make_unique_root.
+             // For an empty-tree commit (txn removed all keys), the ver
+             // has nothing to tag — drop it before publishing so the slot
+             // ends up at {null, null} instead of {null, vestigial_ver}.
+             if (!new_root)
+                new_root.release();
+             self->set_root(root_index, std::move(new_root), self->_sync);
              lock.unlock();
           },
           [&lock]() { lock.unlock(); },

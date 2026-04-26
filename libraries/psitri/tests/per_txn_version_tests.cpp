@@ -234,3 +234,131 @@ TEST_CASE("per-txn version: tombstone coalesces too",
       }
    }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// End-to-end: Phase A per-txn version flow through the public API
+// ════════════════════════════════════════════════════════════════════
+
+namespace
+{
+   struct ptv_pubapi_db
+   {
+      std::filesystem::path          dir;
+      std::shared_ptr<database>      db;
+      std::shared_ptr<write_session> ses;
+
+      ptv_pubapi_db()
+      {
+         auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+         dir     = std::filesystem::temp_directory_path() /
+               ("psitri_ptv_pub_" + std::to_string(getpid()) + "_" +
+                std::to_string(ts));
+         std::filesystem::remove_all(dir);
+         std::filesystem::create_directories(dir / "data");
+         db  = database::open(dir);
+         ses = db->start_write_session();
+      }
+      ~ptv_pubapi_db() { std::filesystem::remove_all(dir); }
+
+      uint64_t chain_length_of(uint32_t root_index, key_view key)
+      {
+         auto root = ses->get_root(root_index);
+         if (!root)
+            return 0;
+         tree_context ctx(root);
+         auto         s = ctx.get_stats();
+         // Single-key trees: total_version_entries == this key's chain length
+         return s.total_version_entries;
+      }
+
+      uint64_t global_version() const { return db->dump().total_segments; /* unused */ }
+   };
+}
+
+TEST_CASE("Phase A: 100 updates to one key in one txn coalesce to ≤ 2 chain entries",
+          "[per_txn][phaseA][coalesce]")
+{
+   ptv_pubapi_db t;
+
+   // Use values >64 bytes so make_value forces a value_node allocation.
+   // (Smaller values stay inline in the leaf and never form a chain.)
+   auto big = [](char c, int idx) {
+      std::string s(80, c);
+      char        buf[32];
+      std::snprintf(buf, sizeof(buf), "_%03d", idx);
+      s.append(buf);
+      return s;
+   };
+
+   // First txn: insert "k" with initial value. Forces value_node (1 entry).
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto v0 = big('A', 0);
+      tx.upsert(to_kv("k"), value_view(v0.data(), v0.size()));
+      tx.commit();
+   }
+   CHECK(t.chain_length_of(0, to_kv("k")) == 1);
+
+   // Second txn: 100 updates to the same key. With per-txn version
+   // threading, the first update appends to the chain (2 entries: committed
+   // v0 + this txn's first iter). Subsequent 99 updates coalesce because
+   // they all share the same txn version. Chain stays at exactly 2.
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 100; ++i)
+      {
+         auto v = big('B', i);
+         tx.upsert(to_kv("k"), value_view(v.data(), v.size()));
+      }
+      tx.commit();
+   }
+
+   // Exactly 2 chain entries: committed v0 + this txn's coalesced top.
+   auto chain = t.chain_length_of(0, to_kv("k"));
+   INFO("chain entries after 100 same-txn updates: " << chain);
+   CHECK(chain == 2);
+
+   // Verify the latest value is the last one written.
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   cursor c(root);
+   REQUIRE(c.seek(to_kv("k")));
+   auto v = c.value<std::string>();
+   REQUIRE(v.has_value());
+   auto expected = big('B', 99);
+   CHECK(*v == expected);
+}
+
+TEST_CASE("Phase A: cross-txn updates leave the latest value visible",
+          "[per_txn][phaseA]")
+{
+   // Across-txn chain semantics depend on the COW prune behavior in
+   // shared-mode update — currently the COW path strips multi-version
+   // value_nodes back to inline form, so the chain length isn't a stable
+   // invariant across txns. What MUST hold: each txn's writes are
+   // visible after commit, regardless of whether the chain was preserved.
+   ptv_pubapi_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), to_vv("v0"));
+      tx.commit();
+   }
+
+   for (int i = 0; i < 5; ++i)
+   {
+      auto tx = t.ses->start_transaction(0);
+      char val[32];
+      std::snprintf(val, sizeof(val), "v_txn_%d", i);
+      tx.upsert(to_kv("k"), value_view(val, std::strlen(val)));
+      tx.commit();
+   }
+
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   cursor c(root);
+   REQUIRE(c.seek(to_kv("k")));
+   auto v = c.value<std::string>();
+   REQUIRE(v.has_value());
+   CHECK(*v == "v_txn_4");
+}

@@ -302,7 +302,7 @@ namespace psitri
             if (pcs.buffer && !pcs.buffer->empty())
                merge_buffer_to_persistent(pcs);
 
-            _commit_func(pcs.cursor->root());
+            _commit_func(pcs.cursor->take_root());
             _commit_func   = nullptr;
             _rollback_func = nullptr;
 
@@ -353,10 +353,12 @@ namespace psitri
       void init_primary_cs(sal::smart_ptr<sal::alloc_header> root)
       {
          change_set cs;
-         if (root)
-            cs.cursor.emplace(std::move(root));
-         else
-            cs.cursor.emplace(_session);
+         // Always emplace with the root smart_ptr so the txn's _ver
+         // (attached by start_transaction's make_unique_root) travels into
+         // the write_cursor even when _adr is null on a fresh database.
+         // For modes that didn't allocate a ver, the smart_ptr is empty
+         // either way — no harm.
+         cs.cursor.emplace(std::move(root));
          if (uses_buffer())
             cs.buffer.emplace();
          _change_sets.push_back(std::move(cs));

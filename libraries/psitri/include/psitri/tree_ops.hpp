@@ -31,6 +31,18 @@ namespace psitri
       void set_current_epoch(uint64_t e) { _current_epoch = e; }
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
       sal::smart_ptr<alloc_header> take_root() { return std::move(_root); }
+
+      /// Per-txn version: read the version number from the working root's
+      /// ver custom CB. Returns 0 if no ver is attached (no active txn /
+      /// expect_failure that hasn't ensured a version yet). Cheap — one
+      /// load through the CB control block.
+      uint64_t txn_version() const noexcept
+      {
+         auto v = _root.ver();
+         if (v == sal::null_ptr_address)
+            return 0;
+         return _session.read_custom_cb(v);
+      }
       tree_context(sal::smart_ptr<alloc_header> root)
           : _root(std::move(root)), _session(*(root.session()))
       {
@@ -165,7 +177,13 @@ namespace psitri
          _new_value          = std::move(value);
          if (not _root)
          {
-            _root = _session.smart_alloc<leaf_node>(key, make_value(_new_value, sal::alloc_hint()));
+            // First write into an empty tree: allocate a leaf and graft
+            // it onto _root via give() so the txn's _ver (set at
+            // start_transaction by make_unique_root) travels through
+            // unchanged.
+            auto leaf_addr = _session.alloc<leaf_node>(
+                sal::alloc_hint(), key, make_value(_new_value, sal::alloc_hint()));
+            _root.give(leaf_addr);
             return -1;
          }
          auto rref     = *_root;
@@ -178,7 +196,7 @@ namespace psitri
          }
          catch (...)
          {
-            _root.give(old_addr);  // restore root on exception (update/insert may throw)
+            _root.give(old_addr);  // restore root on exception
             throw;
          }
          if (result.count() == 1)
@@ -1503,6 +1521,45 @@ namespace psitri
       else
          _old_value_size = old_value.size();
 
+      // Per-txn version chain extension (Phase A):
+      // When the working root carries a txn version (set by start_transaction
+      // via make_unique_root) and the existing value is a value_node, extend
+      // the chain on the existing value_node instead of releasing it and
+      // allocating a fresh single-entry one. This preserves chain history
+      // for snapshot readers and lets multiple writes within one txn
+      // coalesce on the topmost entry.
+      //
+      // Limited to unique mode: in shared mode we're cloning into a new
+      // leaf, so the chain semantics are different (snapshot copies must
+      // not see in-flight updates).
+      if constexpr (mode.is_unique())
+      {
+         if (uint64_t txn_ver = txn_version();
+             txn_ver != 0 && old_value.is_value_node() &&
+             _new_value.is_view())
+         {
+            auto vn_ref = _session.get_ref<value_node>(old_value.value_address());
+            auto new_view = _new_value.view();
+            if (!vn_ref->is_flat() &&
+                new_view.size() <= value_node::max_inline_entry_size)
+            {
+               bool coalesce = vn_ref->num_versions() > 0 &&
+                               vn_ref->latest_version() == txn_ver;
+               if (coalesce)
+                  (void)_session.mvcc_realloc<value_node>(
+                      vn_ref, vn_ref.obj(), txn_ver, new_view,
+                      value_node::replace_last_tag{});
+               else
+                  (void)_session.mvcc_realloc<value_node>(
+                      vn_ref, vn_ref.obj(), txn_ver, new_view);
+               // mvcc_realloc preserves the value_node's ptr_address (only
+               // moves data location); the leaf still points at it. No
+               // leaf-level mutation needed.
+               return leaf.address();
+            }
+         }
+      }
+
       // Convert large values to value_nodes, using the leaf's clines as the
       // allocation hint so the value_node lands on an existing cline when possible.
       auto new_val = make_value(_new_value, leaf->clines());
@@ -2307,7 +2364,10 @@ namespace psitri
 
       if (!_root)
       {
-         _root = _session.smart_alloc<leaf_node>(key, make_value(value, sal::alloc_hint()));
+         // Preserve _ver — see same pattern in insert() above.
+         auto leaf_addr = _session.alloc<leaf_node>(
+             sal::alloc_hint(), key, make_value(value, sal::alloc_hint()));
+         _root.give(leaf_addr);
          return;
       }
 

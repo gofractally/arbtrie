@@ -120,9 +120,19 @@ namespace sal
          return tid;
       }
 
+      /// State-transition primitive: replace the underlying address while
+      /// keeping `_ver` attached. The (root, ver) pair is the smart_ptr's
+      /// invariant — mutating only the address preserves that pair across
+      /// COW operations on a tree's working root.
+      ///
+      /// Releases the prior `_adr` only. The caller hands in a +1 ref on
+      /// `given_adr` (typical: a freshly-allocated node returned by alloc).
       smart_ptr_base& give(ptr_address given_adr) noexcept
       {
-         release();
+         if (_adr != null_ptr_address)
+         {
+            _asession->release(_adr);
+         }
          _adr = given_adr;
          return *this;
       }

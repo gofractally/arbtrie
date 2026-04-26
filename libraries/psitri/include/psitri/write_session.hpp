@@ -77,6 +77,22 @@ namespace psitri
       transaction start_transaction(uint32_t root_index,
                                     tx_mode  mode = tx_mode::expect_success);
 
+      /// Convert any root smart_ptr (shared or unique) into one that is
+      /// uniquely owned by this writer for further mutation. Allocates a
+      /// fresh version control block and attaches it to the returned
+      /// smart_ptr; the prior `_ver` (which belonged to the published
+      /// generation) is released.
+      ///
+      /// From the caller's perspective this is a pure state transition:
+      ///
+      ///     unique_root = ws.make_unique_root(std::move(root));
+      ///
+      /// after which `unique_root` is the writer's working copy. The
+      /// original published root in the slot is unaffected — readers
+      /// holding snapshots continue to see it.
+      sal::smart_ptr<sal::alloc_header> make_unique_root(
+          sal::smart_ptr<sal::alloc_header> root);
+
       /**
        * @brief Immediate-mode MVCC upsert on a single key.
        *
@@ -214,6 +230,11 @@ namespace psitri
       typename LockPolicy::mutex_type& root_modify_lock(uint32_t root_index);
 
       /// Allocate a global version CB and publish a new root at root_index.
+      /// Used by callers (e.g. mvcc_upsert one-shot) that don't already
+      /// hold a version on the new root smart_ptr. Transactions don't
+      /// call this directly — their commit funnels through set_root with
+      /// a root that already carries the txn's version (allocated at
+      /// start_transaction via make_unique_root).
       void publish_root(uint32_t root_index, sal::smart_ptr<sal::alloc_header> new_root);
 
       /// Create a tree_context for a root with dead-version and epoch info set.
