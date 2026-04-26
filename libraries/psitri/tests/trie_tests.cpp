@@ -29,6 +29,4 @@ TEST_CASE("trie_tests", "[psitri][trie]")
       //  trx->set_root(std::move(leaf));
       //  trx->commit();
    }
-   alloc.reset();
-   std::filesystem::remove_all(dir);
 }

@@ -93,89 +93,11 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline void basic_write_session<LockPolicy>::occ_commit(
-       uint32_t                    root_index,
-       const detail::write_buffer* buffer,
-       const read_set&             reads)
-   {
-      auto& lock = this->_db->modify_lock(root_index);
-      std::lock_guard<typename LockPolicy::mutex_type> guard(lock);
-
-      auto current_root = get_root(root_index);
-
-      // Per-key validation: check each read against the current tree
-      if (!reads.empty())
-      {
-         cursor c(current_root);
-
-         for (const auto& entry : reads.entries)
-         {
-            auto info = c.get_key_info(entry.key);
-            if (info.leaf_addr != entry.leaf_addr || info.version != entry.version)
-               throw occ_conflict{};
-         }
-
-         for (const auto& lb : reads.lower_bounds)
-         {
-            if (lb.is_upper)
-               c.upper_bound(lb.query_key);
-            else
-               c.lower_bound(lb.query_key);
-
-            if (lb.at_end)
-            {
-               if (!c.is_end())
-                  throw occ_conflict{};
-            }
-            else
-            {
-               if (c.is_end() || c.key() != lb.found_key)
-                  throw occ_conflict{};
-            }
-         }
-      }
-
-      // Apply buffered writes to the current tree (not the snapshot)
-      if (buffer && !buffer->empty())
-      {
-         write_cursor wc(std::move(current_root));
-         auto it  = buffer->begin();
-         auto end = buffer->end();
-         for (; it != end; ++it)
-         {
-            auto& e = it.value();
-            auto  k = it.key();
-            if (e.is_data())
-               wc.upsert_sorted(k, e.value());
-            else if (e.type == detail::buffer_entry::tombstone)
-               wc.remove(k);
-         }
-         current_root = wc.root();
-      }
-
-      publish_root(root_index, std::move(current_root));
-   }
-
-   template <class LockPolicy>
    inline transaction basic_write_session<LockPolicy>::start_transaction(
        uint32_t root_index, tx_mode mode)
    {
       auto  session = this->_allocator_session;
       auto* self    = this;
-
-      if (mode == tx_mode::occ)
-      {
-         auto root = get_root(root_index);
-         auto tx   = transaction(
-             session, std::move(root),
-             [self, root_index](const detail::write_buffer* buffer, const read_set& reads)
-             { self->occ_commit(root_index, buffer, reads); },
-             []() {});
-         tx._ws                 = self;
-         tx.cs_at(0).root_index = root_index;
-         tx._max_held_root      = root_index;
-         return tx;
-      }
 
       auto& lock = this->_db->modify_lock(root_index);
       lock.lock();

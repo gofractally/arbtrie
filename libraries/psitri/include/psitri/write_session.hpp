@@ -221,11 +221,6 @@ namespace psitri
       /// Create a tree_context for a root with dead-version and epoch info set.
       tree_context make_tree_context(uint32_t root_index);
 
-      /// OCC commit: lock, validate read-set, apply writes, publish.
-      void occ_commit(uint32_t                     root_index,
-                      const detail::write_buffer*  buffer,
-                      const read_set&              reads);
-
       sal::sync_type _sync = sal::sync_type::none;
    };
 

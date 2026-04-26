@@ -15,59 +15,16 @@ namespace psitri
    class tree_handle;
 
    // ═════════════════════════════════════════════════════════════════════
-   // OCC read-set tracking
-   // ═════════════════════════════════════════════════════════════════════
-
-   /// A single point-read observation for OCC validation.
-   struct read_entry
-   {
-      std::string      key;
-      uint64_t         version;    ///< 0=inline, latest_version()=VN, UINT64_MAX=missing
-      sal::ptr_address leaf_addr;  ///< leaf containing the key
-   };
-
-   /// A lower/upper-bound predicate observation for OCC phantom detection.
-   /// Records the query key and the key it resolved to, so validation
-   /// can re-execute the bound and detect inserted phantoms.
-   struct lb_entry
-   {
-      std::string query_key;    ///< the key we searched for
-      std::string found_key;    ///< the key we landed on (empty if at_end)
-      bool        at_end;       ///< whether the bound hit end
-      bool        is_upper;     ///< true = upper_bound, false = lower_bound
-   };
-
-   /// Accumulated read observations for an OCC transaction.
-   struct read_set
-   {
-      std::vector<read_entry> entries;
-      std::vector<lb_entry>   lower_bounds;
-
-      void record(key_view key, uint64_t version, sal::ptr_address leaf_addr)
-      {
-         entries.push_back({std::string(key), version, leaf_addr});
-      }
-
-      void record_bound(key_view query, key_view found, bool at_end, bool is_upper)
-      {
-         lower_bounds.push_back({std::string(query), std::string(found), at_end, is_upper});
-      }
-
-      bool empty() const noexcept { return entries.empty() && lower_bounds.empty(); }
-   };
-
-   // ═════════════════════════════════════════════════════════════════════
    // Per-tree change set
    // ═════════════════════════════════════════════════════════════════════
 
-   /// Tracks modifications and reads for a single tree within a transaction.
+   /// Tracks modifications for a single tree within a transaction.
    /// Each tree opened during a transaction gets its own change_set, indexed
    /// by position in the transaction's _change_sets vector.
    struct change_set
    {
       std::optional<write_cursor>         cursor;
       std::optional<detail::write_buffer> buffer;
-      read_set                            reads;
 
       /// If this tree was obtained from a parent tree, records how to write
       /// the subtree root back into the parent on commit.
@@ -215,10 +172,6 @@ namespace psitri
    // transaction
    // ═════════════════════════════════════════════════════════════════════
 
-   /// OCC commit function type: receives the write buffer and read set,
-   /// validates per-key, applies writes to the current tree, publishes.
-   using occ_commit_fn = std::function<void(const detail::write_buffer*, const read_set&)>;
-
    class transaction
    {
      public:
@@ -232,20 +185,6 @@ namespace psitri
             _rollback_func(std::move(rollback_func)),
             _mode(mode)
       {
-         init_primary_cs(std::move(root));
-      }
-
-      /// OCC-specific constructor: provides an MVCC-aware commit function
-      /// that validates the read set per-key and applies writes to the current tree.
-      transaction(sal::allocator_session_ptr          session,
-                  sal::smart_ptr<sal::alloc_header>   root,
-                  occ_commit_fn                       occ_commit,
-                  std::function<void()>               rollback_func)
-          : _session(std::move(session)),
-            _rollback_func(std::move(rollback_func)),
-            _mode(tx_mode::occ)
-      {
-         _occ_commit_func = std::move(occ_commit);
          init_primary_cs(std::move(root));
       }
 
@@ -356,18 +295,6 @@ namespace psitri
 
       void commit()
       {
-         if (_occ_commit_func)
-         {
-            // OCC: commit subtrees bottom-up, then validate+apply primary
-            commit_subtrees_bottom_up();
-
-            auto& pcs = cs_at(_primary_index);
-            _occ_commit_func(pcs.buffer ? &*pcs.buffer : nullptr, pcs.reads);
-            _occ_commit_func = nullptr;
-            _commit_func     = nullptr;
-            _rollback_func   = nullptr;
-            return;
-         }
          if (_commit_func)
          {
             // Batch/micro: commit subtrees bottom-up, then commit primary
@@ -393,9 +320,8 @@ namespace psitri
          if (_rollback_func)
          {
             _rollback_func();
-            _rollback_func   = nullptr;
-            _commit_func     = nullptr;
-            _occ_commit_func = nullptr;
+            _rollback_func = nullptr;
+            _commit_func   = nullptr;
          }
          abort_additional_roots();
       }
@@ -576,8 +502,6 @@ namespace psitri
 
       uint64_t do_remove_range(uint32_t idx, key_view lower, key_view upper)
       {
-         if (_mode == tx_mode::occ)
-            throw std::logic_error("remove_range not supported in OCC mode");
          auto& cs = cs_at(idx);
          if (cs.buffer)
             return micro_remove_range(cs, lower, upper);
@@ -605,7 +529,6 @@ namespace psitri
             }
          }
          auto result = cs.cursor->get<T>(key);
-         track_read(cs, key);
          return result;
       }
 
@@ -626,7 +549,6 @@ namespace psitri
             }
          }
          auto result = cs.cursor->get(key, buffer);
-         track_read(cs, key);
          return result;
       }
 
@@ -638,7 +560,6 @@ namespace psitri
             c.upper_bound(key);
          else
             c.lower_bound(key);
-         track_bound(cs, key, c, is_upper);
          return c;
       }
 
@@ -840,28 +761,7 @@ namespace psitri
             cs.buffer->soft_clear();
       }
 
-      /// Track a persistent-tree read for OCC validation.
-      void track_read(const change_set& cs, key_view key) const
-      {
-         if (_occ_commit_func)
-         {
-            auto info = cs.cursor->read_cursor().get_key_info(key);
-            const_cast<change_set&>(cs).reads.record(key, info.version, info.leaf_addr);
-         }
-      }
-
-      /// Track a lower_bound/upper_bound predicate for OCC phantom detection.
-      void track_bound(const change_set& cs, key_view query, const cursor& c, bool is_upper) const
-      {
-         if (_occ_commit_func)
-         {
-            const_cast<change_set&>(cs).reads.record_bound(
-                query, c.is_end() ? key_view{} : c.key(), c.is_end(), is_upper);
-         }
-      }
-
       std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
-      occ_commit_fn                                            _occ_commit_func;
       std::function<void()>                                    _rollback_func;
       tx_mode                                                  _mode = tx_mode::batch;
       std::vector<frame>                                       _frames;
