@@ -10,13 +10,13 @@
 - **Mitigation**: Tagged `[!benchmark]` so it doesn't gate normal test runs.
 - **Out of scope for transaction-refactor**: this is a SAL-level segment-growth/remap protocol bug, independent of the COW/MVCC refactor. Fix needs to ensure all live `segment*` references see the post-mremap `data` pointer (or use a stable handle that hides the remap).
 
-### 2. `database::get_stats().total_live_objects` returns 0 after writes
+## Fixed (recent)
+
+### `database::get_stats().total_live_objects` returns 0 after writes (9beb37b)
 - **Repro**: `psitri-tests "database dump and get_stats"`
 - **File**: `libraries/psitri/tests/coverage_gap_tests.cpp:475`
-- **Symptom**: After inserting 100 keys and committing, `stats.total_live_objects` is 0.
-- **Status**: FIXED — `database.hpp:get_stats()` now wires `total_live_objects` to `_allocator.total_allocated_objects()` (control-block-allocator counter) instead of the segment dump's `total_read_nodes` which double-counts/misses after compaction.
-
-## Fixed (recent)
+- **Symptom**: After inserting 100 keys and committing, `stats.total_live_objects` was 0.
+- **Fix**: `database.hpp:get_stats()` now wires `total_live_objects` to `_allocator.total_allocated_objects()` (control-block-allocator counter) instead of the segment dump's `total_read_nodes` which double-counts/misses after compaction.
 
 ### Multi-tree parallel fuzz tests: Catch2 thread-safety (release-only)
 - **Repro**: `psitri-tests "fuzz multi-tree parallel"` — flaky SIGABRT in release builds

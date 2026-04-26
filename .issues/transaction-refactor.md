@@ -13,21 +13,33 @@ blocks: []
 
 ## Status (2026-04-26)
 
-**Landed on `mvcc` branch:**
+**All phases of the original plan landed on the `mvcc` branch:**
+
+First wave:
 - Phase 0 — `with_subtree` removed (b432258)
 - Phase 1 — stabilization (9beb37b): get_stats fix, dead nodes.hpp deleted, hardcoded test paths replaced with unique temp dirs, tree_context Dense Random tagged `[!benchmark]`
 - Phase 2 — OCC dropped entirely (5370aab)
 - Phase 3 — `tx_mode::batch` → `expect_success`, `tx_mode::micro` → `expect_failure` (e7ac82c)
 - Phase 4a — `value_node` coalesce ctor with `replace_last_tag` (ec2ae62)
-- Phase 4b (partial) — coalesce branch wired into `try_mvcc_upsert` / `try_mvcc_remove` (e98fea1). Defensive: no behavior change for current callers (each `mvcc_upsert` still bumps a unique version), but the optimization fires automatically once a future caller reuses a version.
+- Phase 4b (initial) — coalesce branch wired into `try_mvcc_upsert` / `try_mvcc_remove` (e98fea1).
 
-**Deferred (still in this issue, separate follow-up commits):**
-- Phase 4b — full per-txn version threading. Requires routing transaction's COW writes (currently via `write_cursor`) through a session-tracked version, OR teaching `write_cursor` to carry the txn version through to value-node updates. Both are substantial. Without this, the coalesce check in try_mvcc_upsert never fires for the public `transaction.upsert` path.
-- Phase 5 — lazy version allocation for `expect_failure`. Today `publish_root` allocates the version on commit, so `expect_failure` is *already* lazy in the implicit sense. Only meaningful once Phase 4b's per-txn threading lands.
-- Phase 6 — abort releases the version. Same as Phase 5: only meaningful once a version is allocated at txn start.
-- Phase 7 — unique-root optimization. SAL's `can_modify` per-segment check already handles in-place mutation for session-owned nodes; making this an explicit hint requires the per-txn version flow to coordinate with reader-snapshot detection.
+Second wave (transaction-refactor-finish):
+- Phase A — per-txn version threading via `smart_ptr`'s `_ver` (3aa21c3). `make_unique_root` as the explicit state-transition primitive; `give(addr)` preserves `_ver`; tree_context's COW update path uses chain extension on existing value_nodes.
+- Phase B — lazy version allocation for `expect_failure` + cursor snapshot version (2f60d13). `ensure_txn_version` plugged into the buffer-flush funnel; cursors inherit the snapshot's version from `smart_ptr.ver()`.
+- Phase C — `_has_txn_version` flag distinguishes "txn owns its ver" from "inherited slot ver"; expect_failure aborts that allocated a ver release it cleanly (bbe9aa5).
+- Phase D — in-place coalesce: `value_node::try_coalesce_in_place` memcpy fast path for same/smaller updates with matching version (5881120). 1000 hot-key updates allocate ≤ 5 new objects.
+- Phase E — type-erased `held_lock` removes the `std::mutex*` hardcode (aa40f88). Multi-root locking now matches whatever LockPolicy the bound write_session uses.
+- Phase F — tree_context SIGBUS diagnosed as SAL segment-remap stale-pointer bug (cedfcbe), out of scope for transaction-refactor; documented in BUGS.md with lldb evidence; deferred as a SAL ticket.
 
-The landed work is a clean stopping point: tests pass, the OCC removal + rename + value-node coalesce primitive are in. Phases 4b-full / 5 / 6 / 7 are interlocked and best done as one follow-up.
+**Verification:**
+- All `~[!benchmark]` tests pass (587+ cases, 975M assertions).
+- Hot-key perf assertion: 1000 same-size updates to one key in one expect_success txn produce ≤ 5 new allocations and ≤ 2 chain entries.
+- Lazy-alloc assertion: 1000 expect_failure abort cycles with no writes produce zero global_version delta.
+- Abort-release assertion: aborted versions appear in the dead_versions snapshot after the compactor runs; aborted txn pages are reclaimed.
+
+**Out of scope (tracked separately):**
+- DWAL `expect_failure` mode (Phase 8 of original plan). DWAL stays eager-WAL-append.
+- The tree_context SIGBUS itself — needs a SAL segment-remap-protocol fix.
 
 ## Summary
 
