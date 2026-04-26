@@ -9,12 +9,7 @@
 - **Mitigation**: Tagged `[!benchmark]` so it doesn't gate normal test runs. Run explicitly to investigate.
 - **Likely cause**: mmap segment growth or refcount-related access violation under sustained allocation pressure. Pre-existing issue, surfaced after merging mvcc + lock-policy work. Needs targeted investigation with a smaller repro.
 
-### 2. `transaction::held_lock::lock` hardcoded to `std::mutex*`
-- **File**: `libraries/psitri/include/psitri/transaction.hpp:877`
-- **Symptom**: The multi-root machinery stores held locks as `std::mutex*` even though `database` and `write_session` are templated on `LockPolicy`. Currently safe because the unqualified `psitri::transaction` is bound to `std_lock_policy::mutex_type = std::mutex` via the type alias.
-- **Status**: Will break if a fiber-aware `LockPolicy` is wired up and uses the multi-root feature. Fix requires lifting `transaction` to `basic_transaction<LockPolicy>` (mirroring `basic_database` / `basic_write_session`). Tracked as deferred follow-up; not blocking current `std_lock_policy` callers.
-
-### 3. `database::get_stats().total_live_objects` returns 0 after writes
+### 2. `database::get_stats().total_live_objects` returns 0 after writes
 - **Repro**: `psitri-tests "database dump and get_stats"`
 - **File**: `libraries/psitri/tests/coverage_gap_tests.cpp:475`
 - **Symptom**: After inserting 100 keys and committing, `stats.total_live_objects` is 0.

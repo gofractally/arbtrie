@@ -344,7 +344,17 @@ namespace psitri
 
       uint32_t idx = static_cast<uint32_t>(_change_sets.size());
       _change_sets.push_back(std::move(cs));
-      _held_locks.push_back({root_index, idx, &lock});
+      // The transaction class is non-templated; the type-erased unlock_fn
+      // captures the actual mutex type at the fill site. The unqualified
+      // `psitri::transaction` is bound to write_session, which is
+      // bound to std_lock_policy, so we know the mutex type concretely.
+      using mutex_t = typename write_session::lock_policy_type::mutex_type;
+      _held_locks.push_back({
+          .root_index = root_index,
+          .cs_index   = idx,
+          .lock       = &lock,
+          .unlock_fn  = [](void* p) { static_cast<mutex_t*>(p)->unlock(); },
+      });
       _max_held_root = root_index;
 
       return tree_handle(*this, idx);
@@ -358,7 +368,7 @@ namespace psitri
          if (cs.buffer && !cs.buffer->empty())
             merge_buffer_to_persistent(cs);
          _ws->publish_root(hl.root_index, cs.cursor->root());
-         hl.lock->unlock();
+         hl.unlock_fn(hl.lock);
       }
       _held_locks.clear();
    }
@@ -366,7 +376,7 @@ namespace psitri
    inline void transaction::abort_additional_roots() noexcept
    {
       for (auto it = _held_locks.rbegin(); it != _held_locks.rend(); ++it)
-         it->lock->unlock();
+         it->unlock_fn(it->lock);
       _held_locks.clear();
    }
 

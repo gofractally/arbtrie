@@ -781,11 +781,18 @@ namespace psitri
 
       write_session* _ws = nullptr;
 
+      // Type-erased lock handle. The fill site (basic_write_session::open_root)
+      // is templated on LockPolicy, so it knows the concrete mutex type and
+      // captures the unlock function pointer at that point. Storage is
+      // type-agnostic so the transaction class itself doesn't need to be a
+      // template — preserving the public `psitri::transaction` name without
+      // forcing every consumer to specify a LockPolicy.
       struct held_lock
       {
-         uint32_t    root_index;
-         uint32_t    cs_index;
-         std::mutex* lock;
+         uint32_t root_index;
+         uint32_t cs_index;
+         void*    lock;
+         void   (*unlock_fn)(void*);
       };
       std::vector<held_lock> _held_locks;
       uint32_t               _max_held_root = 0;
