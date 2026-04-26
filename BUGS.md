@@ -2,11 +2,23 @@
 
 ## Open
 
-### 1. `database::get_stats().total_live_objects` returns 0 after writes
+### 1. `tree_context` Dense Random SIGBUS under sustained inserts
+- **Repro**: `psitri-tests "tree_context"` (now excluded from default runs via `[!benchmark]`)
+- **File**: `libraries/psitri/tests/tree_context_tests.cpp:492` (TEST_CASE "tree_context")
+- **Symptom**: Test crashes with exit 138 (SIGBUS) somewhere during the 30-round random-key insert loop (1M keys per round × 63-byte values). Crash occurs after round 0 prints. Reproducible 4 of 5 invocations; not deterministic.
+- **Mitigation**: Tagged `[!benchmark]` so it doesn't gate normal test runs. Run explicitly to investigate.
+- **Likely cause**: mmap segment growth or refcount-related access violation under sustained allocation pressure. Pre-existing issue, surfaced after merging mvcc + lock-policy work. Needs targeted investigation with a smaller repro.
+
+### 2. `transaction::held_lock::lock` hardcoded to `std::mutex*`
+- **File**: `libraries/psitri/include/psitri/transaction.hpp:877`
+- **Symptom**: The multi-root machinery stores held locks as `std::mutex*` even though `database` and `write_session` are templated on `LockPolicy`. Currently safe because the unqualified `psitri::transaction` is bound to `std_lock_policy::mutex_type = std::mutex` via the type alias.
+- **Status**: Will break if a fiber-aware `LockPolicy` is wired up and uses the multi-root feature. Fix requires lifting `transaction` to `basic_transaction<LockPolicy>` (mirroring `basic_database` / `basic_write_session`). Tracked as deferred follow-up; not blocking current `std_lock_policy` callers.
+
+### 3. `database::get_stats().total_live_objects` returns 0 after writes
 - **Repro**: `psitri-tests "database dump and get_stats"`
 - **File**: `libraries/psitri/tests/coverage_gap_tests.cpp:475`
 - **Symptom**: After inserting 100 keys and committing, `stats.total_live_objects` is 0.
-- **Likely cause**: `get_stats()` doesn't account for objects allocated during the session, or the stat counter isn't wired up.
+- **Status**: FIXED — `database.hpp:get_stats()` now wires `total_live_objects` to `_allocator.total_allocated_objects()` (control-block-allocator counter) instead of the segment dump's `total_read_nodes` which double-counts/misses after compaction.
 
 ## Fixed (recent)
 

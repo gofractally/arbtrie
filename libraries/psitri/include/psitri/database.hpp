@@ -239,7 +239,11 @@ namespace psitri
          database_stats s;
          s.total_segments       = d.total_segments;
          s.total_live_bytes     = d.total_read_bytes;
-         s.total_live_objects   = d.total_read_nodes;
+         // total_read_nodes from the segment dump only counts objects in
+         // their last-known segment location; objects relocated by the
+         // compactor are double-counted/missed there. Pull the live count
+         // from the control-block allocator instead.
+         s.total_live_objects   = _allocator.total_allocated_objects();
          s.total_free_bytes     = d.total_free_space;
          s.database_file_bytes  = d.total_segments * sal::segment_size;
          s.pinned_segments      = d.mlocked_segments_count;

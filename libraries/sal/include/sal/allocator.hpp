@@ -210,6 +210,11 @@ namespace sal
 
       /// forwards to get_session()->release(adr)
       void release(ptr_address adr) noexcept;
+
+      /// Total number of live (allocated) pointers across all sessions.
+      /// Mirrors `allocator_session::get_total_allocated_objects()` but at
+      /// the database level so callers without a session can read it.
+      uint64_t total_allocated_objects() const noexcept { return _ptr_alloc.used(); }
       /**
        * Syncs the root object to disk.
        * 

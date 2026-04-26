@@ -474,6 +474,10 @@ TEST_CASE("database dump and get_stats", "[database][diagnostics]")
    REQUIRE(!stats_str.empty());
    REQUIRE(stats.total_segments > 0);
    REQUIRE(stats.database_file_bytes > 0);
+   // Regression: total_live_objects must reflect the 100 inserted keys
+   // (plus tree-internal nodes). Pre-fix it was wired to dump's
+   // total_read_nodes which under-counts after compaction. Should be > 0.
+   REQUIRE(stats.total_live_objects > 0);
 }
 
 // ============================================================

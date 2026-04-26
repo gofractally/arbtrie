@@ -12,6 +12,7 @@
 #include <fstream>
 #include <random>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 using namespace psitri;
@@ -22,20 +23,24 @@ namespace
 {
    struct mvcc_db
    {
+      std::filesystem::path           dir;
       std::unique_ptr<sal::allocator> alloc;
       sal::allocator_session_ptr      ses{nullptr};
 
       mvcc_db()
       {
-         std::filesystem::remove_all("mvcc_testdb");
-         alloc = std::make_unique<sal::allocator>("mvcc_testdb", sal::runtime_config());
+         auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+         dir     = std::filesystem::temp_directory_path() /
+               ("psitri_mvcc_" + std::to_string(getpid()) + "_" + std::to_string(ts));
+         std::filesystem::remove_all(dir);
+         alloc = std::make_unique<sal::allocator>(dir, sal::runtime_config());
          sal::register_type_vtable<leaf_node>();
          sal::register_type_vtable<inner_prefix_node>();
          sal::register_type_vtable<inner_node>();
          sal::register_type_vtable<value_node>();
          ses = alloc->get_session();
       }
-      ~mvcc_db() { std::filesystem::remove_all("mvcc_testdb"); }
+      ~mvcc_db() { std::filesystem::remove_all(dir); }
 
       smart_ptr<alloc_header> root()
       {
