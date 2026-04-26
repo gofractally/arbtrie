@@ -696,6 +696,21 @@ Current implementation evidence:
   returned slices, direct-vs-DWAL behavior, and standalone Silkworm repros.
 - The standalone dangling-slice and seek/next repros are now represented as
   ordinary PsiTri MDBX compatibility tests.
+- The pushed PsiTri branch is `origin/codex-mdbx-silkworm-refactor` at
+  `a3ce8cbb86e62dcb92b20083fdd8a5c6d1726a59`.
+- A simulated merge of the pushed PsiTri branch into Silkworm's
+  `silkworm-psitrimdbx-fixes` submodule branch is not clean. It conflicts in
+  PsiTri transaction/DWAL headers and `libraries/psitrimdbx/src/mdbx_impl.cpp`.
+- A direct apply of Silkworm's dirty local `mdbx_impl.cpp` patch onto the
+  pushed PsiTri branch also does not apply cleanly. A 3-way apply reaches
+  conflicts, confirming that the remaining work should be ported deliberately
+  rather than copied wholesale.
+- Silkworm still appears to rely on psitrimdbx compatibility APIs from its
+  submodule branch, including `mdbx::error::throw_exception`, `env::get_path`,
+  `env::get_stat/get_info/copy/check_readers`, transaction map info/stat
+  helpers, generic cursor `move()`, multi-cursor aliases, `cursor::put`,
+  `cursor::erase(key,value)`, `MDBX_ENODATA`, `MDBX_COALESCE`,
+  `MDBX_option_t`, and `mdbx_env_get/set_option`.
 
 Checklist:
 
@@ -709,14 +724,29 @@ Checklist:
       `libraries/psitrimdbx/tests/mdbx_tests.cpp`.
 - [x] Port the Silkworm DUPSORT cursor pattern coverage into
       `libraries/psitrimdbx/tests/mdbx_tests.cpp`.
-- [ ] Push the PsiTri fixes to a branch that the Silkworm fork can consume.
+- [x] Push the PsiTri fixes to a branch that the Silkworm fork can consume.
+- [x] Fetch the pushed PsiTri branch into the Silkworm submodule.
+- [x] Simulate merging the pushed PsiTri branch with Silkworm's
+      `silkworm-psitrimdbx-fixes` submodule branch and record the conflict
+      shape.
 - [ ] Update the Silkworm `third_party/psitri` submodule to that pushed commit.
 - [ ] Re-run the relevant Silkworm build/tests or document any local
       dependency/build blockers.
+- [ ] Port the Silkworm-required psitrimdbx API compatibility surface on top of
+      the pushed PsiTri branch before moving the submodule pointer.
+- [ ] Port or replace Silkworm's case-study/stress benchmark if it is still the
+      intended Ethereum workload for validation.
+- [ ] Decide how the Silkworm direct-COW-default experiment maps onto the
+      planned `direct_backend` / `dwal_backend` split. Do not keep it as a
+      monolithic `mdbx_impl.cpp` mode switch unless that becomes the explicit
+      architecture.
+- [ ] Evaluate Silkworm's DWAL pending-byte cap as a targeted safety guard for
+      the eventual DWAL backend.
 - [ ] Audit remaining Silkworm submodule patches for relevance after the
       PsiTri fixes land. Expected categories: redundant repro workarounds,
-      useful direct-backend experiments, DWAL pending-byte safeguards, and
-      diagnostics that should stay local or move into test-support tooling.
+      useful direct-backend experiments, DWAL pending-byte safeguards, API
+      compatibility shims, and diagnostics that should stay local or move into
+      test-support tooling.
 
 ## DWAL Alignment Gaps
 
