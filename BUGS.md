@@ -2,12 +2,13 @@
 
 ## Open
 
-### 1. `tree_context` Dense Random SIGBUS under sustained inserts
-- **Repro**: `psitri-tests "tree_context"` (now excluded from default runs via `[!benchmark]`)
-- **File**: `libraries/psitri/tests/tree_context_tests.cpp:492` (TEST_CASE "tree_context")
-- **Symptom**: Test crashes with exit 138 (SIGBUS) somewhere during the 30-round random-key insert loop (1M keys per round × 63-byte values). Crash occurs after round 0 prints. Reproducible 4 of 5 invocations; not deterministic.
-- **Mitigation**: Tagged `[!benchmark]` so it doesn't gate normal test runs. Run explicitly to investigate.
-- **Likely cause**: mmap segment growth or refcount-related access violation under sustained allocation pressure. Pre-existing issue, surfaced after merging mvcc + lock-policy work. Needs targeted investigation with a smaller repro.
+### 1. `tree_context` Dense Random SIGBUS in segment::sync
+- **Repro**: `psitri-tests "tree_context"` (excluded from default runs via `[!benchmark]`)
+- **File**: `libraries/psitri/tests/tree_context_tests.cpp:498` (TEST_CASE "tree_context")
+- **Crash site**: `sal::mapped_memory::segment::sync` (segment_impl.hpp:12) — EXC_BAD_ACCESS code=2 (write fault) on a high-memory address (~0x7801ffffc0). Reproducible 3-of-3 runs.
+- **Diagnosis**: The sync path writes a sync_header at `data + alloc_pos` and the user_data follows. The `data` pointer is per-segment; if the segment was grown via mremap and the segment's `data` field hadn't been updated to the new mapping address, this write hits an unmapped page → SIGBUS. Confirmed via lldb: stack frame is `segment::sync + 168`, address is in an unmapped high range.
+- **Mitigation**: Tagged `[!benchmark]` so it doesn't gate normal test runs.
+- **Out of scope for transaction-refactor**: this is a SAL-level segment-growth/remap protocol bug, independent of the COW/MVCC refactor. Fix needs to ensure all live `segment*` references see the post-mremap `data` pointer (or use a stable handle that hides the remap).
 
 ### 2. `database::get_stats().total_live_objects` returns 0 after writes
 - **Repro**: `psitri-tests "database dump and get_stats"`
