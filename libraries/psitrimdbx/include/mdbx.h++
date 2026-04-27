@@ -652,7 +652,10 @@ namespace mdbx
 
       void abort();
       void commit();
-      void commit(MDBX_commit_latency& latency) { commit(); }
+      void commit(MDBX_commit_latency& latency) {
+         latency = {};
+         commit();
+      }
 
       txn_managed(txn_managed&& o) noexcept : txn(std::move(o)) {}
       txn_managed& operator=(txn_managed&& o) noexcept;
