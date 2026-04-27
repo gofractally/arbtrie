@@ -1962,14 +1962,21 @@ namespace sal
             s = nullptr;
       }
 
-      if (not current_session->at(_allocator_index))
+      auto& session = current_session->at(_allocator_index);
+      if (session && &session->get_allocator() != this)
+      {
+         SAL_WARN("get_session: discarding stale session for allocator index {}", _allocator_index);
+         session = nullptr;
+      }
+
+      if (not session)
       {
          SAL_INFO("get_session: creating new session {} ", _allocator_index);
-         return allocator_session_ptr((*current_session)[_allocator_index] =
+         return allocator_session_ptr(session =
                                           new allocator_session(*this, alloc_session_num()));
       }
       SAL_INFO("get_session: returning existing session");
-      auto cs = current_session->at(_allocator_index);
+      auto cs = session;
       cs->retain_session();
       SAL_INFO("get_session: returning existing session {}  allocidx: {}  sessptr: {} ",
                cs->get_session_num(), _allocator_index, current_session->at(_allocator_index));

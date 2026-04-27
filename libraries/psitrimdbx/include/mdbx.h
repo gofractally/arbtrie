@@ -108,7 +108,7 @@ typedef enum MDBX_txn_flags_t {
    MDBX_TXN_TRY            = 0x10000000,
    MDBX_TXN_NOMETASYNC     = 0x40000,
    MDBX_TXN_NOSYNC         = 0x10000,
-   MDBX_TXN_USE_DWAL       = 0x20000000,
+   MDBX_TXN_USE_DWAL       = 0x20000000, /* PsiTri extension: opt into DWAL path */
 } MDBX_txn_flags_t;
 
 /* ── Database (DBI) flags ─────────────────────────────────────────── */
@@ -275,7 +275,7 @@ int   mdbx_env_set_option(MDBX_env* env, MDBX_option_t option, uint64_t value);
 int   mdbx_env_get_option(const MDBX_env* env, MDBX_option_t option, uint64_t* value);
 int   mdbx_env_copy(MDBX_env* env, const char* dest, unsigned flags);
 
-/* ── PsiTri extension: read mode for RO transactions ─────────────── */
+/* ── PsiTri extension: DWAL read mode for RO transactions ────────── */
 /* 0=buffered (RO snapshot+Tri, no locks)                             */
 /* 1=latest (RW+RO+Tri, shared lock on RW, sees all committed data)   */
 /* 2=trie (Tri only, no DWAL layers)                                  */

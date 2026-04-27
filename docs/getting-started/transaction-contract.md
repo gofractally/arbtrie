@@ -140,6 +140,9 @@ Contract:
 - `commit()` publishes the final state atomically.
 - Destroying a live transaction aborts it.
 - `expect_success` may prepare a private writable version at transaction start.
+- A transaction does not hold a compactor/recycling read lock for its whole
+  lifetime. PsiTri takes short internal read locks around operations that need
+  them. Longer zero-copy value lifetimes must be explicit at the call site.
 
 ## Zero-Copy Reads
 
@@ -167,6 +170,31 @@ Contract:
 - Do CPU-light parsing, comparison, or immediate serialization inside the
   lambda. Copy the value out first if later work may block, allocate heavily,
   call user plugins, wait on I/O, or take locks.
+
+If a caller intentionally needs a borrowed value view to live beyond one
+callback, make that cost visible with an explicit RAII pin:
+
+```cpp
+auto pin = tx.pin_values();
+auto cur = tx.cursor();
+
+if (cur.lower_bound("user:alice") && cur.key() == "user:alice")
+{
+   psitri::value_view value = cur.value(pin);
+   parse_and_compare(value);
+}
+```
+
+Contract:
+
+- A value pin protects the memory backing borrowed `value_view` objects from
+  compactor/recycling movement until the pin is destroyed.
+- A value pin is not a snapshot. It does not make a current-state cursor stable
+  across writes, commits, aborts, or cursor invalidation.
+- Keep value pins tightly scoped. Holding a pin longer than necessary can delay
+  compaction and segment reuse.
+- Prefer `get(key, lambda)` for normal hot reads and copying reads for values
+  that must survive slow work.
 
 Copying reads are still useful when ownership matters:
 
@@ -669,6 +697,7 @@ Contract:
 | Hot point read inside writer | `tx.get(key, lambda)` | No | No | Yes |
 | Owned point read | `tx.get<std::string>(key)` | Yes | No | Yes |
 | Reused caller buffer | `tx.get(key, &buffer)` | Yes | No | Yes |
+| Borrow view across a small local scope | `auto pin = tx.pin_values()` + `cur.value(pin)` | No | No | Yes |
 | Iterate current writer state | `tx.cursor()` | No by default | No | Yes |
 | Stable writer snapshot | `tx.snapshot_cursor()` | Optional per read | Yes | State at creation |
 | Read-only snapshot | `read_session::snapshot_cursor(root)` | Optional per read | Yes | Committed state only |

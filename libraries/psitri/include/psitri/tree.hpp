@@ -39,6 +39,7 @@ namespace psitri
       sal::smart_ptr<sal::alloc_header>        take_root() noexcept { return std::move(_root); }
 
       const sal::allocator_session_ptr& session() const noexcept { return _root.session(); }
+      value_pin                         pin_values() const { return value_pin(_root.session()); }
       sal::ptr_address                  address() const noexcept { return _root.address(); }
       sal::ptr_address                  ver() const noexcept { return _root.ver(); }
       void                              set_ver(sal::ptr_address v) noexcept { _root.set_ver(v); }

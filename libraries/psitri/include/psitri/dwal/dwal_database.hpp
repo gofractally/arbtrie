@@ -58,23 +58,29 @@ namespace psitri::dwal
       {
          // Used by create_cursor (Tri layer)
          std::shared_ptr<void> cursor_session;
-         void*                 cursor_db = nullptr;
+         std::weak_ptr<void>   cursor_db;
 
          // Used by tri_get
          std::shared_ptr<void> tri_session;
+         std::weak_ptr<void>   tri_db;
          psitri::cursor*       tri_cursor = nullptr;
-         void*                 tri_db     = nullptr;
 
          void reset()
          {
             cursor_session.reset();
-            cursor_db = nullptr;
+            cursor_db.reset();
             delete tri_cursor;
             tri_cursor = nullptr;
             tri_session.reset();
-            tri_db = nullptr;
+            tri_db.reset();
          }
       };
+
+      inline bool same_owner(const std::shared_ptr<void>& lhs,
+                             const std::shared_ptr<void>& rhs)
+      {
+         return lhs && rhs && !lhs.owner_before(rhs) && !rhs.owner_before(lhs);
+      }
 
       tl_cache_storage& thread_local_cache();
    }  // namespace detail

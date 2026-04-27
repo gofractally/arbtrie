@@ -5,6 +5,7 @@
 #include <psitri/node/leaf.hpp>
 #include <psitri/node/node.hpp>
 #include <psitri/node/value_node.hpp>
+#include <psitri/value_pin.hpp>
 #include <psitri/value_type.hpp>
 #include <sal/smart_ptr.hpp>
 #include <utility>
@@ -170,6 +171,8 @@ namespace psitri
       /// @return the value associated with the current key as a view that is valid for the
       /// the lifetime of the read_lock passed in.
       value_view value(sal::read_lock& rl) const noexcept;
+      value_view value(value_pin& pin) const noexcept { return value(pin.lock()); }
+      value_pin  pin_values() const { return value_pin(_node.session()); }
 
       /// calls lambda with a view of the value for the current key, view is only valid for the lifetime of the lambda
       void get_value(std::invocable<value_view> auto&& lambda) const noexcept;

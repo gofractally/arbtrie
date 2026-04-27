@@ -3,7 +3,8 @@
  *
  *  Drop-in replacement for libmdbx's C++ API. Provides the same class
  *  hierarchy: env/env_managed, txn/txn_managed, cursor/cursor_managed,
- *  slice, map_handle, error/exception. Backed by psitri's DWAL layer.
+ *  slice, map_handle, error/exception. Backed by psitri's direct COW
+ *  transaction path by default, with DWAL available as an explicit extension.
  */
 #pragma once
 

@@ -429,6 +429,136 @@ TEST_CASE("C API: cursor storage is reused within a transaction", "[mdbx][c-api]
    mdbx_env_close(env);
 }
 
+TEST_CASE("C API: cursor put preserves current position",
+          "[mdbx][c-api][cursor][write]")
+{
+   auto dir = make_temp_dir("c_cursor_put_position");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi = 0;
+   REQUIRE(mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
+
+   auto put = [&](const char* key_text, const char* value_text) {
+      MDBX_val key{const_cast<char*>(key_text), std::strlen(key_text)};
+      MDBX_val value{const_cast<char*>(value_text), std::strlen(value_text)};
+      REQUIRE(mdbx_put(txn, dbi, &key, &value, MDBX_UPSERT) == MDBX_SUCCESS);
+   };
+   put("apple", "a");
+   put("banana", "b");
+   put("cherry", "c");
+
+   MDBX_cursor* cur = nullptr;
+   REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+
+   MDBX_val key{const_cast<char*>("banana"), 6};
+   MDBX_val value{};
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_SET_KEY) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(value) == "b");
+
+   MDBX_val date_key{const_cast<char*>("date"), 4};
+   MDBX_val date_value{const_cast<char*>("d"), 1};
+   REQUIRE(mdbx_cursor_put(cur, &date_key, &date_value, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   MDBX_val current_key{};
+   MDBX_val current_value{};
+   REQUIRE(mdbx_cursor_get(cur, &current_key, &current_value, MDBX_GET_CURRENT) ==
+           MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(current_key) == "banana");
+   REQUIRE(mdbx_bytes(current_value) == "b");
+
+   REQUIRE(mdbx_cursor_get(cur, &current_key, &current_value, MDBX_NEXT) ==
+           MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(current_key) == "cherry");
+   REQUIRE(mdbx_bytes(current_value) == "c");
+
+   key = {const_cast<char*>("banana"), 6};
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_SET_KEY) == MDBX_SUCCESS);
+   MDBX_val updated_value{const_cast<char*>("bb"), 2};
+   REQUIRE(mdbx_cursor_put(cur, &key, &updated_value, MDBX_CURRENT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_get(cur, &current_key, &current_value, MDBX_GET_CURRENT) ==
+           MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(current_key) == "banana");
+   REQUIRE(mdbx_bytes(current_value) == "bb");
+
+   mdbx_cursor_close(cur);
+   REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
+TEST_CASE("C API: cursor delete continues and sibling cursors see writes",
+          "[mdbx][c-api][cursor][write]")
+{
+   auto dir = make_temp_dir("c_cursor_delete_stale");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi = 0;
+   REQUIRE(mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
+
+   auto put = [&](const char* key_text, const char* value_text) {
+      MDBX_val key{const_cast<char*>(key_text), std::strlen(key_text)};
+      MDBX_val value{const_cast<char*>(value_text), std::strlen(value_text)};
+      REQUIRE(mdbx_put(txn, dbi, &key, &value, MDBX_UPSERT) == MDBX_SUCCESS);
+   };
+   put("aa", "1");
+   put("ab", "2");
+   put("ac", "3");
+   put("ba", "4");
+
+   MDBX_cursor* reader = nullptr;
+   MDBX_cursor* writer = nullptr;
+   REQUIRE(mdbx_cursor_open(txn, dbi, &reader) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_open(txn, dbi, &writer) == MDBX_SUCCESS);
+
+   MDBX_val key{const_cast<char*>("ab"), 2};
+   MDBX_val value{};
+   REQUIRE(mdbx_cursor_get(reader, &key, &value, MDBX_SET_KEY) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(value) == "2");
+
+   key = {const_cast<char*>("ab"), 2};
+   REQUIRE(mdbx_cursor_get(writer, &key, &value, MDBX_SET_KEY) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_del(writer, static_cast<MDBX_put_flags_t>(0)) ==
+           MDBX_SUCCESS);
+
+   key = {const_cast<char*>("ab"), 2};
+   REQUIRE(mdbx_cursor_get(reader, &key, &value, MDBX_SET_KEY) == MDBX_NOTFOUND);
+   key = {const_cast<char*>("ab"), 2};
+   REQUIRE(mdbx_cursor_get(reader, &key, &value, MDBX_SET_RANGE) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(key) == "ac");
+   REQUIRE(mdbx_bytes(value) == "3");
+
+   key = {const_cast<char*>("aa"), 2};
+   REQUIRE(mdbx_cursor_get(writer, &key, &value, MDBX_SET_KEY) == MDBX_SUCCESS);
+   size_t erased = 0;
+   do
+   {
+      REQUIRE(mdbx_cursor_del(writer, static_cast<MDBX_put_flags_t>(0)) ==
+              MDBX_SUCCESS);
+      ++erased;
+   } while (mdbx_cursor_get(writer, &key, &value, MDBX_NEXT) == MDBX_SUCCESS);
+   REQUIRE(erased == 3);
+
+   REQUIRE(mdbx_cursor_get(writer, &key, &value, MDBX_FIRST) == MDBX_NOTFOUND);
+
+   mdbx_cursor_close(writer);
+   mdbx_cursor_close(reader);
+   REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
 TEST_CASE("C API: cursor_copy clones current position", "[mdbx][c-api][cursor][silkworm]")
 {
    auto dir = make_temp_dir("c_cursor_copy");
@@ -1075,10 +1205,10 @@ TEST_CASE("C API: DUPSORT basic put/get/del", "[mdbx][dupsort]")
    mdbx_env_close(env);
 }
 
-TEST_CASE("C API: DUPSORT supports separate 1KiB key and dup budgets",
+TEST_CASE("C API: DUPSORT uses one encoded PsiTri key budget",
           "[mdbx][dupsort][limits]")
 {
-   auto dir = make_temp_dir("c_dupsort_1k_budget");
+   auto dir = make_temp_dir("c_dupsort_composite_budget");
 
    MDBX_env* env = nullptr;
    REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
@@ -1093,9 +1223,9 @@ TEST_CASE("C API: DUPSORT supports separate 1KiB key and dup budgets",
                          static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT),
                          &dbi) == MDBX_SUCCESS);
 
-   std::string key(1024, 'k');
-   std::string first(1024, 'a');
-   std::string second(1024, 'b');
+   std::string key(512, 'k');
+   std::string first(510, 'a');
+   std::string second(510, 'b');
 
    MDBX_val k{key.data(), key.size()};
    MDBX_val v2{second.data(), second.size()};
@@ -1117,11 +1247,24 @@ TEST_CASE("C API: DUPSORT supports separate 1KiB key and dup budgets",
    REQUIRE(std::string_view(static_cast<char*>(cv.iov_base), cv.iov_len) == second);
    mdbx_cursor_close(cur);
 
-   std::string too_large_value(1025, 'x');
+   std::string binary_key("bin\0key", 7);
+   std::string binary_first("\0a", 2);
+   std::string binary_second("\0b", 2);
+   MDBX_val bk{binary_key.data(), binary_key.size()};
+   MDBX_val bv1{binary_first.data(), binary_first.size()};
+   MDBX_val bv2{binary_second.data(), binary_second.size()};
+   REQUIRE(mdbx_put(txn, dbi, &bk, &bv2, MDBX_UPSERT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_put(txn, dbi, &bk, &bv1, MDBX_UPSERT) == MDBX_SUCCESS);
+   MDBX_val bgot{};
+   REQUIRE(mdbx_get(txn, dbi, &bk, &bgot) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(bgot.iov_base), bgot.iov_len) ==
+           binary_first);
+
+   std::string too_large_value(511, 'x');
    MDBX_val bad_v{too_large_value.data(), too_large_value.size()};
    REQUIRE(mdbx_put(txn, dbi, &k, &bad_v, MDBX_UPSERT) == MDBX_BAD_VALSIZE);
 
-   std::string too_large_key(1025, 'y');
+   std::string too_large_key(1022, 'y');
    MDBX_val bad_k{too_large_key.data(), too_large_key.size()};
    MDBX_val small_v{const_cast<char*>("v"), 1};
    REQUIRE(mdbx_put(txn, dbi, &bad_k, &small_v, MDBX_UPSERT) == MDBX_BAD_VALSIZE);
@@ -1338,6 +1481,78 @@ TEST_CASE("C API: Silkworm DUPSORT cursor patterns", "[mdbx][dupsort][silkworm]"
    }
 
    mdbx_cursor_close(cur);
+   REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: Silkworm cursor invalid operation errors",
+          "[mdbx][silkworm]")
+{
+   auto dir = make_temp_dir("c_silkworm_cursor_invalid");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi single = 0;
+   REQUIRE(mdbx_dbi_open(txn, "single",
+                         static_cast<MDBX_db_flags_t>(MDBX_CREATE), &single) ==
+           MDBX_SUCCESS);
+
+   MDBX_dbi multi = 0;
+   REQUIRE(mdbx_dbi_open(txn, "multi",
+                         static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT),
+                         &multi) == MDBX_SUCCESS);
+
+   auto put = [&](MDBX_dbi dbi, const char* k, const char* v) {
+      MDBX_val key{const_cast<char*>(k), strlen(k)};
+      MDBX_val val{const_cast<char*>(v), strlen(v)};
+      REQUIRE(mdbx_put(txn, dbi, &key, &val, MDBX_UPSERT) == MDBX_SUCCESS);
+   };
+   put(single, "AA", "00");
+   put(single, "BB", "11");
+   put(multi, "AA", "00");
+   put(multi, "AA", "11");
+
+   MDBX_cursor* cur = nullptr;
+   REQUIRE(mdbx_cursor_open(txn, single, &cur) == MDBX_SUCCESS);
+   MDBX_val k{};
+   MDBX_val v{};
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_GET_CURRENT) == MDBX_ENODATA);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_PREV) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(k) == "BB");
+   REQUIRE(mdbx_bytes(v) == "11");
+   mdbx_cursor_close(cur);
+
+   REQUIRE(mdbx_cursor_open(txn, single, &cur) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_NEXT_DUP) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(k) == "AA");
+   REQUIRE(mdbx_bytes(v) == "00");
+   mdbx_cursor_close(cur);
+
+   REQUIRE(mdbx_cursor_open(txn, single, &cur) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_PREV_DUP) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(k) == "BB");
+   REQUIRE(mdbx_bytes(v) == "11");
+   mdbx_cursor_close(cur);
+
+   REQUIRE(mdbx_cursor_open(txn, single, &cur) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_FIRST) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_FIRST_DUP) == MDBX_INCOMPATIBLE);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_LAST_DUP) == MDBX_INCOMPATIBLE);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_GET_BOTH) == MDBX_INCOMPATIBLE);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_GET_BOTH_RANGE) == MDBX_INCOMPATIBLE);
+   mdbx_cursor_close(cur);
+
+   REQUIRE(mdbx_cursor_open(txn, multi, &cur) == MDBX_SUCCESS);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_FIRST_DUP) == MDBX_EINVAL);
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_LAST_DUP) == MDBX_EINVAL);
+   mdbx_cursor_close(cur);
+
    REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
    mdbx_env_close(env);
 }

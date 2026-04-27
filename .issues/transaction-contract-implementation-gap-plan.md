@@ -392,6 +392,12 @@ Remaining implementation evidence:
   an existing key is present.
 - The zero-copy callback APIs exist, but the exact-key fast path and internal
   copy-avoidance audit are not complete.
+- SAL already has an RAII `read_lock`, and tree mutation paths take short
+  internal locks such as the one at the start of upsert. The public PsiTri API
+  still needs a documented value-pin wrapper for callers that intentionally
+  keep borrowed slices alive beyond one callback.
+- The implementation must not solve borrowed slice lifetime by holding a
+  compactor/recycling read lock for the whole transaction.
 
 Checklist:
 
@@ -400,6 +406,12 @@ Checklist:
 - [x] Ensure `get(key, lambda)` is templated/inlined and does not route through
       `std::function`.
 - [ ] Document and enforce that the `value_view` is valid only for the callback.
+- [ ] Add a public RAII value-pin API, for example `tx.pin_values()`, that wraps
+      the existing session read lock and can be passed to cursor/value APIs when
+      the caller intentionally wants a borrowed slice to outlive a callback.
+- [ ] Ensure value pins protect memory lifetime only; they must not be presented
+      as snapshots and must not make current-state cursors valid across
+      mutation.
 - [ ] Audit internal existence checks so known-key paths do not copy values just
       to decide whether `insert`, `update`, or remove semantics apply.
 - [ ] Add exact-key fast paths for `get` and `update` when the caller knows the
@@ -417,6 +429,10 @@ Required tests:
       compile.
 - [ ] Lifetime test: the zero-copy callback view cannot be used outside the
       callback in documented safe examples.
+- [ ] Lifetime test: a borrowed view obtained with an explicit value pin remains
+      usable until the pin is destroyed.
+- [ ] Invalidation test: a value pin does not make a current-state cursor valid
+      after a mutating operation invalidates that cursor.
 - [ ] Performance regression test: exact-key `get` avoids ordered cursor
       allocation/search where the fast hash lookup applies.
 - [ ] Performance regression test: `update()` avoids the extra ordered search
@@ -612,9 +628,24 @@ Current implementation evidence:
   intrusive transaction-local free list.
 - `MDBX_cursor` now stores `cursor_state` inline with `std::optional`, avoiding
   the previous per-open state allocation.
-- RW MDBX transactions now create one DWAL multi-root transaction up front and
-  route RW cursors through `transaction::create_cursor(root)`, so reads and
-  iteration see uncommitted writes.
+- RW MDBX transactions default to the direct PsiTri COW transaction path over
+  the MDBX root set; DWAL remains available only through the explicit
+  `MDBX_TXN_USE_DWAL` flag.
+- MDBX cursors cache DBI metadata (`root_index`, DUPSORT flags) at open/renew
+  time, so hot `mdbx_cursor_put()` calls no longer take `env->dbi_mutex`.
+- `mdbx_cursor_put()` writes through `mdbx_put_impl()` directly, marks the
+  cursor stale after the write, and lazily refreshes/reseeks only when a later
+  cursor movement needs the tree position. `MDBX_GET_CURRENT` remains a cached
+  current-position read.
+- Writes and deletes now mark every open cursor on the affected MDBX root stale,
+  not only the cursor that performed the mutation. The next seek or movement
+  reopens against the current write state.
+- If a stale cursor's previous current item was deleted, the lazy reopen treats
+  `MDBX_NEXT`, `MDBX_PREV`, and DUPSORT current-key movement as continuing from
+  the deleted position instead of stopping at `MDBX_NOTFOUND`.
+- MDBX transactions cache DBI metadata after the first lookup, so repeated
+  non-cursor `mdbx_get()` / `mdbx_put()` / `mdbx_del()` calls avoid repeated
+  bridge metadata locks.
 - DBI creation/drop catalog writes now go through the active transaction, and
   the in-memory DBI registry rolls back on abort.
 - Returned C and C++ `MDBX_val` slices now copy into transaction-owned arena
@@ -635,9 +666,9 @@ Current implementation evidence:
   while DWAL currently exposes configurable read modes and cursor creation on
   the database, not a read-session cursor snapshot API.
 - Impedance mismatch: native MDBX permits larger DUPSORT duplicate values than
-  the PsiTri shim can support. The shim intentionally models DUPSORT as
-  `outer_key -> duplicate-value subtree`, giving the outer key and duplicate
-  value separate 1 KiB PsiTri key budgets and rejecting larger duplicate values.
+  the PsiTri shim can support. The shim intentionally models DUPSORT as one
+  ordered composite PsiTri key, so encoded key plus duplicate value must fit the
+  1 KiB PsiTri key budget.
 - RW point reads still copy values into transaction-owned arena storage to satisfy
   `MDBX_val` lifetime requirements.
 
@@ -649,12 +680,14 @@ Checklist:
       their own writes.
 - [ ] Keep read-only MDBX cursors mapped to explicit snapshot/read-mode
       cursors.
-- [ ] Ensure any write through an MDBX transaction invalidates active
+- [x] Ensure any write through an MDBX transaction invalidates active
       current-state cursors for the affected DBI/root.
 - [x] Remove accidental snapshot creation from RW paths that only need current
       transaction state.
 - [ ] Avoid creating fresh merge cursors for helper checks when an existing
       pooled/current cursor can answer the question.
+- [x] Replace DUPSORT subtree storage with ordered composite keys so duplicate
+      writes stay on the main tree and do not force per-key subtree COW.
 - [x] Keep MDBX value lifetime rules correct: returned `MDBX_val` points into
       storage that remains valid for the documented MDBX operation lifetime.
 - [x] Update MDBX C++ wrapper paths to use the same pooled C cursor machinery.
@@ -677,8 +710,9 @@ Required tests:
       commit.
 - [x] MDBX RW cursor test: cursor iteration sees writes made earlier in the
       same transaction.
-- [ ] MDBX invalidation test: using a cursor after a write that invalidates it
-      returns the documented error or trips a debug assertion.
+- [x] MDBX stale-cursor test: a sibling cursor sees deletes made through
+      another cursor on the next seek, and cursor-delete iteration continues
+      from the deleted position.
 - [ ] MDBX RO snapshot test: read-only transactions do not see later commits.
 - [x] MDBX allocation/perf test: repeated short cursor open/close reuses cursor
       storage after warmup.
@@ -695,6 +729,9 @@ Required tests:
       contract.
 - [x] MDBX/Silkworm RAII lifetime test: a managed cursor can still destruct
       safely after `txn.commit()` has finalized the underlying transaction.
+- [x] MDBX cursor write-position test: `mdbx_cursor_put()` preserves
+      `MDBX_GET_CURRENT`, and the next movement lazily refreshes from the
+      current write state.
 
 ## Silkworm Port Sync
 
@@ -706,6 +743,32 @@ Current implementation evidence:
   returned slices, direct-vs-DWAL behavior, and standalone Silkworm repros.
 - The standalone dangling-slice and seek/next repros are now represented as
   ordinary PsiTri MDBX compatibility tests.
+- The cursor-delete/sibling-cursor stale-state repro from Silkworm is now
+  represented as a PsiTri MDBX compatibility test.
+- Silkworm's `USE_PSITRI` `PooledCursor` path now opens transaction-owned PsiTri
+  MDBX cursors directly instead of allocating throwaway bridge cursor handles in
+  Silkworm's thread-local handle pool.
+- Silkworm read transactions now cache opened MDBX map handles by table name for
+  the transaction lifetime, removing repeated `mdbx_dbi_open()`/DBI mutex work
+  from hot read paths such as `Buffer::read_storage()`.
+- Silkworm `Buffer` now caches hot current-state read cursors for `PlainState`
+  and `PlainCodeHash` across repeated account/storage reads. The cache is tied
+  to the current transaction id and is dropped before state flushes, so a
+  `commit_and_renew()` cannot keep using a cursor from the old MDBX
+  transaction.
+- `SnapshotSync::update_block_headers()` now reuses its write cursors across the
+  header update loop instead of opening short-lived cursors for each write.
+- A fresh non-DWAL Silkworm smoke run
+  (`/Users/dlarimer/eth-bench/psitri-direct-buffer-cache-20260427-033525`)
+  reused the existing 650G snapshots by symlink, reached execution, and
+  processed to block `1,300,481` before being stopped. Snapshot database update
+  ran from `2026-04-27 08:35:31.622 UTC` to
+  `2026-04-27 08:36:27.079 UTC` (~55.5s). The sampled profile no longer
+  contained the old `Buffer::read_storage -> PooledCursor::bind ->
+  mdbx_cursor_open -> make_txn_cursor` stack or the `lock_shared` /
+  `mdbx_dbi_open` bridge path; the short sample landed mostly in block
+  prefetch/snapshot reads, so the next perf pass should take a longer
+  EVM-heavy execution sample.
 - The pushed PsiTri branch is `origin/codex-mdbx-silkworm-refactor` at
   `0d9a6d3` (`Expand psitrimdbx Silkworm compatibility`).
 - A simulated merge of the pushed PsiTri branch into Silkworm's
@@ -744,10 +807,24 @@ Checklist:
       Blocked on preserving or retiring the dirty local submodule patch in
       `/Users/dlarimer/psiserve-agent2/external/silkworm/third_party/psitri`
       (`libraries/psitrimdbx/src/mdbx_impl.cpp` plus two repro test files).
-- [ ] Re-run the relevant Silkworm build/tests or document any local
+- [x] Re-run the relevant Silkworm build/tests or document any local
       dependency/build blockers.
 - [x] Port the Silkworm-required psitrimdbx API compatibility surface on top of
       the pushed PsiTri branch before moving the submodule pointer.
+- [x] Update Silkworm's PsiTri cursor pool expectations under `USE_PSITRI`: the
+      old Silkworm handle cache remains unused because PsiTri recycles cursor
+      storage inside the MDBX transaction.
+- [x] Add a Silkworm-side map-handle cache for read transactions so hot table
+      lookups do not reopen the same DBI metadata repeatedly.
+- [x] Cache Silkworm `Buffer` current-state read cursors for repeated
+      account/storage reads, while resetting them on transaction id changes and
+      before state flushes.
+- [x] Verify the current non-DWAL bridge slice with `silkworm_db_test`
+      `Cursor`, `*cursor*`, `*storage*`,
+      `SnapshotSync::update_block_headers`, and the KvServer cursor valid and
+      invalid operation cases.
+- [ ] Take a longer post-buffer-cache execution profile after block prefetch is
+      no longer the sampled dominant path.
 - [ ] Port or replace Silkworm's case-study/stress benchmark if it is still the
       intended Ethereum workload for validation.
 - [ ] Decide how the Silkworm direct-COW-default experiment maps onto the
@@ -892,11 +969,19 @@ Required tests:
       `build/bin/psitri-tests "[public-api],[count_keys],[cursor],[edge_case],[update_value],[coverage],[database],[range_remove],[zip],[integrity],[tree_handle],[subtree]" --colour-mode none`
       with 220 test cases and 793,047 assertions passing.
 - [x] MDBX compatibility test target passed:
-      `build/bin/mdbx-tests -r compact --colour-mode none` with 49 test cases
-      and 11,144 assertions passing. This verifies the current compatibility
-      behavior plus MDBX cursor pooling, multi-DBI abort, DBI catalog abort,
-      Silkworm API surface, and managed-cursor/transaction-finalization
-      coverage.
+      `build/bin/mdbx-tests --colour-mode none` with 54 test cases and 11,310
+      assertions passing. This verifies the current compatibility behavior plus
+      MDBX cursor pooling, cursor-write position preservation, multi-DBI abort,
+      DBI catalog abort, Silkworm API surface, and
+      managed-cursor/transaction-finalization coverage.
+- [x] Silkworm focused build/tests passed after syncing the psitrimdbx shim:
+      `cmake --build build --target silkworm_db_test silkworm -j 8`,
+      `Buffer storage`, `Buffer account`, `*storage*` (14 test cases, 192
+      assertions), `*cursor*` (44 test cases, 1,886 assertions),
+      `SnapshotSync::update_block_headers`, `KvServer E2E: Tx cursor invalid
+      operations`, `KvServer E2E: Tx cursor valid operations`, and `KvServer
+      E2E: bidirectional max TTL duration`. Parallel gRPC runs can still fail
+      on the fixed test port, so the gRPC cases were verified sequentially.
 - [x] DWAL focused slice passed:
       `build/bin/psitri-tests "[dwal]" -r compact --colour-mode none` with 154
       test cases and 2,275 assertions passing.
@@ -920,6 +1005,8 @@ Required tests:
 - [ ] Snapshot pinning is explicit through `snapshot_cursor()` or copyable
       retained `tree` handles.
 - [ ] Cursor creation is cheap after warmup in PsiTri and the MDBX shim.
+      MDBX shim warm cursor reuse is verified; native PsiTri writer cursor
+      pooling remains open.
 - [ ] Multi-root transactions preserve top-root independence and atomic publish.
 - [ ] `expect_success` and `expect_failure` retain the existing unique-root
       materialization semantics.

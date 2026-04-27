@@ -6,6 +6,7 @@
 #include <psitri/fwd.hpp>
 #include <psitri/tree.hpp>
 #include <psitri/tx_mode.hpp>
+#include <psitri/value_pin.hpp>
 #include <psitri/write_cursor.hpp>
 #include <stdexcept>
 #include <utility>
@@ -270,6 +271,7 @@ namespace psitri
 
       cursor read_cursor() const { return cs_at(_primary_index).cursor->read_cursor(); }
       cursor snapshot_cursor() const { return read_cursor(); }
+      value_pin pin_values() const { return value_pin(_session); }
 
       template <ConstructibleBuffer T>
       std::optional<T> get(key_view key) const
@@ -1125,6 +1127,7 @@ namespace psitri
 
       psitri::cursor cursor() const { return _tx.read_cursor(); }
       psitri::cursor snapshot_cursor() const { return _tx.snapshot_cursor(); }
+      value_pin      pin_values() const { return _tx.pin_values(); }
       bool           is_subtree(key_view key) const { return _tx.is_subtree(key); }
       tree           get_subtree(key_view key) const { return _tx.get_subtree(key); }
       tree           get_tree() { return _tx.get_tree(); }
