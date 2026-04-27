@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -73,6 +75,14 @@ struct MDBX_env
 
    // ── Sequence counter for txn IDs ──────────────────────────────
    std::atomic<uint64_t> next_txn_id{1};
+
+   // MDBX permits only one write transaction per environment. Track that at
+   // the shim boundary so same-thread duplicate writers fail instead of
+   // self-deadlocking inside the underlying PsiTri write session.
+   std::mutex              writer_mutex;
+   std::condition_variable writer_cv;
+   bool                    writer_active = false;
+   std::thread::id         writer_owner;
 
    void init_default_dbi()
    {
@@ -385,6 +395,7 @@ struct MDBX_txn
 
    bool committed = false;
    bool aborted   = false;
+   bool write_slot_reserved = false;
 
    bool is_readonly() const { return (txn_flags & MDBX_TXN_RDONLY) != 0; }
 };
@@ -578,6 +589,43 @@ static MDBX_cursor* acquire_cursor(MDBX_txn* txn)
 static bool txn_finalized(const MDBX_txn* txn)
 {
    return txn && (txn->committed || txn->aborted);
+}
+
+static int reserve_write_slot(MDBX_env* env, MDBX_txn_flags_t flags)
+{
+   std::unique_lock lock(env->writer_mutex);
+   const auto owner = std::this_thread::get_id();
+
+   if (env->writer_active && env->writer_owner == owner)
+      return MDBX_BUSY;
+
+   if (flags & MDBX_TXN_TRY)
+   {
+      if (env->writer_active)
+         return MDBX_BUSY;
+   }
+   else
+   {
+      env->writer_cv.wait(lock, [&] { return !env->writer_active; });
+   }
+
+   env->writer_active = true;
+   env->writer_owner = owner;
+   return MDBX_SUCCESS;
+}
+
+static void release_write_slot(MDBX_txn* txn)
+{
+   if (!txn || !txn->write_slot_reserved)
+      return;
+
+   {
+      std::lock_guard lock(txn->env->writer_mutex);
+      txn->env->writer_active = false;
+      txn->env->writer_owner = {};
+      txn->write_slot_reserved = false;
+   }
+   txn->env->writer_cv.notify_one();
 }
 
 static void delete_or_defer_finalized_txn(MDBX_txn* txn)
@@ -1083,13 +1131,26 @@ int mdbx_txn_begin_ex(MDBX_env* env, MDBX_txn* parent,
       }
       else
       {
+         const int rc = reserve_write_slot(env, flags);
+         if (rc != MDBX_SUCCESS)
+            return rc;
+         t->write_slot_reserved = true;
+
          // DWAL wants a transaction's root set declared up front. MDBX DBIs
          // can be touched lazily, so the compatibility layer enlists every
          // root that could belong to a DBI for this environment. This avoids
          // committing partial work when a transaction later touches another DBI.
-         t->write_roots = all_mdbx_write_roots(env);
-         t->write_tx = std::make_unique<psitri::dwal::transaction>(
-            *env->dwal_db, t->write_roots);
+         try
+         {
+            t->write_roots = all_mdbx_write_roots(env);
+            t->write_tx = std::make_unique<psitri::dwal::transaction>(
+               *env->dwal_db, t->write_roots);
+         }
+         catch (...)
+         {
+            release_write_slot(t.get());
+            throw;
+         }
       }
 
       *txn = t.release();
@@ -1116,6 +1177,7 @@ int mdbx_txn_commit_ex(MDBX_txn* txn, MDBX_commit_latency* latency)
       if (txn->write_tx)
       {
          txn->write_tx->commit();
+         release_write_slot(txn);
       }
 
       txn->dbi_changes.clear();
@@ -1125,6 +1187,7 @@ int mdbx_txn_commit_ex(MDBX_txn* txn, MDBX_commit_latency* latency)
    }
    catch (...)
    {
+      release_write_slot(txn);
       rollback_dbi_registry_changes(txn);
       txn->aborted = true;
       delete_or_defer_finalized_txn(txn);
@@ -1145,7 +1208,10 @@ int mdbx_txn_abort(MDBX_txn* txn)
    try
    {
       if (txn->write_tx)
+      {
          txn->write_tx->abort();
+         release_write_slot(txn);
+      }
 
       rollback_dbi_registry_changes(txn);
       txn->aborted = true;
@@ -1154,6 +1220,7 @@ int mdbx_txn_abort(MDBX_txn* txn)
    }
    catch (...)
    {
+      release_write_slot(txn);
       rollback_dbi_registry_changes(txn);
       txn->aborted = true;
       delete_or_defer_finalized_txn(txn);

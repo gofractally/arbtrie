@@ -96,6 +96,30 @@ TEST_CASE("C API: Silkworm env options, marker file, and copy",
    fs::remove_all(copy_dir);
 }
 
+TEST_CASE("C API: duplicate write transaction fails without blocking",
+          "[mdbx][c-api][transaction][silkworm]")
+{
+   auto dir = make_temp_dir("c_duplicate_writer");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* writer = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &writer) == MDBX_SUCCESS);
+
+   MDBX_txn* duplicate = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &duplicate) == MDBX_BUSY);
+   REQUIRE(duplicate == nullptr);
+
+   REQUIRE(mdbx_txn_abort(writer) == MDBX_SUCCESS);
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &writer) == MDBX_SUCCESS);
+   REQUIRE(mdbx_txn_abort(writer) == MDBX_SUCCESS);
+
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
 TEST_CASE("C API: basic put/get/del", "[mdbx][c-api]")
 {
    auto dir = make_temp_dir("c_crud");
