@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <unordered_set>
+#include <vector>
 #include <sal/alloc_header.hpp>
 #include <sal/allocator.hpp>
 #include <sal/allocator_impl.hpp>
@@ -14,6 +15,120 @@
 
 namespace sal
 {
+   class recovery_visit_set
+   {
+     public:
+      explicit recovery_visit_set(uint64_t address_count) : _bits((address_count + 63) / 64) {}
+
+      bool first_visit(ptr_address addr) noexcept
+      {
+         uint64_t index = *addr;
+         uint64_t word  = index >> 6;
+         if (word >= _bits.size())
+            return false;
+
+         uint64_t mask  = uint64_t(1) << (index & 63);
+         bool     first = (_bits[word] & mask) == 0;
+         _bits[word] |= mask;
+         return first;
+      }
+
+     private:
+      std::vector<uint64_t> _bits;
+   };
+
+   class recovery_location_index
+   {
+     public:
+      explicit recovery_location_index(uint64_t address_count)
+          : _seen((address_count + 63) / 64), _sequence(address_count), _location(address_count)
+      {
+      }
+
+      bool should_store(ptr_address addr, uint16_t sequence, location new_loc) noexcept
+      {
+         uint64_t index = *addr;
+         uint64_t word  = index >> 6;
+         if (word >= _seen.size())
+            return false;
+
+         uint64_t mask = uint64_t(1) << (index & 63);
+         if ((_seen[word] & mask) == 0)
+         {
+            _seen[word] |= mask;
+            _sequence[index] = sequence;
+            _location[index] = new_loc;
+            return true;
+         }
+
+         uint16_t current_sequence = _sequence[index];
+         if (sequence_newer(sequence, current_sequence))
+         {
+            _sequence[index] = sequence;
+            _location[index] = new_loc;
+            return true;
+         }
+
+         if (sequence != current_sequence)
+            return false;
+
+         const auto current_loc = _location[index];
+         if (new_loc.segment() != current_loc.segment() ||
+             new_loc.segment_offset() <= current_loc.segment_offset())
+            return false;
+
+         _location[index] = new_loc;
+         return true;
+      }
+
+     private:
+      static bool sequence_newer(uint16_t candidate, uint16_t current) noexcept
+      {
+         return candidate != current &&
+                static_cast<int16_t>(candidate - current) > 0;
+      }
+
+      std::vector<uint64_t> _seen;
+      std::vector<uint16_t> _sequence;
+      std::vector<location> _location;
+   };
+
+   class recovery_version_index
+   {
+     public:
+      explicit recovery_version_index(uint64_t address_count) : _versions(address_count) {}
+
+      void record(const sync_root_info& info) noexcept
+      {
+         auto version_addr = ptr_address(info.version_address);
+         if (version_addr == null_ptr_address || info.root_version == 0)
+            return;
+
+         uint64_t index = *version_addr;
+         if (index >= _versions.size())
+            return;
+
+         _versions[index] = std::max(_versions[index], info.root_version);
+      }
+
+      uint64_t version_for(ptr_address addr) const noexcept
+      {
+         if (addr == null_ptr_address)
+            return 0;
+
+         uint64_t index = *addr;
+         if (index >= _versions.size())
+            return 0;
+         return _versions[index];
+      }
+
+     private:
+      std::vector<uint64_t> _versions;
+   };
+
+   static constexpr uint64_t recovered_custom_cb_latest_version =
+      control_block::max_cacheline_offset - 1;
+
    /// Set to true to enable compactor timing and unpinned-segment diagnostics.
    /// When false, all instrumentation is compiled out by the optimizer.
    static constexpr bool debug_compactor = false;
@@ -150,8 +265,22 @@ namespace sal
       {
          _root_object_file.resize(system_config::round_to_page(sizeof(root_object_array)));
          auto arr = new (_root_object_file.data()) root_object_array();
-         for (auto& ro : *arr)
-            ro.store(null_tree_id.pack(), std::memory_order_relaxed);
+         (void)arr;
+      }
+      else if (_root_object_file.size() <
+               system_config::round_to_page(sizeof(root_object_array)))
+      {
+         std::array<uint64_t, 1024> legacy_roots{};
+         auto* legacy =
+             reinterpret_cast<std::atomic<uint64_t>*>(_root_object_file.data());
+         for (auto& root : legacy_roots)
+            root = legacy++->load(std::memory_order_relaxed);
+
+         _root_object_file.resize(system_config::round_to_page(sizeof(root_object_array)));
+         auto arr = new (_root_object_file.data()) root_object_array();
+         for (uint32_t i = 0; i < arr->size(); ++i)
+            arr->at(i).store(tree_id::unpack(legacy_roots[i]), 0,
+                             std::memory_order_relaxed);
       }
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
@@ -360,11 +489,12 @@ namespace sal
          // Copy root slots (packed tree_ids) and their custom CBs
          for (uint32_t i = 0; i < _root_objects->size(); ++i)
          {
-            auto packed = (*_root_objects)[i].load(std::memory_order_relaxed);
-            (*dest._root_objects)[i].store(packed, std::memory_order_relaxed);
+            auto& src_root = (*_root_objects)[i];
+            auto& dst_root = (*dest._root_objects)[i];
+            dst_root.copy_from(src_root);
 
             // Copy custom CBs (ver_adr) referenced by root slots
-            auto tid = tree_id::unpack(packed);
+            auto tid = src_root.load(std::memory_order_relaxed);
             if (tid.ver != null_ptr_address)
             {
                auto* cb = _ptr_alloc.try_get(tid.ver);
@@ -385,7 +515,7 @@ namespace sal
                objects_copied, bytes_copied);
    }
 
-   void allocator::recursive_retain_all(ptr_address addr)
+   void allocator::recursive_retain_all(ptr_address addr, void* visited_ptr)
    {
       if (addr == null_ptr_address)
          return;
@@ -395,6 +525,9 @@ namespace sal
          return;
 
       auto prev = cb->retain();
+      auto& visited = *static_cast<recovery_visit_set*>(visited_ptr);
+      if (!visited.first_visit(addr))
+         return;
 
       // Custom control blocks: retained but not dereferenced (no segment data)
       if (allocator_session::is_custom_cb(prev))
@@ -413,7 +546,7 @@ namespace sal
       if (type_idx < vtables.size() && vtables[type_idx].visit_children)
       {
          vtables[type_idx].visit_children(
-             obj, [this](ptr_address child) { recursive_retain_all(child); });
+             obj, [this, visited_ptr](ptr_address child) { recursive_retain_all(child, visited_ptr); });
       }
    }
 
@@ -464,7 +597,7 @@ namespace sal
 
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
             recursive_sum_size(tid.root, total, &visited);
          if (tid.ver != null_ptr_address)
@@ -606,26 +739,27 @@ namespace sal
       return results;
    }
 
-   void allocator::reconstruct_custom_cbs_from_roots()
+   void allocator::reconstruct_custom_cbs_from_roots(const void* recovered_versions_ptr)
    {
+      const auto* recovered_versions =
+          static_cast<const recovery_version_index*>(recovered_versions_ptr);
+
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.ver != null_ptr_address)
          {
-            auto& cb   = _ptr_alloc.get_or_alloc(tid.ver);
-            auto  data = cb.load(std::memory_order_relaxed);
-            if (!data.ref)
-            {
-               // Reconstruct as custom CB with ref=1 and the custom marker.
-               // The original version number stored in the location field is lost
-               // (custom CBs have no segment data), so store 0 as placeholder.
-               cb.store(control_block_data()
-                            .set_ref(1)
-                            .set_pending_cache(true)
-                            .set_loc(location::from_cacheline(0)),
-                        std::memory_order_relaxed);
-            }
+            auto& cb = _ptr_alloc.get_or_alloc(tid.ver);
+            auto version = recovered_versions ? recovered_versions->version_for(tid.ver) : 0;
+            if (version == 0)
+               version = _root_objects->at(i).version_for(tid);
+            if (version == 0)
+               version = recovered_custom_cb_latest_version;
+            cb.store(control_block_data()
+                         .set_ref(1)
+                         .set_pending_cache(true)
+                         .set_loc(location::from_cacheline(version)),
+                     std::memory_order_relaxed);
          }
       }
    }
@@ -663,7 +797,9 @@ namespace sal
       _mapped_state->_segment_provider.ready_unpinned_segments.clear();
 
       // Phase 3: Scan each segment, rebuilding object ID -> location mapping
-      uint32_t max_provider_seq = 0;
+      uint32_t                max_provider_seq = 0;
+      recovery_location_index location_index(_ptr_alloc.current_max_address_count());
+      recovery_version_index  version_index(_ptr_alloc.current_max_address_count());
       for (auto seg_idx : age_index)
       {
          auto* seg = get_segment(segment_number(seg_idx));
@@ -690,22 +826,22 @@ namespace sal
 
             if (obj_ptr->type() == header_type::sync_head)
             {
+               auto* sync = reinterpret_cast<const sync_header*>(obj_ptr);
+               if (auto info = sync->get_root_info())
+                  version_index.record(*info);
                obj_ptr = obj_ptr->next();
                continue;
             }
 
             auto  addr = obj_ptr->address();
             auto& cb   = _ptr_alloc.get_or_alloc(addr);
-            auto  cur_loc = cb.loc();
 
             uint64_t abs_addr =
                 uint64_t(seg_idx) * segment_size +
                 (reinterpret_cast<const char*>(obj_ptr) - seg->data);
             auto new_loc = location::from_absolute_address(abs_addr);
 
-            // Update if unseen, or if in the same segment (later offset = newer)
-            auto cur_seg = cur_loc.segment();
-            if (!cur_loc.cacheline() || *cur_seg == seg_idx)
+            if (location_index.should_store(addr, obj_ptr->sequence(), new_loc))
             {
                cb.store(control_block_data().set_loc(new_loc).set_ref(1),
                         std::memory_order_relaxed);
@@ -716,16 +852,17 @@ namespace sal
       }
 
       // Phase 3.5: Reconstruct custom CBs (version addresses) from root slots
-      reconstruct_custom_cbs_from_roots();
+      reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 4: Walk all root objects, recursively retain reachable nodes
+      recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
-            recursive_retain_all(tid.root);
+            recursive_retain_all(tid.root, &visited);
          if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver);
+            recursive_retain_all(tid.ver, &visited);
       }
 
       // Phase 5: Free leaked objects
@@ -752,16 +889,47 @@ namespace sal
 
       _ptr_alloc.reset_all_refs();
 
-      // Reconstruct custom CBs before walking roots
-      reconstruct_custom_cbs_from_roots();
+      recovery_version_index version_index(_ptr_alloc.current_max_address_count());
+      auto                   num_segs = _block_alloc.num_blocks();
+      for (uint32_t seg_idx = 0; seg_idx < num_segs; ++seg_idx)
+      {
+         auto* seg = get_segment(segment_number(seg_idx));
+         if (seg->_provider_sequence == 0 && seg->get_alloc_pos() == 0)
+            continue;
 
+         auto* obj_ptr = reinterpret_cast<const alloc_header*>(seg->data);
+         auto* seg_end = reinterpret_cast<const alloc_header*>(
+             seg->data +
+             std::min<uint32_t>(segment_size - mapped_memory::segment_footer_size,
+                                seg->get_alloc_pos()));
+
+         while (obj_ptr < seg_end && obj_ptr->address() != null_ptr_address)
+         {
+            if (obj_ptr->size() == 0)
+               break;
+
+            if (obj_ptr->type() == header_type::sync_head)
+            {
+               auto* sync = reinterpret_cast<const sync_header*>(obj_ptr);
+               if (auto info = sync->get_root_info())
+                  version_index.record(*info);
+            }
+
+            obj_ptr = obj_ptr->next();
+         }
+      }
+
+      // Reconstruct custom CBs before walking roots
+      reconstruct_custom_cbs_from_roots(&version_index);
+
+      recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
-            recursive_retain_all(tid.root);
+            recursive_retain_all(tid.root, &visited);
          if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver);
+            recursive_retain_all(tid.ver, &visited);
       }
 
       _ptr_alloc.release_unreachable();
@@ -846,10 +1014,14 @@ namespace sal
          usec_timestamp timestamp;
          uint32_t       root_index;
          uint32_t       root_address;
+         uint32_t       version_address;
+         uint64_t       root_version;
       };
       std::vector<root_recovery_entry> recovered_roots;
 
-      uint32_t max_provider_seq = 0;
+      uint32_t                max_provider_seq = 0;
+      recovery_location_index location_index(_ptr_alloc.current_max_address_count());
+      recovery_version_index  version_index(_ptr_alloc.current_max_address_count());
       for (auto seg_idx : age_index)
       {
          auto* seg = get_segment(segment_number(seg_idx));
@@ -886,10 +1058,13 @@ namespace sal
                auto  info    = scan_sh->get_root_info();
                if (info)
                {
-                  SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ts={}",
-                           scan_pos, info->root_index, info->root_address, *scan_sh->timestamp());
+                  version_index.record(*info);
+                  SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ver_addr={} ver={} ts={}",
+                           scan_pos, info->root_index, info->root_address,
+                           info->version_address, info->root_version, *scan_sh->timestamp());
                   recovered_roots.push_back(
-                      {scan_sh->timestamp(), info->root_index, info->root_address});
+                      {scan_sh->timestamp(), info->root_index, info->root_address,
+                       info->version_address, info->root_version});
                }
                if (scan_pos == scan_sh->prev_aheader_pos())
                   break;  // prevent infinite loop
@@ -930,16 +1105,13 @@ namespace sal
 
             auto  addr = obj_ptr->address();
             auto& cb   = _ptr_alloc.get_or_alloc(addr);
-            auto  cur_loc = cb.loc();
 
             uint64_t abs_addr =
                 uint64_t(seg_idx) * segment_size +
                 (reinterpret_cast<const char*>(obj_ptr) - seg->data);
             auto new_loc = location::from_absolute_address(abs_addr);
 
-            // Prefer newer segments (already sorted newest-first), or later offset in same segment
-            auto cur_seg = cur_loc.segment();
-            if (!cur_loc.cacheline() || *cur_seg == seg_idx)
+            if (location_index.should_store(addr, obj_ptr->sequence(), new_loc))
             {
                cb.store(control_block_data().set_loc(new_loc).set_ref(1),
                         std::memory_order_relaxed);
@@ -965,10 +1137,10 @@ namespace sal
             auto* cb = _ptr_alloc.try_get(ptr_address(entry.root_address));
             if (cb && cb->loc().cacheline())
             {
-               // Store as packed tree_id with null ver (sync headers don't store ver)
-               auto recovered_tid = tree_id(ptr_address(entry.root_address));
+               auto recovered_tid =
+                   tree_id(ptr_address(entry.root_address), ptr_address(entry.version_address));
                _root_objects->at(entry.root_index)
-                   .store(recovered_tid.pack(), std::memory_order_relaxed);
+                   .store(recovered_tid, entry.root_version, std::memory_order_relaxed);
                root_set[entry.root_index] = true;
                ++roots_recovered;
                SAL_WARN("recovered root[{}] = {} from sync header (ts={})",
@@ -984,7 +1156,7 @@ namespace sal
       {
          if (!root_set[i])
          {
-            auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+            auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
             if (tid.root != null_ptr_address)
             {
                // Verify the existing root's control block was rebuilt by the segment scan
@@ -992,7 +1164,8 @@ namespace sal
                if (!cb || !cb->loc().cacheline())
                {
                   SAL_WARN("root[{}] = {} from roots file is invalid (no control block), clearing", i, *tid.root);
-                  _root_objects->at(i).store(null_tree_id.pack(), std::memory_order_relaxed);
+                  _root_objects->at(i).store(null_tree_id, 0,
+                                             std::memory_order_relaxed);
                }
                else
                {
@@ -1003,16 +1176,17 @@ namespace sal
       }
 
       // Phase 5.5: Reconstruct custom CBs from root slots
-      reconstruct_custom_cbs_from_roots();
+      reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 6: Walk all valid roots, recursively retain reachable nodes
+      recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
-            recursive_retain_all(tid.root);
+            recursive_retain_all(tid.root, &visited);
          if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver);
+            recursive_retain_all(tid.ver, &visited);
       }
 
       // Phase 7: Free leaked objects

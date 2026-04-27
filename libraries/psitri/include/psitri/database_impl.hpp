@@ -1,7 +1,9 @@
 #pragma once
+#include <algorithm>
 #include <psitri/database.hpp>
 #include <psitri/read_session.hpp>
 #include <psitri/write_session.hpp>
+#include <sal/allocator_session_impl.hpp>
 
 namespace psitri
 {
@@ -126,7 +128,35 @@ namespace psitri
             _dbm->flags &= ~detail::flag_ref_counts_stale;
             break;
       }
+      recover_global_version_from_roots();
       _dbm->clean_shutdown = false;
+   }
+
+   template <class LockPolicy>
+   void basic_database<LockPolicy>::recover_global_version_from_roots()
+   {
+      auto     session     = _allocator.get_session();
+      uint64_t max_version = 0;
+      for (uint32_t i = 0; i < num_top_roots; ++i)
+      {
+         auto root = session->template get_root<>(sal::root_object_number(i));
+         auto ver  = root.ver();
+         if (ver == sal::null_ptr_address)
+            continue;
+
+         auto version = session->read_custom_cb(ver);
+         if (version >= sal::control_block::max_cacheline_offset - 1)
+            continue;
+         max_version = std::max(max_version, version);
+      }
+
+      auto current = _dbm->global_version.load(std::memory_order_relaxed);
+      while (current < max_version &&
+             !_dbm->global_version.compare_exchange_weak(
+                 current, max_version, std::memory_order_relaxed,
+                 std::memory_order_relaxed))
+      {
+      }
    }
 
    template <class LockPolicy>

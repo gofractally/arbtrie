@@ -389,9 +389,10 @@ namespace psitri
 
       mutex_type& stripe_mutex(sal::ptr_address adr) { return _stripes[stripe_index(adr)].m; }
 
-      void            init_allocator_shared_ownership();
-      std::once_flag  _alloc_shared_init;
-      sal::allocator  _allocator;
+      void           init_allocator_shared_ownership();
+      void           recover_global_version_from_roots();
+      std::once_flag _alloc_shared_init;
+      sal::allocator _allocator;
       sal::mapping            _dbfile;
       detail::database_state* _dbm;
       live_range_map          _dead_versions;

@@ -259,11 +259,19 @@ namespace sal
     */
    struct sync_root_info
    {
-      uint32_t root_index;    ///< which root was updated
-      uint32_t root_address;  ///< the ptr_address it was set to
+      uint32_t root_index;       ///< which root was updated
+      uint32_t root_address;     ///< the root ptr_address it was set to
+      uint32_t version_address;  ///< custom CB ptr_address for the root version
+      uint64_t root_version;     ///< MVCC version stored in version_address
    };
-   static_assert(sizeof(sync_root_info) == 8);
    static_assert(sizeof(sync_root_info) <= 27, "must fit in sync_header user_data");
+
+   struct sync_root_info_v1
+   {
+      uint32_t root_index;
+      uint32_t root_address;
+   };
+   static_assert(sizeof(sync_root_info_v1) == 8);
 
    /**
     * sync_header this is written every time the
@@ -338,6 +346,13 @@ namespace sal
             sync_root_info info;
             memcpy(&info, _user_data, sizeof(info));
             return info;
+         }
+         if (_user_data_size == sizeof(sync_root_info_v1))
+         {
+            sync_root_info_v1 legacy;
+            memcpy(&legacy, _user_data, sizeof(legacy));
+            return sync_root_info{
+                legacy.root_index, legacy.root_address, *null_ptr_address, 0};
          }
          return std::nullopt;
       }

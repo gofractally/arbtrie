@@ -201,7 +201,7 @@ namespace psitri::detail
       auto  num_roots = std::min<uint32_t>(roots.size(), num_top_roots);
       for (uint32_t i = 0; i < num_roots; ++i)
       {
-         auto tid = sal::tree_id::unpack(roots[i].load(std::memory_order_relaxed));
+         auto tid = roots[i].load(std::memory_order_relaxed);
          if (tid.root != sal::null_ptr_address)
          {
             ++result.roots_checked;

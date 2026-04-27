@@ -29,7 +29,42 @@ namespace sal
              uint32_t(_first_writable_page.load(std::memory_order_relaxed))
              << system_config::os_page_size_log2;
          if (alloc_pos <= cur_first_writable_page_pos)
-            return 0;
+         {
+            // No new data since the previous sync. There are three sub-cases
+            // and only one of them needs work:
+            //
+            //  1. Not finalized: caller is asking us to sync something that
+            //     is already fully synced through `_first_writable_page`.
+            //     The tail is still writable and may receive more
+            //     allocations later. Nothing to do.
+            //
+            //  2. Finalized AND already read-only (alloc_pos < fwp_pos,
+            //     fwp == pages_per_segment): terminal state, the previous
+            //     sync wrote the terminal sync_header and mprotected the
+            //     tail. Nothing to do.
+            //
+            //  3. Finalized but NOT read-only (alloc_pos == fwp_pos,
+            //     fwp < pages_per_segment): allocator_session::
+            //     finalize_active_segment() finalized this segment without
+            //     running it through sync(), so it never got its terminal
+            //     sync_header and its tail is still writable. Fall through
+            //     to the normal finalized-sync path, which will:
+            //       - write the sync_header at data + alloc_pos (safe:
+            //         alloc_pos is the start of the first writable page),
+            //       - advance _first_writable_page to pages_per_segment,
+            //       - advance _alloc_pos to end_pos(),
+            //       - mprotect/msync the tail.
+            //     Without this fall-through, the segment stays in
+            //     finalized && !read_only forever and the next session
+            //     drain trips `allocator_session::sync`'s post-condition.
+            //     This also matters for compaction safety: compaction
+            //     scans read-only segments up to shead->end(), so the
+            //     terminal sync_header must actually be on disk before
+            //     read-only is allowed to be true.
+            if (not is_finalized() or is_read_only())
+               return 0;
+            // else: fall through to the normal finalized-sync path below.
+         }
 
          char* alloc_ptr = data + alloc_pos;
 

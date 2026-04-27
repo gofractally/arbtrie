@@ -362,6 +362,8 @@ namespace psitri
       lock.lock();
 
       auto root = _ws->get_root(root_index);
+      if (root)
+         root = tree(_ws->make_unique_root(std::move(root)));
 
       change_set cs;
       if (root)

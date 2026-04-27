@@ -34,6 +34,27 @@ static std::string be_u64(uint64_t n)
    return out;
 }
 
+static unsigned char hex_nibble(char c)
+{
+   if (c >= '0' && c <= '9') return static_cast<unsigned char>(c - '0');
+   if (c >= 'a' && c <= 'f') return static_cast<unsigned char>(c - 'a' + 10);
+   if (c >= 'A' && c <= 'F') return static_cast<unsigned char>(c - 'A' + 10);
+   FAIL("invalid hex digit");
+   return 0;
+}
+
+static std::string hex_to_bytes(std::string_view hex)
+{
+   REQUIRE((hex.size() % 2) == 0);
+   std::string out(hex.size() / 2, '\0');
+   for (size_t i = 0; i < out.size(); ++i)
+   {
+      out[i] = static_cast<char>((hex_nibble(hex[i * 2]) << 4) |
+                                 hex_nibble(hex[i * 2 + 1]));
+   }
+   return out;
+}
+
 static uint64_t from_be_u64(const MDBX_val& v)
 {
    REQUIRE(v.iov_len == 8);
@@ -1485,6 +1506,118 @@ TEST_CASE("C API: Silkworm DUPSORT cursor patterns", "[mdbx][dupsort][silkworm]"
    mdbx_env_close(env);
 }
 
+TEST_CASE("C API: Silkworm binary DUPSORT state iteration",
+          "[mdbx][dupsort][silkworm]")
+{
+   auto dir = make_temp_dir("c_silkworm_binary_dupsort");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi plain_state = 0;
+   REQUIRE(mdbx_dbi_open(txn, "PlainState",
+                         static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT),
+                         &plain_state) == MDBX_SUCCESS);
+
+   auto address = [](unsigned char seed) {
+      std::string out(20, '\0');
+      for (size_t i = 0; i < out.size(); ++i)
+         out[i] = static_cast<char>((seed + i * 17) & 0xff);
+      out[3] = '\0';
+      return out;
+   };
+
+   auto incarnation_key = [](std::string address, uint64_t incarnation) {
+      for (int i = 7; i >= 0; --i)
+         address.push_back(static_cast<char>((incarnation >> (i * 8)) & 0xff));
+      return address;
+   };
+
+   auto storage_value = [](unsigned char slot_seed, unsigned char value_seed) {
+      std::string out(32, '\0');
+      for (size_t i = 0; i < 32; ++i)
+         out[i] = static_cast<char>((slot_seed + i * 13) & 0xff);
+      out[5] = '\0';
+      out.push_back(static_cast<char>(value_seed));
+      out.push_back('\0');
+      out.push_back(static_cast<char>(value_seed + 1));
+      return out;
+   };
+
+   auto account_value = [](unsigned char seed) {
+      std::string out;
+      out.push_back(static_cast<char>(0xf8));
+      out.push_back('\0');
+      out.push_back(static_cast<char>(seed));
+      return out;
+   };
+
+   auto put = [&](const std::string& key, const std::string& value) {
+      MDBX_val k{const_cast<char*>(key.data()), key.size()};
+      MDBX_val v{const_cast<char*>(value.data()), value.size()};
+      REQUIRE(mdbx_put(txn, plain_state, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+   };
+
+   const auto addr_a = address(0x11);
+   const auto addr_b = address(0x70);
+   const auto acct_a = account_value(0xa1);
+   const auto acct_b = account_value(0xb1);
+   const auto stor_a_key = incarnation_key(addr_a, 1);
+   const auto stor_b_key = incarnation_key(addr_b, 1);
+   const auto stor_a_low = storage_value(0x10, 0x01);
+   const auto stor_a_high = storage_value(0x90, 0x02);
+   const auto stor_b_low = storage_value(0x20, 0x03);
+
+   put(stor_a_key, stor_a_high);
+   put(addr_b, acct_b);
+   put(stor_a_key, stor_a_low);
+   put(stor_b_key, stor_b_low);
+   put(addr_a, acct_a);
+
+   MDBX_cursor* cur = nullptr;
+   REQUIRE(mdbx_cursor_open(txn, plain_state, &cur) == MDBX_SUCCESS);
+
+   MDBX_val key{};
+   MDBX_val value{};
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_FIRST) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(key) == addr_a);
+   REQUIRE(mdbx_bytes(value) == acct_a);
+
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_NEXT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(key) == stor_a_key);
+   REQUIRE(mdbx_bytes(value) == stor_a_low);
+
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_NEXT_DUP) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(key) == stor_a_key);
+   REQUIRE(mdbx_bytes(value) == stor_a_high);
+
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_NEXT_DUP) == MDBX_NOTFOUND);
+
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_NEXT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(key) == addr_b);
+   REQUIRE(mdbx_bytes(value) == acct_b);
+
+   REQUIRE(mdbx_cursor_get(cur, &key, &value, MDBX_NEXT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(key) == stor_b_key);
+   REQUIRE(mdbx_bytes(value) == stor_b_low);
+
+   MDBX_val seek_key{const_cast<char*>(stor_a_key.data()), stor_a_key.size()};
+   MDBX_val seek_value{const_cast<char*>(stor_a_low.data()), 16};
+   REQUIRE(mdbx_cursor_get(cur, &seek_key, &seek_value, MDBX_GET_BOTH_RANGE) ==
+           MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(seek_key) == stor_a_key);
+   REQUIRE(mdbx_bytes(seek_value) == stor_a_low);
+
+   mdbx_cursor_close(cur);
+   REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
 TEST_CASE("C API: Silkworm cursor invalid operation errors",
           "[mdbx][silkworm]")
 {
@@ -2213,6 +2346,129 @@ TEST_CASE("C API: large values", "[mdbx][c-api]")
    }
 
    mdbx_txn_abort(ro);
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: Code table large bytecode round trip", "[mdbx][c-api][silkworm]")
+{
+   auto dir = make_temp_dir("c_code_large");
+
+   const auto code_hash = hex_to_bytes(
+      "f40d3381e4aaf383996cd5295d27b2edb24017be97374fd6e101ea3cf72a34cc");
+   std::string bytecode;
+   bytecode.reserve(18617);
+   bytecode.append("\x60\x60\x60\x40\x52", 5);
+   for (size_t i = bytecode.size(); i < 18617; ++i)
+      bytecode.push_back(static_cast<char>((i * 131 + 17) & 0xff));
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_dbi code_dbi = 0;
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, "Code", MDBX_CREATE, &code_dbi) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>(code_hash.data()), code_hash.size()};
+      MDBX_val val{bytecode.data(), bytecode.size()};
+      REQUIRE(mdbx_put(txn, code_dbi, &key, &val, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      MDBX_val in_txn{};
+      REQUIRE(mdbx_get(txn, code_dbi, &key, &in_txn) == MDBX_SUCCESS);
+      REQUIRE(in_txn.iov_len == bytecode.size());
+      REQUIRE(std::memcmp(in_txn.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   }
+
+   {
+      MDBX_txn* ro = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>(code_hash.data()), code_hash.size()};
+      MDBX_val val{};
+      REQUIRE(mdbx_get(ro, code_dbi, &key, &val) == MDBX_SUCCESS);
+      REQUIRE(val.iov_len == bytecode.size());
+      REQUIRE(std::memcmp(val.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      MDBX_cursor* cursor = nullptr;
+      REQUIRE(mdbx_cursor_open(ro, code_dbi, &cursor) == MDBX_SUCCESS);
+      key = MDBX_val{const_cast<char*>(code_hash.data()), code_hash.size()};
+      val = MDBX_val{};
+      REQUIRE(mdbx_cursor_get(cursor, &key, &val, MDBX_SET) == MDBX_SUCCESS);
+      REQUIRE(key.iov_len == code_hash.size());
+      REQUIRE(std::memcmp(key.iov_base, code_hash.data(), code_hash.size()) == 0);
+      REQUIRE(val.iov_len == bytecode.size());
+      REQUIRE(std::memcmp(val.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      mdbx_cursor_close(cursor);
+      mdbx_txn_abort(ro);
+   }
+
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: Code table empty value upgraded to large bytecode", "[mdbx][c-api][silkworm]")
+{
+   auto dir = make_temp_dir("c_code_empty_to_large");
+
+   const auto code_hash = hex_to_bytes(
+      "f40d3381e4aaf383996cd5295d27b2edb24017be97374fd6e101ea3cf72a34cc");
+   std::string bytecode;
+   bytecode.reserve(18617);
+   bytecode.append("\x60\x60\x60\x40\x52", 5);
+   for (size_t i = bytecode.size(); i < 18617; ++i)
+      bytecode.push_back(static_cast<char>((i * 131 + 17) & 0xff));
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_dbi code_dbi = 0;
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, "Code", MDBX_CREATE, &code_dbi) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>(code_hash.data()), code_hash.size()};
+      MDBX_val empty{nullptr, 0};
+      REQUIRE(mdbx_put(txn, code_dbi, &key, &empty, MDBX_UPSERT) == MDBX_SUCCESS);
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   }
+
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>(code_hash.data()), code_hash.size()};
+      MDBX_val val{bytecode.data(), bytecode.size()};
+      REQUIRE(mdbx_put(txn, code_dbi, &key, &val, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      MDBX_val in_txn{};
+      REQUIRE(mdbx_get(txn, code_dbi, &key, &in_txn) == MDBX_SUCCESS);
+      REQUIRE(in_txn.iov_len == bytecode.size());
+      REQUIRE(std::memcmp(in_txn.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   }
+
+   {
+      MDBX_txn* ro = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>(code_hash.data()), code_hash.size()};
+      MDBX_val val{};
+      REQUIRE(mdbx_get(ro, code_dbi, &key, &val) == MDBX_SUCCESS);
+      REQUIRE(val.iov_len == bytecode.size());
+      REQUIRE(std::memcmp(val.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      mdbx_txn_abort(ro);
+   }
+
    mdbx_env_close(env);
 }
 

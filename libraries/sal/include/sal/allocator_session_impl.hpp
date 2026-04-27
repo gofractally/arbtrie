@@ -384,15 +384,27 @@ namespace sal
       auto tid = _sega.get(ro);
       return smart_ptr<T>(allocator_session_ptr(this, true), tid, false);
    }
+
+   inline sync_root_info make_sync_root_info(
+       const allocator_session& session,
+       root_object_number       ro,
+       tree_id                  tid) noexcept
+   {
+      sync_root_info info{*ro, *tid.root, *tid.ver, 0};
+      if (tid.ver != null_ptr_address)
+         info.root_version = session.read_custom_cb(tid.ver);
+      return info;
+   }
+
    template <typename T>
    inline smart_ptr<T> allocator_session::set_root(root_object_number ro,
                                                    smart_ptr<T>       ptr,
                                                    sync_type          st) noexcept
    {
       auto new_tid = ptr.take_tree_id();
-      sync_root_info root_info{*ro, *new_tid.root};
+      auto root_info = make_sync_root_info(*this, ro, new_tid);
       sync(st, _sega._mapped_state->_config, root_info);
-      auto old_tid = _sega.set(ro, new_tid, st);
+      auto old_tid = _sega.set(ro, new_tid, st, root_info.root_version);
       return smart_ptr<T>(allocator_session_ptr(this, true), old_tid, false);
    }
 
@@ -402,11 +414,15 @@ namespace sal
                                                    smart_ptr<U>       desired,
                                                    sync_type          st) noexcept
    {
-      sync_root_info root_info{*ro, *desired.address()};
-      sync(st, _sega._mapped_state->_config, root_info);
       auto expect_tid  = expect.get_tree_id();
       auto desired_tid = desired.get_tree_id();
-      if (_sega.cas_root(ro, expect_tid, desired_tid, st))
+      auto root_info   = make_sync_root_info(*this, ro, desired_tid);
+      if (_sega.cas_root(ro, expect_tid, desired_tid, st,
+                         root_info.root_version,
+                         [this, st, &root_info]() noexcept
+                         {
+                            sync(st, _sega._mapped_state->_config, root_info);
+                         }))
       {
          desired.take_tree_id();  // _sega took it, so don't release it
          // let the caller determine how and when to release prior value
@@ -428,12 +444,13 @@ namespace sal
    inline smart_ptr<alloc_header> allocator_session::transaction_commit(
        root_object_number      ro,
        smart_ptr<alloc_header> desired,
-       sync_type               st) noexcept
+                                                   sync_type               st) noexcept
    {
       auto new_tid = desired.take_tree_id();
-      sync_root_info root_info{*ro, *new_tid.root};
+      auto root_info = make_sync_root_info(*this, ro, new_tid);
       sync(st, _sega._mapped_state->_config, root_info);
-      auto old_tid = _sega.transaction_commit(ro, new_tid, st);
+      auto old_tid =
+          _sega.transaction_commit(ro, new_tid, st, root_info.root_version);
       return smart_ptr<alloc_header>(get_session_ptr(), old_tid, false);
    }
    inline void allocator_session::transaction_abort(root_object_number ro) noexcept
