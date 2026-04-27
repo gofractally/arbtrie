@@ -19,6 +19,7 @@
 #include <cassert>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -38,6 +39,7 @@ struct dbi_info
    uint32_t    root_index;     // psitri root index
    unsigned    flags;          // MDBX_db_flags_t used at creation
    bool        is_dupsort;     // (flags & MDBX_DUPSORT) != 0
+   bool        reverse_dup;     // (flags & MDBX_REVERSEDUP) != 0
 };
 
 struct MDBX_env
@@ -60,6 +62,7 @@ struct MDBX_env
    // Geometry (stored but ignored — psitri manages its own sizing)
    intptr_t geo_lower = -1, geo_now = -1, geo_upper = -1;
    intptr_t geo_growth = -1, geo_shrink = -1, geo_pagesize = -1;
+   std::unordered_map<int, uint64_t> options;
 
    // ── DBI registry ─────────────────────────────────────────────
    mutable std::shared_mutex             dbi_mutex;
@@ -74,16 +77,17 @@ struct MDBX_env
    void init_default_dbi()
    {
       // DBI 0: metadata root (stores name→dbi mappings)
-      dbis.push_back({"__meta__", 0, 0, false});
+      dbis.push_back({"__meta__", 0, 0, false, false});
       // DBI 1: unnamed default database (root 1)
-      dbis.push_back({"", 1, MDBX_DB_DEFAULTS, false});
+      dbis.push_back({"", 1, MDBX_DB_DEFAULTS, false, false});
    }
 
    MDBX_dbi allocate_dbi(const std::string& name, unsigned flags)
    {
       MDBX_dbi dbi = static_cast<MDBX_dbi>(dbis.size());
       uint32_t root_idx = dbi + 1;
-      dbis.push_back({name, root_idx, flags, (flags & MDBX_DUPSORT) != 0});
+      dbis.push_back({name, root_idx, flags, (flags & MDBX_DUPSORT) != 0,
+                      (flags & MDBX_REVERSEDUP) != 0});
       // Use dbi+1 as root_index (root 0 = meta, root 1 = default, root 2+ = named)
       if (!name.empty())
          name_to_dbi[name] = dbi;
@@ -91,6 +95,17 @@ struct MDBX_env
       // Under COWART, latest reads are lock-free via cow_coordinator.
       // No explicit locking setup needed.
 
+      return dbi;
+   }
+
+   MDBX_dbi allocate_dbi_with_root(const std::string& name, unsigned flags,
+                                   uint32_t root_idx)
+   {
+      MDBX_dbi dbi = static_cast<MDBX_dbi>(dbis.size());
+      dbis.push_back({name, root_idx, flags, (flags & MDBX_DUPSORT) != 0,
+                      (flags & MDBX_REVERSEDUP) != 0});
+      if (!name.empty())
+         name_to_dbi[name] = dbi;
       return dbi;
    }
 };
@@ -107,7 +122,8 @@ struct MDBX_env
 // then by value within the same key. The \x00\x00 separator cannot
 // appear in an escaped key, so decoding is unambiguous.
 
-static std::string dupsort_encode(std::string_view key, std::string_view value)
+static std::string dupsort_encode(std::string_view key, std::string_view value,
+                                  bool reverse_dup = false)
 {
    std::string result;
    result.reserve(key.size() + 2 + value.size());
@@ -119,7 +135,15 @@ static std::string dupsort_encode(std::string_view key, std::string_view value)
    }
    result += '\0';
    result += '\0';
-   result.append(value.data(), value.size());
+   if (reverse_dup)
+   {
+      for (char c : value)
+         result += static_cast<char>(~static_cast<unsigned char>(c));
+   }
+   else
+   {
+      result.append(value.data(), value.size());
+   }
    return result;
 }
 
@@ -155,7 +179,8 @@ static std::string dupsort_key_upper(std::string_view key)
 
 static bool dupsort_decode(std::string_view composite,
                            std::string& key_out,
-                           std::string& val_out)
+                           std::string& val_out,
+                           bool reverse_dup = false)
 {
    key_out.clear();
    val_out.clear();
@@ -171,7 +196,18 @@ static bool dupsort_decode(std::string_view composite,
          }
          else if (i + 1 < composite.size() && composite[i + 1] == '\x00')
          {
-            val_out.assign(composite.data() + i + 2, composite.size() - i - 2);
+            if (reverse_dup)
+            {
+               val_out.resize(composite.size() - i - 2);
+               for (size_t j = i + 2; j < composite.size(); ++j)
+                  val_out[j - i - 2] = static_cast<char>(
+                     ~static_cast<unsigned char>(composite[j]));
+            }
+            else
+            {
+               val_out.assign(composite.data() + i + 2,
+                              composite.size() - i - 2);
+            }
             return true;
          }
          else
@@ -243,12 +279,14 @@ struct cursor_state
    psitri::dwal::owned_merge_cursor mc;
    bool                             valid     = false;
    bool                             dupsort   = false;
+   bool                             reverse_dup = false;
    std::string                      key_buf;   // exposed key
    std::string                      val_buf;   // exposed value
    std::string                      raw_key;   // raw composite (DUPSORT only)
 
-   explicit cursor_state(psitri::dwal::owned_merge_cursor m, bool ds = false)
-       : mc(std::move(m)), dupsort(ds)
+   explicit cursor_state(psitri::dwal::owned_merge_cursor m, bool ds = false,
+                         bool rd = false)
+       : mc(std::move(m)), dupsort(ds), reverse_dup(rd)
    {
    }
 
@@ -287,7 +325,7 @@ struct cursor_state
       {
          // Composite key — decode into key + value
          raw_key.assign(mc->key().data(), mc->key().size());
-         if (!dupsort_decode(raw_key, key_buf, val_buf))
+         if (!dupsort_decode(raw_key, key_buf, val_buf, reverse_dup))
          {
             valid = false;
             return;
@@ -331,6 +369,7 @@ struct MDBX_txn
    // and returns cursors to this intrusive free list instead of deleting them.
    std::vector<std::unique_ptr<MDBX_cursor>> cursor_storage;
    MDBX_cursor*                             free_cursors = nullptr;
+   size_t                                   active_cursors = 0;
 
    // RO transaction (mutable: lazily created even from const mdbx_get)
    mutable std::unique_ptr<psitri::dwal::dwal_read_session> read_session;
@@ -355,7 +394,11 @@ struct MDBX_cursor
    MDBX_txn* txn  = nullptr;
    MDBX_dbi  dbi  = 0;
    bool      is_dupsort = false;
+   bool      is_reverse_dup = false;
    bool      open = false;
+   bool      heap_owned = false;
+   bool      counted = false;
+   void*     context = nullptr;
    MDBX_cursor* next_free = nullptr;
 
    std::optional<cursor_state> state;
@@ -400,6 +443,64 @@ static bool dbi_is_dupsort(MDBX_env* env, MDBX_dbi dbi)
    if (dbi >= env->dbis.size())
       return false;
    return env->dbis[dbi].is_dupsort;
+}
+
+static bool dbi_is_reverse_dup(MDBX_env* env, MDBX_dbi dbi)
+{
+   std::shared_lock lk(env->dbi_mutex);
+   if (dbi >= env->dbis.size())
+      return false;
+   return env->dbis[dbi].reverse_dup;
+}
+
+static std::string encode_catalog_entry(unsigned flags, uint32_t root_idx)
+{
+   static constexpr char magic[] = {'P', 'T', 'X', '1'};
+   std::string out(sizeof(magic) + sizeof(uint32_t) * 2, '\0');
+   std::memcpy(out.data(), magic, sizeof(magic));
+   auto f = static_cast<uint32_t>(flags);
+   std::memcpy(out.data() + sizeof(magic), &f, sizeof(uint32_t));
+   std::memcpy(out.data() + sizeof(magic) + sizeof(uint32_t), &root_idx,
+               sizeof(uint32_t));
+   return out;
+}
+
+static bool decode_catalog_entry(std::string_view value, unsigned& flags,
+                                 uint32_t& root_idx, bool allow_legacy)
+{
+   static constexpr char magic[] = {'P', 'T', 'X', '1'};
+
+   if (value.size() >= sizeof(magic) + sizeof(uint32_t) * 2 &&
+       std::memcmp(value.data(), magic, sizeof(magic)) == 0)
+   {
+      uint32_t f = 0;
+      std::memcpy(&f, value.data() + sizeof(magic), sizeof(uint32_t));
+      std::memcpy(&root_idx, value.data() + sizeof(magic) + sizeof(uint32_t),
+                  sizeof(uint32_t));
+      flags = f;
+      return root_idx < psitri::num_top_roots;
+   }
+
+   if (allow_legacy && value.size() == sizeof(uint32_t) * 2)
+   {
+      uint32_t f = 0;
+      std::memcpy(&f, value.data(), sizeof(uint32_t));
+      std::memcpy(&root_idx, value.data() + sizeof(uint32_t),
+                  sizeof(uint32_t));
+      flags = f;
+      return root_idx < psitri::num_top_roots;
+   }
+
+   if (allow_legacy && value.size() == sizeof(uint32_t))
+   {
+      uint32_t f = 0;
+      std::memcpy(&f, value.data(), sizeof(uint32_t));
+      flags = f;
+      root_idx = 0;
+      return true;
+   }
+
+   return false;
 }
 
 static constexpr unsigned max_named_dbs()
@@ -464,6 +565,7 @@ static MDBX_cursor* acquire_cursor(MDBX_txn* txn)
       txn->free_cursors = c->next_free;
       c->next_free = nullptr;
       c->open = true;
+      c->counted = false;
       return c;
    }
 
@@ -473,22 +575,58 @@ static MDBX_cursor* acquire_cursor(MDBX_txn* txn)
    return c;
 }
 
+static bool txn_finalized(const MDBX_txn* txn)
+{
+   return txn && (txn->committed || txn->aborted);
+}
+
+static void delete_or_defer_finalized_txn(MDBX_txn* txn)
+{
+   if (txn && txn_finalized(txn) && txn->active_cursors == 0)
+      delete txn;
+}
+
 static void release_cursor(MDBX_cursor* cursor)
 {
-   if (!cursor || !cursor->open)
+   if (!cursor)
+      return;
+   if (!cursor->open && !cursor->heap_owned && !cursor->counted)
       return;
 
    MDBX_txn* txn = cursor->txn;
+   bool finalized = txn_finalized(txn);
+   bool heap_owned = cursor->heap_owned;
    cursor->state.reset();
    cursor->dbi = 0;
    cursor->is_dupsort = false;
+   cursor->is_reverse_dup = false;
    cursor->open = false;
+   cursor->txn = nullptr;
+
+   if (cursor->counted)
+   {
+      cursor->counted = false;
+      if (txn && txn->active_cursors > 0)
+         --txn->active_cursors;
+   }
+
+   if (heap_owned)
+   {
+      delete cursor;
+      delete_or_defer_finalized_txn(txn);
+      return;
+   }
 
    if (!txn)
       return;
 
-   cursor->next_free = txn->free_cursors;
-   txn->free_cursors = cursor;
+   if (!finalized)
+   {
+      cursor->next_free = txn->free_cursors;
+      txn->free_cursors = cursor;
+   }
+
+   delete_or_defer_finalized_txn(txn);
 }
 
 static void rollback_dbi_registry_changes(MDBX_txn* txn)
@@ -519,6 +657,7 @@ static void rollback_dbi_registry_changes(MDBX_txn* txn)
          slot.root_index = UINT32_MAX;
          slot.flags = 0;
          slot.is_dupsort = false;
+         slot.reverse_dup = false;
       }
    }
    txn->dbi_changes.clear();
@@ -534,6 +673,26 @@ const MDBX_version_info mdbx_version = {
    0, 13, 11, 0,
    {"psitri-compat", "", "", "psitrimdbx-0.1"},
    "psitrimdbx"
+};
+
+const MDBX_build_info mdbx_build = {
+   __DATE__ " " __TIME__,
+#if defined(__aarch64__) || defined(_M_ARM64)
+   "aarch64",
+#elif defined(__x86_64__) || defined(_M_X64)
+   "x86_64",
+#else
+   "unknown",
+#endif
+   "psitrimdbx",
+#if defined(__clang__)
+   "clang",
+#elif defined(__GNUC__)
+   "gcc",
+#else
+   "unknown",
+#endif
+   ""
 };
 
 // ── Error handling ───────────────────────────────────────────────
@@ -560,6 +719,7 @@ const char* mdbx_strerror(int errnum)
       case MDBX_PROBLEM:        return "MDBX_PROBLEM: Unexpected internal error";
       case MDBX_BUSY:           return "MDBX_BUSY: Resource is busy";
       case MDBX_EMULTIVAL:      return "MDBX_EMULTIVAL: Multiple values for a key";
+      case MDBX_ENODATA:        return "MDBX_ENODATA: No data available";
       case MDBX_ENOSYS:         return "MDBX_ENOSYS: Feature not implemented";
       case MDBX_EINVAL:         return "MDBX_EINVAL: Invalid argument";
       case MDBX_ENOMEM:         return "MDBX_ENOMEM: Out of memory";
@@ -567,6 +727,7 @@ const char* mdbx_strerror(int errnum)
       case MDBX_PAGE_NOTFOUND:  return "MDBX_PAGE_NOTFOUND: Page not found";
       case MDBX_INCOMPATIBLE:   return "MDBX_INCOMPATIBLE: Incompatible operation";
       case MDBX_UNABLE_EXTEND_MAPSIZE: return "MDBX_UNABLE_EXTEND_MAPSIZE: Unable to extend map size";
+      case MDBX_EKEYMISMATCH:   return "MDBX_EKEYMISMATCH: Key mismatch";
       default:                  return "Unknown MDBX error";
    }
 }
@@ -612,6 +773,18 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
 
       env->db = psitri::database::open(env->path, open_mode);
 
+      if (!(flags & MDBX_RDONLY))
+      {
+         std::filesystem::create_directories(env->path);
+         auto marker = env->path / "mdbx.dat";
+         if (!std::filesystem::exists(marker) ||
+             std::filesystem::file_size(marker) == 0)
+         {
+            std::ofstream out{marker, std::ios::binary | std::ios::trunc};
+            out.write("psitrimdbx", 10);
+         }
+      }
+
       // Create WAL directory
       auto wal_dir = env->path / "wal";
       std::filesystem::create_directories(wal_dir);
@@ -626,23 +799,36 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
 
       // Under COWART, latest reads are lock-free via cow_coordinator.
 
-      // Restore named DBIs from catalog (PsiTri root 0).
+      // Restore named DBIs from the MDBX main DB (root 1). Root 0 is scanned
+      // only for older psitrimdbx catalogs written before the main-DB layout.
       try
       {
          auto rs = env->db->start_read_session();
-         auto cur = rs->snapshot_cursor(0);
-         if (cur.seek_begin())
-         {
-            do
+         auto restore_catalog = [&](uint32_t root_idx) {
+            auto cur = rs->snapshot_cursor(root_idx);
+            if (cur.seek_begin())
             {
-               auto name = std::string(cur.key().data(), cur.key().size());
-               auto val = cur.value<std::string>();
-               unsigned f = 0;
-               if (val && val->size() >= sizeof(uint32_t))
-                  std::memcpy(&f, val->data(), sizeof(uint32_t));
-               env->allocate_dbi(name, f);
-            } while (cur.next());
-         }
+               do
+               {
+                  auto name = std::string(cur.key().data(), cur.key().size());
+                  if (env->name_to_dbi.contains(name))
+                     continue;
+
+                  auto val = cur.value<std::string>();
+                  unsigned f = 0;
+                  uint32_t r = 0;
+                  if (!val || !decode_catalog_entry(*val, f, r, root_idx == 0))
+                     continue;
+
+                  if (r != 0)
+                     env->allocate_dbi_with_root(name, f, r);
+                  else
+                     env->allocate_dbi(name, f);
+               } while (cur.next());
+            }
+         };
+         restore_catalog(1);
+         restore_catalog(0);
       }
       catch (...)
       {
@@ -803,6 +989,66 @@ int mdbx_env_set_userctx(MDBX_env* env, void* ctx)
    return MDBX_SUCCESS;
 }
 
+int mdbx_env_set_option(MDBX_env* env, MDBX_option_t option, uint64_t value)
+{
+   if (!env)
+      return MDBX_EINVAL;
+
+   switch (option)
+   {
+      case MDBX_opt_max_db:
+         return mdbx_env_set_maxdbs(env, static_cast<MDBX_dbi>(value));
+      case MDBX_opt_max_readers:
+         return mdbx_env_set_maxreaders(env, static_cast<unsigned>(value));
+      default:
+         env->options[static_cast<int>(option)] = value;
+         return MDBX_SUCCESS;
+   }
+}
+
+int mdbx_env_get_option(const MDBX_env* env, MDBX_option_t option,
+                        uint64_t* value)
+{
+   if (!env || !value)
+      return MDBX_EINVAL;
+
+   switch (option)
+   {
+      case MDBX_opt_max_db:
+         *value = env->max_dbs;
+         return MDBX_SUCCESS;
+      case MDBX_opt_max_readers:
+         *value = env->max_readers;
+         return MDBX_SUCCESS;
+      default:
+      {
+         auto it = env->options.find(static_cast<int>(option));
+         *value = it == env->options.end() ? 0 : it->second;
+         return MDBX_SUCCESS;
+      }
+   }
+}
+
+int mdbx_env_copy(MDBX_env* env, const char* dest, unsigned /*flags*/)
+{
+   if (!env || !dest || !env->opened)
+      return MDBX_EINVAL;
+
+   try
+   {
+      env->dwal_db->flush_wal();
+      std::filesystem::copy(
+         env->path, dest,
+         std::filesystem::copy_options::recursive |
+            std::filesystem::copy_options::overwrite_existing);
+      return MDBX_SUCCESS;
+   }
+   catch (...)
+   {
+      return MDBX_PANIC;
+   }
+}
+
 int mdbx_env_set_read_mode(MDBX_env* env, int mode)
 {
    if (!env || mode < 0 || mode > 2)
@@ -874,14 +1120,14 @@ int mdbx_txn_commit_ex(MDBX_txn* txn, MDBX_commit_latency* latency)
 
       txn->dbi_changes.clear();
       txn->committed = true;
-      delete txn;
+      delete_or_defer_finalized_txn(txn);
       return MDBX_SUCCESS;
    }
    catch (...)
    {
       rollback_dbi_registry_changes(txn);
       txn->aborted = true;
-      delete txn;
+      delete_or_defer_finalized_txn(txn);
       return MDBX_PANIC;
    }
 }
@@ -892,7 +1138,7 @@ int mdbx_txn_abort(MDBX_txn* txn)
       return MDBX_EINVAL;
    if (txn->committed || txn->aborted)
    {
-      delete txn;
+      delete_or_defer_finalized_txn(txn);
       return MDBX_SUCCESS;
    }
 
@@ -903,13 +1149,14 @@ int mdbx_txn_abort(MDBX_txn* txn)
 
       rollback_dbi_registry_changes(txn);
       txn->aborted = true;
-      delete txn;
+      delete_or_defer_finalized_txn(txn);
       return MDBX_SUCCESS;
    }
    catch (...)
    {
       rollback_dbi_registry_changes(txn);
-      delete txn;
+      txn->aborted = true;
+      delete_or_defer_finalized_txn(txn);
       return MDBX_PANIC;
    }
 }
@@ -1011,19 +1258,21 @@ int mdbx_dbi_open(MDBX_txn* txn, const char* name,
       txn->dbi_changes.push_back({*dbi, {}, false});
    }
 
-   // Persist the DBI name→flags mapping through the active MDBX/DWAL
-   // transaction. This keeps DBI creation rollbackable.
+   // Persist the DBI catalog record through the active transaction. MDBX
+   // exposes named DB records through the unnamed main DBI, so root 1 carries
+   // the public catalog. The value stores both flags and the PsiTri root id so
+   // reopening in sorted catalog order cannot remap table data to new roots.
    try
    {
-      int rc = ensure_rw_root(txn, 0);
+      int rc = ensure_rw_root(txn, 1);
       if (rc != MDBX_SUCCESS)
       {
          rollback_dbi_registry_changes(txn);
          return rc;
       }
-      uint32_t f = flags;
-      std::string_view fv(reinterpret_cast<const char*>(&f), sizeof(f));
-      txn->write_tx->upsert(0, sname, fv);
+      uint32_t root_idx = dbi_root_index(env, *dbi);
+      auto catalog_value = encode_catalog_entry(flags, root_idx);
+      txn->write_tx->upsert(1, sname, std::string_view(catalog_value));
    }
    catch (...)
    {
@@ -1117,16 +1366,17 @@ int mdbx_drop(MDBX_txn* txn, MDBX_dbi dbi, int del)
             txn->env->dbis[dbi].root_index = UINT32_MAX;
             txn->env->dbis[dbi].flags = 0;
             txn->env->dbis[dbi].is_dupsort = false;
+            txn->env->dbis[dbi].reverse_dup = false;
 
             lk.unlock();
 
-            int rc = ensure_rw_root(txn, 0);
+            int rc = ensure_rw_root(txn, 1);
             if (rc != MDBX_SUCCESS)
             {
                rollback_dbi_registry_changes(txn);
                return rc;
             }
-            txn->write_tx->remove(0, name);
+            txn->write_tx->remove(1, name);
          }
       }
 
@@ -1168,6 +1418,7 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
    auto    key_sv = to_sv(key);
    auto*   mtxn   = const_cast<MDBX_txn*>(txn);
    bool    is_ds  = dbi_is_dupsort(txn->env, dbi);
+   bool    rev_ds = dbi_is_reverse_dup(txn->env, dbi);
 
    try
    {
@@ -1186,7 +1437,7 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
 
          // Decode the composite to get the value part
          std::string dk, dv;
-         if (!dupsort_decode(found, dk, dv))
+         if (!dupsort_decode(found, dk, dv, rev_ds))
             return MDBX_NOTFOUND;
 
          *data = hold_txn_slice(mtxn, dv);
@@ -1294,13 +1545,14 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
    auto key_sv = to_sv(key);
    auto val_sv = to_sv(data);
    bool is_ds  = dbi_is_dupsort(txn->env, dbi);
+   bool rev_ds = dbi_is_reverse_dup(txn->env, dbi);
 
    try
    {
       if (is_ds)
       {
          // DUPSORT: store as composite key, empty value
-         auto composite = dupsort_encode(key_sv, val_sv);
+         auto composite = dupsort_encode(key_sv, val_sv, rev_ds);
 
          if (flags & MDBX_NODUPDATA)
          {
@@ -1366,6 +1618,7 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
 
    auto key_sv = to_sv(key);
    bool is_ds  = dbi_is_dupsort(txn->env, dbi);
+   bool rev_ds = dbi_is_reverse_dup(txn->env, dbi);
 
    try
    {
@@ -1374,7 +1627,7 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
          if (data)
          {
             // Delete specific (key, value) pair
-            auto composite = dupsort_encode(key_sv, to_sv(data));
+            auto composite = dupsort_encode(key_sv, to_sv(data), rev_ds);
             bool removed = txn->write_tx->remove(root_idx, composite);
             return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
          }
@@ -1427,6 +1680,8 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
 {
    if (!txn || !cursor)
       return MDBX_EINVAL;
+   if (txn_finalized(txn))
+      return MDBX_BAD_TXN;
 
    uint32_t root_idx = dbi_root_index(txn->env, dbi);
    if (root_idx == UINT32_MAX)
@@ -1438,6 +1693,7 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
       c->txn  = txn;
       c->dbi  = dbi;
       c->is_dupsort = dbi_is_dupsort(txn->env, dbi);
+      c->is_reverse_dup = dbi_is_reverse_dup(txn->env, dbi);
 
       // Ensure root is writable if RW
       if (!txn->is_readonly())
@@ -1451,7 +1707,9 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
       }
 
       auto mc = make_txn_cursor(txn, root_idx);
-      c->state.emplace(std::move(mc), c->is_dupsort);
+      c->state.emplace(std::move(mc), c->is_dupsort, c->is_reverse_dup);
+      c->counted = true;
+      ++txn->active_cursors;
 
       *cursor = c;
       return MDBX_SUCCESS;
@@ -1472,6 +1730,8 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
 {
    if (!cursor || !cursor->state)
       return MDBX_EINVAL;
+   if (!cursor->txn || txn_finalized(cursor->txn))
+      return MDBX_BAD_TXN;
 
    auto& st = *cursor->state;
    auto& mc = st.mc;
@@ -1679,7 +1939,8 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
                return MDBX_EINVAL;
             if (!st.dupsort)
                return MDBX_EINVAL;
-            auto composite = dupsort_encode(to_sv(key), to_sv(data));
+            auto composite = dupsort_encode(to_sv(key), to_sv(data),
+                                            st.reverse_dup);
             ok = mc->seek(composite);
             break;
          }
@@ -1690,7 +1951,8 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
             if (!st.dupsort)
                return MDBX_EINVAL;
             // lower_bound on composite, verify same key
-            auto composite = dupsort_encode(to_sv(key), to_sv(data));
+            auto composite = dupsort_encode(to_sv(key), to_sv(data),
+                                            st.reverse_dup);
             ok = mc->lower_bound(composite);
             if (ok && !mc->is_end())
             {
@@ -1727,7 +1989,8 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
 int mdbx_cursor_put(MDBX_cursor* cursor, const MDBX_val* key,
                     MDBX_val* data, MDBX_put_flags_t flags)
 {
-   if (!cursor || !cursor->txn || cursor->txn->is_readonly())
+   if (!cursor || !cursor->txn || txn_finalized(cursor->txn) ||
+       cursor->txn->is_readonly())
       return MDBX_BAD_TXN;
    return mdbx_put(cursor->txn, cursor->dbi, key, data, flags);
 }
@@ -1736,7 +1999,7 @@ int mdbx_cursor_del(MDBX_cursor* cursor, MDBX_put_flags_t flags)
 {
    if (!cursor || !cursor->state || !cursor->state->valid)
       return MDBX_EINVAL;
-   if (!cursor->txn || cursor->txn->is_readonly())
+   if (!cursor->txn || txn_finalized(cursor->txn) || cursor->txn->is_readonly())
       return MDBX_BAD_TXN;
 
    auto& st = *cursor->state;
@@ -1756,7 +2019,8 @@ int mdbx_cursor_del(MDBX_cursor* cursor, MDBX_put_flags_t flags)
          int rc = ensure_rw_root(cursor->txn, root_idx);
          if (rc != MDBX_SUCCESS)
             return rc;
-         auto composite = dupsort_encode(st.key_buf, st.val_buf);
+         auto composite = dupsort_encode(st.key_buf, st.val_buf,
+                                         st.reverse_dup);
          cursor->txn->write_tx->remove(root_idx, composite);
          return MDBX_SUCCESS;
       }
@@ -1768,8 +2032,10 @@ int mdbx_cursor_del(MDBX_cursor* cursor, MDBX_put_flags_t flags)
 
 int mdbx_cursor_count(const MDBX_cursor* cursor, size_t* count)
 {
-   if (!cursor || !count)
+   if (!cursor || !count || !cursor->state)
       return MDBX_EINVAL;
+   if (!cursor->txn || txn_finalized(cursor->txn))
+      return MDBX_BAD_TXN;
 
    auto& st = *cursor->state;
    if (!st.valid)
@@ -1806,6 +2072,8 @@ int mdbx_cursor_on_first(const MDBX_cursor* cursor)
 {
    if (!cursor || !cursor->state || !cursor->state->valid)
       return MDBX_NOTFOUND;
+   if (!cursor->txn || txn_finalized(cursor->txn))
+      return MDBX_BAD_TXN;
    if (cursor->state->mc->is_end())
       return MDBX_NOTFOUND;
 
@@ -1821,6 +2089,8 @@ int mdbx_cursor_on_last(const MDBX_cursor* cursor)
 {
    if (!cursor || !cursor->state || !cursor->state->valid)
       return MDBX_NOTFOUND;
+   if (!cursor->txn || txn_finalized(cursor->txn))
+      return MDBX_BAD_TXN;
    if (cursor->state->mc->is_end())
       return MDBX_NOTFOUND;
 
@@ -1836,6 +2106,8 @@ int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
 {
    if (!txn || !cursor)
       return MDBX_EINVAL;
+   if (txn_finalized(txn))
+      return MDBX_BAD_TXN;
 
    uint32_t root_idx = dbi_root_index(txn->env, cursor->dbi);
    if (root_idx == UINT32_MAX)
@@ -1843,10 +2115,22 @@ int mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor)
 
    try
    {
+      if (!cursor->counted || cursor->txn != txn)
+      {
+         MDBX_txn* old_txn = cursor->txn;
+         if (cursor->counted && cursor->txn && cursor->txn->active_cursors > 0)
+            --cursor->txn->active_cursors;
+         cursor->counted = true;
+         ++txn->active_cursors;
+         delete_or_defer_finalized_txn(old_txn);
+      }
       cursor->txn = txn;
+      cursor->is_dupsort = dbi_is_dupsort(txn->env, cursor->dbi);
+      cursor->is_reverse_dup = dbi_is_reverse_dup(txn->env, cursor->dbi);
       auto mc = make_txn_cursor(txn, root_idx);
       cursor->state.reset();
-      cursor->state.emplace(std::move(mc), cursor->is_dupsort);
+      cursor->state.emplace(std::move(mc), cursor->is_dupsort,
+                            cursor->is_reverse_dup);
       return MDBX_SUCCESS;
    }
    catch (...)
@@ -1863,6 +2147,43 @@ MDBX_dbi mdbx_cursor_dbi(const MDBX_cursor* cursor)
 MDBX_txn* mdbx_cursor_txn(const MDBX_cursor* cursor)
 {
    return cursor ? cursor->txn : nullptr;
+}
+
+MDBX_cursor* mdbx_cursor_create(void* context)
+{
+   auto* cursor = new MDBX_cursor();
+   cursor->heap_owned = true;
+   cursor->open = true;
+   cursor->context = context;
+   return cursor;
+}
+
+int mdbx_cursor_copy(const MDBX_cursor* src, MDBX_cursor* dest)
+{
+   if (!src || !dest || !src->txn || !src->state)
+      return MDBX_EINVAL;
+
+   dest->txn = src->txn;
+   dest->dbi = src->dbi;
+   dest->is_dupsort = src->is_dupsort;
+   dest->is_reverse_dup = src->is_reverse_dup;
+   dest->open = true;
+
+   int rc = mdbx_cursor_renew(src->txn, dest);
+   if (rc != MDBX_SUCCESS)
+      return rc;
+
+   if (src->state->valid)
+   {
+      auto& src_state = *src->state;
+      auto& dst_state = *dest->state;
+      bool ok = src->is_dupsort ? dst_state.mc->seek(src_state.raw_key)
+                                : dst_state.mc->seek(src_state.key_buf);
+      if (ok)
+         dst_state.sync_key_val();
+   }
+
+   return MDBX_SUCCESS;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1918,6 +2239,35 @@ namespace mdbx
    bool env::sync_to_disk(bool force, bool nonblock)
    {
       return mdbx_env_sync_ex(handle_, force ? 1 : 0, nonblock ? 1 : 0) == MDBX_SUCCESS;
+   }
+
+   MDBX_stat env::get_stat() const
+   {
+      MDBX_stat stat{};
+      error::success_or_throw(
+         mdbx_env_stat_ex(handle_, nullptr, &stat, sizeof(stat)));
+      return stat;
+   }
+
+   MDBX_envinfo env::get_info() const
+   {
+      MDBX_envinfo info{};
+      error::success_or_throw(
+         mdbx_env_info_ex(handle_, nullptr, &info, sizeof(info)));
+      return info;
+   }
+
+   void env::copy(const char* dest, bool compactify, bool /*force_dynamic*/)
+   {
+      error::success_or_throw(
+         mdbx_env_copy(handle_, dest, compactify ? 1u : 0u));
+   }
+
+   std::filesystem::path env::get_path() const
+   {
+      if (!handle_)
+         error::success_or_throw(MDBX_EINVAL);
+      return static_cast<const MDBX_env*>(handle_)->path;
    }
 
    void env::close_map(const map_handle& map)
@@ -2053,6 +2403,36 @@ namespace mdbx
       error::success_or_throw(mdbx_drop(handle_, map.dbi, 0));
    }
 
+   bool txn::drop_map(const std::string& name, bool throw_if_absent)
+   {
+      MDBX_dbi dbi = 0;
+      int rc = mdbx_dbi_open(handle_, name.c_str(), MDBX_DB_DEFAULTS, &dbi);
+      if (rc == MDBX_NOTFOUND)
+      {
+         if (throw_if_absent)
+            throw not_found();
+         return false;
+      }
+      error::success_or_throw(rc);
+      error::success_or_throw(mdbx_drop(handle_, dbi, 1));
+      return true;
+   }
+
+   bool txn::clear_map(const std::string& name, bool throw_if_absent)
+   {
+      MDBX_dbi dbi = 0;
+      int rc = mdbx_dbi_open(handle_, name.c_str(), MDBX_DB_DEFAULTS, &dbi);
+      if (rc == MDBX_NOTFOUND)
+      {
+         if (throw_if_absent)
+            throw not_found();
+         return false;
+      }
+      error::success_or_throw(rc);
+      error::success_or_throw(mdbx_drop(handle_, dbi, 0));
+      return true;
+   }
+
    cursor_managed txn::open_cursor(map_handle map) const
    {
       MDBX_cursor* c = nullptr;
@@ -2159,6 +2539,25 @@ namespace mdbx
       return true;
    }
 
+   MDBX_stat txn::get_map_stat(map_handle map) const
+   {
+      MDBX_stat stat{};
+      error::success_or_throw(
+         mdbx_dbi_stat(handle_, map.dbi, &stat, sizeof(stat)));
+      return stat;
+   }
+
+   map_handle::info txn::get_handle_info(map_handle map) const
+   {
+      map_handle::info info{};
+      info.dbi = map.dbi;
+      unsigned raw_flags = 0;
+      error::success_or_throw(
+         mdbx_dbi_flags_ex(handle_, map.dbi, &raw_flags, &info.state));
+      info.flags = static_cast<MDBX_db_flags_t>(raw_flags);
+      return info;
+   }
+
    // ── txn_managed ───────────────────────────────────────────────────
 
    txn_managed::~txn_managed() noexcept
@@ -2205,6 +2604,8 @@ namespace mdbx
       MDBX_val k{}, d{};
       if (key)
          k = *key;
+      if (data)
+         d = *data;
       int rc = mdbx_cursor_get(const_cast<MDBX_cursor*>(handle_), &k, &d, op);
       if (rc == MDBX_NOTFOUND)
       {
@@ -2251,7 +2652,7 @@ namespace mdbx
    {
       MDBX_val k = key;
       MDBX_val d;
-      int rc = mdbx_cursor_get(handle_, &k, &d, MDBX_SET_RANGE);
+      int rc = mdbx_cursor_get(handle_, &k, &d, MDBX_SET_KEY);
       return rc == MDBX_SUCCESS;
    }
 
@@ -2273,6 +2674,32 @@ namespace mdbx
       return do_get(MDBX_SET_UPPERBOUND, &k, nullptr, throw_notfound);
    }
 
+   cursor::move_result cursor::move(move_operation op, MDBX_val* key,
+                                    MDBX_val* value, bool throw_notfound)
+   {
+      return do_get(op, key, value, throw_notfound);
+   }
+
+   cursor::move_result cursor::move(move_operation op, bool throw_notfound)
+   {
+      return do_get(op, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::move(move_operation op, const slice& key,
+                                    bool throw_notfound)
+   {
+      MDBX_val k = key;
+      return do_get(op, &k, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::move(move_operation op, const slice& key,
+                                    const slice& value, bool throw_notfound)
+   {
+      MDBX_val k = key;
+      MDBX_val v = value;
+      return do_get(op, &k, &v, throw_notfound);
+   }
+
    // DUPSORT multi-value stubs
    cursor::move_result cursor::to_current_first_multi(bool throw_notfound)
    {
@@ -2282,6 +2709,20 @@ namespace mdbx
    cursor::move_result cursor::to_current_last_multi(bool throw_notfound)
    {
       return do_get(MDBX_LAST_DUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_current_prev_multi(bool throw_notfound)
+   {
+      if (!handle_ || !handle_->is_dupsort)
+         return do_get(MDBX_PREV, nullptr, nullptr, throw_notfound);
+      return do_get(MDBX_PREV_DUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_current_next_multi(bool throw_notfound)
+   {
+      if (!handle_ || !handle_->is_dupsort)
+         return do_get(MDBX_NEXT, nullptr, nullptr, throw_notfound);
+      return do_get(MDBX_NEXT_DUP, nullptr, nullptr, throw_notfound);
    }
 
    cursor::move_result cursor::to_next_dup(bool throw_notfound)
@@ -2302,6 +2743,16 @@ namespace mdbx
    cursor::move_result cursor::to_prev_nodup(bool throw_notfound)
    {
       return do_get(MDBX_PREV_NODUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_previous_last_multi(bool throw_notfound)
+   {
+      return do_get(MDBX_PREV_NODUP, nullptr, nullptr, throw_notfound);
+   }
+
+   cursor::move_result cursor::to_next_first_multi(bool throw_notfound)
+   {
+      return do_get(MDBX_NEXT_NODUP, nullptr, nullptr, throw_notfound);
    }
 
    cursor::move_result cursor::find_multivalue(const slice& key, const slice& value,
@@ -2361,6 +2812,24 @@ namespace mdbx
       error::success_or_throw(mdbx_cursor_put(handle_, &k, &v, MDBX_UPSERT));
    }
 
+   void cursor::append(const slice& key, const slice& value)
+   {
+      MDBX_val k = key;
+      MDBX_val v = value;
+      error::success_or_throw(mdbx_cursor_put(handle_, &k, &v, MDBX_APPEND));
+   }
+
+   MDBX_error_t cursor::put(const slice& key, slice* value,
+                            MDBX_put_flags_t flags) noexcept
+   {
+      MDBX_val k = key;
+      MDBX_val v = value ? static_cast<MDBX_val>(*value) : MDBX_val{nullptr, 0};
+      int rc = mdbx_cursor_put(handle_, &k, &v, flags);
+      if (value && (rc == MDBX_SUCCESS || rc == MDBX_KEYEXIST))
+         *value = slice(v);
+      return static_cast<MDBX_error_t>(rc);
+   }
+
    void cursor::insert(const slice& key, slice value)
    {
       MDBX_val k = key;
@@ -2397,19 +2866,46 @@ namespace mdbx
       return true;
    }
 
-   bool cursor::erase(bool /*whole_multivalue*/)
+   bool cursor::erase(bool whole_multivalue)
    {
-      int rc = mdbx_cursor_del(handle_, MDBX_UPSERT);
+      auto flags = whole_multivalue ? MDBX_ALLDUPS : MDBX_UPSERT;
+      int rc = mdbx_cursor_del(handle_, static_cast<MDBX_put_flags_t>(flags));
       if (rc == MDBX_NOTFOUND)
          return false;
       error::success_or_throw(rc);
       return true;
    }
 
-   bool cursor::erase(const slice& key, bool /*whole_multivalue*/)
+   bool cursor::erase(const slice& key, bool whole_multivalue)
    {
       MDBX_val k = key;
-      int rc = mdbx_del(mdbx_cursor_txn(handle_), mdbx_cursor_dbi(handle_), &k, nullptr);
+      if (whole_multivalue)
+      {
+         int rc = mdbx_del(mdbx_cursor_txn(handle_), mdbx_cursor_dbi(handle_),
+                           &k, nullptr);
+         if (rc == MDBX_NOTFOUND)
+            return false;
+         error::success_or_throw(rc);
+         return true;
+      }
+
+      MDBX_val v{};
+      int rc = mdbx_cursor_get(handle_, &k, &v, MDBX_SET);
+      if (rc == MDBX_NOTFOUND)
+         return false;
+      error::success_or_throw(rc);
+      rc = mdbx_del(mdbx_cursor_txn(handle_), mdbx_cursor_dbi(handle_), &k, &v);
+      if (rc == MDBX_NOTFOUND)
+         return false;
+      error::success_or_throw(rc);
+      return true;
+   }
+
+   bool cursor::erase(const slice& key, const slice& value)
+   {
+      MDBX_val k = key;
+      MDBX_val v = value;
+      int rc = mdbx_del(mdbx_cursor_txn(handle_), mdbx_cursor_dbi(handle_), &k, &v);
       if (rc == MDBX_NOTFOUND)
          return false;
       error::success_or_throw(rc);

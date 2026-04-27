@@ -11,9 +11,11 @@
 
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace mdbx
@@ -52,6 +54,11 @@ namespace mdbx
 
       static void success_or_throw(int code);
       static bool boolean_or_throw(int code);
+      [[noreturn]] static void throw_exception(int code);
+      [[noreturn]] static void throw_exception(MDBX_error_t code)
+      {
+         throw_exception(static_cast<int>(code));
+      }
 
       friend bool operator==(const error& a, const error& b) noexcept { return a.code_ == b.code_; }
       friend bool operator!=(const error& a, const error& b) noexcept { return a.code_ != b.code_; }
@@ -79,6 +86,12 @@ namespace mdbx
    {
      public:
       key_exists() : exception(::mdbx::error(MDBX_KEYEXIST)) {}
+   };
+
+   class incompatible_operation : public exception
+   {
+     public:
+      incompatible_operation() : exception(::mdbx::error(MDBX_INCOMPATIBLE)) {}
    };
 
    // ── slice ─────────────────────────────────────────────────────────
@@ -116,9 +129,32 @@ namespace mdbx
       slice(const char (&text)[N]) noexcept
           : data_(text), size_(N - 1) {}
 
+     private:
+      template <typename> struct is_basic_string : std::false_type {};
+      template <typename C, typename Tr, typename A>
+      struct is_basic_string<std::basic_string<C, Tr, A>> : std::true_type {};
+
+     public:
+      template <typename C, typename Tr, typename A,
+                typename = std::enable_if_t<!std::is_same_v<C, char>>>
+      explicit slice(const std::basic_string<C, Tr, A>& s) noexcept
+          : data_(s.data()), size_(s.size()) {}
+
+      template <typename T,
+                typename = std::enable_if_t<
+                   !std::is_same_v<std::decay_t<T>, slice> &&
+                   !std::is_same_v<std::decay_t<T>, std::string_view> &&
+                   !std::is_same_v<std::decay_t<T>, MDBX_val> &&
+                   !std::is_pointer_v<std::decay_t<T>> &&
+                   !std::is_array_v<std::remove_reference_t<T>> &&
+                   !is_basic_string<std::decay_t<T>>::value>>
+      slice(const T& v) noexcept
+          : data_(v.data()), size_(v.size()) {}
+
       // Accessors
-      const void*  data() const noexcept { return data_; }
+      void*        data() const noexcept { return const_cast<void*>(data_); }
       const void*  end() const noexcept { return static_cast<const byte*>(data_) + size_; }
+      const byte*  byte_ptr() const noexcept { return static_cast<const byte*>(data_); }
       size_t       length() const noexcept { return size_; }
       size_t       size() const noexcept { return size_; }
       bool         empty() const noexcept { return size_ == 0; }
@@ -129,6 +165,8 @@ namespace mdbx
       {
          return static_cast<const byte*>(data_)[n];
       }
+
+      const char* char_ptr() const noexcept { return static_cast<const char*>(data_); }
 
       // Conversion
       std::string_view string_view() const noexcept
@@ -168,6 +206,35 @@ namespace mdbx
       }
 
       void clear() noexcept { data_ = nullptr; size_ = 0; }
+
+      void remove_prefix(size_t n) noexcept
+      {
+         data_ = static_cast<const byte*>(data_) + n;
+         size_ -= n;
+      }
+
+      void remove_suffix(size_t n) noexcept { size_ -= n; }
+
+      slice safe_head(size_t n) const
+      {
+         if (n > size_)
+            throw std::out_of_range("slice::safe_head");
+         return {data_, n};
+      }
+
+      slice safe_tail(size_t n) const
+      {
+         if (n > size_)
+            throw std::out_of_range("slice::safe_tail");
+         return {static_cast<const byte*>(data_) + (size_ - n), n};
+      }
+
+      slice safe_middle(size_t from, size_t n) const
+      {
+         if (from + n > size_)
+            throw std::out_of_range("slice::safe_middle");
+         return {static_cast<const byte*>(data_) + from, n};
+      }
 
       // Comparison
       static int compare_fast(const slice& a, const slice& b) noexcept
@@ -226,28 +293,6 @@ namespace mdbx
       operator bool() const noexcept { return done; }
    };
 
-   // ── map_handle ────────────────────────────────────────────────────
-
-   struct map_handle
-   {
-      MDBX_dbi dbi{0};
-
-      constexpr map_handle() noexcept = default;
-      constexpr map_handle(MDBX_dbi dbi) noexcept : dbi(dbi) {}
-
-      operator bool() const noexcept { return dbi != 0; }
-      operator MDBX_dbi() const noexcept { return dbi; }
-
-      friend bool operator==(const map_handle& a, const map_handle& b) noexcept
-      {
-         return a.dbi == b.dbi;
-      }
-      friend bool operator<(const map_handle& a, const map_handle& b) noexcept
-      {
-         return a.dbi < b.dbi;
-      }
-   };
-
    // ── Key/value mode enums ──────────────────────────────────────────
 
    enum key_mode {
@@ -268,6 +313,48 @@ namespace mdbx
       insert_unique = MDBX_NOOVERWRITE,
       upsert        = MDBX_UPSERT,
       update        = MDBX_CURRENT,
+   };
+
+   // ── map_handle ────────────────────────────────────────────────────
+
+   struct map_handle
+   {
+      MDBX_dbi dbi{0};
+
+      constexpr map_handle() noexcept = default;
+      constexpr map_handle(MDBX_dbi dbi) noexcept : dbi(dbi) {}
+
+      operator bool() const noexcept { return dbi != 0; }
+      operator MDBX_dbi() const noexcept { return dbi; }
+
+      struct info
+      {
+         MDBX_dbi dbi;
+         MDBX_db_flags_t flags;
+         unsigned state;
+
+         key_mode key_mode() const noexcept
+         {
+            return static_cast<enum key_mode>(
+               flags & (MDBX_REVERSEKEY | MDBX_INTEGERKEY));
+         }
+
+         value_mode value_mode() const noexcept
+         {
+            return static_cast<enum value_mode>(
+               flags & (MDBX_DUPSORT | MDBX_REVERSEDUP |
+                        MDBX_DUPFIXED | MDBX_INTEGERDUP));
+         }
+      };
+
+      friend bool operator==(const map_handle& a, const map_handle& b) noexcept
+      {
+         return a.dbi == b.dbi;
+      }
+      friend bool operator<(const map_handle& a, const map_handle& b) noexcept
+      {
+         return a.dbi < b.dbi;
+      }
    };
 
    // ── env (unmanaged) ───────────────────────────────────────────────
@@ -349,8 +436,31 @@ namespace mdbx
          unsigned    max_readers = 0;
          env::mode       mode       = write_mapped_io;
          env::durability durability = robust_synchronous;
+         unsigned         options    = 0;
 
          MDBX_env_flags_t make_flags() const noexcept;
+
+         static enum mode mode_from_flags(MDBX_env_flags_t flags) noexcept
+         {
+            if (flags & MDBX_RDONLY)
+               return readonly;
+            if (flags & MDBX_WRITEMAP)
+               return write_mapped_io;
+            return write_file_io;
+         }
+
+         static unsigned options_from_flags(MDBX_env_flags_t) noexcept { return 0; }
+
+         static env::durability durability_from_flags(MDBX_env_flags_t flags) noexcept
+         {
+            if (flags & MDBX_UTTERLY_NOSYNC)
+               return whole_fragile;
+            if (flags & MDBX_SAFE_NOSYNC)
+               return lazy_weak_tail;
+            if (flags & MDBX_NOMETASYNC)
+               return half_synchronous_weak_last;
+            return robust_synchronous;
+         }
       };
 
       // ── create_parameters (for env_managed) ────────────────────────
@@ -375,6 +485,19 @@ namespace mdbx
       bool sync_to_disk(bool force = true, bool nonblock = false);
 
       void close_map(const map_handle& map);
+
+      MDBX_stat    get_stat() const;
+      MDBX_envinfo get_info() const;
+      size_t       get_pagesize() const { return 4096; }
+      int          check_readers() { return 0; }
+      void         copy(const char* dest, bool compactify = false,
+                        bool force_dynamic = false);
+      void         copy(const std::string& dest, bool compactify = false,
+                        bool force_dynamic = false)
+      {
+         copy(dest.c_str(), compactify, force_dynamic);
+      }
+      std::filesystem::path get_path() const;
 
       txn_managed start_read() const;
       txn_managed start_write(bool dont_wait = false);
@@ -472,6 +595,8 @@ namespace mdbx
 
       void drop_map(map_handle map);
       void clear_map(map_handle map);
+      bool drop_map(const std::string& name, bool throw_if_absent = true);
+      bool clear_map(const std::string& name, bool throw_if_absent = true);
 
       // ── Cursor ─────────────────────────────────────────────────────
 
@@ -503,7 +628,17 @@ namespace mdbx
 
       // ── Estimation ─────────────────────────────────────────────────
 
-      // Simplified — not fully implemented
+      using map_stat = MDBX_stat;
+      MDBX_stat get_map_stat(map_handle map) const;
+      void renew_reading()
+      {
+         if (handle_)
+         {
+            error::success_or_throw(mdbx_txn_reset(handle_));
+            error::success_or_throw(mdbx_txn_renew(handle_));
+         }
+      }
+      map_handle::info get_handle_info(map_handle map) const;
    };
 
    // ── txn_managed ───────────────────────────────────────────────────
@@ -556,6 +691,7 @@ namespace mdbx
       operator bool() const noexcept { return handle_ != nullptr; }
       operator const MDBX_cursor*() const { return handle_; }
       operator MDBX_cursor*() { return handle_; }
+      operator map_handle() const { return map(); }
 
       using move_operation = MDBX_cursor_op;
 
@@ -584,13 +720,24 @@ namespace mdbx
       move_result lower_bound(const slice& key, bool throw_notfound = false);
       move_result upper_bound(const slice& key, bool throw_notfound = false);
 
+      move_result move(move_operation op, MDBX_val* key, MDBX_val* value,
+                       bool throw_notfound);
+      move_result move(move_operation op, bool throw_notfound);
+      move_result move(move_operation op, const slice& key, bool throw_notfound);
+      move_result move(move_operation op, const slice& key, const slice& value,
+                       bool throw_notfound);
+
       // DUPSORT multi-value navigation
       move_result to_current_first_multi(bool throw_notfound = true);
       move_result to_current_last_multi(bool throw_notfound = true);
+      move_result to_current_prev_multi(bool throw_notfound = true);
+      move_result to_current_next_multi(bool throw_notfound = true);
       move_result to_next_dup(bool throw_notfound = true);
       move_result to_prev_dup(bool throw_notfound = true);
       move_result to_next_nodup(bool throw_notfound = true);
       move_result to_prev_nodup(bool throw_notfound = true);
+      move_result to_previous_last_multi(bool throw_notfound = true);
+      move_result to_next_first_multi(bool throw_notfound = true);
 
       move_result find_multivalue(const slice& key, const slice& value,
                                   bool throw_notfound = true);
@@ -613,8 +760,13 @@ namespace mdbx
       void update(const slice& key, const slice& value);
       bool try_update(const slice& key, const slice& value);
 
+      void append(const slice& key, const slice& value);
+      MDBX_error_t put(const slice& key, slice* value,
+                       MDBX_put_flags_t flags) noexcept;
+
       bool erase(bool whole_multivalue = false);
       bool erase(const slice& key, bool whole_multivalue = true);
+      bool erase(const slice& key, const slice& value);
 
       // ── Binding ────────────────────────────────────────────────────
 
@@ -661,6 +813,8 @@ namespace mdbx
             throw not_found();
          if (code_ == MDBX_KEYEXIST)
             throw key_exists();
+         if (code_ == MDBX_INCOMPATIBLE)
+            throw incompatible_operation();
          throw exception(*this);
       }
    }
@@ -668,6 +822,18 @@ namespace mdbx
    inline void error::success_or_throw(int code)
    {
       error(static_cast<MDBX_error_t>(code)).throw_on_failure();
+   }
+
+   inline void error::throw_exception(int code)
+   {
+      error e(static_cast<MDBX_error_t>(code));
+      if (code == MDBX_NOTFOUND)
+         throw not_found();
+      if (code == MDBX_KEYEXIST)
+         throw key_exists();
+      if (code == MDBX_INCOMPATIBLE)
+         throw incompatible_operation();
+      throw exception(e);
    }
 
    inline bool error::boolean_or_throw(int code)
@@ -679,5 +845,30 @@ namespace mdbx
       error(static_cast<MDBX_error_t>(code)).throw_on_failure();
       return false;
    }
+
+   struct to_hex
+   {
+      std::string str_;
+
+      explicit to_hex(const slice& s)
+      {
+         static constexpr char alphabet[] = "0123456789abcdef";
+         const auto* bytes = s.byte_ptr();
+         str_.resize(s.size() * 2);
+         for (size_t i = 0; i < s.size(); ++i)
+         {
+            str_[2 * i] = alphabet[(bytes[i] >> 4) & 0x0f];
+            str_[2 * i + 1] = alphabet[bytes[i] & 0x0f];
+         }
+      }
+
+      std::string as_string() const { return str_; }
+      operator std::string() const { return str_; }
+   };
+
+   using build_info = ::MDBX_build_info;
+
+   inline const MDBX_version_info& get_version() { return mdbx_version; }
+   inline const MDBX_build_info& get_build() { return mdbx_build; }
 
 }  // namespace mdbx

@@ -63,6 +63,39 @@ TEST_CASE("C API: env create, open, close", "[mdbx][c-api]")
    // Cleanup handled by make_temp_dir() at start of next run
 }
 
+TEST_CASE("C API: Silkworm env options, marker file, and copy",
+          "[mdbx][c-api][silkworm]")
+{
+   auto dir = make_temp_dir("c_env_silkworm");
+   auto copy_dir = fs::temp_directory_path() / "c_env_silkworm_copy_mdbx_test";
+   fs::remove_all(copy_dir);
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(),
+                         static_cast<MDBX_env_flags_t>(MDBX_NOTLS |
+                                                        MDBX_NORDAHEAD |
+                                                        MDBX_COALESCE),
+                         0644) == MDBX_SUCCESS);
+
+   REQUIRE(fs::exists(dir / "mdbx.dat"));
+   REQUIRE(fs::file_size(dir / "mdbx.dat") > 0);
+
+   REQUIRE(mdbx_env_set_option(env, MDBX_opt_txn_dp_initial, 16 * 1024) ==
+           MDBX_SUCCESS);
+   uint64_t option_value = 0;
+   REQUIRE(mdbx_env_get_option(env, MDBX_opt_txn_dp_initial, &option_value) ==
+           MDBX_SUCCESS);
+   REQUIRE(option_value == 16 * 1024);
+
+   REQUIRE(mdbx_env_copy(env, copy_dir.c_str(), 0) == MDBX_SUCCESS);
+   REQUIRE(fs::exists(copy_dir / "mdbx.dat"));
+
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+   fs::remove_all(copy_dir);
+}
+
 TEST_CASE("C API: basic put/get/del", "[mdbx][c-api]")
 {
    auto dir = make_temp_dir("c_crud");
@@ -235,6 +268,56 @@ TEST_CASE("C API: named DBI creation abort rolls back catalog", "[mdbx][c-api][t
    mdbx_env_close(env);
 }
 
+TEST_CASE("C API: named DBI catalog preserves root ids across reopen",
+          "[mdbx][c-api][persistence][silkworm]")
+{
+   auto dir = make_temp_dir("c_catalog_root_ids");
+
+   {
+      MDBX_env* env = nullptr;
+      REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+      REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+      REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+      MDBX_dbi zeta = 0, alpha = 0;
+      REQUIRE(mdbx_dbi_open(txn, "zeta", MDBX_CREATE, &zeta) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, "alpha", MDBX_CREATE, &alpha) == MDBX_SUCCESS);
+
+      MDBX_val key{const_cast<char*>("same"), 4};
+      MDBX_val vz{const_cast<char*>("zeta-value"), 10};
+      MDBX_val va{const_cast<char*>("alpha-value"), 11};
+      REQUIRE(mdbx_put(txn, zeta, &key, &vz, MDBX_UPSERT) == MDBX_SUCCESS);
+      REQUIRE(mdbx_put(txn, alpha, &key, &va, MDBX_UPSERT) == MDBX_SUCCESS);
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+      REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+   }
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi zeta = 0, alpha = 0;
+   REQUIRE(mdbx_dbi_open(txn, "zeta", MDBX_DB_DEFAULTS, &zeta) == MDBX_SUCCESS);
+   REQUIRE(mdbx_dbi_open(txn, "alpha", MDBX_DB_DEFAULTS, &alpha) == MDBX_SUCCESS);
+
+   MDBX_val key{const_cast<char*>("same"), 4};
+   MDBX_val got{};
+   REQUIRE(mdbx_get(txn, zeta, &key, &got) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(got) == "zeta-value");
+   REQUIRE(mdbx_get(txn, alpha, &key, &got) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(got) == "alpha-value");
+
+   REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
 TEST_CASE("C API: cursor iteration", "[mdbx][c-api]")
 {
    auto dir = make_temp_dir("c_cursor");
@@ -320,6 +403,53 @@ TEST_CASE("C API: cursor storage is reused within a transaction", "[mdbx][c-api]
 
    REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
    mdbx_env_close(env);
+}
+
+TEST_CASE("C API: cursor_copy clones current position", "[mdbx][c-api][cursor][silkworm]")
+{
+   auto dir = make_temp_dir("c_cursor_copy");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi = 0;
+   REQUIRE(mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
+
+   for (auto item : {"a", "b", "c"})
+   {
+      MDBX_val k{const_cast<char*>(item), 1};
+      MDBX_val v{const_cast<char*>("value"), 5};
+      REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+   }
+
+   MDBX_cursor* cur = nullptr;
+   REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+   MDBX_val k{const_cast<char*>("b"), 1};
+   MDBX_val v{};
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_SET_KEY) == MDBX_SUCCESS);
+
+   MDBX_cursor* clone = mdbx_cursor_create(nullptr);
+   REQUIRE(clone != nullptr);
+   REQUIRE(mdbx_cursor_copy(cur, clone) == MDBX_SUCCESS);
+
+   REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_NEXT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(k) == "c");
+
+   MDBX_val clone_key{};
+   MDBX_val clone_val{};
+   REQUIRE(mdbx_cursor_get(clone, &clone_key, &clone_val, MDBX_GET_CURRENT) ==
+           MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(clone_key) == "b");
+
+   mdbx_cursor_close(clone);
+   mdbx_cursor_close(cur);
+   REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
 }
 
 TEST_CASE("C API: returned cursor slices survive cursor close until transaction end",
@@ -742,6 +872,62 @@ TEST_CASE("C++ API: slice comparison", "[mdbx][cpp-api]")
    REQUIRE(b > a);
    REQUIRE(d < a);
    REQUIRE(a.starts_with(d));
+}
+
+TEST_CASE("C++ API: Silkworm compatibility surface", "[mdbx][cpp-api][silkworm]")
+{
+   auto dir = make_temp_dir("cpp_silkworm_surface");
+
+   mdbx::env_managed::create_parameters cp;
+   mdbx::env::operate_parameters        op;
+   op.max_maps = 16;
+   op.mode = mdbx::env::operate_parameters::mode_from_flags(MDBX_WRITEMAP);
+   op.options = mdbx::env::operate_parameters::options_from_flags(MDBX_WRITEMAP);
+   op.durability =
+      mdbx::env::operate_parameters::durability_from_flags(MDBX_SYNC_DURABLE);
+
+   mdbx::env_managed db(dir.c_str(), cp, op);
+   REQUIRE(db.get_path() == dir);
+   REQUIRE(db.get_stat().ms_psize == 4096);
+   REQUIRE(db.get_info().mi_dxb_pagesize == 4096);
+   REQUIRE(db.check_readers() == 0);
+   REQUIRE(mdbx::get_build().target != nullptr);
+
+   std::vector<unsigned char> bytes;
+   bytes.push_back(0xab);
+   bytes.push_back(0xcd);
+   mdbx::slice bytes_slice(bytes);
+   REQUIRE(bytes_slice.size() == 2);
+   REQUIRE(mdbx::to_hex(bytes_slice).as_string() == "abcd");
+   bytes_slice.remove_prefix(1);
+   REQUIRE(bytes_slice.safe_head(1)[0] == 0xcd);
+
+   auto txn = db.start_write();
+   auto map = txn.create_map("dups", mdbx::key_mode::usual,
+                             mdbx::value_mode::multi_reverse);
+   auto info = txn.get_handle_info(map);
+   REQUIRE((info.flags & MDBX_DUPSORT) != 0);
+   REQUIRE((info.flags & MDBX_REVERSEDUP) != 0);
+
+   auto cur = txn.open_cursor(map);
+   mdbx::slice v1("one");
+   REQUIRE(cur.put(mdbx::slice("k"), &v1, MDBX_UPSERT) == MDBX_SUCCESS);
+   mdbx::slice v2("two");
+   REQUIRE(cur.put(mdbx::slice("k"), &v2, MDBX_APPENDDUP) == MDBX_SUCCESS);
+
+   auto found = cur.move(mdbx::cursor::move_operation::get_both,
+                         mdbx::slice("k"), mdbx::slice("two"), false);
+   REQUIRE(found.done);
+   REQUIRE(found.value.string_view() == "two");
+
+   auto current = cur.move(mdbx::cursor::move_operation::get_current, false);
+   REQUIRE(current.done);
+   REQUIRE(current.key.string_view() == "k");
+
+   REQUIRE(cur.erase(mdbx::slice("k"), mdbx::slice("two")));
+   REQUIRE(txn.get_map_stat(map).ms_entries == 1);
+   txn.commit();
+   REQUIRE(mdbx_cursor_get(cur, nullptr, nullptr, MDBX_GET_CURRENT) == MDBX_BAD_TXN);
 }
 
 TEST_CASE("C++ API: multiple maps isolation", "[mdbx][cpp-api]")

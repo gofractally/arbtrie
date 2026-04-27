@@ -620,6 +620,10 @@ Current implementation evidence:
 - Returned C and C++ `MDBX_val` slices now copy into transaction-owned arena
   storage so short-lived cursor helpers can close/reuse cursors without
   invalidating slices that callers keep until transaction end.
+- Finalized MDBX transactions now defer destruction while managed cursors are
+  still alive, so normal C++ RAII usage where `txn.commit()` happens before a
+  cursor variable leaves scope invalidates cursor operations without making the
+  cursor destructor touch freed transaction storage.
 - Impedance mismatch: MDBX allows DBIs to be discovered lazily inside a write
   transaction, but DWAL requires the root set when the transaction starts. The
   shim currently enlists every possible MDBX root for the environment to keep
@@ -652,6 +656,8 @@ Checklist:
 - [x] Keep MDBX value lifetime rules correct: returned `MDBX_val` points into
       storage that remains valid for the documented MDBX operation lifetime.
 - [x] Update MDBX C++ wrapper paths to use the same pooled C cursor machinery.
+- [x] Make MDBX cursor cleanup safe after `commit()`/`abort()` finalizes the
+      transaction but C++ cursor RAII wrappers are still unwinding.
 - [ ] Replace the "enlist all possible roots" workaround if DWAL grows an API
       for dynamic root enlistment or a cheap declared root-set builder.
 - [ ] Split shared MDBX compatibility code from storage-specific backend code.
@@ -685,6 +691,8 @@ Required tests:
 - [x] MDBX/Silkworm DUPSORT test: `GET_BOTH`, `GET_BOTH_RANGE`, `NEXT_DUP`,
       `NEXT_NODUP`, `FIRST_DUP`, and `LAST_DUP` match the compatibility
       contract.
+- [x] MDBX/Silkworm RAII lifetime test: a managed cursor can still destruct
+      safely after `txn.commit()` has finalized the underlying transaction.
 
 ## Silkworm Port Sync
 
@@ -705,12 +713,13 @@ Current implementation evidence:
   pushed PsiTri branch also does not apply cleanly. A 3-way apply reaches
   conflicts, confirming that the remaining work should be ported deliberately
   rather than copied wholesale.
-- Silkworm still appears to rely on psitrimdbx compatibility APIs from its
+- Silkworm appears to rely on psitrimdbx compatibility APIs from its
   submodule branch, including `mdbx::error::throw_exception`, `env::get_path`,
   `env::get_stat/get_info/copy/check_readers`, transaction map info/stat
   helpers, generic cursor `move()`, multi-cursor aliases, `cursor::put`,
   `cursor::erase(key,value)`, `MDBX_ENODATA`, `MDBX_COALESCE`,
-  `MDBX_option_t`, and `mdbx_env_get/set_option`.
+  `MDBX_option_t`, and `mdbx_env_get/set_option`. These are now represented in
+  the PsiTri psitrimdbx headers/implementation and covered by local MDBX tests.
 
 Checklist:
 
@@ -732,7 +741,7 @@ Checklist:
 - [ ] Update the Silkworm `third_party/psitri` submodule to that pushed commit.
 - [ ] Re-run the relevant Silkworm build/tests or document any local
       dependency/build blockers.
-- [ ] Port the Silkworm-required psitrimdbx API compatibility surface on top of
+- [x] Port the Silkworm-required psitrimdbx API compatibility surface on top of
       the pushed PsiTri branch before moving the submodule pointer.
 - [ ] Port or replace Silkworm's case-study/stress benchmark if it is still the
       intended Ethereum workload for validation.
@@ -878,9 +887,10 @@ Required tests:
       `build/bin/psitri-tests "[public-api],[count_keys],[cursor],[edge_case],[update_value],[coverage],[database],[range_remove],[zip],[integrity],[tree_handle],[subtree]" --colour-mode none`
       with 220 test cases and 793,047 assertions passing.
 - [x] MDBX compatibility test target passed:
-      `build/bin/mdbx-tests -r compact --colour-mode none` with 42 test cases
-      and 10,790 assertions passing. This verifies the current compatibility
-      behavior plus MDBX cursor pooling, multi-DBI abort, and DBI catalog abort
+      `build/bin/mdbx-tests -r compact --colour-mode none` with 49 test cases
+      and 11,144 assertions passing. This verifies the current compatibility
+      behavior plus MDBX cursor pooling, multi-DBI abort, DBI catalog abort,
+      Silkworm API surface, and managed-cursor/transaction-finalization
       coverage.
 - [x] DWAL focused slice passed:
       `build/bin/psitri-tests "[dwal]" -r compact --colour-mode none` with 154
