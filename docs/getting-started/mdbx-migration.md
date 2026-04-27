@@ -100,7 +100,7 @@ auto val = ro.get(map, mdbx::slice("alice"));
 | `mdbx_drop` | Supported | Both clear (del=0) and delete (del=1) |
 | `mdbx_dbi_stat` | Supported | Real entry counting |
 | `mdbx_replace` | Supported | |
-| `MDBX_DUPSORT` | Supported | Composite key encoding |
+| `MDBX_DUPSORT` | Supported | Stored as duplicate-value subtrees; outer key and dup value are each limited to 1 KiB |
 | `MDBX_NOOVERWRITE` / `MDBX_UPSERT` | Supported | |
 | `mdbx_env_set_userctx` / `mdbx_env_get_userctx` | Supported | |
 | C++ API (`mdbx::env_managed`, `mdbx::txn_managed`, etc.) | Supported | |

@@ -1075,6 +1075,77 @@ TEST_CASE("C API: DUPSORT basic put/get/del", "[mdbx][dupsort]")
    mdbx_env_close(env);
 }
 
+TEST_CASE("C API: DUPSORT supports separate 1KiB key and dup budgets",
+          "[mdbx][dupsort][limits]")
+{
+   auto dir = make_temp_dir("c_dupsort_1k_budget");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi = 0;
+   REQUIRE(mdbx_dbi_open(txn, "dupsort_limits",
+                         static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT),
+                         &dbi) == MDBX_SUCCESS);
+
+   std::string key(1024, 'k');
+   std::string first(1024, 'a');
+   std::string second(1024, 'b');
+
+   MDBX_val k{key.data(), key.size()};
+   MDBX_val v2{second.data(), second.size()};
+   MDBX_val v1{first.data(), first.size()};
+   REQUIRE(mdbx_put(txn, dbi, &k, &v2, MDBX_UPSERT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_put(txn, dbi, &k, &v1, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   MDBX_val got{};
+   REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(got.iov_base), got.iov_len) == first);
+
+   MDBX_cursor* cur = nullptr;
+   REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+   MDBX_val ck{key.data(), key.size()};
+   MDBX_val cv{};
+   REQUIRE(mdbx_cursor_get(cur, &ck, &cv, MDBX_SET) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(cv.iov_base), cv.iov_len) == first);
+   REQUIRE(mdbx_cursor_get(cur, &ck, &cv, MDBX_NEXT_DUP) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(cv.iov_base), cv.iov_len) == second);
+   mdbx_cursor_close(cur);
+
+   std::string too_large_value(1025, 'x');
+   MDBX_val bad_v{too_large_value.data(), too_large_value.size()};
+   REQUIRE(mdbx_put(txn, dbi, &k, &bad_v, MDBX_UPSERT) == MDBX_BAD_VALSIZE);
+
+   std::string too_large_key(1025, 'y');
+   MDBX_val bad_k{too_large_key.data(), too_large_key.size()};
+   MDBX_val small_v{const_cast<char*>("v"), 1};
+   REQUIRE(mdbx_put(txn, dbi, &bad_k, &small_v, MDBX_UPSERT) == MDBX_BAD_VALSIZE);
+
+   REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+
+   env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* ro = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro) == MDBX_SUCCESS);
+   MDBX_dbi reopened = 0;
+   REQUIRE(mdbx_dbi_open(ro, "dupsort_limits", MDBX_DUPSORT, &reopened) == MDBX_SUCCESS);
+   MDBX_val rk{key.data(), key.size()};
+   MDBX_val rv{};
+   REQUIRE(mdbx_get(ro, reopened, &rk, &rv) == MDBX_SUCCESS);
+   REQUIRE(std::string_view(static_cast<char*>(rv.iov_base), rv.iov_len) == first);
+   REQUIRE(mdbx_txn_abort(ro) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
 TEST_CASE("C API: DUPSORT cursor navigation", "[mdbx][dupsort]")
 {
    auto dir = make_temp_dir("c_dupsort_nav");

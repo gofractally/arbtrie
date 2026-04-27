@@ -634,8 +634,10 @@ Current implementation evidence:
 - Impedance mismatch: MDBX read-only transactions imply a transaction snapshot,
   while DWAL currently exposes configurable read modes and cursor creation on
   the database, not a read-session cursor snapshot API.
-- Impedance mismatch: MDBX DUPSORT is emulated by composite ordered keys rather
-  than a native duplicate-value storage model.
+- Impedance mismatch: native MDBX permits larger DUPSORT duplicate values than
+  the PsiTri shim can support. The shim intentionally models DUPSORT as
+  `outer_key -> duplicate-value subtree`, giving the outer key and duplicate
+  value separate 1 KiB PsiTri key budgets and rejecting larger duplicate values.
 - RW point reads still copy values into transaction-owned arena storage to satisfy
   `MDBX_val` lifetime requirements.
 
