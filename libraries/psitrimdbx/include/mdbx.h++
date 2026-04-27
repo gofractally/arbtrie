@@ -488,7 +488,7 @@ namespace mdbx
 
       MDBX_stat    get_stat() const;
       MDBX_envinfo get_info() const;
-      size_t       get_pagesize() const { return 4096; }
+      size_t       get_pagesize() const;
       int          check_readers() { return 0; }
       void         copy(const char* dest, bool compactify = false,
                         bool force_dynamic = false);

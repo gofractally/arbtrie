@@ -21,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,9 +31,72 @@
 #include <unordered_map>
 #include <vector>
 
+#include <unistd.h>
+
 // ════════════════════════════════════════════════════════════════════
 // Internal types (hidden behind opaque C handles)
 // ════════════════════════════════════════════════════════════════════
+
+static size_t system_page_size()
+{
+   long size = ::sysconf(_SC_PAGESIZE);
+   return size > 0 ? static_cast<size_t>(size) : 4096;
+}
+
+static size_t requested_or_default_page_size(intptr_t pagesize)
+{
+   return pagesize > 0 ? static_cast<size_t>(pagesize) : system_page_size();
+}
+
+static size_t max_single_value_size(size_t page_size, size_t key_size)
+{
+   static constexpr size_t page_overhead_size = 32;
+   if (page_size <= page_overhead_size + 2 * sizeof(uint16_t) + key_size)
+      return 0;
+   size_t page_room = page_size - page_overhead_size;
+   size_t leaf_node_room = ((page_room / 2) & ~size_t{1}) - 2 * sizeof(uint16_t);
+   return leaf_node_room > key_size ? leaf_node_room - key_size : 0;
+}
+
+static size_t max_dupsort_value_size(size_t page_size)
+{
+   static constexpr size_t page_header_size = 20;
+   static constexpr size_t dupsort_nodes = 2;
+   static constexpr size_t node_header_size = 8;
+   if (page_size <= page_header_size + dupsort_nodes * node_header_size)
+      return 0;
+   return (page_size - page_header_size) / dupsort_nodes - 2 * node_header_size;
+}
+
+static std::optional<size_t> read_marker_page_size(const std::filesystem::path& marker)
+{
+   std::ifstream in{marker, std::ios::binary};
+   if (!in)
+      return std::nullopt;
+
+   std::string text((std::istreambuf_iterator<char>(in)),
+                    std::istreambuf_iterator<char>());
+   static constexpr std::string_view tag = "pagesize=";
+   auto pos = text.find(tag);
+   if (pos == std::string::npos)
+      return std::nullopt;
+
+   pos += tag.size();
+   size_t value = 0;
+   while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9')
+   {
+      value = value * 10 + static_cast<size_t>(text[pos] - '0');
+      ++pos;
+   }
+   return value != 0 ? std::optional<size_t>{value} : std::nullopt;
+}
+
+static void write_marker_page_size(const std::filesystem::path& marker,
+                                   size_t page_size)
+{
+   std::ofstream out{marker, std::ios::binary | std::ios::trunc};
+   out << "psitrimdbx\npagesize=" << page_size << '\n';
+}
 
 /// Per-DBI metadata stored in the environment.
 struct dbi_info
@@ -57,6 +121,7 @@ struct MDBX_env
    MDBX_env_flags_t  env_flags   = MDBX_ENV_DEFAULTS;
    bool              opened      = false;
    void*             userctx     = nullptr;
+   size_t            page_size   = 4096;
 
    // Read mode for RO transactions: 0=buffered, 1=latest, 2=direct(get_latest)
    int               read_mode   = 1;  // default: latest (sees all committed data)
@@ -798,6 +863,7 @@ int mdbx_env_create(MDBX_env** penv)
    if (!penv)
       return MDBX_EINVAL;
    *penv = new MDBX_env();
+   (*penv)->page_size = system_page_size();
    return MDBX_SUCCESS;
 }
 
@@ -825,12 +891,18 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       {
          std::filesystem::create_directories(env->path);
          auto marker = env->path / "mdbx.dat";
+         env->page_size = read_marker_page_size(marker).value_or(
+            requested_or_default_page_size(env->geo_pagesize));
          if (!std::filesystem::exists(marker) ||
-             std::filesystem::file_size(marker) == 0)
-         {
-            std::ofstream out{marker, std::ios::binary | std::ios::trunc};
-            out.write("psitrimdbx", 10);
-         }
+             std::filesystem::file_size(marker) == 0 ||
+             !read_marker_page_size(marker))
+            write_marker_page_size(marker, env->page_size);
+      }
+      else
+      {
+         auto marker = env->path / "mdbx.dat";
+         env->page_size = read_marker_page_size(marker).value_or(
+            requested_or_default_page_size(env->geo_pagesize));
       }
 
       // Create WAL directory
@@ -1009,7 +1081,7 @@ int mdbx_env_stat_ex(const MDBX_env* env, const MDBX_txn* /*txn*/,
    if (!env || !stat || bytes < sizeof(MDBX_stat))
       return MDBX_EINVAL;
    std::memset(stat, 0, sizeof(MDBX_stat));
-   stat->ms_psize = 4096; // Synthetic page size
+   stat->ms_psize = env->page_size;
    return MDBX_SUCCESS;
 }
 
@@ -1019,8 +1091,8 @@ int mdbx_env_info_ex(const MDBX_env* env, const MDBX_txn* /*txn*/,
    if (!env || !info || bytes < sizeof(MDBX_envinfo))
       return MDBX_EINVAL;
    std::memset(info, 0, sizeof(MDBX_envinfo));
-   info->mi_dxb_pagesize = 4096;
-   info->mi_sys_pagesize = 4096;
+   info->mi_dxb_pagesize = env->page_size;
+   info->mi_sys_pagesize = system_page_size();
    return MDBX_SUCCESS;
 }
 
@@ -1367,18 +1439,38 @@ int mdbx_dbi_stat(const MDBX_txn* txn, MDBX_dbi dbi,
       return MDBX_BAD_DBI;
 
    std::memset(stat, 0, sizeof(MDBX_stat));
-   stat->ms_psize = 4096;
+   stat->ms_psize = txn->env->page_size;
 
    try
    {
-      // Count entries by iterating a cursor.
-      auto mc = make_txn_cursor(txn, root_idx);
+      bool is_ds  = dbi_is_dupsort(const_cast<MDBX_env*>(txn->env), dbi);
+      bool rev_ds = dbi_is_reverse_dup(const_cast<MDBX_env*>(txn->env), dbi);
+      cursor_state st(make_txn_cursor(txn, root_idx), is_ds, rev_ds);
       uint64_t count = 0;
-      if (mc->seek_begin())
+      uint64_t overflow_pages = 0;
+      if (st.mc->seek_begin())
       {
-         do { ++count; } while (mc->next());
+         do
+         {
+            st.sync_key_val();
+            if (!st.valid)
+               continue;
+
+            ++count;
+            size_t max_inline = is_ds
+               ? max_dupsort_value_size(txn->env->page_size)
+               : max_single_value_size(txn->env->page_size, st.key_buf.size());
+            if (st.val_buf.size() > max_inline)
+               ++overflow_pages;
+         } while (st.mc->next());
       }
       stat->ms_entries = count;
+      if (count)
+      {
+         stat->ms_depth = 1;
+         stat->ms_leaf_pages = 1;
+      }
+      stat->ms_overflow_pages = overflow_pages;
    }
    catch (...)
    {
@@ -1618,6 +1710,9 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
    {
       if (is_ds)
       {
+         if (val_sv.size() > max_dupsort_value_size(txn->env->page_size))
+            return MDBX_BAD_VALSIZE;
+
          // DUPSORT: store as composite key, empty value
          auto composite = dupsort_encode(key_sv, val_sv, rev_ds);
 
@@ -2324,6 +2419,13 @@ namespace mdbx
       return info;
    }
 
+   size_t env::get_pagesize() const
+   {
+      if (!handle_)
+         error::success_or_throw(MDBX_EINVAL);
+      return static_cast<const MDBX_env*>(handle_)->page_size;
+   }
+
    void env::copy(const char* dest, bool compactify, bool /*force_dynamic*/)
    {
       error::success_or_throw(
@@ -2849,7 +2951,7 @@ namespace mdbx
    {
       if (!handle_ || !handle_->state)
          return true;
-      return handle_->state->mc->is_end();
+      return handle_->state->mc->is_end() || handle_->state->mc->is_rend();
    }
 
    bool cursor::on_first() const

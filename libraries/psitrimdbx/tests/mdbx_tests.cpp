@@ -912,8 +912,8 @@ TEST_CASE("C++ API: Silkworm compatibility surface", "[mdbx][cpp-api][silkworm]"
 
    mdbx::env_managed db(dir.c_str(), cp, op);
    REQUIRE(db.get_path() == dir);
-   REQUIRE(db.get_stat().ms_psize == 4096);
-   REQUIRE(db.get_info().mi_dxb_pagesize == 4096);
+   REQUIRE(db.get_stat().ms_psize == db.get_pagesize());
+   REQUIRE(db.get_info().mi_dxb_pagesize == db.get_pagesize());
    REQUIRE(db.check_readers() == 0);
    REQUIRE(mdbx::get_build().target != nullptr);
 
