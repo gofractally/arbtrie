@@ -104,7 +104,7 @@ namespace mdbx
      public:
       constexpr slice() noexcept = default;
 
-      slice(const void* ptr, size_t bytes) noexcept
+      constexpr slice(const void* ptr, size_t bytes) noexcept
           : data_(ptr), size_(bytes) {}
 
       slice(const void* begin, const void* end) noexcept
