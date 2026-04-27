@@ -705,7 +705,7 @@ Current implementation evidence:
 - The standalone dangling-slice and seek/next repros are now represented as
   ordinary PsiTri MDBX compatibility tests.
 - The pushed PsiTri branch is `origin/codex-mdbx-silkworm-refactor` at
-  `a3ce8cbb86e62dcb92b20083fdd8a5c6d1726a59`.
+  `0d9a6d3` (`Expand psitrimdbx Silkworm compatibility`).
 - A simulated merge of the pushed PsiTri branch into Silkworm's
   `silkworm-psitrimdbx-fixes` submodule branch is not clean. It conflicts in
   PsiTri transaction/DWAL headers and `libraries/psitrimdbx/src/mdbx_impl.cpp`.
@@ -739,6 +739,9 @@ Checklist:
       `silkworm-psitrimdbx-fixes` submodule branch and record the conflict
       shape.
 - [ ] Update the Silkworm `third_party/psitri` submodule to that pushed commit.
+      Blocked on preserving or retiring the dirty local submodule patch in
+      `/Users/dlarimer/psiserve-agent2/external/silkworm/third_party/psitri`
+      (`libraries/psitrimdbx/src/mdbx_impl.cpp` plus two repro test files).
 - [ ] Re-run the relevant Silkworm build/tests or document any local
       dependency/build blockers.
 - [x] Port the Silkworm-required psitrimdbx API compatibility surface on top of
