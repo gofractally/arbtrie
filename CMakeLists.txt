@@ -463,6 +463,11 @@ target_link_libraries(psitri-tool PUBLIC Boost::program_options psitri)
 target_include_directories(psitri-tool PUBLIC ${Boost_INCLUDE_DIRS})
 set_target_properties(psitri-tool PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(psitricorder programs/psitri_tool.cpp)
+target_link_libraries(psitricorder PUBLIC Boost::program_options psitri)
+target_include_directories(psitricorder PUBLIC ${Boost_INCLUDE_DIRS})
+set_target_properties(psitricorder PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 add_executable(mdbx-probe programs/mdbx_probe.cpp)
 target_link_libraries(mdbx-probe PRIVATE psitrimdbx)
 set_target_properties(mdbx-probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

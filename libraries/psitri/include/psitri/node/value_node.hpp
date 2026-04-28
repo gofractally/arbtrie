@@ -473,6 +473,16 @@ namespace psitri
          return get_stored_tree_id(offset);
       }
 
+      /// Get the tree_id stored at a specific subtree entry.
+      tree_id get_entry_tree_id(uint8_t i) const noexcept
+      {
+         assert(_is_subtree);
+         int16_t offset = get_entry_offset(i);
+         if (offset < offset_data_start)
+            return sal::null_tree_id;
+         return get_stored_tree_id(offset);
+      }
+
       bool is_subtree_container() const noexcept { return _is_subtree; }
 
       uint8_t num_versions() const noexcept { return _num_versions; }

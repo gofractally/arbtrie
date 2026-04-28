@@ -172,6 +172,114 @@ std::string format_number(uint64_t n)
    return s;
 }
 
+void print_audit_progress(const version_audit_result& r, void*)
+{
+   std::cerr << "  progress: nodes=" << format_number(r.nodes_visited)
+             << " leaves=" << format_number(r.leaf_nodes)
+             << " values=" << format_number(r.value_nodes)
+             << " versions=" << format_number(r.value_versions_seen + r.leaf_versions_seen)
+             << " dangling=" << format_number(r.dangling_pointers) << "\n";
+}
+
+int cmd_audit_versions(database& db, uint64_t prune_floor, uint64_t progress_nodes)
+{
+   version_audit_options options;
+   options.prune_floor             = prune_floor;
+   options.progress_interval_nodes = progress_nodes;
+   if (progress_nodes != 0)
+      options.progress = print_audit_progress;
+
+   std::cout << "Auditing MVCC version retention...\n\n";
+   std::cout.flush();
+
+   auto r = db.audit_versions(options);
+
+   std::cout << "-- Roots --\n";
+   std::cout << "  " << std::setw(30) << std::left << "Roots checked"
+             << r.roots_checked << " / " << num_top_roots << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Roots with version"
+             << r.roots_with_version << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Roots without version"
+             << r.roots_without_version << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Oldest root version"
+             << r.oldest_root_version << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Newest root version"
+             << r.newest_root_version << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Prune floor"
+             << r.effective_prune_floor;
+   if (r.requested_prune_floor == 0)
+      std::cout << " (from oldest root)";
+   std::cout << "\n";
+
+   std::cout << "\n-- Reachable Nodes --\n";
+   std::cout << "  " << std::setw(30) << std::left << "Nodes visited"
+             << format_number(r.nodes_visited) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Shared nodes skipped"
+             << format_number(r.shared_nodes_skipped) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Dangling pointers"
+             << format_number(r.dangling_pointers) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Inner nodes"
+             << format_number(r.inner_nodes) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Inner prefix nodes"
+             << format_number(r.inner_prefix_nodes) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Leaf nodes"
+             << format_number(r.leaf_nodes) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Value nodes"
+             << format_number(r.value_nodes) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Flat value nodes"
+             << format_number(r.flat_value_nodes) << "\n";
+
+   std::cout << "\n-- Leaf Versions --\n";
+   std::cout << "  " << std::setw(30) << std::left << "Leaf branches"
+             << format_number(r.leaf_branches) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Version table entries"
+             << format_number(r.leaf_version_table_entries) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Branch version refs"
+             << format_number(r.leaf_branch_versions) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Leaf subtrees"
+             << format_number(r.leaf_subtrees) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Leaf subtrees no ver"
+             << format_number(r.leaf_subtrees_without_ver) << "\n";
+
+   std::cout << "\n-- Value Versions --\n";
+   std::cout << "  " << std::setw(30) << std::left << "Value entries"
+             << format_number(r.value_entries) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Value nodes with history"
+             << format_number(r.value_nodes_with_history) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Value nodes with next"
+             << format_number(r.value_nodes_with_next) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Value next ptrs"
+             << format_number(r.value_next_ptrs) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Subtree value nodes"
+             << format_number(r.subtree_value_nodes) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Subtree value entries"
+             << format_number(r.subtree_value_entries) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Max entries/node"
+             << format_number(r.max_value_entries) << "\n";
+
+   std::cout << "\n-- Retention Debt --\n";
+   std::cout << "  " << std::setw(30) << std::left << "Distinct versions retained"
+             << format_number(r.retained_versions) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Value version refs"
+             << format_number(r.value_versions_seen) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Leaf version refs"
+             << format_number(r.leaf_versions_seen) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Prunable value entries"
+             << format_number(r.prunable_value_entries) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Nodes with prune work"
+             << format_number(r.prunable_value_nodes) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Floor rewrite entries"
+             << format_number(r.floor_rewrite_entries) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Unknown floor nodes"
+             << format_number(r.prune_floor_unknown_nodes) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Out-of-range floor nodes"
+             << format_number(r.prune_floor_out_of_range_nodes) << "\n";
+
+   if (r.dangling_pointers != 0)
+      return 1;
+   return 0;
+}
+
 int cmd_verify(database& db)
 {
    std::cout << "Verifying database integrity...\n\n";
@@ -354,18 +462,24 @@ int main(int argc, char** argv)
    std::string command;
    std::string recovery_str;
    int64_t     max_db_size_gb = -1;
+   uint64_t    prune_floor = 0;
+   uint64_t    progress_nodes = 10000000;
 
-   po::options_description desc("psitri-tool — database inspection & defrag utility");
+   po::options_description desc("psitricorder — database inspection & repair utility");
    auto                    opt = desc.add_options();
    opt("help,h", "show this help message");
    opt("db-dir,d", po::value<std::string>(&db_dir), "database directory");
    opt("command", po::value<std::string>(&command)->default_value("info"),
-       "command: info, verify, defrag, vas-info");
+       "command: info, verify, audit-versions, defrag, vas-info");
    opt("recovery,r", po::value<std::string>(&recovery_str)->default_value("none"),
        "recovery mode: none, deferred, app_crash, power_loss, full_verify");
    opt("max-db-size", po::value<int64_t>(&max_db_size_gb),
        "cap the virtual address reservation in GiB (e.g. 512 for 512 GiB); "
        "default is the compile-time max (32768 GiB = 32 TiB)");
+   opt("prune-floor", po::value<uint64_t>(&prune_floor)->default_value(0),
+       "audit-versions: oldest version that must remain readable; default is oldest root");
+   opt("progress-nodes", po::value<uint64_t>(&progress_nodes)->default_value(10000000),
+       "audit-versions: print progress every N visited nodes; 0 disables");
 
    po::positional_options_description pos;
    pos.add("command", 1);
@@ -392,10 +506,12 @@ int main(int argc, char** argv)
 
    if (vm.count("help") || db_dir.empty())
    {
-      std::cout << "Usage: psitri-tool [command] <db-dir> [options]\n\n"
+      std::cout << "Usage: psitricorder [command] <db-dir> [options]\n\n"
                 << "Commands:\n"
                 << "  info       Show database size summary (default)\n"
                 << "  verify     Full integrity verification (offline)\n"
+                << "  audit-versions\n"
+                << "             Report retained MVCC versions and value history prune debt\n"
                 << "  defrag     Compact and truncate to minimum size\n"
                 << "  vas-info   Query available virtual address space (no db-dir needed)\n"
                 << "\n"
@@ -422,6 +538,8 @@ int main(int argc, char** argv)
          cmd_info(*db, db_dir);
       else if (command == "verify")
          return cmd_verify(*db);
+      else if (command == "audit-versions")
+         return cmd_audit_versions(*db, prune_floor, progress_nodes);
       else if (command == "defrag")
          cmd_defrag(*db, db_dir);
       else if (command == "vas-info")
@@ -429,7 +547,7 @@ int main(int argc, char** argv)
       else
       {
          std::cerr << "Unknown command: " << command << "\n";
-         std::cerr << "Valid commands: info, verify, defrag, vas-info\n";
+         std::cerr << "Valid commands: info, verify, audit-versions, defrag, vas-info\n";
          return 1;
       }
    }

@@ -33,6 +33,9 @@ namespace psitri
    template <class LockPolicy>
    class basic_read_session;
 
+   struct version_audit_options;
+   struct version_audit_result;
+
    static constexpr uint32_t num_top_roots = 512;
 
    /// Controls how database::open() handles existing vs. new databases.
@@ -222,6 +225,8 @@ namespace psitri
       /// Non-template so it can live in a .cpp file and keep the tree-walk
       /// logic out of the header.
       sal::verify_result verify_all_roots(sal::allocator& alloc);
+      version_audit_result audit_all_roots(sal::allocator& alloc,
+                                           const version_audit_options& options);
    }  // namespace detail
 
    /**
@@ -301,6 +306,65 @@ namespace psitri
       {
          return os << s.to_string();
       }
+   };
+
+   struct version_audit_options
+   {
+      /// Explicit oldest version that must remain readable. When zero, the
+      /// audit uses the minimum valid version among populated top roots.
+      uint64_t prune_floor = 0;
+
+      /// Optional progress callback. The audit calls this after each
+      /// progress_interval_nodes newly visited nodes. A zero interval disables
+      /// progress reporting.
+      uint64_t progress_interval_nodes = 0;
+      void (*progress)(const version_audit_result&, void*) = nullptr;
+      void* progress_user = nullptr;
+   };
+
+   struct version_audit_result
+   {
+      uint64_t requested_prune_floor = 0;
+      uint64_t effective_prune_floor = 0;
+
+      uint32_t roots_checked          = 0;
+      uint32_t roots_with_version     = 0;
+      uint32_t roots_without_version  = 0;
+      uint64_t oldest_root_version    = 0;
+      uint64_t newest_root_version    = 0;
+
+      uint64_t nodes_visited          = 0;
+      uint64_t shared_nodes_skipped   = 0;
+      uint64_t dangling_pointers      = 0;
+      uint64_t inner_nodes            = 0;
+      uint64_t inner_prefix_nodes     = 0;
+      uint64_t leaf_nodes             = 0;
+      uint64_t value_nodes            = 0;
+      uint64_t flat_value_nodes       = 0;
+
+      uint64_t leaf_branches              = 0;
+      uint64_t leaf_version_table_entries = 0;
+      uint64_t leaf_branch_versions       = 0;
+      uint64_t leaf_subtrees              = 0;
+      uint64_t leaf_subtrees_without_ver  = 0;
+
+      uint64_t value_entries              = 0;
+      uint64_t value_nodes_with_history   = 0;
+      uint64_t value_nodes_with_next      = 0;
+      uint64_t value_next_ptrs            = 0;
+      uint64_t subtree_value_nodes        = 0;
+      uint64_t subtree_value_entries      = 0;
+      uint64_t max_value_entries          = 0;
+
+      uint64_t retained_versions          = 0;
+      uint64_t value_versions_seen        = 0;
+      uint64_t leaf_versions_seen         = 0;
+
+      uint64_t prunable_value_entries     = 0;
+      uint64_t prunable_value_nodes       = 0;
+      uint64_t floor_rewrite_entries      = 0;
+      uint64_t prune_floor_unknown_nodes  = 0;
+      uint64_t prune_floor_out_of_range_nodes = 0;
    };
 
    /**
@@ -483,6 +547,11 @@ namespace psitri
       void reclaim_leaked_memory();
 
       sal::verify_result verify() { return detail::verify_all_roots(_allocator); }
+
+      version_audit_result audit_versions(version_audit_options options = {})
+      {
+         return detail::audit_all_roots(_allocator, options);
+      }
 
       void recover() { _allocator.recover(); }
 

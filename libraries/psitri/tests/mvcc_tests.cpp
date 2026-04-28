@@ -1683,6 +1683,42 @@ TEST_CASE("version entries accumulate then clean up after snapshot release", "[m
    std::filesystem::remove_all(db_path);
 }
 
+TEST_CASE("audit_versions reports retained value history", "[mvcc_lifecycle][audit]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("audit_versions_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("hot", std::string(128, 'A'));
+      tx.commit();
+   }
+
+   auto v2 = ws->upsert(0, "hot", std::string(128, 'B'));
+   auto v3 = ws->upsert(0, "hot", std::string(128, 'C'));
+   REQUIRE(v3 > v2);
+
+   auto audit = db->audit_versions();
+   CHECK(audit.roots_checked == 1);
+   CHECK(audit.roots_with_version == 1);
+   CHECK(audit.effective_prune_floor == v3);
+   CHECK(audit.value_nodes >= 1);
+   CHECK(audit.value_entries >= 3);
+   CHECK(audit.value_nodes_with_history >= 1);
+   CHECK(audit.retained_versions >= 3);
+   CHECK(audit.prunable_value_nodes >= 1);
+   CHECK(audit.prunable_value_entries >= 2);
+   CHECK(audit.dangling_pointers == 0);
+
+   ws.reset();
+   db.reset();
+   std::filesystem::remove_all(db_path);
+}
+
 TEST_CASE("held snapshot prevents version cleanup", "[mvcc_lifecycle]")
 {
    sal::set_current_thread_name("main");
