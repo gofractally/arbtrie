@@ -1540,8 +1540,20 @@ namespace psitri
          {
             auto vn_ref = _session.get_ref<value_node>(old_value.value_address());
             auto new_view = _new_value.view();
+            // Skip the in-place coalesce / mvcc_realloc fast path when
+            // the value_node's ptr_address is shared (ref > 1). Both the
+            // coalesce_top_entry and mvcc_realloc paths preserve the
+            // ptr_address and mutate the data location it resolves to —
+            // which would also be observed by any other holder of the
+            // ptr_address (e.g. a sub-transaction frame snapshot, an
+            // open read cursor, or a sibling leaf created via
+            // retain_children during a recent COW). Falling through to
+            // the standard leaf-update path below allocates a fresh
+            // value_node ptr_address for the new value, leaving the
+            // shared ptr_address untouched and snapshots intact.
             if (!vn_ref->is_flat() &&
-                new_view.size() <= value_node::max_inline_entry_size)
+                new_view.size() <= value_node::max_inline_entry_size &&
+                vn_ref.ref() == 1)
             {
                // Phase D three-way dispatch — same shape as
                // try_mvcc_upsert above:

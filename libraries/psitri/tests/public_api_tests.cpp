@@ -275,6 +275,84 @@ TEST_CASE("transaction sub_transaction abort", "[public-api][transaction]")
    tx.commit();
 }
 
+// Minimal repro for value_node abort bug.
+// Pre-existing key with a large (value_node-resident) value is updated to
+// another large value inside a sub_transaction; the sub aborts. The pre-frame
+// bytes must remain after abort.
+TEST_CASE("transaction sub_transaction abort restores large value",
+          "[public-api][transaction][value_node]")
+{
+   test_db t;
+
+   const std::string original(1780, char(0xf4));
+   const std::string overwrite(1790, char(0xfe));
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("k"), to_value_view(original));
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      {
+         auto sub = tx.sub_transaction();
+         sub.upsert(to_key("k"), to_value_view(overwrite));
+         sub.abort();
+      }
+      auto post_abort = tx.get<std::string>(to_key("k"));
+      REQUIRE(post_abort.has_value());
+      REQUIRE(post_abort->size() == original.size());
+      REQUIRE(*post_abort == original);
+      tx.commit();
+   }
+
+   // Also visible from a fresh read cursor on the committed root
+   auto root = t.ses->get_root(0);
+   cursor c(root);
+   std::string buf;
+   REQUIRE(c.get(to_key("k"), &buf) >= 0);
+   REQUIRE(buf.size() == original.size());
+   REQUIRE(buf == original);
+}
+
+// Same shape as above but with multiple keys updated inside the sub —
+// matches the spring ram_tests pattern (10 keys updated then aborted).
+TEST_CASE("transaction sub_transaction abort restores many large values",
+          "[public-api][transaction][value_node]")
+{
+   test_db t;
+
+   const std::string original(1780, char(0xf4));
+   const std::string overwrite(1790, char(0xfe));
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int k = 0; k < 10; ++k)
+         tx.upsert(to_key_view("key_" + std::to_string(k)), to_value_view(original));
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      {
+         auto sub = tx.sub_transaction();
+         for (int k = 0; k < 10; ++k)
+            sub.upsert(to_key_view("key_" + std::to_string(k)), to_value_view(overwrite));
+         sub.abort();
+      }
+      for (int k = 0; k < 10; ++k)
+      {
+         auto v = tx.get<std::string>(to_key_view("key_" + std::to_string(k)));
+         INFO("key_" << k);
+         REQUIRE(v.has_value());
+         REQUIRE(v->size() == original.size());
+         REQUIRE(*v == original);
+      }
+      tx.commit();
+   }
+}
+
 TEST_CASE("transaction read_cursor snapshot", "[public-api][transaction]")
 {
    test_db t;
