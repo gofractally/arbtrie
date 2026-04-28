@@ -968,6 +968,40 @@ TEST_CASE("Phase D: smaller-size updates demote once they fit inline", "[per_txn
    CHECK(t.chain_length_of(0, to_kv("k")) == 0);
 }
 
+TEST_CASE("Phase D: shared leaf rewrite skips flat value_nodes", "[per_txn][phaseD][flat]")
+{
+   ptv_db t;
+
+   // Values larger than value_node::max_inline_entry_size use flat value_node
+   // storage: they have one implicit current value and no explicit version
+   // entries. Leaf rewrite pruning must not ask them for entry version 0.
+   std::string huge(value_node::max_inline_entry_size + 1, 'F');
+   {
+      tree_context ctx(t.root());
+      ctx.insert(to_kv("flat"), value_type(to_vv(huge)));
+      t.set_root(ctx.take_root());
+   }
+
+   {
+      tree_context ctx(t.root());
+      auto old_size =
+          ctx.upsert<upsert_mode::shared_insert>(to_kv("next"), value_type(to_vv("small")));
+      CHECK(old_size == -1);
+      t.set_root(ctx.take_root());
+   }
+
+   tree_context ctx(t.root());
+   cursor       c(ctx.get_root());
+   REQUIRE(c.seek(to_kv("flat")));
+   auto flat = c.value<std::string>();
+   REQUIRE(flat.has_value());
+   CHECK(flat->size() == huge.size());
+   REQUIRE(c.seek(to_kv("next")));
+   auto next = c.value<std::string>();
+   REQUIRE(next.has_value());
+   CHECK(*next == "small");
+}
+
 TEST_CASE("Phase A: cross-txn updates leave the latest value visible", "[per_txn][phaseA]")
 {
    // Across-txn chain semantics depend on the COW prune behavior in

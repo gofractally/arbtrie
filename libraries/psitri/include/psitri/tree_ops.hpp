@@ -610,11 +610,12 @@ namespace psitri
 
       uint64_t leaf_rewrite_prune_floor(const value_node& vref) const noexcept
       {
+         if (vref.is_flat() || vref.num_versions() == 0)
+            return 0;
+         if (_root_value_version != 0)
+            return _root_value_version;
          if (_dead_snap && _dead_snap->oldest_retained_floor() != 0)
             return _dead_snap->oldest_retained_floor();
-         // A transaction/root version does not prove that older committed roots
-         // no longer share this leaf. Only the retained floor can make release
-         // of replaced value_node refs safe here.
          return vref.get_entry_version(0);
       }
 
@@ -680,7 +681,8 @@ namespace psitri
             // This plan allocates a distinct replacement value_node, so copied
             // subtree refs would need matching retains. Keep reference-owning
             // histories on same-CB rewrite paths for now.
-            if (vref->is_subtree_container() || vref->num_next() != 0)
+            if (vref->is_subtree_container() || vref->is_flat() ||
+                vref->num_next() != 0 || vref->num_versions() == 0)
                continue;
 
             uint64_t floor = leaf_rewrite_prune_floor(*vref);
