@@ -724,6 +724,12 @@ namespace psitri
             _session.release(plan.entries[i].old_addr);
       }
 
+      void release_leaf_rewrite_replacements(const leaf_rewrite_plan& plan)
+      {
+         for (uint16_t i = 0; i < plan.count; ++i)
+            _session.release(plan.entries[i].replacement.value_address());
+      }
+
       static value_type rewrite_leaf_source_value(void*            raw,
                                                   const leaf_node& src,
                                                   branch_number    bn)
@@ -1428,32 +1434,43 @@ namespace psitri
                            retain_children(leaf_ref);
                            auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
                            auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
-                           (void)_session.realloc<leaf_node>(in, leaf_ref.obj(), &rewrite_policy);
-                           release_leaf_rewrite_sources(rewrite_plan);
+                           if (leaf_ref->rebuilt_size_fits(key_view(),
+                                                           branch_zero,
+                                                           branch_number(leaf_ref->num_branches()),
+                                                           &rewrite_policy))
+                           {
+                              (void)_session.realloc<leaf_node>(
+                                  in, leaf_ref.obj(), &rewrite_policy);
+                              release_leaf_rewrite_sources(rewrite_plan);
+                           }
+                           else
+                           {
+                              release_leaf_rewrite_replacements(rewrite_plan);
+                              (void)_session.realloc<leaf_node>(
+                                  in, leaf_ref.obj(), static_cast<const op::leaf_value_rewrite*>(nullptr));
+                           }
                            _session.release(child_addr);
                         }
                         else if constexpr (is_inner_prefix_node<InnerNodeType>)
                         {
-                           // Skip collapse if prepending prefix would overflow leaf capacity.
-                           // Account for per-branch overhead, cline slots for address-typed values,
-                           // and the extra prefix bytes prepended to each key.
-                           auto     pfx         = in->prefix();
-                           uint16_t nb          = leaf_ref->num_branches();
-                           uint32_t cline_space = leaf_ref->clines_capacity() * sizeof(ptr_address);
-                           uint32_t avail =
-                               leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * nb - cline_space;
-                           if (leaf_ref->alloc_pos() + (uint32_t)pfx.size() * nb <= avail)
+                           auto pfx = in->prefix();
+                           char prefix_buf[2048];
+                           memcpy(prefix_buf, pfx.data(), pfx.size());
+                           auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
+                           auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+                           op::leaf_prepend_prefix pp{
+                               *leaf_ref.obj(), key_view(prefix_buf, pfx.size()), &rewrite_policy};
+                           if (!leaf_ref->rebuilt_size_fits(pp))
+                           {
+                              release_leaf_rewrite_replacements(rewrite_plan);
+                              pp.rewrite = nullptr;
+                           }
+                           if (leaf_ref->rebuilt_size_fits(pp))
                            {
                               retain_children(leaf_ref);
-                              auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
-                              auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
-                              char prefix_buf[2048];
-                              memcpy(prefix_buf, pfx.data(), pfx.size());
-                              (void)_session.realloc<leaf_node>(
-                                  in, op::leaf_prepend_prefix{*leaf_ref.obj(),
-                                                              key_view(prefix_buf, pfx.size()),
-                                                              &rewrite_policy});
-                              release_leaf_rewrite_sources(rewrite_plan);
+                              (void)_session.realloc<leaf_node>(in, pp);
+                              if (pp.rewrite)
+                                 release_leaf_rewrite_sources(rewrite_plan);
                               _session.release(child_addr);
                            }
                            // else: skip collapse, inner_prefix_node stays with 1 branch
@@ -1610,21 +1627,23 @@ namespace psitri
                      {
                         case node_type::leaf:
                         {
-                           auto     leaf_ref    = child_ref.template as<leaf_node>();
-                           auto     pfx         = in->prefix();
-                           uint16_t nb          = leaf_ref->num_branches();
-                           uint32_t cline_space = leaf_ref->clines_capacity() * sizeof(ptr_address);
-                           uint32_t avail =
-                               leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * nb - cline_space;
-                           if (leaf_ref->alloc_pos() + (uint32_t)pfx.size() * nb <= avail)
+                           auto leaf_ref = child_ref.template as<leaf_node>();
+                           auto pfx      = in->prefix();
+                           auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
+                           auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+                           op::leaf_prepend_prefix pp{*leaf_ref.obj(), pfx, &rewrite_policy};
+                           if (!leaf_ref->rebuilt_size_fits(pp))
+                           {
+                              release_leaf_rewrite_replacements(rewrite_plan);
+                              pp.rewrite = nullptr;
+                           }
+                           if (leaf_ref->rebuilt_size_fits(pp))
                            {
                               retain_children(leaf_ref);
-                              auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
-                              auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
                               auto result = _session.alloc<leaf_node>(
-                                  parent_hint,
-                                  op::leaf_prepend_prefix{*leaf_ref.obj(), pfx, &rewrite_policy});
-                              release_leaf_rewrite_sources(rewrite_plan);
+                                  parent_hint, pp);
+                              if (pp.rewrite)
+                                 release_leaf_rewrite_sources(rewrite_plan);
                               _session.release(remaining_addr);
                               return result;
                            }
@@ -1850,14 +1869,20 @@ namespace psitri
                return leaf.address();
             case leaf_node::can_apply_mode::defrag:
             {
-               if (old_has_address)
-                  _session.release(leaf->get_value(br).address());
                auto plan = make_leaf_rewrite_plan_skipping(
                    *leaf.obj(), br, branch_number(uint32_t(*br) + 1));
                auto rewrite_policy = leaf_rewrite_policy(plan);
                update_op.rewrite   = &rewrite_policy;
+               if (!leaf->rebuilt_size_fits(update_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  update_op.rewrite = nullptr;
+               }
+               if (old_has_address)
+                  _session.release(leaf->get_value(br).address());
                auto result = _session.realloc<leaf_node>(leaf, update_op).address();
-               release_leaf_rewrite_sources(plan);
+               if (update_op.rewrite)
+                  release_leaf_rewrite_sources(plan);
                return result;
             }
             case leaf_node::can_apply_mode::none:
@@ -1881,8 +1906,14 @@ namespace psitri
                auto rewrite_policy = leaf_rewrite_policy(plan);
                op::leaf_remove rm_op{
                    .src = *leaf.obj(), .bn = br, .rewrite = &rewrite_policy};
+               if (!leaf->rebuilt_size_fits(rm_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  rm_op.rewrite = nullptr;
+               }
                auto            removed = _session.realloc<leaf_node>(leaf, rm_op);
-               release_leaf_rewrite_sources(plan);
+               if (rm_op.rewrite)
+                  release_leaf_rewrite_sources(plan);
                // Now insert the key with the new value into the (possibly smaller) leaf.
                // Must use unique_upsert (not mode=unique_update) because the key was
                // removed — split_insert calls upsert<mode>() which must INSERT, not UPDATE.
@@ -1911,8 +1942,14 @@ namespace psitri
                 *leaf.obj(), br, branch_number(uint32_t(*br) + 1));
             auto rewrite_policy = leaf_rewrite_policy(plan);
             update_op.rewrite   = &rewrite_policy;
+            if (!leaf->rebuilt_size_fits(update_op))
+            {
+               release_leaf_rewrite_replacements(plan);
+               update_op.rewrite = nullptr;
+            }
             auto new_leaf       = _session.alloc<leaf_node>(parent_hint, update_op);
-            release_leaf_rewrite_sources(plan);
+            if (update_op.rewrite)
+               release_leaf_rewrite_sources(plan);
             return new_leaf;
          }
 
@@ -1945,8 +1982,14 @@ namespace psitri
          auto rewrite_policy = leaf_rewrite_policy(plan);
          op::leaf_remove rm_op{
              .src = *leaf.obj(), .bn = br, .rewrite = &rewrite_policy};
+         if (!leaf->rebuilt_size_fits(rm_op))
+         {
+            release_leaf_rewrite_replacements(plan);
+            rm_op.rewrite = nullptr;
+         }
          auto            rm_addr = _session.alloc<leaf_node>(parent_hint, rm_op);
-         release_leaf_rewrite_sources(plan);
+         if (rm_op.rewrite)
+            release_leaf_rewrite_sources(plan);
          auto          removed = _session.get_ref<leaf_node>(rm_addr);
          branch_number new_lb  = removed->lower_bound(key);
          // Insert using unique mode since removed has ref=1.
@@ -2013,8 +2056,14 @@ namespace psitri
          auto            rewrite_policy = leaf_rewrite_policy(plan);
          op::leaf_remove remove_op{
              .src = *leaf.obj(), .bn = lb, .rewrite = &rewrite_policy};
+         if (!leaf->rebuilt_size_fits(remove_op))
+         {
+            release_leaf_rewrite_replacements(plan);
+            remove_op.rewrite = nullptr;
+         }
          auto            new_leaf = _session.alloc<leaf_node>(parent_hint, remove_op);
-         release_leaf_rewrite_sources(plan);
+         if (remove_op.rewrite)
+            release_leaf_rewrite_sources(plan);
 
          // if bn is an address, we need to release the address (value_node or subtree)
          if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
@@ -2083,6 +2132,11 @@ namespace psitri
                auto plan           = make_leaf_rewrite_plan(*leaf.obj());
                auto rewrite_policy = leaf_rewrite_policy(plan);
                insert_op.rewrite   = &rewrite_policy;
+               if (!leaf->rebuilt_size_fits(insert_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  return split_insert<mode>(parent_hint, leaf, key, lb);
+               }
                auto result =
                    _session.realloc<leaf_node>(leaf, leaf.obj(), insert_op).address();
                release_leaf_rewrite_sources(plan);
@@ -2106,6 +2160,11 @@ namespace psitri
                auto plan           = make_leaf_rewrite_plan(*leaf.obj());
                auto rewrite_policy = leaf_rewrite_policy(plan);
                insert_op.rewrite   = &rewrite_policy;
+               if (!leaf->rebuilt_size_fits(insert_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  return split_insert<mode>(parent_hint, leaf, key, lb);
+               }
                auto result = _session.alloc<leaf_node>(parent_hint, leaf.obj(), insert_op);
                release_leaf_rewrite_sources(plan);
                return result;
@@ -2204,6 +2263,7 @@ namespace psitri
       branch_set result;
       auto       rewrite_plan   = make_leaf_rewrite_plan(*leaf.obj());
       auto       rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+      const op::leaf_value_rewrite* split_rewrite = &rewrite_policy;
 
       // Special case: leaf has only 1 entry and can't fit a second key.
       // get_split_pos() requires nb > 1, so we manually build the split:
@@ -2226,9 +2286,15 @@ namespace psitri
          uint8_t new_byte      = (cplen < key.size()) ? key[cplen] : 0;
 
          // Alloc both leaves (don't realloc leaf — we need it for remake_inner_prefix)
+         if (!leaf->rebuilt_size_fits(cprefix, branch_zero, branch_number(1), split_rewrite))
+         {
+            release_leaf_rewrite_replacements(rewrite_plan);
+            split_rewrite = nullptr;
+         }
          ptr_address existing_leaf = _session.alloc<leaf_node>(
-             {}, leaf.obj(), cprefix, branch_zero, branch_number(1), &rewrite_policy);
-         release_leaf_rewrite_sources(rewrite_plan);
+             {}, leaf.obj(), cprefix, branch_zero, branch_number(1), split_rewrite);
+         if (split_rewrite)
+            release_leaf_rewrite_sources(rewrite_plan);
 
          key_view    new_key_suffix = key.substr(cplen);
          ptr_address new_leaf       = _session.alloc<leaf_node>(
@@ -2267,14 +2333,21 @@ namespace psitri
       leaf_node::split_pos spos      = leaf->get_split_pos();
       branch_number        left_size = branch_number(spos.less_than_count);
       branch_number        right_end = branch_number(leaf->num_branches());
+      if (!leaf->rebuilt_size_fits(spos.cprefix, branch_zero, left_size, split_rewrite) ||
+          !leaf->rebuilt_size_fits(spos.cprefix, left_size, right_end, split_rewrite))
+      {
+         release_leaf_rewrite_replacements(rewrite_plan);
+         split_rewrite = nullptr;
+      }
 
       if (spos.cprefix.size() > 0)
       {
          ptr_address left = _session.alloc<leaf_node>(
-             {}, leaf.obj(), spos.cprefix, branch_zero, left_size, &rewrite_policy);
+             {}, leaf.obj(), spos.cprefix, branch_zero, left_size, split_rewrite);
          ptr_address right = _session.alloc<leaf_node>(
-             {&left, 1}, leaf.obj(), spos.cprefix, left_size, right_end, &rewrite_policy);
-         release_leaf_rewrite_sources(rewrite_plan);
+             {&left, 1}, leaf.obj(), spos.cprefix, left_size, right_end, split_rewrite);
+         if (split_rewrite)
+            release_leaf_rewrite_sources(rewrite_plan);
 
          if constexpr (mode.is_unique())
          {
@@ -2298,16 +2371,17 @@ namespace psitri
       if constexpr (mode.is_unique())
          left = _session
                     .realloc<leaf_node>(leaf, leaf.obj(), key_view(), branch_zero, left_size,
-                                        &rewrite_policy)
+                                        split_rewrite)
                     .address();
       else
       {
          left = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), branch_zero,
-                                          left_size, &rewrite_policy);
+                                          left_size, split_rewrite);
       }
       ptr_address right = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), left_size,
-                                                    right_end, &rewrite_policy);
-      release_leaf_rewrite_sources(rewrite_plan);
+                                                    right_end, split_rewrite);
+      if (split_rewrite)
+         release_leaf_rewrite_sources(rewrite_plan);
       //     SAL_WARN("left: {} right: {} delta: {}", left, right, right - left);
 
       if (key < spos.divider_key())

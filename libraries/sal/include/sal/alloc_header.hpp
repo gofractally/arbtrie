@@ -271,6 +271,8 @@ namespace sal
     * at each commit boundary. Enables root reconstruction from segments
     * during power-loss recovery.
     */
+   inline constexpr uint8_t sync_header_user_data_capacity = 27;
+
    struct sync_root_info
    {
       uint32_t root_index;       ///< which root was updated
@@ -278,7 +280,8 @@ namespace sal
       uint32_t version_address;  ///< custom CB ptr_address for the root version
       uint64_t root_version;     ///< MVCC version stored in version_address
    };
-   static_assert(sizeof(sync_root_info) <= 27, "must fit in sync_header user_data");
+   static_assert(sizeof(sync_root_info) <= sync_header_user_data_capacity,
+                 "must fit in sync_header user_data");
 
    struct sync_root_info_v1
    {
@@ -377,7 +380,7 @@ namespace sal
       usec_timestamp _time_stamp_usec;
       uint32_t       _prev_aheader_pos;
       uint32_t       _start_checksum_pos;
-      char           _user_data[27];
+      char           _user_data[sync_header_user_data_capacity];
       uint8_t        _user_data_size;
       /// covers entire range from last sync to _sync_checksum
       /// disticnt from alloc_header::_checksum which only covers this object.

@@ -142,8 +142,14 @@ namespace psitri
          auto                  rewrite_policy = leaf_rewrite_policy(rewrite_plan);
          op::leaf_remove_range rm{
              .src = *leaf.obj(), .lo = lo, .hi = hi, .rewrite = &rewrite_policy};
+         if (!leaf->rebuilt_size_fits(rm))
+         {
+            release_leaf_rewrite_replacements(rewrite_plan);
+            rm.rewrite = nullptr;
+         }
          auto result = _session.alloc<leaf_node>(parent_hint, rm);
-         release_leaf_rewrite_sources(rewrite_plan);
+         if (rm.rewrite)
+            release_leaf_rewrite_sources(rewrite_plan);
          return result;
       }
    }

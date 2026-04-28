@@ -130,10 +130,14 @@ namespace psitri
       inline static uint32_t alloc_size(const op::leaf_update& upd) { return max_leaf_size; }
       inline static uint32_t alloc_size(const op::leaf_remove& rm)
       {
-         // no point in growing the node when we are removing a value
-         return rm.src.size();
+         // Maintenance rewrites can move external values to new clines while
+         // removing a branch, so give the rebuild the normal edit workspace.
+         return rm.rewrite ? max_leaf_size : rm.src.size();
       }
-      inline static uint32_t alloc_size(const op::leaf_remove_range& rm) { return rm.src.size(); }
+      inline static uint32_t alloc_size(const op::leaf_remove_range& rm)
+      {
+         return rm.rewrite ? max_leaf_size : rm.src.size();
+      }
       inline static uint32_t alloc_size(const op::leaf_prepend_prefix&) { return max_leaf_size; }
       inline static uint32_t alloc_size(const struct op::leaf_from_visitor&)
       {
@@ -272,6 +276,21 @@ namespace psitri
       };
       can_apply_mode can_apply(const op::leaf_insert& ins) const noexcept;
       can_apply_mode can_apply(const op::leaf_update& ins) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_insert& ins,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_update& upd,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_remove& rm,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_remove_range& rm,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_prepend_prefix& pp,
+                             uint32_t max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(key_view                     common_prefix,
+                             branch_number                start,
+                             branch_number                end,
+                             const op::leaf_value_rewrite* rewrite,
+                             uint32_t max_size = max_leaf_size) const noexcept;
       //      can_apply_mode can_apply(const op::leaf_remove& ins) const noexcept;
 
       /// determines whether there is enough space to insert the key

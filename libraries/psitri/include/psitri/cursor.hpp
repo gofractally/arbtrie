@@ -8,6 +8,7 @@
 #include <psitri/value_pin.hpp>
 #include <psitri/value_type.hpp>
 #include <sal/smart_ptr.hpp>
+#include <stdexcept>
 #include <utility>
 
 namespace psitri
@@ -290,6 +291,20 @@ namespace psitri
       void push_end(ptr_address adr) noexcept;
       void next_branch(key_view key) noexcept;
    };
+   inline bool is_cursor_root_type(sal::header_type type) noexcept
+   {
+      switch (node_type(type))
+      {
+         case node_type::leaf:
+         case node_type::inner:
+         case node_type::inner_prefix:
+         case node_type::value:
+            return true;
+         default:
+            return false;
+      }
+   }
+
    inline auto cursor::visit(ptr_address adr, auto&& lambda)
    {
       auto ref = _node.session()->get_ref(adr);
@@ -304,7 +319,7 @@ namespace psitri
          case node_type::value:
             return lambda(*ref.as<value_node>());
          default:
-            std::unreachable();
+            throw std::runtime_error("psitri cursor root is not a tree node");
       }
    }
    inline cursor::cursor(sal::smart_ptr<sal::alloc_header> n, uint64_t version)
@@ -321,6 +336,8 @@ namespace psitri
          return;
       }
       auto read_lock = _node.session()->lock();
+      if (!is_cursor_root_type(_node.session()->get_ref(_node.address())->type()))
+         throw std::runtime_error("psitri cursor root is not a tree node");
       _root_end_branch =
           visit(_node.address(), [](auto&& node) { return branch_number(node.num_branches()); });
    }
@@ -346,6 +363,8 @@ namespace psitri
          return;
       }
       auto read_lock = _node.session()->lock();
+      if (!is_cursor_root_type(_node.session()->get_ref(_node.address())->type()))
+         throw std::runtime_error("psitri cursor root is not a tree node");
       _root_end_branch =
           visit(_node.address(), [](auto&& node) { return branch_number(node.num_branches()); });
    }

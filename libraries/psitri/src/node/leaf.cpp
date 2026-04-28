@@ -23,6 +23,92 @@ namespace psitri
             return rewrite->value(rewrite->ctx, src, bn);
          return src.get_value(bn);
       }
+
+      struct leaf_rebuild_meter
+      {
+         uint16_t    branches;
+         uint32_t    max_size;
+         uint32_t    branch_meta_size;
+         uint32_t    key_header_size;
+         uint32_t    value_header_size;
+         uint32_t    alloc_pos     = 0;
+         uint8_t     cline_count   = 0;
+         uint8_t     version_count = 0;
+         ptr_address clines[16];
+         uint64_t    versions[31];
+
+         leaf_rebuild_meter(uint16_t dst_branches,
+                            uint32_t dst_max_size,
+                            uint32_t dst_branch_meta_size,
+                            uint32_t dst_key_header_size,
+                            uint32_t dst_value_header_size)
+             : branches(dst_branches),
+               max_size(dst_max_size),
+               branch_meta_size(dst_branch_meta_size),
+               key_header_size(dst_key_header_size),
+               value_header_size(dst_value_header_size)
+         {
+            for (auto& cline : clines)
+               cline = sal::null_ptr_address;
+         }
+
+         uint32_t meta_size() const noexcept
+         {
+            uint32_t result =
+                sizeof(leaf_node) + uint32_t(branches) * branch_meta_size +
+                uint32_t(cline_count) * sizeof(ptr_address);
+            if (version_count != 0)
+               result += uint32_t(branches) + uint32_t(version_count) * sizeof(version48);
+            return result;
+         }
+
+         bool fits() const noexcept { return meta_size() + alloc_pos <= max_size; }
+
+         bool add_key(key_view key) noexcept
+         {
+            alloc_pos += uint32_t(key.size()) + key_header_size;
+            return fits();
+         }
+
+         bool add_value(value_type val) noexcept
+         {
+            if (val.is_view())
+            {
+               if (!val.view().empty())
+                  alloc_pos += uint32_t(val.view().size()) + value_header_size;
+               return fits();
+            }
+
+            if (!val.is_address())
+               return fits();
+
+            ptr_address base_cline(*val.address() & ~0x0ful);
+            for (uint8_t i = 0; i < cline_count; ++i)
+               if (clines[i] == base_cline)
+                  return fits();
+
+            if (cline_count >= 16)
+               return false;
+            clines[cline_count++] = base_cline;
+            return fits();
+         }
+
+         bool add_version(uint64_t version) noexcept
+         {
+            if (version == 0)
+               return fits();
+
+            version = version_token(version, value_version_bits);
+            for (uint8_t i = 0; i < version_count; ++i)
+               if (versions[i] == version)
+                  return fits();
+
+            if (version_count >= 31)
+               return false;
+            versions[version_count++] = version;
+            return fits();
+         }
+      };
    }  // namespace
 
    /**
@@ -786,6 +872,227 @@ namespace psitri
       if (leftover + int(dead_space()) + (int(leaf_node::cow_size()) - int(size())) >= 0)
          return can_apply_mode::defrag;
       return can_apply_mode::none;
+   }
+
+   bool leaf_node::rebuilt_size_fits(const op::leaf_insert& ins, uint32_t max_size) const noexcept
+   {
+      const leaf_node& src    = ins.src;
+      const uint16_t   src_nb = src.num_branches();
+      const uint16_t   dst_nb = src_nb + 1;
+      const uint16_t   ins_bn = *ins.lb;
+      assert(ins_bn <= src_nb);
+
+      leaf_rebuild_meter meter(dst_nb,
+                               max_size,
+                               sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch),
+                               sizeof(leaf_node::key),
+                               sizeof(value_data));
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+      {
+         key_view dst_key =
+             (dst_idx == ins_bn)
+                 ? ins.key
+                 : src.get_key(branch_number(dst_idx - (dst_idx > ins_bn)));
+         if (!meter.add_key(dst_key))
+            return false;
+      }
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+      {
+         value_type val =
+             (dst_idx == ins_bn)
+                 ? ins.value
+                 : source_value_for_leaf_copy(src,
+                                              branch_number(dst_idx - (dst_idx > ins_bn)),
+                                              ins.rewrite);
+         if (!meter.add_value(val))
+            return false;
+      }
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+      {
+         uint64_t version =
+             (dst_idx == ins_bn)
+                 ? ins.created_at
+                 : src.get_version(branch_number(dst_idx - (dst_idx > ins_bn)));
+         if (!meter.add_version(version))
+            return false;
+      }
+      return meter.fits();
+   }
+
+   bool leaf_node::rebuilt_size_fits(const op::leaf_update& upd, uint32_t max_size) const noexcept
+   {
+      const leaf_node& src = upd.src;
+      const uint16_t   nb  = src.num_branches();
+      assert(upd.lb < nb);
+
+      leaf_rebuild_meter meter(nb,
+                               max_size,
+                               sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch),
+                               sizeof(leaf_node::key),
+                               sizeof(value_data));
+
+      for (uint16_t i = 0; i < nb; ++i)
+         if (!meter.add_key(src.get_key(branch_number(i))))
+            return false;
+
+      for (uint16_t i = 0; i < nb; ++i)
+      {
+         value_type val = (i == *upd.lb)
+                              ? upd.value
+                              : source_value_for_leaf_copy(src, branch_number(i), upd.rewrite);
+         if (!meter.add_value(val))
+            return false;
+      }
+
+      for (uint16_t i = 0; i < nb; ++i)
+         if (!meter.add_version(src.get_version(branch_number(i))))
+            return false;
+      return meter.fits();
+   }
+
+   bool leaf_node::rebuilt_size_fits(const op::leaf_remove& rm, uint32_t max_size) const noexcept
+   {
+      const leaf_node& src    = rm.src;
+      const uint16_t   src_nb = src.num_branches();
+      assert(rm.bn < src_nb);
+      if (src_nb == 0)
+         return false;
+
+      const uint16_t dst_nb = src_nb - 1;
+      leaf_rebuild_meter meter(dst_nb,
+                               max_size,
+                               sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch),
+                               sizeof(leaf_node::key),
+                               sizeof(value_data));
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+      {
+         uint16_t src_idx = dst_idx + (dst_idx >= *rm.bn);
+         if (!meter.add_key(src.get_key(branch_number(src_idx))))
+            return false;
+      }
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+      {
+         uint16_t src_idx = dst_idx + (dst_idx >= *rm.bn);
+         if (!meter.add_value(
+                 source_value_for_leaf_copy(src, branch_number(src_idx), rm.rewrite)))
+            return false;
+      }
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+      {
+         uint16_t src_idx = dst_idx + (dst_idx >= *rm.bn);
+         if (!meter.add_version(src.get_version(branch_number(src_idx))))
+            return false;
+      }
+      return meter.fits();
+   }
+
+   bool leaf_node::rebuilt_size_fits(const op::leaf_remove_range& rm,
+                                     uint32_t                    max_size) const noexcept
+   {
+      const leaf_node& src = rm.src;
+      assert(rm.lo <= rm.hi);
+      assert(rm.hi <= src.num_branches());
+      const uint16_t remove_count = *rm.hi - *rm.lo;
+      const uint16_t dst_nb       = src.num_branches() - remove_count;
+
+      leaf_rebuild_meter meter(dst_nb,
+                               max_size,
+                               sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch),
+                               sizeof(leaf_node::key),
+                               sizeof(value_data));
+
+      auto src_index_for = [&](uint16_t dst_idx)
+      { return uint16_t(dst_idx + (dst_idx >= *rm.lo) * remove_count); };
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+         if (!meter.add_key(src.get_key(branch_number(src_index_for(dst_idx)))))
+            return false;
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+         if (!meter.add_value(source_value_for_leaf_copy(
+                 src, branch_number(src_index_for(dst_idx)), rm.rewrite)))
+            return false;
+
+      for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+         if (!meter.add_version(src.get_version(branch_number(src_index_for(dst_idx)))))
+            return false;
+      return meter.fits();
+   }
+
+   bool leaf_node::rebuilt_size_fits(const op::leaf_prepend_prefix& pp,
+                                     uint32_t                      max_size) const noexcept
+   {
+      const leaf_node& src = pp.src;
+      const uint16_t   nb  = src.num_branches();
+      leaf_rebuild_meter meter(nb,
+                               max_size,
+                               sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch),
+                               sizeof(leaf_node::key),
+                               sizeof(value_data));
+
+      for (uint16_t i = 0; i < nb; ++i)
+      {
+         auto key = src.get_key(branch_number(i));
+         if (pp.prefix.size() + key.size() > 1024)
+            return false;
+         meter.alloc_pos += uint32_t(pp.prefix.size()) + uint32_t(key.size()) +
+                            meter.key_header_size;
+         if (!meter.fits())
+            return false;
+      }
+
+      for (uint16_t i = 0; i < nb; ++i)
+         if (!meter.add_value(source_value_for_leaf_copy(src, branch_number(i), pp.rewrite)))
+            return false;
+
+      for (uint16_t i = 0; i < nb; ++i)
+         if (!meter.add_version(src.get_version(branch_number(i))))
+            return false;
+      return meter.fits();
+   }
+
+   bool leaf_node::rebuilt_size_fits(key_view                     common_prefix,
+                                     branch_number                start,
+                                     branch_number                end,
+                                     const op::leaf_value_rewrite* rewrite,
+                                     uint32_t max_size) const noexcept
+   {
+      assert(start <= end);
+      assert(end <= num_branches());
+      const uint16_t dst_nb = *end - *start;
+      leaf_rebuild_meter meter(dst_nb,
+                               max_size,
+                               sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch),
+                               sizeof(leaf_node::key),
+                               sizeof(value_data));
+
+      for (uint16_t x = *start; x < *end; ++x)
+      {
+         key_view key = get_key(branch_number(x));
+         if (common_prefix.size() > key.size())
+            return false;
+         if (!meter.add_key(key.substr(common_prefix.size())))
+            return false;
+      }
+
+      for (uint16_t x = *start; x < *end; ++x)
+      {
+         if (!meter.add_value(source_value_for_leaf_copy(*this, branch_number(x), rewrite)))
+            return false;
+      }
+
+      for (uint16_t x = *start; x < *end; ++x)
+      {
+         if (!meter.add_version(get_version(branch_number(x))))
+            return false;
+      }
+      return meter.fits();
    }
 
    void leaf_node::apply(const op::leaf_remove& rm) noexcept

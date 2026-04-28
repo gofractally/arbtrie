@@ -100,7 +100,8 @@ namespace sal
       // committed data. Without this, is_read_only() returns false for
       // objects in the current segment even after transaction commit.
       if (_alloc_seg_ptr and not _alloc_seg_ptr->is_finalized() and
-          _alloc_seg_ptr->get_alloc_pos() > _alloc_seg_ptr->get_first_write_pos())
+          (_alloc_seg_ptr->get_alloc_pos() > _alloc_seg_ptr->get_first_write_pos() ||
+           !user_data.empty()))
       {
          auto pos_before = _alloc_seg_ptr->get_alloc_pos();
          _sega.record_session_write(_session_num,

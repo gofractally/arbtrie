@@ -2565,9 +2565,10 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
    if (meta.root_index == UINT32_MAX)
       return MDBX_BAD_DBI;
 
+   MDBX_cursor* c = nullptr;
    try
    {
-      auto* c = acquire_cursor(txn);
+      c = acquire_cursor(txn);
       c->txn  = txn;
       c->dbi  = dbi;
       c->root_idx = meta.root_index;
@@ -2593,8 +2594,14 @@ int mdbx_cursor_open(MDBX_txn* txn, MDBX_dbi dbi, MDBX_cursor** cursor)
       *cursor = c;
       return MDBX_SUCCESS;
    }
+   catch (const std::runtime_error&)
+   {
+      release_cursor(c);
+      return MDBX_CORRUPTED;
+   }
    catch (...)
    {
+      release_cursor(c);
       return MDBX_PANIC;
    }
 }

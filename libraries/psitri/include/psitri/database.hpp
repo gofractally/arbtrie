@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <hash/xxhash.h>
@@ -11,6 +12,7 @@
 #include <psitri/node/inner.hpp>
 #include <psitri/node/leaf.hpp>
 #include <psitri/node/value_node.hpp>
+#include <psitri/version_compare.hpp>
 #include <psitri/write_session.hpp>
 #include <sal/allocator.hpp>
 #include <sal/config.hpp>
@@ -553,10 +555,28 @@ namespace psitri
 
       mutex_type& stripe_mutex(sal::ptr_address adr) { return _stripes[stripe_index(adr)].m; }
 
+      void maybe_publish_dead_versions_for_epoch(uint64_t epoch_base)
+      {
+         const uint64_t epoch_token = version_token(epoch_base, last_unique_version_bits);
+         if (epoch_token == 0)
+            return;
+
+         std::lock_guard<mutex_type> lock(_dead_publish_mutex);
+         if (!version_newer_than(epoch_token, _last_dead_publish_epoch,
+                                 last_unique_version_bits))
+            return;
+
+         _dead_versions.flush_pending();
+         _dead_versions.publish_snapshot();
+         _last_dead_publish_epoch = epoch_token;
+      }
+
       void           init_allocator_shared_ownership();
       void           recover_global_version_from_roots();
       std::once_flag _alloc_shared_init;
       live_range_map _dead_versions;
+      mutable mutex_type _dead_publish_mutex;
+      uint64_t           _last_dead_publish_epoch = 0;
       detail::psitri_object_registry _object_registry;
       sal::allocator _allocator;
       sal::mapping            _dbfile;

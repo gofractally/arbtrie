@@ -28,6 +28,7 @@ namespace psitri
    {
       std::optional<write_cursor>         cursor;
       std::optional<detail::write_buffer> buffer;
+      bool                                dirty = false;
 
       /// If this tree was obtained from a parent tree, records how to write
       /// the subtree root back into the parent on commit.
@@ -240,6 +241,7 @@ namespace psitri
          auto& cs = cs_at(_primary_index);
          assert(_mode == tx_mode::expect_success && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert(key, std::move(subtree_root));
+         cs.dirty = true;
       }
 
       void upsert_subtree(key_view key, tree subtree)
@@ -252,6 +254,7 @@ namespace psitri
          auto& cs = cs_at(_primary_index);
          assert(_mode == tx_mode::expect_success && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert_sorted(key, std::move(subtree_root));
+         cs.dirty = true;
       }
 
       void upsert_subtree_sorted(key_view key, tree subtree)
@@ -325,7 +328,11 @@ namespace psitri
             if (pcs.buffer && !pcs.buffer->empty())
                merge_buffer_to_persistent(pcs);
 
-            _commit_func(pcs.cursor->take_root());
+            if (pcs.dirty)
+               _commit_func(pcs.cursor->take_root());
+            else if (_rollback_func)
+               _rollback_func();
+
             _commit_func   = nullptr;
             _rollback_func = nullptr;
 
@@ -494,17 +501,21 @@ namespace psitri
                if (!children_done)
                   continue;
 
-               // Commit this subtree: merge buffer, get new root
-               if (cs.buffer && !cs.buffer->empty())
-                  merge_buffer_to_persistent(cs);
-
-               auto new_root = cs.cursor->root();
-
-               // Write the new subtree root back into the parent's tree
-               if (cs.parent)
+               if (cs.dirty)
                {
-                  auto& parent_cs = cs_at(cs.parent->parent_cs_index);
-                  parent_cs.cursor->upsert(cs.parent->key, std::move(new_root));
+                  // Commit this subtree: merge buffer, get new root
+                  if (cs.buffer && !cs.buffer->empty())
+                     merge_buffer_to_persistent(cs);
+
+                  auto new_root = cs.cursor->root();
+
+                  // Write the new subtree root back into the parent's tree
+                  if (cs.parent)
+                  {
+                     auto& parent_cs = cs_at(cs.parent->parent_cs_index);
+                     parent_cs.cursor->upsert(cs.parent->key, std::move(new_root));
+                     parent_cs.dirty = true;
+                  }
                }
 
                committed[i] = true;
@@ -524,22 +535,39 @@ namespace psitri
             micro_put(cs, key, value);
          else
             ((*cs.cursor).*op)(key, value);
+         cs.dirty = true;
       }
 
       int do_remove(uint32_t idx, key_view key)
       {
          auto& cs = cs_at(idx);
          if (cs.buffer)
-            return micro_remove(cs, key);
-         return cs.cursor->remove(key);
+         {
+            auto result = micro_remove(cs, key);
+            if (result >= 0)
+               cs.dirty = true;
+            return result;
+         }
+         auto result = cs.cursor->remove(key);
+         if (result >= 0)
+            cs.dirty = true;
+         return result;
       }
 
       uint64_t do_remove_range(uint32_t idx, key_view lower, key_view upper)
       {
          auto& cs = cs_at(idx);
          if (cs.buffer)
-            return micro_remove_range(cs, lower, upper);
-         return cs.cursor->remove_range(lower, upper);
+         {
+            auto removed = micro_remove_range(cs, lower, upper);
+            if (removed)
+               cs.dirty = true;
+            return removed;
+         }
+         auto removed = cs.cursor->remove_range(lower, upper);
+         if (removed)
+            cs.dirty = true;
+         return removed;
       }
 
       // ── Internal read methods ─────────────────────────────────────────
@@ -636,6 +664,7 @@ namespace psitri
          uint32_t                                       change_sets_size = 0;
          // Cursor roots of all change_sets at push time, indexed in parallel.
          std::vector<sal::smart_ptr<sal::alloc_header>> cs_roots;
+         std::vector<bool>                              cs_dirty;
       };
 
       bool uses_buffer() const noexcept { return _mode != tx_mode::expect_success; }
@@ -651,8 +680,12 @@ namespace psitri
          }
          f.change_sets_size = static_cast<uint32_t>(_change_sets.size());
          f.cs_roots.reserve(_change_sets.size());
+         f.cs_dirty.reserve(_change_sets.size());
          for (auto& cs : _change_sets)
+         {
             f.cs_roots.push_back(cs.cursor->root());
+            f.cs_dirty.push_back(cs.dirty);
+         }
          _frames.push_back(std::move(f));
       }
 
@@ -673,7 +706,10 @@ namespace psitri
 
          // Restore every cursor root to its pre-frame snapshot.
          for (uint32_t i = 0; i < f.change_sets_size; ++i)
+         {
             _change_sets[i].cursor.emplace(std::move(f.cs_roots[i]));
+            _change_sets[i].dirty = f.cs_dirty[i];
+         }
 
          // Restore primary write buffer in buffered mode.
          if (uses_buffer())
@@ -897,12 +933,16 @@ namespace psitri
 
    inline void tree_handle::upsert_subtree(key_view key, tree subtree)
    {
-      _tx->cs_at(_cs_index).cursor->upsert(key, std::move(subtree).take_root());
+      auto& cs = _tx->cs_at(_cs_index);
+      cs.cursor->upsert(key, std::move(subtree).take_root());
+      cs.dirty = true;
    }
 
    inline void tree_handle::upsert_subtree_sorted(key_view key, tree subtree)
    {
-      _tx->cs_at(_cs_index).cursor->upsert_sorted(key, std::move(subtree).take_root());
+      auto& cs = _tx->cs_at(_cs_index);
+      cs.cursor->upsert_sorted(key, std::move(subtree).take_root());
+      cs.dirty = true;
    }
 
    inline int tree_handle::remove(key_view key)

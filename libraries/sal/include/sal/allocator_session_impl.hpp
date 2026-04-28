@@ -340,6 +340,13 @@ namespace sal
       assert(check_thread_ownership());
       auto& cb      = get(adr);
       auto  cur_ref = cb.ref();
+      auto  pre     = cb.load(std::memory_order_relaxed);
+      // Custom CBs carry immediate metadata notifications and have no object destructor.
+      if (cur_ref == 1 and is_custom_cb(pre))
+      {
+         final_release(adr);
+         return;
+      }
       if (cur_ref == 1 and _release_queue.try_push(adr))
          return;
 

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <concepts>
+#include <fstream>
 #include <numeric>
 #include <random>
 #include <thread>
@@ -142,6 +143,47 @@ TEST_CASE("multi-root transaction publishes additional roots with their write ve
 
    t.validate_unique_refs(13);
    t.validate_unique_refs(14);
+}
+
+TEST_CASE("multi-root transaction records recovery metadata for each dirty root",
+          "[public-api][multi-root][recovery]")
+{
+   const std::filesystem::path dir = "multi_root_recovery_marker_testdb";
+   std::filesystem::remove_all(dir);
+   std::filesystem::create_directories(dir / "data");
+
+   {
+      auto db  = database::open(dir);
+      auto ses = db->start_write_session();
+
+      auto tx  = ses->start_transaction(0);
+      auto r13 = tx.open_root(13);
+      auto r14 = tx.open_root(14);
+      r13.upsert(to_key("left"), to_value("root-13"));
+      r14.upsert(to_key("right"), to_value("root-14"));
+      tx.commit();
+   }
+
+   const auto roots_path = dir / "roots";
+   const auto roots_size = std::filesystem::file_size(roots_path);
+   {
+      std::fstream roots(roots_path, std::ios::binary | std::ios::in | std::ios::out);
+      REQUIRE(roots.good());
+      std::vector<char> zeros(roots_size, 0);
+      roots.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+      REQUIRE(roots.good());
+   }
+
+   {
+      auto db  = database::open(dir, open_mode::open_existing, {}, recovery_mode::power_loss);
+      auto rs  = db->start_read_session();
+      auto r13 = rs->get_root(13);
+      auto r14 = rs->get_root(14);
+      REQUIRE(r13.get<std::string>(to_key("left")) == "root-13");
+      REQUIRE(r14.get<std::string>(to_key("right")) == "root-14");
+   }
+
+   std::filesystem::remove_all(dir);
 }
 
 // ============================================================

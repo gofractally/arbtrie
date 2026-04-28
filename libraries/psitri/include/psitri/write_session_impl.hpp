@@ -195,6 +195,7 @@ namespace psitri
                                                            value_view value)
    {
       auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
+      this->_db->maybe_publish_dead_versions_for_epoch(this->_db->_dbm->current_epoch_base());
 
       // Fast path: stripe lock on target node (value_node or leaf).
       // Handles existing-key cases (inline promotion and value_node append)
@@ -248,6 +249,7 @@ namespace psitri
    inline uint64_t basic_write_session<LockPolicy>::remove(uint32_t root_index, key_view key)
    {
       auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
+      this->_db->maybe_publish_dead_versions_for_epoch(this->_db->_dbm->current_epoch_base());
 
       // Fast path: stripe lock on target node (value_node or leaf).
       {
@@ -389,7 +391,8 @@ namespace psitri
          auto& cs = cs_at(hl.cs_index);
          if (cs.buffer && !cs.buffer->empty())
             merge_buffer_to_persistent(cs);
-         _ws->publish_root(hl.root_index, cs.cursor->take_root());
+         if (cs.dirty)
+            _ws->publish_root(hl.root_index, cs.cursor->take_root());
          hl.unlock_fn(hl.lock);
       }
       _held_locks.clear();

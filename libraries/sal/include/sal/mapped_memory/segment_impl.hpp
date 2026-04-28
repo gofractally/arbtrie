@@ -40,6 +40,46 @@ namespace sal
          // unused-tail bytes in freed_space exactly once.
          if (alloc_pos <= cur_first_writable_page_pos)
          {
+            if (!user_data.empty() && not is_finalized() && not is_read_only())
+            {
+               constexpr uint32_t marker_size = 64;
+               assert(alloc_pos + marker_size <= segment_size - segment_footer_size);
+               assert(user_data.size() <= sync_header_user_data_capacity);
+
+               SAL_TRACK_LOCK();
+               char* alloc_ptr = data + alloc_pos;
+               auto* ahead     = new (alloc_ptr) sync_header(marker_size);
+               ahead->set_timestamp(sal::get_current_time_usec());
+               ahead->set_prev_aheader_pos(_last_aheader_pos);
+               memcpy(ahead->user_data(), user_data.data(), user_data.size());
+               ahead->set_user_data_size(user_data.size());
+               {
+                  auto lah = get_last_aheader();
+                  if (lah->type() == header_type::sync_head)
+                     ahead->set_start_checksum_pos(_last_aheader_pos + lah->size());
+                  auto cksum = alloc_pos + ahead->checksum_offset() -
+                               ahead->start_checksum_pos();
+                  if (cfg.checksum_on_commit)
+                     ahead->set_sync_checksum(
+                         XXH3_64bits(data + ahead->start_checksum_pos(), cksum));
+               }
+               _last_aheader_pos = alloc_pos;
+               set_alloc_pos(alloc_pos + marker_size);
+               SAL_TRACK_ALLOC(ahead, marker_size, "metadata_sync_header");
+               if (st >= sync_type::msync_async)
+               {
+                  const uint32_t page_size = system_config::os_page_size();
+                  const uint32_t page_pos  = alloc_pos & ~(page_size - 1);
+                  int mode = st == sync_type::msync_async ? MS_ASYNC : MS_SYNC;
+                  if (msync(data + page_pos, page_size, mode))
+                  {
+                     SAL_ERROR("msync ({}) failed: {}", st, strerror(errno));
+                     throw std::runtime_error("msync failed");
+                  }
+               }
+               return marker_size;
+            }
+
             //  1. Not finalized: still being written. Tail is writable. NOOP.
             //  2. Finalized && read_only: terminal state, no work.
             //  3. Finalized && !read_only: write small terminal header,

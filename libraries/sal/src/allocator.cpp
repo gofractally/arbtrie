@@ -1154,9 +1154,11 @@ namespace sal
       {
          if (entry.root_index < _root_objects->size() && !root_set[entry.root_index])
          {
-            // Verify the ptr_address actually has a valid control block
-            auto* cb = _ptr_alloc.try_get(ptr_address(entry.root_address));
-            if (cb && cb->loc().cacheline())
+            // Verify the ptr_address resolves to a real segment object. Offset
+            // zero is a valid location, so do not treat loc().cacheline() as a
+            // boolean validity check.
+            auto resolved = resolve(ptr_address(entry.root_address));
+            if (resolved.first)
             {
                auto recovered_tid =
                    tree_id(ptr_address(entry.root_address), ptr_address(entry.version_address));
@@ -1173,6 +1175,7 @@ namespace sal
       // Validate roots from the roots file — these were synced to disk by
       // allocator::sync() during commit, so they are the primary source.
       // Sync headers are a secondary source for when the roots file is corrupt.
+      uint32_t roots_from_file = 0;
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
          if (!root_set[i])
@@ -1181,8 +1184,8 @@ namespace sal
             if (tid.root != null_ptr_address)
             {
                // Verify the existing root's control block was rebuilt by the segment scan
-               auto* cb = _ptr_alloc.try_get(tid.root);
-               if (!cb || !cb->loc().cacheline())
+               auto resolved = resolve(tid.root);
+               if (!resolved.first)
                {
                   SAL_WARN("root[{}] = {} from roots file is invalid (no control block), clearing", i, *tid.root);
                   _root_objects->at(i).store(null_tree_id, 0,
@@ -1191,6 +1194,7 @@ namespace sal
                else
                {
                   root_set[i] = true;  // existing root is valid, keep it
+                  ++roots_from_file;
                }
             }
          }
@@ -1223,10 +1227,6 @@ namespace sal
       provider_populate_unpinned_segments();
       start_background_threads();
 
-      uint32_t roots_from_file = 0;
-      for (uint32_t i = 0; i < _root_objects->size(); ++i)
-         if (root_set[i] && i >= roots_recovered)
-            ++roots_from_file;
       SAL_WARN("Power-loss recovery complete. {} roots from sync headers, {} validated from roots file.",
                roots_recovered, roots_from_file);
    }

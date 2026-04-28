@@ -302,6 +302,8 @@ namespace psitri
    void basic_database<LockPolicy>::set_epoch_interval(uint64_t interval)
    {
       _dbm->epoch_interval = interval;
+      std::lock_guard<mutex_type> lock(_dead_publish_mutex);
+      _last_dead_publish_epoch = 0;
    }
 
    template <class LockPolicy>
