@@ -1,4 +1,10 @@
-MVCC Design 
+MVCC Design
+
+> Note: the epoch/version-maintenance portions of this older design have been
+> superseded by `docs/architecture/mvcc-version-maintenance.md`. In particular,
+> MVCC is now treated as the normal write model, `_epoch` should become
+> `last_unique_version`, cleanup is a rewrite-time filter, and raw numeric
+> version comparisons are not valid across wrap.
 
 A tree is identified as (rootptr, version) where rootptr is a reference counted tree.
 
@@ -1015,5 +1021,4 @@ Writers do not need path locks. CB identity invariant ensures safety:
 
 - Writers operating on different leaves under different parents have
   zero contention.
-
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include <psitri/version_compare.hpp>
 #include <sal/alloc_header.hpp>
 #include <string_view>
 #include <ucc/lower_bound.hpp>
@@ -221,7 +222,11 @@ namespace psitri
          std::memcpy(&v, bytes, 6);
          return v;
       }
-      void set(uint64_t v) noexcept { std::memcpy(bytes, &v, 6); }
+      void set(uint64_t v) noexcept
+      {
+         v = version_token(v, value_version_bits);
+         std::memcpy(bytes, &v, 6);
+      }
    } __attribute__((packed));
    static_assert(sizeof(version48) == 6);
 

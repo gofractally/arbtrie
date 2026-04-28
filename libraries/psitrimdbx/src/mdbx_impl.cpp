@@ -1124,15 +1124,17 @@ static bool txn_remove_key(MDBX_txn* txn, uint32_t root_idx,
    return static_cast<bool>(txn->write_tx->remove(root_idx, key));
 }
 
-static void txn_remove_range(MDBX_txn* txn, uint32_t root_idx,
-                             std::string_view low, std::string_view high)
+static uint64_t txn_remove_range(MDBX_txn* txn, uint32_t root_idx,
+                                 std::string_view low, std::string_view high)
 {
    if (!txn->use_dwal && txn->direct_tx)
    {
-      direct_root_handle(txn, root_idx)->remove_range(low, high);
-      return;
+      return direct_root_handle(txn, root_idx)->remove_range(low, high);
    }
+   auto mc = make_txn_cursor(txn, root_idx);
+   bool had_key = mc->lower_bound(low) && (high.empty() || mc->key() < high);
    txn->write_tx->remove_range(root_idx, low, high);
+   return had_key ? 1 : 0;
 }
 
 static uint64_t count_dups_for_key(const MDBX_txn* txn, uint32_t root_idx,
@@ -2504,12 +2506,14 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
             // Delete ALL duplicate values for this key.
             auto prefix = dupsort_prefix(key_sv);
             auto upper  = prefix ? prefix_successor(*prefix) : std::nullopt;
+            uint64_t removed = 0;
             if (prefix && upper)
             {
-               txn_remove_range(txn, root_idx, *prefix, *upper);
-               mark_txn_cursors_stale_after_write(txn, root_idx);
+               removed = txn_remove_range(txn, root_idx, *prefix, *upper);
+               if (removed)
+                  mark_txn_cursors_stale_after_write(txn, root_idx);
             }
-            return MDBX_SUCCESS;
+            return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
          }
       }
 

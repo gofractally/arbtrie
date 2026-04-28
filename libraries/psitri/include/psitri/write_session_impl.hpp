@@ -16,30 +16,31 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline typename LockPolicy::mutex_type&
-   basic_write_session<LockPolicy>::root_modify_lock(uint32_t root_index)
+   inline typename LockPolicy::mutex_type& basic_write_session<LockPolicy>::root_modify_lock(
+       uint32_t root_index)
    {
       return this->_db->modify_lock(root_index);
    }
 
    template <class LockPolicy>
-   inline write_cursor_ptr basic_write_session<LockPolicy>::create_write_cursor()
-   {
-      return std::make_shared<write_cursor>(this->_allocator_session);
-   }
+	   inline write_cursor_ptr basic_write_session<LockPolicy>::create_write_cursor()
+	   {
+	      return std::make_shared<write_cursor>(this->_allocator_session,
+	                                            this->_db->_dbm->current_epoch_base());
+	   }
 
    template <class LockPolicy>
    inline write_cursor_ptr basic_write_session<LockPolicy>::create_write_cursor(
        sal::smart_ptr<sal::alloc_header> root)
-   {
-      return std::make_shared<write_cursor>(std::move(root));
-   }
+	   {
+	      return std::make_shared<write_cursor>(std::move(root), this->_db->_dbm->current_epoch_base());
+	   }
 
    template <class LockPolicy>
    inline tree basic_write_session<LockPolicy>::get_root(uint32_t root_index)
    {
-      return tree(this->_allocator_session->template get_root<>(
-          sal::root_object_number(root_index)));
+      return tree(
+          this->_allocator_session->template get_root<>(sal::root_object_number(root_index)));
    }
 
    template <class LockPolicy>
@@ -49,8 +50,8 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline write_transaction basic_write_session<LockPolicy>::start_write_transaction(
-       tree base, tx_mode mode)
+   inline write_transaction basic_write_session<LockPolicy>::start_write_transaction(tree    base,
+                                                                                     tx_mode mode)
    {
       auto root            = std::move(base).take_root();
       bool has_txn_version = false;
@@ -60,25 +61,20 @@ namespace psitri
          has_txn_version = true;
       }
 
-      auto tx = transaction(
-          this->_allocator_session,
-          std::move(root),
-          {},
-          {},
-          mode);
+	      auto tx             = transaction(this->_allocator_session, std::move(root), {}, {}, mode,
+	                                        this->_db->_dbm->current_epoch_base());
       tx._ws              = this;
       tx._has_txn_version = has_txn_version;
       return write_transaction(std::move(tx));
    }
 
    template <class LockPolicy>
-   inline void basic_write_session<LockPolicy>::set_root(
-       uint32_t       root_index,
-       tree           root,
-       sal::sync_type sync)
+   inline void basic_write_session<LockPolicy>::set_root(uint32_t       root_index,
+                                                         tree           root,
+                                                         sal::sync_type sync)
    {
-      this->_allocator_session->set_root(
-          sal::root_object_number(root_index), root.take_root(), sync);
+      this->_allocator_session->set_root(sal::root_object_number(root_index), root.take_root(),
+                                         sync);
    }
 
    template <class LockPolicy>
@@ -95,19 +91,11 @@ namespace psitri
 
    template <class LockPolicy>
    inline void basic_write_session<LockPolicy>::publish_root(
-       uint32_t root_index, sal::smart_ptr<sal::alloc_header> new_root)
+       uint32_t                          root_index,
+       sal::smart_ptr<sal::alloc_header> new_root)
    {
-      if (new_root)
-      {
-         auto ver_num =
-             this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
-         auto ver_adr = this->_allocator_session->alloc_custom_cb(ver_num);
-         new_root.set_ver(ver_adr);
-      }
-      else
-      {
+      if (!new_root)
          new_root.release();
-      }
       set_root(root_index, std::move(new_root), _sync);
    }
 
@@ -116,18 +104,16 @@ namespace psitri
    {
       tree_context ctx(get_root(root_index));
       ctx.set_dead_versions(this->_db->dead_versions().load_snapshot());
-      ctx.set_current_epoch(this->_db->_dbm->current_epoch());
+      ctx.set_epoch_base(this->_db->_dbm->current_epoch_base());
       return ctx;
    }
 
    template <class LockPolicy>
-   inline sal::smart_ptr<sal::alloc_header>
-   basic_write_session<LockPolicy>::make_unique_root(
+   inline sal::smart_ptr<sal::alloc_header> basic_write_session<LockPolicy>::make_unique_root(
        sal::smart_ptr<sal::alloc_header> root)
    {
-      auto session = this->_allocator_session;
-      auto ver_num =
-          this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
+      auto session   = this->_allocator_session;
+      auto ver_num   = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
       auto ver_adr   = session->alloc_custom_cb(ver_num);
       auto prior_ver = root.ver();
       root.set_ver(ver_adr);
@@ -137,8 +123,8 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline transaction basic_write_session<LockPolicy>::start_transaction(
-       uint32_t root_index, tx_mode mode)
+   inline transaction basic_write_session<LockPolicy>::start_transaction(uint32_t root_index,
+                                                                         tx_mode  mode)
    {
       auto* self = this;
 
@@ -175,8 +161,7 @@ namespace psitri
              self->set_root(root_index, std::move(new_root), self->_sync);
              lock.unlock();
           },
-          [&lock]() { lock.unlock(); },
-          mode);
+	          [&lock]() { lock.unlock(); }, mode, this->_db->_dbm->current_epoch_base());
       tx._ws                 = self;
       tx.cs_at(0).root_index = root_index;
       tx._max_held_root      = root_index;
@@ -205,24 +190,27 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline uint64_t basic_write_session<LockPolicy>::mvcc_upsert(
-       uint32_t root_index, key_view key, value_view value)
+   inline uint64_t basic_write_session<LockPolicy>::upsert(uint32_t   root_index,
+                                                           key_view   key,
+                                                           value_view value)
    {
       auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
 
       // Fast path: stripe lock on target node (value_node or leaf).
-      // Handles Cases A (inline promotion), B (value_node append), C (new key).
-      // Returns false only on leaf overflow (needs split → COW fallback).
+      // Handles existing-key cases (inline promotion and value_node append)
+      // plus same-leaf new-key inserts tagged by branch creation version.
       {
          auto ctx = make_tree_context(root_index);
+         ctx.set_root_version(ver_num);
 
-         auto target = ctx.mvcc_find_target(key);
+         auto target = ctx.find_versioned_write_target(key);
          if (target != sal::null_ptr_address)
          {
             bool ok;
             {
-               std::lock_guard<typename LockPolicy::mutex_type> guard(this->_db->stripe_mutex(target));
-               ok = ctx.try_mvcc_upsert(key, value_type(value), ver_num);
+               std::lock_guard<typename LockPolicy::mutex_type> guard(
+                   this->_db->stripe_mutex(target));
+               ok = ctx.try_upsert_at_version(key, value_type(value), ver_num);
             }
             if (ok)
             {
@@ -234,13 +222,14 @@ namespace psitri
       }
 
       // Slow path: COW fallback (split, prefix mismatch, empty tree).
-      auto& lock = this->_db->modify_lock(root_index);
+      auto&                                            lock = this->_db->modify_lock(root_index);
       std::lock_guard<typename LockPolicy::mutex_type> guard(lock);
 
       tree_context ctx(get_root(root_index));
       ctx.set_dead_versions(this->_db->dead_versions().load_snapshot());
-      ctx.set_current_epoch(this->_db->_dbm->current_epoch());
-      ctx.mvcc_upsert(key, value_type(value), ver_num);
+      ctx.set_epoch_base(this->_db->_dbm->current_epoch_base());
+      ctx.set_root_version(ver_num);
+      ctx.upsert_at_version(key, value_type(value), ver_num);
 
       auto new_root = ctx.take_root();
       auto old_ver  = new_root.ver();
@@ -256,21 +245,23 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline uint64_t basic_write_session<LockPolicy>::mvcc_remove(uint32_t root_index, key_view key)
+   inline uint64_t basic_write_session<LockPolicy>::remove(uint32_t root_index, key_view key)
    {
       auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
 
       // Fast path: stripe lock on target node (value_node or leaf).
       {
          auto ctx = make_tree_context(root_index);
+         ctx.set_root_version(ver_num);
 
-         auto target = ctx.mvcc_find_target(key);
+         auto target = ctx.find_versioned_write_target(key);
          if (target != sal::null_ptr_address)
          {
             bool ok;
             {
-               std::lock_guard<typename LockPolicy::mutex_type> guard(this->_db->stripe_mutex(target));
-               ok = ctx.try_mvcc_remove(key, ver_num);
+               std::lock_guard<typename LockPolicy::mutex_type> guard(
+                   this->_db->stripe_mutex(target));
+               ok = ctx.try_remove_at_version(key, ver_num);
             }
             if (ok)
             {
@@ -281,13 +272,14 @@ namespace psitri
       }
 
       // Slow path: COW fallback.
-      auto& lock = this->_db->modify_lock(root_index);
+      auto&                                            lock = this->_db->modify_lock(root_index);
       std::lock_guard<typename LockPolicy::mutex_type> guard(lock);
 
       tree_context ctx(get_root(root_index));
       ctx.set_dead_versions(this->_db->dead_versions().load_snapshot());
-      ctx.set_current_epoch(this->_db->_dbm->current_epoch());
-      ctx.mvcc_remove(key, ver_num);
+      ctx.set_epoch_base(this->_db->_dbm->current_epoch_base());
+      ctx.set_root_version(ver_num);
+      ctx.remove_at_version(key, ver_num);
 
       auto new_root = ctx.take_root();
       auto old_ver  = new_root.ver();
@@ -305,7 +297,7 @@ namespace psitri
    template <class LockPolicy>
    inline uint64_t basic_write_session<LockPolicy>::defrag_tree(uint32_t root_index)
    {
-      auto& lock = this->_db->modify_lock(root_index);
+      auto&                                            lock = this->_db->modify_lock(root_index);
       std::lock_guard<typename LockPolicy::mutex_type> guard(lock);
 
       auto root = get_root(root_index);
@@ -331,16 +323,21 @@ namespace psitri
              const char* type_name = "unknown";
              switch ((int)obj->type())
              {
-                case (int)node_type::inner: type_name = "inner"; break;
-                case (int)node_type::inner_prefix: type_name = "inner_prefix"; break;
-                case (int)node_type::leaf: type_name = "leaf"; break;
-                case (int)node_type::value: type_name = "value_node"; break;
+                case (int)node_type::inner:
+                   type_name = "inner";
+                   break;
+                case (int)node_type::inner_prefix:
+                   type_name = "inner_prefix";
+                   break;
+                case (int)node_type::leaf:
+                   type_name = "leaf";
+                   break;
+                case (int)node_type::value:
+                   type_name = "value_node";
+                   break;
              }
-             std::cerr << "  LIVE addr=" << *adr
-                       << " ref=" << ref
-                       << " type=" << type_name
-                       << " size=" << obj->size()
-                       << std::endl;
+             std::cerr << "  LIVE addr=" << *adr << " ref=" << ref << " type=" << type_name
+                       << " size=" << obj->size() << std::endl;
           });
    }
 
@@ -361,15 +358,10 @@ namespace psitri
       auto& lock = _ws->root_modify_lock(root_index);
       lock.lock();
 
-      auto root = _ws->get_root(root_index);
-      if (root)
-         root = tree(_ws->make_unique_root(std::move(root)));
+      auto root = _ws->make_unique_root(_ws->get_root(root_index));
 
       change_set cs;
-      if (root)
-         cs.cursor.emplace(std::move(root));
-      else
-         cs.cursor.emplace(_session);
+	      cs.cursor.emplace(std::move(root), _ws->_db->current_epoch_base());
       cs.root_index = root_index;
 
       uint32_t idx = static_cast<uint32_t>(_change_sets.size());
@@ -397,7 +389,7 @@ namespace psitri
          auto& cs = cs_at(hl.cs_index);
          if (cs.buffer && !cs.buffer->empty())
             merge_buffer_to_persistent(cs);
-         _ws->publish_root(hl.root_index, cs.cursor->root());
+         _ws->publish_root(hl.root_index, cs.cursor->take_root());
          hl.unlock_fn(hl.lock);
       }
       _held_locks.clear();
@@ -417,7 +409,7 @@ namespace psitri
       auto& cs       = cs_at(_primary_index);
       auto  root     = cs.cursor->take_root();
       auto  with_ver = _ws->make_unique_root(std::move(root));
-      cs.cursor.emplace(std::move(with_ver));
+	      cs.cursor.emplace(std::move(with_ver), _ws->_db->current_epoch_base());
       _has_txn_version = true;
    }
 

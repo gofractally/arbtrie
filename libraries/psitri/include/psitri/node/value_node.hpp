@@ -78,10 +78,15 @@ namespace psitri
       static constexpr int16_t offset_zero_length = 2;
       static constexpr int16_t offset_data_start  = 3;
 
+      struct prune_floor_policy
+      {
+         uint64_t floor;
+      };
+
       // ── Entry packing helpers ───────────────────────────────────
       static uint64_t pack_entry(uint64_t version, int16_t offset) noexcept
       {
-         return (version << 16) | (uint16_t(offset));
+         return (version_token(version, value_version_bits) << 16) | (uint16_t(offset));
       }
       static uint64_t entry_version(uint64_t entry) noexcept { return entry >> 16; }
       static int16_t  entry_offset(uint64_t entry) noexcept { return int16_t(entry & 0xFFFF); }
@@ -171,6 +176,22 @@ namespace psitri
       static uint32_t alloc_size(const value_node* src, const live_range_map::snapshot*)
       {
          return src->size();
+      }
+
+      /// Normalized copy: over-allocate to source size; floor pruning only removes entries.
+      static uint32_t alloc_size(const value_node* src, prune_floor_policy)
+      {
+         return src->size();
+      }
+      static uint32_t alloc_size(const value_node* src, uint64_t version, value_view new_val,
+                                 prune_floor_policy)
+      {
+         return alloc_size(src, version, new_val);
+      }
+      static uint32_t alloc_size(const value_node* src, uint64_t version, std::nullptr_t,
+                                 prune_floor_policy)
+      {
+         return alloc_size(src, version, nullptr);
       }
 
       uint32_t num_branches() const { return _is_flat ? 1 : (_num_versions + _num_next); }
@@ -306,6 +327,26 @@ namespace psitri
          append_data_entry(version, new_val);
       }
 
+      /// MVCC: copy existing value_node, normalize entries to prune_floor, append data.
+      value_node(uint32_t asize, ptr_address_seq seq,
+                 const value_node* src, uint64_t version, value_view new_val,
+                 prune_floor_policy prune)
+          : node(asize, type_id, seq),
+            _alloc_pos(0),
+            _num_versions(0),
+            _num_next(src->_num_next),
+            _is_subtree(src->_is_subtree),
+            _is_flat(0)
+      {
+         std::memcpy(next_ptrs(), src->next_ptrs(), _num_next * sizeof(value_next_ptr));
+         copy_entries_from(src, prune);
+         if (_num_versions > 0 &&
+             entry_version(entries()[_num_versions - 1]) ==
+                 version_token(version, value_version_bits))
+            --_num_versions;
+         append_data_entry(version, new_val);
+      }
+
       /// MVCC: promote inline value to 2-entry value_node.
       value_node(uint32_t asize, ptr_address_seq seq,
                  uint64_t old_ver, value_view old_val,
@@ -352,6 +393,26 @@ namespace psitri
          entries()[_num_versions++] = pack_entry(version, offset_tombstone);
       }
 
+      /// MVCC: copy existing value_node, normalize entries to prune_floor, append tombstone.
+      value_node(uint32_t asize, ptr_address_seq seq,
+                 const value_node* src, uint64_t version, std::nullptr_t,
+                 prune_floor_policy prune)
+          : node(asize, type_id, seq),
+            _alloc_pos(0),
+            _num_versions(0),
+            _num_next(src->_num_next),
+            _is_subtree(src->_is_subtree),
+            _is_flat(0)
+      {
+         std::memcpy(next_ptrs(), src->next_ptrs(), _num_next * sizeof(value_next_ptr));
+         copy_entries_from(src, prune);
+         if (_num_versions > 0 &&
+             entry_version(entries()[_num_versions - 1]) ==
+                 version_token(version, value_version_bits))
+            --_num_versions;
+         entries()[_num_versions++] = pack_entry(version, offset_tombstone);
+      }
+
       /// Strip-only: copy existing value_node with dead entries removed.
       /// No new entry is appended — used by background defrag.
       value_node(uint32_t asize, ptr_address_seq seq,
@@ -365,6 +426,20 @@ namespace psitri
       {
          std::memcpy(next_ptrs(), src->next_ptrs(), _num_next * sizeof(value_next_ptr));
          copy_entries_from(src, dead);
+      }
+
+      /// Strip-only: copy existing value_node normalized to prune_floor.
+      value_node(uint32_t asize, ptr_address_seq seq,
+                 const value_node* src, prune_floor_policy prune)
+          : node(asize, type_id, seq),
+            _alloc_pos(0),
+            _num_versions(0),
+            _num_next(src->_num_next),
+            _is_subtree(src->_is_subtree),
+            _is_flat(0)
+      {
+         std::memcpy(next_ptrs(), src->next_ptrs(), _num_next * sizeof(value_next_ptr));
+         copy_entries_from(src, prune);
       }
 
       // ── Accessors ───────────────────────────────────────────────
@@ -425,19 +500,30 @@ namespace psitri
          return get_stored_value(off);
       }
 
-      /// Lookup value at a specific version (finds latest entry <= version).
+      /// Lookup value at a specific version in append/version order.
       /// Returns {offset, entry_index} or {offset_null, 0xFF} if not found.
       std::pair<int16_t, uint8_t> find_version(uint64_t version) const noexcept
       {
          if (_is_flat)
             return {offset_data_start, 0};  // flat nodes have 1 implicit version at 0
 
-         // Linear scan from end (latest first) — entries sorted ascending.
-         // SIMD acceleration deferred to Phase 7.
+         if (_num_versions == 0)
+            return {offset_null, 0xFF};
+
          const uint64_t* e = entries();
+         if (version == UINT64_MAX)
+            return {entry_offset(e[_num_versions - 1]), uint8_t(_num_versions - 1)};
+
+         // Entries are appended in logical version order. Numeric order may wrap
+         // at the persisted token width, so visibility is anchored at the
+         // earliest retained entry instead of using raw <=.
+         uint64_t base = entry_version(e[0]);
+         if (version_distance(base, version, value_version_bits) >
+             (version_mask(value_version_bits) >> 1))
+            return {offset_null, 0xFF};
          for (int i = _num_versions - 1; i >= 0; --i)
          {
-            if (entry_version(e[i]) <= version)
+            if (version_visible_at(base, entry_version(e[i]), version, value_version_bits))
                return {entry_offset(e[i]), uint8_t(i)};
          }
          // Not in this node — check children (next_ptrs).
@@ -553,6 +639,86 @@ namespace psitri
                ++count;
          }
          return count;
+      }
+
+      /// Collect subtree references omitted by copy_entries_from(src, dead).
+      /// The copy path preserves the latest entry even if it is marked dead, so
+      /// only non-latest dead subtree entries are reported here.
+      bool collect_dead_references(const live_range_map::snapshot* dead,
+                                   sal::pending_release_list& pending) const noexcept
+      {
+         if (!dead || _is_flat || !_is_subtree || _num_versions == 0)
+            return true;
+
+         const uint64_t* e        = entries();
+         const uint8_t   last_idx = _num_versions - 1;
+         for (uint8_t i = 0; i < _num_versions; ++i)
+         {
+            if (i != last_idx && dead->is_dead(entry_version(e[i])))
+               if (!collect_entry_references(i, pending))
+                  return false;
+         }
+         return !pending.failed();
+      }
+
+      /// Collect subtree references omitted by copy_entries_from(src, prune).
+      /// The predecessor visible at prune.floor is retained and rewritten to
+      /// prune.floor; only entries strictly older than that predecessor are
+      /// dropped.
+      bool collect_pruned_references(prune_floor_policy prune,
+                                     sal::pending_release_list& pending) const noexcept
+      {
+         if (_is_flat || !_is_subtree || _num_versions == 0)
+            return true;
+
+         const uint64_t* se    = entries();
+         const uint64_t  base  = entry_version(se[0]);
+         const uint64_t  floor = version_token(prune.floor, value_version_bits);
+         const uint64_t  floor_distance =
+             version_distance(base, floor, value_version_bits);
+         const uint64_t half_range = version_mask(value_version_bits) >> 1;
+
+         if (floor_distance > half_range)
+            return true;
+
+         uint8_t floor_idx = 0xFF;
+         for (uint8_t i = 0; i < _num_versions; ++i)
+         {
+            uint64_t entry_distance =
+                version_distance(base, entry_version(se[i]), value_version_bits);
+            if (entry_distance <= floor_distance)
+               floor_idx = i;
+            else
+               break;
+         }
+
+         if (floor_idx == 0xFF)
+            return true;
+
+         for (uint8_t i = 0; i < floor_idx; ++i)
+            if (!collect_entry_references(i, pending))
+               return false;
+         return !pending.failed();
+      }
+
+      /// collect refs omitted by copy_entries_skip_last().
+      bool collect_replace_last_references(sal::pending_release_list& pending) const noexcept
+      {
+         if (_is_flat || !_is_subtree || _num_versions == 0)
+            return true;
+         return collect_entry_references(_num_versions - 1, pending);
+      }
+
+      /// collect refs omitted when a prune rewrite copies the top entry and
+      /// then replaces that same version with a new value/tombstone.
+      bool collect_replaced_top_references(uint64_t version,
+                                           sal::pending_release_list& pending) const noexcept
+      {
+         if (_is_flat || !_is_subtree || _num_versions == 0)
+            return true;
+         if (latest_version() != version_token(version, value_version_bits))
+            return true;
+         return collect_entry_references(_num_versions - 1, pending);
       }
 
       // ── COW / compaction support ────────────────────────────────
@@ -731,6 +897,23 @@ namespace psitri
          return tid;
       }
 
+      bool collect_entry_references(uint8_t idx,
+                                    sal::pending_release_list& pending) const noexcept
+      {
+         assert(_is_subtree);
+         assert(idx < _num_versions);
+         int16_t off = entry_offset(entries()[idx]);
+         if (off < offset_data_start)
+            return true;
+
+         tree_id tid = get_stored_tree_id(off);
+         if (!pending.push(tid.root))
+            return false;
+         if (tid.ver != sal::null_ptr_address && !pending.push(tid.ver))
+            return false;
+         return true;
+      }
+
       /// Allocate space in the alloc area and store value data.
       /// Returns the byte offset from tail().
       PSITRI_NO_SANITIZE_ALIGNMENT
@@ -811,6 +994,78 @@ namespace psitri
                entries()[_num_versions++] = se[i];
             }
          }
+      }
+
+      PSITRI_NO_SANITIZE_ALIGNMENT
+      void copy_entry_from(const value_node* src, uint64_t src_entry,
+                           uint64_t dst_version) noexcept
+      {
+         int16_t off = entry_offset(src_entry);
+         if (off >= offset_data_start)
+         {
+            const stored_value* sv = src->get_stored_value_ptr(off);
+            if (src->_is_subtree)
+            {
+               tree_id tid;
+               std::memcpy(&tid, sv->data, sizeof(tree_id));
+               int16_t new_off = alloc_tree_id_data(tid);
+               entries()[_num_versions++] = pack_entry(dst_version, new_off);
+            }
+            else
+            {
+               value_view v(reinterpret_cast<const char*>(sv->data), sv->size);
+               int16_t    new_off = alloc_value_data(v);
+               entries()[_num_versions++] = pack_entry(dst_version, new_off);
+            }
+         }
+         else
+         {
+            entries()[_num_versions++] = pack_entry(dst_version, off);
+         }
+      }
+
+      /// Copy entries while normalizing history to the oldest retained version.
+      /// The destination preserves exactly the state visible at prune.floor, then
+      /// retains all later entries in append order.
+      PSITRI_NO_SANITIZE_ALIGNMENT
+      void copy_entries_from(const value_node* src, prune_floor_policy prune) noexcept
+      {
+         if (src->_num_versions == 0)
+            return;
+
+         const uint64_t* se    = src->entries();
+         const uint64_t  base  = entry_version(se[0]);
+         const uint64_t  floor = version_token(prune.floor, value_version_bits);
+         const uint64_t  floor_distance =
+             version_distance(base, floor, value_version_bits);
+         const uint64_t half_range = version_mask(value_version_bits) >> 1;
+
+         if (floor_distance > half_range)
+         {
+            copy_entries_from(src);
+            return;
+         }
+
+         uint8_t floor_idx = 0xFF;
+         uint8_t first_after_floor = src->_num_versions;
+         for (uint8_t i = 0; i < src->_num_versions; ++i)
+         {
+            uint64_t entry_distance =
+                version_distance(base, entry_version(se[i]), value_version_bits);
+            if (entry_distance <= floor_distance)
+               floor_idx = i;
+            else
+            {
+               first_after_floor = i;
+               break;
+            }
+         }
+
+         if (floor_idx != 0xFF)
+            copy_entry_from(src, se[floor_idx], floor);
+
+         for (uint8_t i = first_after_floor; i < src->_num_versions; ++i)
+            copy_entry_from(src, se[i], entry_version(se[i]));
       }
 
       /// Copy all but the LAST entry from src. Used by per-txn coalescing

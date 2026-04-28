@@ -1723,6 +1723,12 @@ TEST_CASE("C API: DUPSORT delete all dups", "[mdbx][dupsort]")
       REQUIRE(mdbx_del(txn, dbi, &key, nullptr) == MDBX_SUCCESS);
    }
 
+   // Deleting an absent dup key reports NOTFOUND like native MDBX.
+   {
+      MDBX_val key{const_cast<char*>("missing"), 7};
+      REQUIRE(mdbx_del(txn, dbi, &key, nullptr) == MDBX_NOTFOUND);
+   }
+
    // "x" should be gone
    {
       MDBX_val key{const_cast<char*>("x"), 1};
@@ -2465,6 +2471,126 @@ TEST_CASE("C API: Code table empty value upgraded to large bytecode", "[mdbx][c-
       REQUIRE(mdbx_get(ro, code_dbi, &key, &val) == MDBX_SUCCESS);
       REQUIRE(val.iov_len == bytecode.size());
       REQUIRE(std::memcmp(val.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      mdbx_txn_abort(ro);
+   }
+
+   mdbx_env_close(env);
+}
+
+TEST_CASE("C API: Silkworm state code tables publish together",
+          "[mdbx][c-api][silkworm]")
+{
+   auto dir = make_temp_dir("c_silkworm_state_code_publish");
+
+   const auto address =
+      hex_to_bytes("6062e466cf33a5d1e22ac57b2a726a23bf79a0d0");
+   const auto code_hash = hex_to_bytes(
+      "2420ae84d6a3b36442082a6ec0b552b4dbe8bc64dd2a89a72c4ca32e64055603");
+
+   std::string storage_prefix = address + be_u64(1);
+   std::string account_payload{"account-with-code-hash"};
+   std::string bytecode;
+   bytecode.reserve(17'411);
+   bytecode.append("\x60\x60\x60\x40\x52", 5);
+   for (size_t i = bytecode.size(); i < 17'411; ++i)
+      bytecode.push_back(static_cast<char>((i * 67 + 29) & 0xff));
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 64) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) ==
+           MDBX_SUCCESS);
+
+   MDBX_dbi code_dbi = 0;
+   MDBX_dbi plain_code_hash_dbi = 0;
+   MDBX_dbi plain_state_dbi = 0;
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) ==
+              MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, "Code", MDBX_CREATE, &code_dbi) ==
+              MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, "PlainCodeHash", MDBX_CREATE,
+                            &plain_code_hash_dbi) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(
+                 txn, "PlainState",
+                 static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT),
+                 &plain_state_dbi) == MDBX_SUCCESS);
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   }
+
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) ==
+              MDBX_SUCCESS);
+
+      MDBX_val code_key{const_cast<char*>(code_hash.data()), code_hash.size()};
+      MDBX_val code_val{bytecode.data(), bytecode.size()};
+      REQUIRE(mdbx_put(txn, code_dbi, &code_key, &code_val, MDBX_UPSERT) ==
+              MDBX_SUCCESS);
+
+      MDBX_val hash_key{storage_prefix.data(), storage_prefix.size()};
+      MDBX_val hash_val{const_cast<char*>(code_hash.data()), code_hash.size()};
+      REQUIRE(mdbx_put(txn, plain_code_hash_dbi, &hash_key, &hash_val,
+                       MDBX_UPSERT) == MDBX_SUCCESS);
+
+      MDBX_val state_key{const_cast<char*>(address.data()), address.size()};
+      MDBX_val state_val{account_payload.data(), account_payload.size()};
+      REQUIRE(mdbx_put(txn, plain_state_dbi, &state_key, &state_val,
+                       MDBX_UPSERT) == MDBX_SUCCESS);
+
+      MDBX_val got{};
+      REQUIRE(mdbx_get(txn, code_dbi, &code_key, &got) == MDBX_SUCCESS);
+      REQUIRE(got.iov_len == bytecode.size());
+      REQUIRE(std::memcmp(got.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      got = {};
+      REQUIRE(mdbx_get(txn, plain_code_hash_dbi, &hash_key, &got) ==
+              MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(got) == code_hash);
+
+      got = {};
+      REQUIRE(mdbx_get(txn, plain_state_dbi, &state_key, &got) == MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(got) == account_payload);
+
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   }
+
+   mdbx_env_close(env);
+
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 64) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) ==
+           MDBX_SUCCESS);
+
+   {
+      MDBX_txn* ro = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro) ==
+              MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(ro, "Code", MDBX_DB_DEFAULTS, &code_dbi) ==
+              MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(ro, "PlainCodeHash", MDBX_DB_DEFAULTS,
+                            &plain_code_hash_dbi) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(ro, "PlainState", MDBX_DUPSORT,
+                            &plain_state_dbi) == MDBX_SUCCESS);
+
+      MDBX_val code_key{const_cast<char*>(code_hash.data()), code_hash.size()};
+      MDBX_val got{};
+      REQUIRE(mdbx_get(ro, code_dbi, &code_key, &got) == MDBX_SUCCESS);
+      REQUIRE(got.iov_len == bytecode.size());
+      REQUIRE(std::memcmp(got.iov_base, bytecode.data(), bytecode.size()) == 0);
+
+      MDBX_val hash_key{storage_prefix.data(), storage_prefix.size()};
+      got = {};
+      REQUIRE(mdbx_get(ro, plain_code_hash_dbi, &hash_key, &got) ==
+              MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(got) == code_hash);
+
+      MDBX_val state_key{const_cast<char*>(address.data()), address.size()};
+      got = {};
+      REQUIRE(mdbx_get(ro, plain_state_dbi, &state_key, &got) == MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(got) == account_payload);
 
       mdbx_txn_abort(ro);
    }

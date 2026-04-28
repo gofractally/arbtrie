@@ -184,14 +184,16 @@ namespace psitri
    {
      public:
       transaction(sal::allocator_session_ptr                             session,
-                  sal::smart_ptr<sal::alloc_header>                      root,
-                  std::function<void(sal::smart_ptr<sal::alloc_header>)> commit_func,
-                  std::function<void()>                                  rollback_func,
-                  tx_mode                                                mode = tx_mode::expect_success)
-          : _session(std::move(session)),
-            _commit_func(std::move(commit_func)),
-            _rollback_func(std::move(rollback_func)),
-            _mode(mode)
+	                  sal::smart_ptr<sal::alloc_header>                      root,
+	                  std::function<void(sal::smart_ptr<sal::alloc_header>)> commit_func,
+	                  std::function<void()>                                  rollback_func,
+	                  tx_mode                                                mode = tx_mode::expect_success,
+	                  uint64_t                                               epoch_base = 0)
+	          : _session(std::move(session)),
+	            _commit_func(std::move(commit_func)),
+	            _rollback_func(std::move(rollback_func)),
+	            _mode(mode),
+	            _epoch_base(epoch_base)
       {
          init_primary_cs(std::move(root));
       }
@@ -390,7 +392,7 @@ namespace psitri
          // the write_cursor even when _adr is null on a fresh database.
          // For modes that didn't allocate a ver, the smart_ptr is empty
          // either way — no harm.
-         cs.cursor.emplace(std::move(root));
+	         cs.cursor.emplace(std::move(root), _epoch_base);
          if (uses_buffer())
             cs.buffer.emplace();
          _change_sets.push_back(std::move(cs));
@@ -421,11 +423,11 @@ namespace psitri
          if (existing)
             return *existing;
 
-         change_set cs;
-         if (root)
-            cs.cursor.emplace(std::move(*root));
-         else
-            cs.cursor.emplace(_session);
+	         change_set cs;
+	         if (root)
+	            cs.cursor.emplace(std::move(*root), _epoch_base);
+	         else
+	            cs.cursor.emplace(_session, _epoch_base);
          if (uses_buffer())
             cs.buffer.emplace();
          cs.parent = change_set::parent_link{parent_idx, std::string(key)};
@@ -822,10 +824,11 @@ namespace psitri
             cs.buffer->soft_clear();
       }
 
-      std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
-      std::function<void()>                                    _rollback_func;
-      tx_mode                                                  _mode = tx_mode::expect_success;
-      std::vector<frame>                                       _frames;
+	      std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
+	      std::function<void()>                                    _rollback_func;
+	      tx_mode                                                  _mode = tx_mode::expect_success;
+	      uint64_t                                                 _epoch_base = 0;
+	      std::vector<frame>                                       _frames;
 
       // ── Multi-root support ────────────────────────────────────────────
 

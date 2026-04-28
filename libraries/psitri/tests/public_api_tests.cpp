@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 #include <algorithm>
 #include <chrono>
+#include <concepts>
 #include <numeric>
 #include <random>
 #include <thread>
@@ -23,6 +24,35 @@ static_assert(std::is_same_v<decltype(std::declval<write_session&>().get_root(0)
 static_assert(std::is_same_v<decltype(std::declval<tree&>().get_subtree(std::declval<key_view>())), tree>);
 static_assert(std::is_same_v<decltype(std::declval<transaction&>().get_subtree(std::declval<key_view>())), tree>);
 static_assert(std::is_same_v<decltype(std::declval<write_transaction&>().get_subtree(std::declval<key_view>())), tree>);
+
+template <typename T>
+concept has_public_session_upsert =
+    requires(T& s, key_view key, value_view value) {
+       { s.upsert(0, key, value) } -> std::same_as<uint64_t>;
+    };
+
+template <typename T>
+concept has_public_session_remove =
+    requires(T& s, key_view key) {
+       { s.remove(0, key) } -> std::same_as<uint64_t>;
+    };
+
+template <typename T>
+concept exposes_upsert_at_version =
+    requires(T& s, key_view key, value_view value) {
+       s.upsert_at_version(0, key, value);
+    };
+
+template <typename T>
+concept exposes_remove_at_version =
+    requires(T& s, key_view key) {
+       s.remove_at_version(0, key);
+    };
+
+static_assert(has_public_session_upsert<write_session>);
+static_assert(has_public_session_remove<write_session>);
+static_assert(!exposes_upsert_at_version<write_session>);
+static_assert(!exposes_remove_at_version<write_session>);
 
 constexpr int SCALE = 1;
 
@@ -57,6 +87,62 @@ namespace
       }
    };
 }  // namespace
+
+TEST_CASE("multi-root transaction publishes additional roots with their write version",
+          "[public-api][multi-root][mvcc]")
+{
+   test_db t("multi_root_publish_testdb");
+
+   const std::string code_key{"code-hash"};
+   const std::string lookup_key{"address-incarnation"};
+   const std::string large_code_v1(17'411, 'a');
+   const std::string large_code_v2(17'411, 'b');
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_key("primary"), to_value("metadata"));
+
+      auto code_root = tx.open_root(13);
+      auto hash_root = tx.open_root(14);
+
+      code_root.upsert(to_key_view(code_key), to_value_view(large_code_v1));
+      hash_root.upsert(to_key_view(lookup_key), to_value_view(code_key));
+
+      REQUIRE(code_root.get<std::string>(to_key_view(code_key)) == large_code_v1);
+      REQUIRE(hash_root.get<std::string>(to_key_view(lookup_key)) == code_key);
+
+      tx.commit();
+   }
+
+   {
+      auto rs = t.db->start_read_session();
+      auto code_root = rs->get_root(13);
+      auto hash_root = rs->get_root(14);
+
+      REQUIRE(code_root.get<std::string>(to_key_view(code_key)) == large_code_v1);
+      REQUIRE(hash_root.get<std::string>(to_key_view(lookup_key)) == code_key);
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto code_root = tx.open_root(13);
+
+      code_root.upsert(to_key_view(code_key), to_value_view(large_code_v2));
+      REQUIRE(code_root.get<std::string>(to_key_view(code_key)) == large_code_v2);
+
+      tx.commit();
+   }
+
+   {
+      auto rs = t.db->start_read_session();
+      auto code_root = rs->get_root(13);
+
+      REQUIRE(code_root.get<std::string>(to_key_view(code_key)) == large_code_v2);
+   }
+
+   t.validate_unique_refs(13);
+   t.validate_unique_refs(14);
+}
 
 // ============================================================
 // detached tree write transaction tests

@@ -27,11 +27,10 @@ namespace psitri
          /// and the ver_adr is packed into the root slot alongside root_adr.
          std::atomic<uint64_t> global_version{0};
 
-         /// Epoch = global_version / epoch_interval.  Inner nodes store the epoch
-         /// at which they were last COW'd.  The first write after an epoch boundary
-         /// to a path with stale inner nodes triggers a full COW cascade, providing
-         /// an opportunity for structural maintenance (merge, collapse, rebalance,
-         /// pruning multi-version value_nodes).
+         /// Epoch base = (global_version / epoch_interval) * epoch_interval.
+         /// Inner nodes store the root version at which they were last made unique.
+         /// The first write after an epoch boundary to a path with stale inner
+         /// nodes triggers a COW maintenance cascade.
          ///
          /// Trade-off: smaller interval → more frequent COW maintenance (less bloat,
          /// lower MVCC throughput).  Larger → more MVCC fast-path hits (higher
@@ -41,9 +40,10 @@ namespace psitri
          /// Default 1M provides a maintenance pass roughly every 1M writes.
          uint64_t epoch_interval = 1'000'000;
 
-         uint64_t current_epoch() const noexcept
+         uint64_t current_epoch_base() const noexcept
          {
-            return global_version.load(std::memory_order_relaxed) / epoch_interval;
+            auto version = global_version.load(std::memory_order_relaxed);
+            return (version / epoch_interval) * epoch_interval;
          }
 
          // top_root is an array of root object addresses, one per top-level root.
@@ -74,10 +74,11 @@ namespace psitri
                                               recovery_mode                mode)
        : _dir(dir),
          _cfg(cfg),
-         _allocator(dir, cfg),
+         _object_registry(_dead_versions),
+         _allocator(dir, cfg, false),
          _dbfile(dir / "dbfile.bin", sal::access_mode::read_write)
    {
-      detail::register_node_types();
+      _object_registry.install(_allocator);
 
       // Register callback: when a version CB's refcount drops to 0,
       // record its version number in the dead-version map for MVCC
@@ -130,6 +131,7 @@ namespace psitri
       }
       recover_global_version_from_roots();
       _dbm->clean_shutdown = false;
+      _allocator.start_background_threads();
    }
 
    template <class LockPolicy>
@@ -144,7 +146,11 @@ namespace psitri
          if (ver == sal::null_ptr_address)
             continue;
 
-         auto version = session->read_custom_cb(ver);
+         auto version_opt = session->try_read_custom_cb(ver);
+         if (!version_opt)
+            continue;
+
+         auto version = *version_opt;
          if (version >= sal::control_block::max_cacheline_offset - 1)
             continue;
          max_version = std::max(max_version, version);
@@ -299,9 +305,9 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   uint64_t basic_database<LockPolicy>::current_epoch() const
+   uint64_t basic_database<LockPolicy>::current_epoch_base() const
    {
-      return _dbm->current_epoch();
+      return _dbm->current_epoch_base();
    }
 
 }  // namespace psitri

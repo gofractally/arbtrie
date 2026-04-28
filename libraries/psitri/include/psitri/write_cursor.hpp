@@ -12,13 +12,21 @@ namespace psitri
       using ptr = std::shared_ptr<write_cursor>;
 
       /// Create a write cursor on an empty (transient) tree
-      write_cursor(sal::allocator_session_ptr session)
-          : _ctx(sal::smart_ptr<sal::alloc_header>(session, sal::null_ptr_address))
-      {
-      }
+      write_cursor(sal::allocator_session_ptr session, uint64_t epoch_base = 0)
+	          : _ctx(sal::smart_ptr<sal::alloc_header>(session, sal::null_ptr_address))
+	      {
+	         _ctx.set_epoch_base(epoch_base);
+	      }
 
-      /// Create a write cursor on an existing root
-      write_cursor(sal::smart_ptr<sal::alloc_header> root) : _ctx(std::move(root)) {}
+	      /// Create a write cursor on an existing root
+	      write_cursor(sal::smart_ptr<sal::alloc_header> root, uint64_t epoch_base = 0)
+	          : _ctx(std::move(root))
+	      {
+	         _ctx.set_epoch_base(epoch_base);
+	      }
+
+	      void set_epoch_base(uint64_t epoch_base) { _ctx.set_epoch_base(epoch_base); }
+	      void set_root_version(uint64_t root_version) { _ctx.set_root_version(root_version); }
 
       // -- Mutations --
 

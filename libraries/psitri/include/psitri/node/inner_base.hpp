@@ -141,7 +141,7 @@ namespace psitri
 
          d._num_branches = *range.end - *range.begin;
          d._num_cline    = ftab.compressed_clines();
-         d._epoch  = epoch;
+         d._last_unique_version = version_token(epoch, last_unique_version_bits);
          if constexpr (is_inner_prefix_node<Derived>)
             d._prefix_cap = saved_prefix_cap;
 
@@ -193,7 +193,7 @@ namespace psitri
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = branches.count();
          d._num_cline    = numcline;
-         d._epoch  = epoch;
+         d._last_unique_version = version_token(epoch, last_unique_version_bits);
          assert(d._num_cline >= numcline);
 
          memcpy(d.divisions(), branches.dividers().data(), branches.dividers().size());
@@ -231,7 +231,7 @@ namespace psitri
          Derived& d      = static_cast<Derived&>(*this);
          d._num_branches = clone->_num_branches + update.sub_branches.count() - 1;
          d._num_cline    = update.needed_clines;
-         d._epoch        = clone->_epoch;
+         d._last_unique_version        = clone->_last_unique_version;
          assert(d._num_cline >= clone->_num_cline);
 
          sal::ptr_address*       d_clines_data = reinterpret_cast<sal::ptr_address*>(d.clines());
@@ -291,7 +291,7 @@ namespace psitri
          Derived&       d          = static_cast<Derived&>(*this);
          d._num_branches           = clone->_num_branches - 1;
          d._num_cline              = clone->_num_cline;  // keep same cline count
-         d._epoch                  = clone->_epoch;
+         d._last_unique_version                  = clone->_last_unique_version;
 
          const branch*  c_branches = clone->const_branches();
          const uint8_t* c_divs     = clone->divisions();
@@ -325,7 +325,7 @@ namespace psitri
          uint16_t       count = *rm.hi - *rm.lo;
          d._num_branches      = clone->_num_branches - count;
          d._num_cline         = clone->_num_cline;  // keep same cline count
-         d._epoch             = clone->_epoch;
+         d._last_unique_version             = clone->_last_unique_version;
 
          const branch*  c_branches = clone->const_branches();
          const uint8_t* c_divs     = clone->divisions();
@@ -446,15 +446,15 @@ namespace psitri
          lbidx += (byte >= (divs[lbidx])) * (lbidx < num_divs);
          return branch_number(lbidx);
       }
-      uint64_t epoch() const noexcept
+      uint64_t last_unique_version() const noexcept
       {
          const Derived& d = static_cast<const Derived&>(*this);
-         return d._epoch;
+         return d._last_unique_version;
       }
-      void set_epoch(uint64_t e) noexcept
+      void set_last_unique_version(uint64_t e) noexcept
       {
          Derived& d = static_cast<Derived&>(*this);
-         d._epoch = e;
+         d._last_unique_version = version_token(e, last_unique_version_bits);
       }
       uint32_t free_space() const noexcept
       {
@@ -562,7 +562,7 @@ namespace psitri
       }
       d->_num_branches = new_branch_count;
       d->_num_cline = up.needed_clines;
-      // _epoch preserved from original node (no descendent tracking)
+      // _last_unique_version preserved from original node (no descendent tracking)
       assert(std::is_sorted(d->divisions(), d->divisions() + d->num_divisions()));
       assert(d->validate_invariants());
    }

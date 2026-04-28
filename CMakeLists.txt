@@ -273,6 +273,10 @@ add_subdirectory(libraries/hash)
 add_subdirectory(libraries/ucc)
 add_subdirectory(libraries/art)
 
+# PsiTriLevelDB: LevelDB-compatible wrapper around psitri (Bitcoin Core target)
+# Always built — small, header-light, and the primary external integration target.
+add_subdirectory(libraries/psitrileveldb)
+
 if(NOT PSITRI_AS_SUBDIRECTORY)
     # PsiTriRocks: RocksDB-compatible wrapper around psitri
     add_subdirectory(libraries/psitrirocks)
@@ -458,6 +462,10 @@ add_executable(psitri-tool programs/psitri_tool.cpp)
 target_link_libraries(psitri-tool PUBLIC Boost::program_options psitri)
 target_include_directories(psitri-tool PUBLIC ${Boost_INCLUDE_DIRS})
 set_target_properties(psitri-tool PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(mdbx-probe programs/mdbx_probe.cpp)
+target_link_libraries(mdbx-probe PRIVATE psitrimdbx)
+set_target_properties(mdbx-probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # psitri benchmark in TidesDB-style format (same workload/output for direct comparison)
 # Configurable via BENCH_* cmake variables (same defaults as TidesDB bench)

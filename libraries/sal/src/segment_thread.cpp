@@ -179,10 +179,23 @@ namespace sal
    {
       try
       {
-         // Special case for 1ms sleep
+         // Special case for short sleeps (≤10ms): just sleep_for and return.
+         // For the very common time_ms == 0 case, replace what would otherwise
+         // be a no-op `sleep_for(0)` with a small idle backoff. The background
+         // thread loops (compactor, release, segment_provider, read_bit_decay)
+         // all spin on `while (thread.yield())` with the default 0 argument;
+         // without a backoff each idle iteration burns CPU on a non-blocking
+         // queue poll. 100us is small enough that it doesn't materially slow
+         // any notifier path (typical work batches take many hundreds of us)
+         // but big enough that an idle DB no longer pegs a core.
          if (time_ms.count() <= 10)
          {
-            std::this_thread::sleep_for(time_ms);
+            constexpr auto idle_backoff = std::chrono::microseconds(100);
+            if (time_ms.count() == 0) {
+               std::this_thread::sleep_for(idle_backoff);
+            } else {
+               std::this_thread::sleep_for(time_ms);
+            }
             return !_stop.load(std::memory_order_relaxed);
          }
 

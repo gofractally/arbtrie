@@ -583,9 +583,11 @@ namespace sal
        */
       void compactor_loop(segment_thread& thread);
 
-      void compact_segment(allocator_session& ses, segment_number seg_num);
-      bool compact_pinned_segment(allocator_session& ses);
-      bool compact_unpinned_segment(allocator_session& ses);
+      void compact_segment(allocator_session& ses,
+                           segment_number     seg_num,
+                           const segment_thread* thread = nullptr);
+      bool compact_pinned_segment(allocator_session& ses, const segment_thread* thread = nullptr);
+      bool compact_unpinned_segment(allocator_session& ses, const segment_thread* thread = nullptr);
       bool compactor_promote_rcache_data(allocator_session& ses);
 
       // segment_thread implementation for the compactor

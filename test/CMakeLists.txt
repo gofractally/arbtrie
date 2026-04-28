@@ -15,6 +15,7 @@ add_test(NAME sim-db-test COMMAND sim-db-test)
 add_executable(psitri-tests
     test_main.cpp
     ../libraries/psitri/tests/leaf_node_test.cpp
+    ../libraries/psitri/tests/leaf_node_transform_tests.cpp
     ../libraries/psitri/tests/inner_node_tests.cpp
     ../libraries/psitri/tests/inner_node_util_tests.cpp
     ../libraries/psitri/tests/leaf_node_split_test.cpp

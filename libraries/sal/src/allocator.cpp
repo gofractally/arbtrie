@@ -1329,10 +1329,10 @@ namespace sal
             auto t0 = clock::now();
             compactor_promote_rcache_data(sesr);
             auto t1 = clock::now();
-            compact_pinned_segment(sesr);
+            compact_pinned_segment(sesr, &thread);
             auto t2 = clock::now();
             compactor_promote_rcache_data(sesr);
-            compact_unpinned_segment(sesr);
+            compact_unpinned_segment(sesr, &thread);
             auto t3 = clock::now();
 
             total_promote_ns += (t1 - t0).count() + (t3 - t2).count();
@@ -1357,9 +1357,9 @@ namespace sal
          while (thread.yield())
          {
             compactor_promote_rcache_data(sesr);
-            compact_pinned_segment(sesr);
+            compact_pinned_segment(sesr, &thread);
             compactor_promote_rcache_data(sesr);
-            compact_unpinned_segment(sesr);
+            compact_unpinned_segment(sesr, &thread);
          }
       }
    }
@@ -1527,7 +1527,7 @@ namespace sal
     * Overall performance is based upon the % of data in memory and limiting
     * the number of SSD IO operations.  
     */
-   bool allocator::compact_pinned_segment(allocator_session& ses)
+   bool allocator::compact_pinned_segment(allocator_session& ses, const segment_thread* thread)
    {
       auto total_segs = _block_alloc.num_blocks();
 
@@ -1560,11 +1560,15 @@ namespace sal
       }
 
       for (uint32_t i = 0; i < total_qualifying; ++i)
-         compact_segment(ses, qualifying_segments[i].first);
+      {
+         if (thread && thread->get_stop_flag().load(std::memory_order_relaxed))
+            return false;
+         compact_segment(ses, qualifying_segments[i].first, thread);
+      }
       return total_qualifying != N;
    }
 
-   bool allocator::compact_unpinned_segment(allocator_session& ses)
+   bool allocator::compact_unpinned_segment(allocator_session& ses, const segment_thread* thread)
    {
       auto   total_segs       = _block_alloc.num_blocks();
       size_t total_qualifying = 0;
@@ -1639,12 +1643,18 @@ namespace sal
 
       // configure the session to not allocate from the pinned segments
       for (uint32_t i = 0; i < total_qualifying; ++i)
-         compact_segment(ses, qualifying_segments[i].first);
+      {
+         if (thread && thread->get_stop_flag().load(std::memory_order_relaxed))
+            return false;
+         compact_segment(ses, qualifying_segments[i].first, thread);
+      }
 
       return total_qualifying != N;
    }
 
-   void allocator::compact_segment(allocator_session& ses, segment_number seg_num)
+   void allocator::compact_segment(allocator_session& ses,
+                                   segment_number     seg_num,
+                                   const segment_thread* thread)
    {
       //      SAL_ERROR("compact_segment: {:L}", seg_num);
       auto        state = ses.lock();
@@ -1729,6 +1739,8 @@ namespace sal
       msec_timestamp src_vage(s->age_accumulator.average());
       while (foo < send)
       {
+         if (thread && thread->get_stop_flag().load(std::memory_order_relaxed))
+            return;
          if (foo->type() == header_type::sync_head)
             src_vage =
                 msec_timestamp(*reinterpret_cast<const sync_header*>(foo)->timestamp() / 1000);

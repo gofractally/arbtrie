@@ -1,11 +1,16 @@
 #pragma once
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <hash/xxhash.h>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <psitri/live_range_map.hpp>
 #include <psitri/lock_policy.hpp>
+#include <psitri/node/inner.hpp>
+#include <psitri/node/leaf.hpp>
+#include <psitri/node/value_node.hpp>
 #include <psitri/write_session.hpp>
 #include <sal/allocator.hpp>
 #include <sal/config.hpp>
@@ -13,6 +18,7 @@
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/verify.hpp>
 #include <thread>
+#include <vector>
 
 namespace psitri
 {
@@ -48,9 +54,167 @@ namespace psitri
    {
       class database_state;
 
-      /// One-time registration of psitri node vtables with SAL.  Idempotent,
-      /// safe to call multiple times and from multiple threads.
-      void register_node_types();
+      /// Register PsiTri node object operations with this SAL allocator instance.
+      void register_node_types(sal::allocator& alloc);
+
+      struct psitri_object_context
+      {
+         live_range_map& dead_versions;
+      };
+
+      template <typename T>
+      class psitri_node_ops : public sal::static_object_type_ops<T>
+      {
+        public:
+         explicit psitri_node_ops(psitri_object_context& ctx) : _ctx(ctx) {}
+
+        protected:
+         psitri_object_context& context() const noexcept { return _ctx; }
+
+        private:
+         psitri_object_context& _ctx;
+      };
+
+      class psitri_value_node_ops final : public psitri_node_ops<value_node>
+      {
+        public:
+         using psitri_node_ops<value_node>::psitri_node_ops;
+
+         void active_compact_to(const sal::alloc_header*          src,
+                                sal::alloc_header*                compact_dst,
+                                const sal::allocator_session_ptr& session) const noexcept override
+         {
+            if (try_prune_retained_floor_active(src, compact_dst, session))
+               return;
+            psitri_node_ops<value_node>::active_compact_to(src, compact_dst, session);
+         }
+
+         void passive_compact_to(const sal::alloc_header*   src,
+                                 sal::alloc_header*         compact_dst,
+                                 sal::pending_release_list& pending_releases) const noexcept override
+         {
+            if (try_prune_retained_floor_passive(src, compact_dst, pending_releases))
+               return;
+            psitri_node_ops<value_node>::passive_compact_to(src, compact_dst,
+                                                            pending_releases);
+         }
+
+        private:
+         bool try_prune_retained_floor_active(
+             const sal::alloc_header*          src,
+             sal::alloc_header*                compact_dst,
+             const sal::allocator_session_ptr& session) const noexcept
+         {
+            const auto* value = static_cast<const value_node*>(src);
+            const auto* snap  = context().dead_versions.load_snapshot();
+            if (!snap || snap->oldest_retained_floor() == 0)
+               return false;
+            if (!can_prune_retained_floor(*value, snap->oldest_retained_floor()))
+               return false;
+
+            value_node::prune_floor_policy prune{snap->oldest_retained_floor()};
+            std::vector<sal::ptr_address> pending_storage;
+            try
+            {
+               pending_storage.reserve(1024);
+            }
+            catch (...)
+            {
+               return false;
+            }
+            sal::pending_release_list pending(pending_storage);
+            if (!value->collect_pruned_references(prune, pending))
+               return false;
+            new (compact_dst)
+                value_node(compact_dst->size(), compact_dst->address_seq(), value, prune);
+            release_pending_refs(session, pending);
+            return true;
+         }
+
+         bool try_prune_retained_floor_passive(
+             const sal::alloc_header*   src,
+             sal::alloc_header*         compact_dst,
+             sal::pending_release_list& pending_releases) const noexcept
+         {
+            const auto* value = static_cast<const value_node*>(src);
+            const auto* snap  = context().dead_versions.load_snapshot();
+            if (!snap || snap->oldest_retained_floor() == 0)
+               return false;
+            if (!can_prune_retained_floor(*value, snap->oldest_retained_floor()))
+               return false;
+
+            value_node::prune_floor_policy prune{snap->oldest_retained_floor()};
+            if (!value->collect_pruned_references(prune, pending_releases))
+               return false;
+            new (compact_dst)
+                value_node(compact_dst->size(), compact_dst->address_seq(), value, prune);
+            return true;
+         }
+
+         static void release_pending_refs(
+             const sal::allocator_session_ptr& session,
+             const sal::pending_release_list&  pending) noexcept
+         {
+            for (auto adr : pending)
+               session->release(adr);
+         }
+
+         static bool can_prune_retained_floor(const value_node& value,
+                                              uint64_t floor) noexcept
+         {
+            if (value.is_flat() || value.num_next() != 0 || value.num_versions() == 0)
+               return false;
+
+            const uint64_t base           = value.get_entry_version(0);
+            const uint64_t floor_token    = version_token(floor, value_version_bits);
+            const uint64_t floor_distance = version_distance(base, floor_token,
+                                                             value_version_bits);
+            const uint64_t half_range     = version_mask(value_version_bits) >> 1;
+            if (floor_distance > half_range)
+               return false;
+
+            uint8_t floor_idx = 0xFF;
+            for (uint8_t i = 0; i < value.num_versions(); ++i)
+            {
+               uint64_t entry_distance =
+                   version_distance(base, value.get_entry_version(i), value_version_bits);
+               if (entry_distance <= floor_distance)
+                  floor_idx = i;
+               else
+                  break;
+            }
+
+            if (floor_idx == 0xFF)
+               return false;
+            return floor_idx != 0 || value.get_entry_version(floor_idx) != floor_token;
+         }
+      };
+
+      struct psitri_object_registry
+      {
+         explicit psitri_object_registry(live_range_map& dead)
+             : context{dead},
+               leaf(context),
+               inner(context),
+               inner_prefix(context),
+               value(context)
+         {
+         }
+
+         void install(sal::allocator& alloc) noexcept
+         {
+            alloc.register_type_ops<leaf_node>(leaf);
+            alloc.register_type_ops<inner_node>(inner);
+            alloc.register_type_ops<inner_prefix_node>(inner_prefix);
+            alloc.register_type_ops<value_node>(value);
+         }
+
+         psitri_object_context               context;
+         psitri_node_ops<leaf_node>          leaf;
+         psitri_node_ops<inner_node>         inner;
+         psitri_node_ops<inner_prefix_node> inner_prefix;
+         psitri_value_node_ops               value;
+      };
 
       /// Walk the tree from all top-level roots and populate a verify_result.
       /// Non-template so it can live in a .cpp file and keep the tree-walk
@@ -270,8 +434,8 @@ namespace psitri
       /// larger values allow more MVCC fast-path writes before cleanup.
       void set_epoch_interval(uint64_t interval);
 
-      /// Current epoch number.
-      uint64_t current_epoch() const;
+      /// Current epoch base in logical version space.
+      uint64_t current_epoch_base() const;
 
       ///@}
 
@@ -392,10 +556,11 @@ namespace psitri
       void           init_allocator_shared_ownership();
       void           recover_global_version_from_roots();
       std::once_flag _alloc_shared_init;
+      live_range_map _dead_versions;
+      detail::psitri_object_registry _object_registry;
       sal::allocator _allocator;
       sal::mapping            _dbfile;
       detail::database_state* _dbm;
-      live_range_map          _dead_versions;
    };
 
    /// Default-policy alias preserved for existing consumers.

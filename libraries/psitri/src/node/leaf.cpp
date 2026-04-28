@@ -11,9 +11,20 @@
 #define PSITRI_LEAF_ALIGNMENT_PUSH 1
 #endif
 
-
 namespace psitri
 {
+   namespace
+   {
+      value_type source_value_for_leaf_copy(const leaf_node&                  src,
+                                            branch_number                     bn,
+                                            const op::leaf_value_rewrite* rewrite)
+      {
+         if (rewrite && rewrite->value)
+            return rewrite->value(rewrite->ctx, src, bn);
+         return src.get_value(bn);
+      }
+   }  // namespace
+
    /**
     * simulate lower_bound and track how often each position is accessed
     */
@@ -61,6 +72,24 @@ namespace psitri
 
    static const auto search_seq_table = create_table();
 
+   void leaf_node::set_branch_version(branch_number bn, uint64_t version) noexcept
+   {
+      if (version == 0)
+         return;
+      auto idx = add_version(version);
+      set_ver_index(bn, idx);
+      assert(free_space() >= 0);
+   }
+
+   void leaf_node::copy_branch_version_from(const leaf_node& src,
+                                            branch_number    src_bn,
+                                            branch_number    dst_bn) noexcept
+   {
+      if (src.get_ver_index(src_bn) == 0xFF)
+         return;
+      set_branch_version(dst_bn, src.get_version(src_bn));
+   }
+
    leaf_node::leaf_node(size_t            alloc_size,
                         ptr_address_seq   seq,
                         key_view          key,
@@ -82,9 +111,9 @@ namespace psitri
       // will rebuild via clone_from to eliminate dead space, then compaction can shrink.
       if (_dead_space > 0)
          return size();
-      uint32_t head_size  = meta_end() - (const char*)this;
-      uint32_t result     = ucc::round_up_multiple<64>(head_size) +
-                            ucc::round_up_multiple<64>(_alloc_pos);
+      uint32_t head_size = meta_end() - (const char*)this;
+      uint32_t result =
+          ucc::round_up_multiple<64>(head_size) + ucc::round_up_multiple<64>(_alloc_pos);
       // Floor: at least one cacheline for a valid node
       result = std::max<uint32_t>(result, 64u);
       return std::min<uint32_t>(result, size());
@@ -111,9 +140,7 @@ namespace psitri
 
       // Copy alloc area (grows backward from tail)
       auto* dst = reinterpret_cast<leaf_node*>(compact_dst);
-      memcpy((char*)dst->tail() - _alloc_pos,
-             (const char*)tail() - _alloc_pos,
-             _alloc_pos);
+      memcpy((char*)dst->tail() - _alloc_pos, (const char*)tail() - _alloc_pos, _alloc_pos);
    }
 
    void leaf_node::clone_from(const leaf_node* clone)
@@ -174,6 +201,8 @@ namespace psitri
                else
                   vos[x] = value_branch();
             }
+            for (uint16_t x = 0; x < nb; ++x)
+               copy_branch_version_from(*clone, branch_number(x), branch_number(x));
             assert(is_optimal_layout());
             return;
          }
@@ -191,7 +220,7 @@ namespace psitri
       // that has an optimal layout, otherwise we could end up copying data that is not
       // aligned to the cacheline size.
       // Copy everything from _key_hashs through meta_end (includes clines + ver_indices + version_table)
-      auto head_size  = clone->meta_end() - (const char*)clone->_key_hashs;
+      auto head_size = clone->meta_end() - (const char*)clone->_key_hashs;
 
       memcpy(_key_hashs, clone->_key_hashs, head_size);
 
@@ -223,6 +252,62 @@ namespace psitri
          _optimal_layout(true)
    {
       _num_versions = 0;
+      if (clone->num_versions() || ins.created_at || ins.rewrite)
+      {
+         PSITRI_ASSERT_INVARIANTS(clone->validate_invariants());
+         const uint16_t src_nb = clone->num_branches();
+         const uint16_t dst_nb = src_nb + 1;
+         const uint16_t ins_bn = *ins.lb;
+         set_num_branches(dst_nb);
+
+         const uint8_t* seq_table = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
+         auto           kos       = keys_offsets();
+         auto           kh        = key_hashs();
+         for (uint16_t x = dst_nb; x-- > 0;)
+         {
+            auto     dst_idx = seq_table[x];
+            key_view dst_key = (dst_idx == ins_bn)
+                                   ? ins.key
+                                   : clone->get_key(branch_number(dst_idx - (dst_idx > ins_bn)));
+            kos[dst_idx]     = alloc_key(dst_key);
+            kh[dst_idx]      = calc_key_hash(dst_key);
+         }
+
+         auto vos = value_offsets();
+         for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+         {
+            value_type val =
+                (dst_idx == ins_bn)
+                    ? ins.value
+                    : source_value_for_leaf_copy(
+                          *clone, branch_number(dst_idx - (dst_idx > ins_bn)), ins.rewrite);
+            if (val.is_view())
+            {
+               if (val.view().empty())
+                  vos[dst_idx] = value_branch();
+               else
+                  vos[dst_idx] = alloc_value(val.view());
+            }
+            else if (val.is_subtree())
+               vos[dst_idx] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+            else if (val.is_value_node())
+               vos[dst_idx] = add_address_ptr(value_type_flag::value_node, val.value_address());
+            else
+               vos[dst_idx] = value_branch();
+         }
+
+         for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+         {
+            if (dst_idx == ins_bn)
+               set_branch_version(branch_number(dst_idx), ins.created_at);
+            else
+               copy_branch_version_from(*clone, branch_number(dst_idx - (dst_idx > ins_bn)),
+                                        branch_number(dst_idx));
+         }
+         assert(is_optimal_layout());
+         PSITRI_ASSERT_INVARIANTS(validate_invariants());
+         return;
+      }
       clone_from(clone);
       apply(ins);
    }
@@ -249,15 +334,17 @@ namespace psitri
       auto           kos       = keys_offsets();
       for (uint16_t x = nb; x-- > 0;)
       {
-         auto idx  = seq_table[x];
-         kos[idx]  = alloc_key(clone->get_key(branch_number(idx)));
+         auto idx = seq_table[x];
+         kos[idx] = alloc_key(clone->get_key(branch_number(idx)));
       }
 
-      auto vos       = value_offsets();
+      auto vos = value_offsets();
       for (uint16_t x = 0; x < nb; ++x)
       {
          // Substitute the new value at the updated branch
-         value_type val = (x == *upd.lb) ? upd.value : clone->get_value(branch_number(x));
+         value_type val = (x == *upd.lb)
+                              ? upd.value
+                              : source_value_for_leaf_copy(*clone, branch_number(x), upd.rewrite);
          if (val.is_view())
          {
             if (val.view().empty())
@@ -272,6 +359,8 @@ namespace psitri
          else
             vos[x] = value_branch();
       }
+      for (uint16_t x = 0; x < nb; ++x)
+         copy_branch_version_from(*clone, branch_number(x), branch_number(x));
       assert(is_optimal_layout());
       PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
@@ -284,6 +373,51 @@ namespace psitri
          _optimal_layout(true)
    {
       _num_versions = 0;
+      if (rm.src.num_versions() || rm.rewrite)
+      {
+         const leaf_node& src    = rm.src;
+         const uint16_t   src_nb = src.num_branches();
+         const uint16_t   dst_nb = src_nb - 1;
+         set_num_branches(dst_nb);
+         if (dst_nb == 0)
+            return;
+
+         const uint8_t* seq_table = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
+         auto           kos       = keys_offsets();
+         auto           kh        = key_hashs();
+         for (uint16_t x = dst_nb; x-- > 0;)
+         {
+            auto     dst_idx = seq_table[x];
+            auto     src_idx = dst_idx + (dst_idx >= *rm.bn);
+            key_view key     = src.get_key(branch_number(src_idx));
+            kos[dst_idx]     = alloc_key(key);
+            kh[dst_idx]      = calc_key_hash(key);
+         }
+
+         auto vos = value_offsets();
+         for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+         {
+            auto       src_idx = dst_idx + (dst_idx >= *rm.bn);
+            value_type val =
+                source_value_for_leaf_copy(src, branch_number(src_idx), rm.rewrite);
+            if (val.is_view())
+            {
+               if (val.view().empty())
+                  vos[dst_idx] = value_branch();
+               else
+                  vos[dst_idx] = alloc_value(val.view());
+            }
+            else if (val.is_subtree())
+               vos[dst_idx] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+            else if (val.is_value_node())
+               vos[dst_idx] = add_address_ptr(value_type_flag::value_node, val.value_address());
+            else
+               vos[dst_idx] = value_branch();
+            copy_branch_version_from(src, branch_number(src_idx), branch_number(dst_idx));
+         }
+         PSITRI_ASSERT_INVARIANTS(validate_invariants());
+         return;
+      }
       /// TODO: could be more effecient by copying node values in order and just skipping the
       /// removed branch, it would leave the leaf in a better layout without dead space
       /// but putting this work onto the compactor might make more sense.
@@ -299,6 +433,52 @@ namespace psitri
          _optimal_layout(true)
    {
       _num_versions = 0;
+      if (rm.src.num_versions() || rm.rewrite)
+      {
+         const leaf_node& src    = rm.src;
+         const uint16_t   dst_nb = src.num_branches() - (*rm.hi - *rm.lo);
+         set_num_branches(dst_nb);
+         if (dst_nb == 0)
+            return;
+
+         const uint8_t* seq_table     = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
+         auto           kos           = keys_offsets();
+         auto           kh            = key_hashs();
+         auto           src_index_for = [&](uint16_t dst_idx)
+         { return uint16_t(dst_idx + (dst_idx >= *rm.lo) * (*rm.hi - *rm.lo)); };
+         for (uint16_t x = dst_nb; x-- > 0;)
+         {
+            auto     dst_idx = seq_table[x];
+            auto     src_idx = src_index_for(dst_idx);
+            key_view key     = src.get_key(branch_number(src_idx));
+            kos[dst_idx]     = alloc_key(key);
+            kh[dst_idx]      = calc_key_hash(key);
+         }
+
+         auto vos = value_offsets();
+         for (uint16_t dst_idx = 0; dst_idx < dst_nb; ++dst_idx)
+         {
+            auto       src_idx = src_index_for(dst_idx);
+            value_type val =
+                source_value_for_leaf_copy(src, branch_number(src_idx), rm.rewrite);
+            if (val.is_view())
+            {
+               if (val.view().empty())
+                  vos[dst_idx] = value_branch();
+               else
+                  vos[dst_idx] = alloc_value(val.view());
+            }
+            else if (val.is_subtree())
+               vos[dst_idx] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+            else if (val.is_value_node())
+               vos[dst_idx] = add_address_ptr(value_type_flag::value_node, val.value_address());
+            else
+               vos[dst_idx] = value_branch();
+            copy_branch_version_from(src, branch_number(src_idx), branch_number(dst_idx));
+         }
+         PSITRI_ASSERT_INVARIANTS(validate_invariants());
+         return;
+      }
       // Clone the source then remove the range in-place.
       // This is simple and correct; the compactor can optimize layout later.
       clone_from(&rm.src);
@@ -312,7 +492,7 @@ namespace psitri
          _cline_cap(0),
          _optimal_layout(true)
    {
-      _num_versions = 0;
+      _num_versions        = 0;
       const leaf_node& src = pp.src;
       const uint16_t   nb  = src.num_branches();
       set_num_branches(nb);
@@ -332,8 +512,8 @@ namespace psitri
       // Allocate keys in optimal layout order (reverse for allocation)
       for (uint16_t x = nb; x-- > 0;)
       {
-         auto idx       = aseq[x];
-         auto orig_key  = src.get_key(branch_number(idx));
+         auto idx      = aseq[x];
+         auto orig_key = src.get_key(branch_number(idx));
          memcpy(key_buf + pp.prefix.size(), orig_key.data(), orig_key.size());
          key_view new_key(key_buf, pp.prefix.size() + orig_key.size());
          kos[idx] = alloc_key(new_key);
@@ -344,7 +524,7 @@ namespace psitri
       auto vos = value_offsets();
       for (uint16_t x = 0; x < nb; ++x)
       {
-         value_type val = src.get_value(branch_number(x));
+         value_type val = source_value_for_leaf_copy(src, branch_number(x), pp.rewrite);
          if (val.is_view())
          {
             if (val.view().empty())
@@ -359,6 +539,8 @@ namespace psitri
          else
             vos[x] = value_branch();
       }
+      for (uint16_t x = 0; x < nb; ++x)
+         copy_branch_version_from(src, branch_number(x), branch_number(x));
       PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
    /*
@@ -382,6 +564,21 @@ namespace psitri
    {
       clone_from(clone);
    }
+
+   leaf_node::leaf_node(size_t           alloc_size,
+                        ptr_address_seq  seq,
+                        const leaf_node* clone,
+                        const op::leaf_value_rewrite* rewrite)
+       : leaf_node(alloc_size,
+                   seq,
+                   clone,
+                   key_view(),
+                   branch_zero,
+                   branch_number(clone->num_branches()),
+                   rewrite)
+   {
+   }
+
    /**
     *  Construct an optimized node by cloning the existing node and truncating keys
     *  by the common prefix and only including keys in the range [start, end).
@@ -391,7 +588,8 @@ namespace psitri
                         const leaf_node* clone,
                         key_view         cprefix,
                         branch_number    start,
-                        branch_number    end)
+                        branch_number    end,
+                        const op::leaf_value_rewrite* rewrite)
        : node(alloc_size, node_type::leaf, seq)
    {
       _alloc_pos      = 0;
@@ -416,7 +614,6 @@ namespace psitri
          kh[idx]  = calc_key_hash(key);
       }
 
-
       auto vos       = value_offsets();
       auto clone_vos = clone->value_offsets();
 
@@ -424,7 +621,7 @@ namespace psitri
       // this has to be forward order so that address_ptrs() are added in order
       for (uint16_t x = *start; x < *end; ++x)
       {
-         value_type val = clone->get_value(branch_number(x));
+         value_type val = source_value_for_leaf_copy(*clone, branch_number(x), rewrite);
          if (val.is_view())
          {
             if (val.view().empty())
@@ -439,6 +636,8 @@ namespace psitri
          else
             vos[x - *start] = value_branch();
       }
+      for (uint16_t x = *start; x < *end; ++x)
+         copy_branch_version_from(*clone, branch_number(x), branch_number(x - *start));
       PSITRI_ASSERT_INVARIANTS(validate_invariants());
    }
 
@@ -489,14 +688,17 @@ namespace psitri
       ++_idx;
    }
 
-   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq,
-                        const op::leaf_from_visitor& vis)
+   leaf_node::leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_from_visitor& vis)
        : node(alloc_size, node_type::leaf, seq),
-         _alloc_pos(0), _dead_space(0), _cline_cap(0), _optimal_layout(true)
+         _alloc_pos(0),
+         _dead_space(0),
+         _cline_cap(0),
+         _optimal_layout(true)
    {
       _num_versions = 0;
       set_num_branches(vis.count);
-      if (vis.count == 0) return;
+      if (vis.count == 0)
+         return;
 
       entry_inserter ins(*this);
       vis.init(ins, vis.ctx);
@@ -522,10 +724,21 @@ namespace psitri
       /// the calculating whether address() is on an existing cline requires
       /// scanning all clines to see if we can re-use one or have to add a new one.
       size_required += 4 * ins.value.is_address();
+      if (_num_versions || ins.created_at)
+      {
+         size_required += 1;  // one ver_indices entry for the inserted branch
+         if (_num_versions == 0)
+            size_required += num_branches();
+         bool existing_version = false;
+         for (uint8_t i = 0; i < _num_versions; ++i)
+            existing_version |= version_table()[i].get() == ins.created_at;
+         if (ins.created_at && !existing_version)
+            size_required += sizeof(version48);
+      }
       int leftover = free_space() - size_required;
       // SAL_WARN("size_required: {}  free_space: {}  leftover: {}", size_required, free_space(),
       //          leftover);
-      if (leftover >= 0)
+      if (leftover >= 0 && _num_versions == 0 && ins.created_at == 0)
          return can_apply_mode::modify;
       if (leftover + int(dead_space()) + (int(leaf_node::cow_size()) - int(size())) >= 0)
       {
@@ -546,7 +759,7 @@ namespace psitri
       //  - cline growth: if the new value is address-typed and doesn't match an existing cline
       int extra = 0;
 
-      value_branch old_vb   = value_offsets()[*upd.lb];
+      value_branch old_vb     = value_offsets()[*upd.lb];
       bool         old_inline = old_vb.is_inline();
       size_t       old_size   = old_inline ? get_value_ptr(old_vb.offset())->get().size() : 0;
 
@@ -586,6 +799,8 @@ namespace psitri
    {
       auto init_free_space = free_space();
       assert(can_apply(ins) == can_apply_mode::modify);
+      assert(_num_versions == 0);
+      assert(ins.created_at == 0);
       assert(!ins.value.is_remove());
       assert(ins.lb == lower_bound(ins.key));
       assert(ins.lb == num_branches() or get_key(ins.lb) != ins.key);
@@ -594,7 +809,8 @@ namespace psitri
       uint32_t bn       = *ins.lb;
 
       {
-         constexpr const int move_size = sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
+         constexpr const int move_size =
+             sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
 
          char*  vo_tail          = (char*)(value_offsets() + bn);
          size_t vo_tail_size     = tail_len * sizeof(value_branch);
@@ -725,7 +941,7 @@ namespace psitri
       // 1. Free space accounting and cline cleanup for removed branches
       for (uint16_t i = *lo; i < *hi; ++i)
       {
-         key_offset   ko = keys_offsets()[i];
+         key_offset ko = keys_offsets()[i];
          _dead_space += sizeof(key) + get_key_ptr(ko)->get().size();
 
          value_branch vb = value_offsets()[i];
@@ -750,7 +966,7 @@ namespace psitri
             {
                // Access via raw pointer to avoid span bounds issues: _cline_cap must not
                // be shrunk mid-loop because a later branch may share the same cline index.
-               auto* cl_ptr = reinterpret_cast<ptr_address*>(value_offsets() + num_branches());
+               auto* cl_ptr    = reinterpret_cast<ptr_address*>(value_offsets() + num_branches());
                cl_ptr[*cl_off] = sal::null_ptr_address;
             }
          }
@@ -769,11 +985,11 @@ namespace psitri
       uint16_t nb   = num_branches();
 
       // Pointers for the range being removed
-      auto khash_hi  = meta.khash + *hi;
-      auto koff_lo   = meta.koffs + *lo * sizeof(key_offset);
-      auto koff_hi   = meta.koffs + *hi * sizeof(key_offset);
-      auto voff_lo   = meta.voffs + *lo * sizeof(value_branch);
-      auto voff_hi   = meta.voffs + *hi * sizeof(value_branch);
+      auto khash_hi   = meta.khash + *hi;
+      auto koff_lo    = meta.koffs + *lo * sizeof(key_offset);
+      auto koff_hi    = meta.koffs + *hi * sizeof(key_offset);
+      auto voff_lo    = meta.voffs + *lo * sizeof(value_branch);
+      auto voff_hi    = meta.voffs + *hi * sizeof(value_branch);
       auto clines_end = meta.clines_end;
 
       // khash: shift [hi..nb) back by count bytes
@@ -1008,7 +1224,8 @@ namespace psitri
       // 1. Layout sanity: clines must not overlap with alloc area
       if (free_space() < 0)
       {
-         SAL_ERROR("leaf validate: free_space {} < 0  cline_cap:{} nb:{}", free_space(), _cline_cap, nb);
+         SAL_ERROR("leaf validate: free_space {} < 0  cline_cap:{} nb:{}", free_space(), _cline_cap,
+                   nb);
          return false;
       }
 

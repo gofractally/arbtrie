@@ -140,6 +140,7 @@ TEST_CASE("live_range_map: snapshot publish and query", "[live_range_map]")
    CHECK(snap->is_dead(6));
    CHECK(snap->is_dead(10));
    CHECK_FALSE(snap->is_dead(7));
+   CHECK(snap->oldest_retained_floor() == 0);
 
    // Add more dead versions and publish again
    map.add_dead_version(7);
@@ -153,6 +154,38 @@ TEST_CASE("live_range_map: snapshot publish and query", "[live_range_map]")
    CHECK(snap2->is_dead(5));
    CHECK(snap2->is_dead(9));
    CHECK(snap2->is_dead(10));
+   CHECK(snap2->oldest_retained_floor() == 0);
+}
+
+TEST_CASE("live_range_map: retained floor follows contiguous dead prefix",
+          "[live_range_map][floor]")
+{
+   live_range_map map;
+
+   CHECK(map.oldest_retained_floor() == 0);
+
+   map.add_dead_version(1);
+   map.add_dead_version(2);
+   map.flush_pending();
+   CHECK(map.oldest_retained_floor() == 0);
+
+   map.add_dead_version(0);
+   map.flush_pending();
+   CHECK(map.oldest_retained_floor() == 3);
+
+   map.add_dead_version(4);
+   map.flush_pending();
+   CHECK(map.oldest_retained_floor() == 3);
+
+   map.add_dead_version(3);
+   map.publish_snapshot();
+
+   auto* snap = map.load_snapshot();
+   REQUIRE(snap != nullptr);
+   CHECK(snap->oldest_retained_floor() == 5);
+   CHECK(snap->is_dead(0));
+   CHECK(snap->is_dead(4));
+   CHECK_FALSE(snap->is_dead(5));
 }
 
 TEST_CASE("live_range_map: empty map queries", "[live_range_map]")
