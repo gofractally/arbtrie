@@ -156,9 +156,13 @@ namespace sal
          // fully read-only via the fall-through path, the bytes past the
          // 64-byte terminal sync_header are unallocated tail — reclaimable
          // by the compactor, and must be recorded once.
-         if (was_partial_finalized and seg->is_read_only())
+         constexpr uint32_t terminal_size = 64;
+         const bool wrote_fall_through_terminal =
+             was_partial_finalized and seg->is_read_only() and bytes_synced > 0 and
+             seg->get_alloc_pos() == pos_before + terminal_size and
+             seg->get_last_aheader()->size() == terminal_size;
+         if (wrote_fall_through_terminal)
          {
-            constexpr uint32_t terminal_size = 64;
             constexpr uint32_t footer        = mapped_memory::segment_footer_size;
             const uint32_t     tail_start    = pos_before + terminal_size;
             if (tail_start + footer < segment_size)
