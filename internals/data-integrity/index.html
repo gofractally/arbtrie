@@ -1,0 +1,3102 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A persistent, transactional key-value store built on an adaptive radix trie. 3x faster than RocksDB. ~9x less write amplification than page-based COW.">
+      
+      
+      
+        <link rel="canonical" href="https://gofractally.github.io/arbtrie/internals/data-integrity/">
+      
+      
+        <link rel="prev" href="../write-protection/">
+      
+      
+        <link rel="next" href="../recovery/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Data Integrity & Verification - PsiTri</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#data-integrity-verification" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="PsiTri" class="md-header__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            PsiTri
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Data Integrity & Verification
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../why-psitri/problem/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Why PsiTri
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quickstart/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../../architecture/overview/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  How It Works
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../benchmarks/bank/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Benchmarks
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="PsiTri" class="md-nav__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    PsiTri
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why PsiTri
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Why PsiTri
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/problem/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Problem
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/tradeoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tradeoffs & Limitations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/transaction-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transaction Contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/rocksdb-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RocksDB Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/mdbx-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MDBX Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/sqlite-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How It Works
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    How It Works
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/dwal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DWAL: ART-Buffered Write Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/control-blocks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Blocks & Addressing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/mvcc-version-maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MVCC Version Maintenance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/sal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segment Allocator (SAL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/branchless-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Branchless Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/smart-pointers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smart Pointers & Thread Safety
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/concurrent-writers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrent Writers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Caching, Compaction & Beyond-RAM Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../write-protection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Write Protection & Durability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Integrity & Verification
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Integrity & Verification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#zero-performance-cost-zero-wasted-space" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Zero Performance Cost, Zero Wasted Space
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-five-checksum-levels" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Five Checksum Levels
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The Five Checksum Levels">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#level-1-segment-sync-checksums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 1: Segment Sync Checksums
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-2-object-checksums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 2: Object Checksums
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-3-key-hashes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 3: Key Hashes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-4-value-checksums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 4: Value Checksums
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-5-tree-structure-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 5: Tree Structure Verification
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verification-algorithm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verification Algorithm
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Verification Algorithm">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#comparison-with-other-databases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Comparison with Other Databases
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Comparison with Other Databases">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-databases-protect-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Databases Protect Data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rocksdb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RocksDB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mdbx-and-lmdb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MDBX (and LMDB)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tidesdb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TidesDB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#broader-industry-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Broader Industry Comparison
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Broader Industry Comparison">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sqlite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQLite
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#postgresql" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PostgreSQL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#boltdb-bbolt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BoltDB / bbolt
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#zfs-btrfs-filesystem-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ZFS / Btrfs (Filesystem Level)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#summary-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary Comparison
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-five-levels-matter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why Five Levels Matter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Why Five Levels Matter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-end-to-end-argument" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The End-to-End Argument
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#physical-vs-logical-corruption" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Physical vs. Logical Corruption
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#real-world-incidents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Real-World Incidents
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#industry-trend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Industry Trend
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-modes-by-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure Modes by Level
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#copy-on-write-as-implicit-redundancy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Copy-on-Write as Implicit Redundancy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#repair-strategies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Repair Strategies
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Benchmarks
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/bank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bank Transaction Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/random-upsert/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Random Upsert (200M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/scale/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scale Benchmark (419M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/rocksdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: RocksDB API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/sqlite-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: SQLite API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/duckdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: DuckDB Storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/coverage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code Coverage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/x86_simd/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x86 SIMD Optimizations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../known-issues/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Known Issues
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#zero-performance-cost-zero-wasted-space" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Zero Performance Cost, Zero Wasted Space
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-five-checksum-levels" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Five Checksum Levels
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The Five Checksum Levels">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#level-1-segment-sync-checksums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 1: Segment Sync Checksums
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-2-object-checksums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 2: Object Checksums
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-3-key-hashes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 3: Key Hashes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-4-value-checksums" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 4: Value Checksums
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#level-5-tree-structure-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Level 5: Tree Structure Verification
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verification-algorithm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verification Algorithm
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Verification Algorithm">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#comparison-with-other-databases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Comparison with Other Databases
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Comparison with Other Databases">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-databases-protect-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Databases Protect Data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rocksdb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RocksDB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mdbx-and-lmdb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MDBX (and LMDB)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tidesdb" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TidesDB
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#broader-industry-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Broader Industry Comparison
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Broader Industry Comparison">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sqlite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SQLite
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#postgresql" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PostgreSQL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#boltdb-bbolt" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BoltDB / bbolt
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#zfs-btrfs-filesystem-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ZFS / Btrfs (Filesystem Level)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#summary-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary Comparison
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-five-levels-matter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why Five Levels Matter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Why Five Levels Matter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-end-to-end-argument" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The End-to-End Argument
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#physical-vs-logical-corruption" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Physical vs. Logical Corruption
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#real-world-incidents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Real-World Incidents
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#industry-trend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Industry Trend
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-modes-by-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure Modes by Level
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#copy-on-write-as-implicit-redundancy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Copy-on-Write as Implicit Redundancy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#repair-strategies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Repair Strategies
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="data-integrity-verification">Data Integrity &amp; Verification<a class="headerlink" href="#data-integrity-verification" title="Permanent link">&para;</a></h1>
+<p>PsiTri implements five independent checksum levels that protect data from the segment layer up through individual key-value pairs. Together they detect corruption at any granularity -- from a single flipped bit in a value to a torn segment write -- and pinpoint exactly which keys are affected.</p>
+<p>Most databases offer one or two integrity mechanisms. PsiTri's layered approach means that a failure at one level doesn't prevent verification at others: a corrupt inner node still has individually checksummed children, and a failed segment sync checksum doesn't invalidate the object-level checksums within it.</p>
+<h2 id="zero-performance-cost-zero-wasted-space">Zero Performance Cost, Zero Wasted Space<a class="headerlink" href="#zero-performance-cost-zero-wasted-space" title="Permanent link">&para;</a></h2>
+<p>A natural concern with five checksum levels is overhead. In PsiTri, the cost is effectively zero:</p>
+<ul>
+<li><strong>Key hashes (1 byte each) are not overhead -- they accelerate lookups.</strong> The hash array is the first thing consulted during a leaf search. It filters non-matching keys before any full key comparison, turning an O(n) scan into a hash-first probe. The integrity check is a free side effect of a performance optimization.</li>
+<li><strong>Value checksums (1 byte each) fit in existing padding.</strong> The <code>value_data</code> header is 2 bytes (checksum + size), and these bytes would otherwise be alignment padding or wasted in the variable-length layout.</li>
+<li><strong>Object checksums (2 bytes) are computed once on allocation.</strong> Copy-on-write means every mutation creates a new object -- the checksum is computed at creation time and never recomputed. There is no "update in place" path where the checksum must be recalculated.</li>
+<li><strong>Segment sync checksums are computed during sync</strong> -- an operation that is already dominated by the <code>msync</code>/<code>fsync</code> call. The XXH3 hash over the committed byte range is negligible compared to the I/O wait.</li>
+</ul>
+<p>Traditional databases face a harder tradeoff: page checksums must be recomputed on every page write, and verifying them on every page read adds measurable overhead (PostgreSQL's <code>data_checksums</code> is a non-trivial cost). PsiTri's copy-on-write model eliminates this tension entirely -- checksums are write-once and read-only.</p>
+<h2 id="the-five-checksum-levels">The Five Checksum Levels<a class="headerlink" href="#the-five-checksum-levels" title="Permanent link">&para;</a></h2>
+<h3 id="level-1-segment-sync-checksums">Level 1: Segment Sync Checksums<a class="headerlink" href="#level-1-segment-sync-checksums" title="Permanent link">&para;</a></h3>
+<p><strong>Scope:</strong> Byte range between two sync points within a segment.</p>
+<p>Every time a session syncs, a <code>sync_header</code> is appended to the segment. It records the byte range since the previous sync header and stores an XXH3-64 checksum over that entire range. This creates a backward-linked chain of checksummed regions covering all data written to the segment.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Segment layout:
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>┌─────────────────┬──────────────┬─────────────────┬──────────────┬────────┐
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>│  objects A-D    │ sync_header₁ │  objects E-H    │ sync_header₂ │  ...   │
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>│                 │ cksum(A..D)  │                 │ cksum(E..H)  │        │
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>└─────────────────┴──────────────┴─────────────────┴──────────────┴────────┘
+</span></code></pre></div>
+<p>Sync checksums are configurable -- when <code>checksum_commits</code> is enabled, every sync computes <code>XXH3_64bits(data + start, end - start)</code>. When disabled, the checksum field is zero, and the verification pass reports these ranges as "not checksummed" rather than failed.</p>
+<p><strong>What it catches:</strong> Torn writes from power loss, filesystem corruption, partial page flushes, storage media errors that corrupt a range of bytes.</p>
+<p><strong>Granularity:</strong> Coarse -- a failure implicates all objects in the range, though individual object checksums (Level 2) can narrow it down.</p>
+<h3 id="level-2-object-checksums">Level 2: Object Checksums<a class="headerlink" href="#level-2-object-checksums" title="Permanent link">&para;</a></h3>
+<p><strong>Scope:</strong> Individual allocated object (node, value, or subtree).</p>
+<p>Every <code>alloc_header</code> has a 16-bit checksum field computed as <code>XXH3_64bits(data + &amp;_address, _size - sizeof(_checksum))</code> -- covering everything in the object except the checksum field itself. This is updated on every copy-on-write allocation.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>alloc_header layout (12 bytes):
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>┌──────────┬────────────────────────┬──────────────┐
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>│ checksum │ ptr_addr_seq (6 bytes) │ size | type  │
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>│ (2 bytes)│ sequence + address     │ (4 bytes)    │
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>└──────────┴────────────────────────┴──────────────┘
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>          ↑ checksum covers this range →→→→→→→→→→→ ... end of object
+</span></code></pre></div>
+<p>A checksum of zero means "not set" -- the verification pass counts these as unknown rather than failed, since some allocation paths may skip checksumming for performance.</p>
+<p><strong>What it catches:</strong> Any corruption of a single node's data -- flipped bits in branch pointers, corrupted key suffixes in leaves, damaged inner node dividers.</p>
+<p><strong>Granularity:</strong> Per-object. A failed checksum on an inner node makes all keys in that subtree suspect. A failed checksum on a leaf makes all keys in that leaf suspect.</p>
+<h3 id="level-3-key-hashes">Level 3: Key Hashes<a class="headerlink" href="#level-3-key-hashes" title="Permanent link">&para;</a></h3>
+<p><strong>Scope:</strong> Individual key within a leaf node.</p>
+<p>Every key stored in a leaf has a precomputed 1-byte XXH3 hash stored in the <code>key_hashs[]</code> array. These hashes serve double duty: they accelerate lookups (hash-first filtering before full key comparison) and detect per-key corruption.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kt">uint8_t</span><span class="w"> </span><span class="nf">calc_key_hash</span><span class="p">(</span><span class="n">key_view</span><span class="w"> </span><span class="n">key</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">noexcept</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">XXH3_64bits</span><span class="p">(</span><span class="n">key</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">key</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="p">}</span>
+</span></code></pre></div>
+<p><strong>What it catches:</strong> Corruption isolated to a single key's data within an otherwise intact leaf node. Bit rot in key storage that wouldn't be caught by the object checksum if the checksum itself is also corrupt.</p>
+<p><strong>Granularity:</strong> Per-key. The verification report identifies the exact key (hex-encoded) and its position within the leaf.</p>
+<h3 id="level-4-value-checksums">Level 4: Value Checksums<a class="headerlink" href="#level-4-value-checksums" title="Permanent link">&para;</a></h3>
+<p><strong>Scope:</strong> Individual inline value within a leaf node.</p>
+<p>Inline values (stored directly in the leaf rather than in a separate value_node) carry a 1-byte XXH3 checksum over the value's size and data:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kt">void</span><span class="w"> </span><span class="nf">set</span><span class="p">(</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">    </span><span class="n">_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">value</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">memcpy</span><span class="p">(</span><span class="n">_data</span><span class="p">,</span><span class="w"> </span><span class="n">value</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span><span class="w"> </span><span class="n">_size</span><span class="p">);</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="n">_checksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">XXH3_64bits</span><span class="p">((</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">_size</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">_size</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">_size</span><span class="p">);</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Values stored in separate <code>value_node</code> objects (large values, subtrees) are covered by the object checksum (Level 2) instead.</p>
+<p><strong>What it catches:</strong> Corruption of a specific value while the key and leaf structure remain intact.</p>
+<p><strong>Granularity:</strong> Per-value. Reports the exact key whose value is corrupt.</p>
+<h3 id="level-5-tree-structure-verification">Level 5: Tree Structure Verification<a class="headerlink" href="#level-5-tree-structure-verification" title="Permanent link">&para;</a></h3>
+<p><strong>Scope:</strong> Every child pointer in the entire tree.</p>
+<p>The verification walk resolves every branch pointer from root to leaf. A pointer that fails to resolve to a valid object is a <strong>dangling pointer</strong> -- evidence of a structural break in the tree.</p>
+<p>The walk also maintains a visited set to handle shared nodes in the DAG (PsiTri uses structural sharing via copy-on-write, so multiple paths may reference the same node). Each node is checksummed once on first visit.</p>
+<p><strong>What it catches:</strong> Dangling pointers from incomplete copy-on-write operations, orphaned subtrees, corruption in branch pointer encoding, cycles introduced by pointer corruption.</p>
+<p><strong>Granularity:</strong> Per-branch. Reports the key prefix leading to the dangling pointer and which root index it belongs to.</p>
+<h2 id="verification-algorithm">Verification Algorithm<a class="headerlink" href="#verification-algorithm" title="Permanent link">&para;</a></h2>
+<p>Verification runs in two passes:</p>
+<p><strong>Pass 1: Segment Scan.</strong> Walk every segment's sync_header chain. For each header with a non-zero checksum, recompute and compare. This is a sequential scan that doesn't require tree knowledge.</p>
+<p><strong>Pass 2: Tree Walk.</strong> Starting from all 512 root slots, recursively descend through every inner node, prefix node, and leaf. At each node:</p>
+<ol>
+<li>Resolve the address through the control block to get the physical location</li>
+<li>Check the visited set (skip shared nodes already verified)</li>
+<li>Verify the object checksum (Level 2)</li>
+<li>Dispatch by node type:<ul>
+<li><strong>Inner nodes</strong>: recurse into each branch, accumulating the key prefix</li>
+<li><strong>Leaves</strong>: verify each key hash (Level 3) and value checksum (Level 4); recurse into value_node/subtree addresses</li>
+<li><strong>Value nodes</strong>: recurse into subtree children if applicable</li>
+</ul>
+</li>
+</ol>
+<p>The accumulated key prefix at each level provides failure context -- when an inner node's checksum fails, the report identifies the affected key range (e.g., "all keys with prefix <code>0x3f7a...</code>") rather than just a raw address.</p>
+<h3 id="output">Output<a class="headerlink" href="#output" title="Permanent link">&para;</a></h3>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>$ psitri-tool verify /path/to/db
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>-- Segment Sync Checksums --
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>  Checked               42
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>  Passed                38
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>  Failed                 0
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>  Not checksummed        4
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>-- Object Checksums --
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>  Reachable objects  125,432
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>  Passed             120,100
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>  Failed                   0
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>  Not checksummed      5,332
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>-- Key Hashes --
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>  Keys checked        98,200
+</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a>  Passed              98,200
+</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>  Failed                   0
+</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a>
+</span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a>-- Value Checksums --
+</span><span id="__span-4-21"><a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a>  Values checked      98,200
+</span><span id="__span-4-22"><a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a>  Passed              98,200
+</span><span id="__span-4-23"><a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a>  Failed                   0
+</span><span id="__span-4-24"><a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a>
+</span><span id="__span-4-25"><a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a>-- Tree Structure --
+</span><span id="__span-4-26"><a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a>  Roots checked         1 / 512
+</span><span id="__span-4-27"><a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a>  Nodes visited     125,432
+</span><span id="__span-4-28"><a id="__codelineno-4-28" name="__codelineno-4-28" href="#__codelineno-4-28"></a>  Reachable size    560.2 MB
+</span><span id="__span-4-29"><a id="__codelineno-4-29" name="__codelineno-4-29" href="#__codelineno-4-29"></a>  Dangling pointers       0
+</span><span id="__span-4-30"><a id="__codelineno-4-30" name="__codelineno-4-30" href="#__codelineno-4-30"></a>
+</span><span id="__span-4-31"><a id="__codelineno-4-31" name="__codelineno-4-31" href="#__codelineno-4-31"></a>  Database integrity verified.
+</span></code></pre></div>
+<p>Each failure is reported with enough context for targeted repair: the address and location of the corrupt node, the key prefix or full key affected, the root index, and the failure type.</p>
+<h2 id="comparison-with-other-databases">Comparison with Other Databases<a class="headerlink" href="#comparison-with-other-databases" title="Permanent link">&para;</a></h2>
+<h3 id="how-databases-protect-data">How Databases Protect Data<a class="headerlink" href="#how-databases-protect-data" title="Permanent link">&para;</a></h3>
+<p>There are four fundamental strategies for data integrity, and every database uses some combination:</p>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Description</th>
+<th>Databases</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Page checksums</strong></td>
+<td>Checksum per fixed-size page (4-16 KB)</td>
+<td>PostgreSQL, SQLite, MDBX, LMDB</td>
+</tr>
+<tr>
+<td><strong>Block checksums</strong></td>
+<td>Checksum per variable-size block</td>
+<td>RocksDB (SST blocks), LevelDB</td>
+</tr>
+<tr>
+<td><strong>WAL checksums</strong></td>
+<td>Checksum per log record/batch</td>
+<td>PostgreSQL, SQLite, RocksDB, MySQL/InnoDB</td>
+</tr>
+<tr>
+<td><strong>Object checksums</strong></td>
+<td>Checksum per logical object</td>
+<td>PsiTri</td>
+</tr>
+</tbody>
+</table>
+<p>PsiTri is unique in combining object-level checksums with fine-grained per-key and per-value verification. Most databases stop at the page or block level.</p>
+<hr />
+<h3 id="rocksdb">RocksDB<a class="headerlink" href="#rocksdb" title="Permanent link">&para;</a></h3>
+<p>RocksDB is an LSM-tree that protects data at the block and file level.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>Granularity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>WAL</td>
+<td>CRC32 per log record</td>
+<td>Per batch</td>
+</tr>
+<tr>
+<td>SST data blocks</td>
+<td>CRC32 or XXH3 per block (4-64 KB)</td>
+<td>Per block</td>
+</tr>
+<tr>
+<td>SST metadata</td>
+<td>CRC32 on index/filter blocks</td>
+<td>Per block</td>
+</tr>
+<tr>
+<td>SST file</td>
+<td>Optional file checksum (XXH3 or CRC32c)</td>
+<td>Per file</td>
+</tr>
+<tr>
+<td>Manifest</td>
+<td>CRC32 per version edit record</td>
+<td>Per record</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Verification:</strong> <code>ldb checksmdump</code> / <code>ldb verify_checksum</code> walks SST blocks and verifies each block checksum. <code>BackupEngine::VerifyBackup()</code> verifies file-level checksums.</p>
+<p><strong>Key limitations:</strong></p>
+<ul>
+<li><strong>No per-key checksums.</strong> If a block checksum passes but a single key within that block has a bit flip, RocksDB cannot detect it. Block checksums cover 4-64 KB at a time -- corruption that spans exactly the right bytes to produce a valid CRC32 collision would be undetected.</li>
+<li><strong>No structural verification.</strong> RocksDB doesn't walk the LSM tree structure to verify that all referenced SST files exist and are readable. The manifest tracks file references, but there is no single command that verifies end-to-end reachability from the manifest through every key.</li>
+<li><strong>CRC32 weakness.</strong> Many RocksDB checksum paths still use CRC32 (32-bit), which has a collision probability of ~1 in 4 billion. PsiTri uses XXH3-64 for segment sync checksums (1 in ~18 quintillion collision probability). Object checksums store the lower 16 bits of an XXH3-64 hash (~1 in 65,536 collision probability) -- weaker than CRC32 per-object, but objects are additionally protected by per-key and per-value checksums. The 8-bit per-key/per-value hashes serve primarily as fast lookup filters with corruption detection as a secondary benefit.</li>
+<li><strong>Compaction can propagate corruption.</strong> If a corrupt block has a valid checksum (due to collision or the corruption happening after checksumming), compaction will read and rewrite the corrupt data into new SST files, preserving the corruption with a fresh valid checksum. PsiTri's copy-on-write model has the same theoretical risk, but the additional per-key and per-value checksums provide a second line of defense.</li>
+</ul>
+<hr />
+<h3 id="mdbx-and-lmdb">MDBX (and LMDB)<a class="headerlink" href="#mdbx-and-lmdb" title="Permanent link">&para;</a></h3>
+<p>MDBX is a B+tree with copy-on-write pages and single-writer / multi-reader concurrency. LMDB is its predecessor with a similar design.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>Granularity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pages</td>
+<td>None by default (MDBX); LMDB has no page checksums</td>
+<td>Per page (4 KB)</td>
+</tr>
+<tr>
+<td>Meta pages</td>
+<td>CRC32 on two meta pages</td>
+<td>Per database</td>
+</tr>
+<tr>
+<td>Geometry</td>
+<td>Double-buffered meta pages for atomic commit</td>
+<td>2 copies</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Verification:</strong> <code>mdbx_chk</code> walks the B+tree and verifies page structure (parent-child consistency, key ordering, free list consistency). MDBX added optional page checksums in recent versions (<code>MDBX_PAGECHECK</code>).</p>
+<p><strong>Key limitations:</strong></p>
+<ul>
+<li><strong>No checksums on data pages by default.</strong> MDBX historically relied on the filesystem and hardware for data integrity. The <code>MDBX_PAGECHECK</code> option adds page-level checksums but is not enabled by default and has a performance cost.</li>
+<li><strong>Page-level granularity only.</strong> Even with page checksums, a failure implicates the entire 4 KB page. There's no way to narrow corruption to a specific key or value within the page.</li>
+<li><strong>No value-level checksums.</strong> If a value is silently corrupted (bit rot) but the page checksum still passes -- or page checksums are disabled -- MDBX cannot detect it.</li>
+<li><strong>Single-writer means simpler corruption modes.</strong> MDBX's single-writer design eliminates many concurrent corruption scenarios, but it cannot detect silent storage corruption (bit rot) without page checksums enabled.</li>
+<li><strong>No segment/range-level checksums.</strong> MDBX doesn't have anything equivalent to PsiTri's sync checksums. The meta page CRC32 verifies the database root pointers, but there's no intermediate layer between "is the root valid" and "is this specific page valid."</li>
+</ul>
+<hr />
+<h3 id="tidesdb">TidesDB<a class="headerlink" href="#tidesdb" title="Permanent link">&para;</a></h3>
+<p>TidesDB is a newer LSM-tree engine designed for large-scale time-series and general key-value workloads.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Mechanism</th>
+<th>Granularity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SST files</td>
+<td>CRC32 per data block</td>
+<td>Per block</td>
+</tr>
+<tr>
+<td>WAL</td>
+<td>CRC32 per entry</td>
+<td>Per entry</td>
+</tr>
+<tr>
+<td>Bloom filters</td>
+<td>Per-SST Bloom filter</td>
+<td>Per file</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key limitations:</strong></p>
+<ul>
+<li><strong>Similar to RocksDB's model</strong> with block-level CRC32 checksums. No per-key or per-value verification.</li>
+<li><strong>Younger codebase</strong> with less battle-tested verification tooling compared to RocksDB or MDBX.</li>
+<li><strong>No offline structural verification</strong> equivalent to PsiTri's full tree walk or MDBX's <code>mdbx_chk</code>.</li>
+</ul>
+<hr />
+<h3 id="broader-industry-comparison">Broader Industry Comparison<a class="headerlink" href="#broader-industry-comparison" title="Permanent link">&para;</a></h3>
+<h4 id="sqlite">SQLite<a class="headerlink" href="#sqlite" title="Permanent link">&para;</a></h4>
+<p>SQLite offers optional per-page checksums via the <code>checksum</code> VFS shim and its <code>PRAGMA integrity_check</code>:</p>
+<ul>
+<li><strong><code>PRAGMA integrity_check</code></strong>: walks every table and index B-tree, verifying page structure, key ordering, and free list consistency. Does not verify data checksums -- it verifies structural invariants.</li>
+<li><strong>Checksum VFS</strong>: adds a CRC32 per page when enabled. Not on by default.</li>
+<li><strong>WAL checksums</strong>: CRC32 per WAL frame, verified on recovery.</li>
+</ul>
+<p>SQLite's <code>integrity_check</code> is analogous to PsiTri's Level 5 (tree structure verification) but lacks the per-key/per-value checksum layers.</p>
+<h4 id="postgresql">PostgreSQL<a class="headerlink" href="#postgresql" title="Permanent link">&para;</a></h4>
+<p>PostgreSQL has the most mature integrity infrastructure of any open-source relational database:</p>
+<ul>
+<li><strong><code>data_checksums</code></strong> (init option): CRC32 per 8 KB data page, verified on every page read. Must be enabled at cluster creation time.</li>
+<li><strong>WAL</strong>: CRC32 per WAL record.</li>
+<li><strong><code>pg_verify_checksums</code></strong> / <code>pg_checksums</code>: offline tool to verify all page checksums.</li>
+<li><strong><code>amcheck</code> extension</strong>: walks B-tree indexes verifying structural invariants (parent-child consistency, key ordering, sibling links).</li>
+</ul>
+<p>PostgreSQL's page checksums are verified on every read (not just during verification), which catches corruption early but adds overhead. PsiTri's object checksums can also be verified on read paths, but the dedicated <code>verify</code> command performs the exhaustive offline check.</p>
+<h4 id="boltdb-bbolt">BoltDB / bbolt<a class="headerlink" href="#boltdb-bbolt" title="Permanent link">&para;</a></h4>
+<p>BoltDB (used by etcd) is a B+tree with copy-on-write, similar in spirit to MDBX:</p>
+<ul>
+<li><strong>No page checksums.</strong> Relies entirely on the filesystem.</li>
+<li><strong><code>bbolt check</code></strong>: walks the B+tree verifying structural consistency (reachability, key ordering, page type correctness).</li>
+<li><strong><code>bbolt surgery</code></strong>: tools for inspecting and repairing damaged databases.</li>
+</ul>
+<p>BoltDB demonstrates the risk of relying on filesystem integrity alone -- etcd has experienced data corruption incidents that page checksums would have caught earlier.</p>
+<h4 id="zfs-btrfs-filesystem-level">ZFS / Btrfs (Filesystem Level)<a class="headerlink" href="#zfs-btrfs-filesystem-level" title="Permanent link">&para;</a></h4>
+<p>Copy-on-write filesystems provide their own integrity layer below the database:</p>
+<ul>
+<li><strong>Per-block checksums</strong> (SHA-256 or Fletcher-4 in ZFS) verified on every read.</li>
+<li><strong>Merkle tree</strong> structure: parent blocks checksum their children, creating a root-to-leaf verification chain.</li>
+<li><strong>Automatic scrubbing</strong>: background process that reads and re-verifies all data.</li>
+<li><strong>Self-healing</strong>: with redundancy (mirror/RAIDZ), corrupt blocks can be transparently repaired.</li>
+</ul>
+<p>When running on ZFS, the filesystem provides the equivalent of PsiTri's Levels 1 and 2 (range and object checksums). However, database-level checksums remain valuable because they catch corruption that happens <em>above</em> the filesystem -- bugs in the database engine, memory corruption before writing, or application-level data corruption.</p>
+<hr />
+<h3 id="summary-comparison">Summary Comparison<a class="headerlink" href="#summary-comparison" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>PsiTri</th>
+<th>RocksDB</th>
+<th>MDBX</th>
+<th>SQLite</th>
+<th>PostgreSQL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Segment/range checksums</strong></td>
+<td>XXH3-64 per sync range</td>
+<td>--</td>
+<td>--</td>
+<td>--</td>
+<td>--</td>
+</tr>
+<tr>
+<td><strong>Object/page checksums</strong></td>
+<td>16-bit (XXH3-64 truncated) per object</td>
+<td>CRC32 per block</td>
+<td>Optional per page</td>
+<td>Optional per page</td>
+<td>CRC32 per 8KB page</td>
+</tr>
+<tr>
+<td><strong>Per-key checksums</strong></td>
+<td>8-bit (XXH3-64 truncated) per key</td>
+<td>--</td>
+<td>--</td>
+<td>--</td>
+<td>--</td>
+</tr>
+<tr>
+<td><strong>Per-value checksums</strong></td>
+<td>8-bit (XXH3-64 truncated) per value</td>
+<td>--</td>
+<td>--</td>
+<td>--</td>
+<td>--</td>
+</tr>
+<tr>
+<td><strong>WAL checksums</strong></td>
+<td>XXH3-64 per DWAL entry</td>
+<td>CRC32 per record</td>
+<td>--</td>
+<td>CRC32 per frame</td>
+<td>CRC32 per record</td>
+</tr>
+<tr>
+<td><strong>Structural verification</strong></td>
+<td>Full tree walk</td>
+<td>Partial (SST-level)</td>
+<td><code>mdbx_chk</code> tree walk</td>
+<td><code>integrity_check</code></td>
+<td><code>amcheck</code> B-tree walk</td>
+</tr>
+<tr>
+<td><strong>Failure localization</strong></td>
+<td>Per-key + hex prefix</td>
+<td>Per-block</td>
+<td>Per-page</td>
+<td>Per-page</td>
+<td>Per-page</td>
+</tr>
+<tr>
+<td><strong>Checksum levels</strong></td>
+<td>5</td>
+<td>2-3</td>
+<td>1-2</td>
+<td>2-3</td>
+<td>3</td>
+</tr>
+<tr>
+<td><strong>Implicit redundancy</strong></td>
+<td>COW prior copies in compacted segments</td>
+<td>Multiple SST levels (lost on compaction)</td>
+<td>None (in-place COW overwrites)</td>
+<td>None (in-place update)</td>
+<td>None (in-place update)</td>
+</tr>
+<tr>
+<td><strong>Performance cost</strong></td>
+<td>Zero (checksums are write-once or dual-purpose)</td>
+<td>Low (CRC32 per block write)</td>
+<td>Optional (page checksums add overhead)</td>
+<td>Optional</td>
+<td>Moderate (<code>data_checksums</code> on every read)</td>
+</tr>
+<tr>
+<td><strong>Offline verify tool</strong></td>
+<td><code>psitri-tool verify</code></td>
+<td><code>ldb verify_checksum</code></td>
+<td><code>mdbx_chk</code></td>
+<td><code>PRAGMA integrity_check</code></td>
+<td><code>pg_checksums</code> + <code>amcheck</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="why-five-levels-matter">Why Five Levels Matter<a class="headerlink" href="#why-five-levels-matter" title="Permanent link">&para;</a></h3>
+<h4 id="the-end-to-end-argument">The End-to-End Argument<a class="headerlink" href="#the-end-to-end-argument" title="Permanent link">&para;</a></h4>
+<p>The theoretical foundation for layered checksums is the <strong>end-to-end argument</strong> (Saltzer, Reed, Clark, 1984): reliability mechanisms at lower layers of a system can reduce but never eliminate the need for checks at the endpoints. A page-level checksum is a "middle layer" check -- it validates that the storage layer delivered what was written, but it cannot detect corruption that happened <em>before</em> the write (software bugs, memory errors) or <em>between</em> fields within a valid page.</p>
+<p>Per-key and per-value checksums are <strong>end-to-end checks</strong> from the application's perspective. They are computed at the moment data enters the database and verified at the moment it is read back or audited. Every layer of the stack between those two points -- the trie engine, the allocator, the memory-mapped I/O, the filesystem, the storage controller -- is covered.</p>
+<h4 id="physical-vs-logical-corruption">Physical vs. Logical Corruption<a class="headerlink" href="#physical-vs-logical-corruption" title="Permanent link">&para;</a></h4>
+<p>The critical distinction that page-level checksums miss:</p>
+<ul>
+<li><strong>Physical corruption</strong>: bits flip on storage media. Page/block checksums catch this reliably.</li>
+<li><strong>Logical corruption</strong>: the database engine has a bug and writes structurally valid but semantically wrong data. The page checksum passes because the engine wrote a "correct" page -- it just contains the wrong data.</li>
+</ul>
+<p>Studies from CERN, Google, and Facebook have found that <strong>logical corruption is more common than physical corruption</strong> in modern systems with ECC memory and enterprise storage. Per-key checksums are the only defense against this class of failure.</p>
+<h4 id="real-world-incidents">Real-World Incidents<a class="headerlink" href="#real-world-incidents" title="Permanent link">&para;</a></h4>
+<p>The argument for fine-grained checksums is not theoretical. Multiple production databases have suffered corruption that page-level checksums failed to catch:</p>
+<p><strong>etcd / BoltDB.</strong> BoltDB's page-level CRC32 checksums did not catch intra-page corruption caused by bugs in B-tree rebalancing logic. Pages were structurally valid, but individual key-value pairs within them were corrupted -- keys pointing to wrong values, or values silently truncated. This led to the bbolt fork adding additional structural consistency checks beyond page checksums.</p>
+<p><strong>CockroachDB.</strong> After real production corruption incidents where RocksDB's block-level checksums were insufficient to catch bugs in the MVCC transaction layer, CockroachDB added per-key MVCC checksums on top of the storage engine. Block checksums validated the physical blocks; the per-key checksums caught logical corruption from higher layers.</p>
+<p><strong>TiKV / TiDB.</strong> TiKV added per-key-value checksum support explicitly because RocksDB's block checksums don't protect against bugs in TiKV's transaction layer that might write wrong values for correct keys.</p>
+<p><strong>RocksDB.</strong> Facebook documented multiple incidents where compaction produced corrupt SST files with valid block checksums but violated key ordering or wrong key-value associations. These are exactly the class of bugs that per-KV checksums catch but block checksums cannot.</p>
+<p><strong>PostgreSQL.</strong> Heap corruption caused by multixact bugs produced pages that were structurally valid (checksums passed) but contained wrong visibility information. Core developers have acknowledged on pgsql-hackers that page-level checksums are a "minimum viable" solution.</p>
+<p><strong>MySQL / InnoDB.</strong> Percona documented client incidents where InnoDB pages were logically corrupted despite checksums being enabled -- approximately 0.1% of hosted MySQL instances experienced at least one corrupted page per year, some undetected by page checksums because they were logical corruptions from InnoDB bugs.</p>
+<h4 id="industry-trend">Industry Trend<a class="headerlink" href="#industry-trend" title="Permanent link">&para;</a></h4>
+<p>The databases that have added per-key/value checksums -- FoundationDB (from inception), CockroachDB, TiKV -- all did so after real production incidents proved that page-level checksums were insufficient. PsiTri builds this protection in from day one rather than retrofitting it after a production failure.</p>
+<h4 id="failure-modes-by-level">Failure Modes by Level<a class="headerlink" href="#failure-modes-by-level" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th style="text-align: center;">Level 1 (Segment)</th>
+<th style="text-align: center;">Level 2 (Object)</th>
+<th style="text-align: center;">Level 3 (Key)</th>
+<th style="text-align: center;">Level 4 (Value)</th>
+<th style="text-align: center;">Level 5 (Structure)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Torn write from power loss</td>
+<td style="text-align: center;"><strong>catches</strong></td>
+<td style="text-align: center;">catches</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+</tr>
+<tr>
+<td>Bit rot on storage media</td>
+<td style="text-align: center;">catches</td>
+<td style="text-align: center;"><strong>catches</strong></td>
+<td style="text-align: center;">catches</td>
+<td style="text-align: center;">catches</td>
+<td style="text-align: center;">--</td>
+</tr>
+<tr>
+<td>Engine bug writes wrong value</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;"><strong>catches</strong></td>
+<td style="text-align: center;">--</td>
+</tr>
+<tr>
+<td>Engine bug corrupts node structure</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">catches</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;"><strong>catches</strong></td>
+</tr>
+<tr>
+<td>Dangling pointer from incomplete COW</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;"><strong>catches</strong></td>
+</tr>
+<tr>
+<td>Memory error before write</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;">--</td>
+<td style="text-align: center;"><strong>catches</strong></td>
+<td style="text-align: center;"><strong>catches</strong></td>
+<td style="text-align: center;">--</td>
+</tr>
+</tbody>
+</table>
+<p>Each level catches failures that other levels cannot. Segment checksums catch range-level tears that individual object checksums straddle. Object checksums catch per-node corruption that segment checksums average over. Key and value checksums catch per-field corruption within otherwise valid nodes -- including logical corruption from software bugs, which is the most common class of corruption in modern systems.</p>
+<h2 id="copy-on-write-as-implicit-redundancy">Copy-on-Write as Implicit Redundancy<a class="headerlink" href="#copy-on-write-as-implicit-redundancy" title="Permanent link">&para;</a></h2>
+<p>PsiTri's copy-on-write design provides an often-overlooked integrity benefit: <strong>old versions of objects survive in segments that have been compacted but not yet recycled.</strong></p>
+<p>When a node is modified, the new version is written to a fresh location and the old version's segment is marked for compaction. But the old data remains physically present in the segment until that segment is fully recycled -- which may not happen for a significant period, especially under moderate write loads. This means:</p>
+<ul>
+<li><strong>Recently modified data has at least two physical copies</strong>: the current version in the active segment and the prior version in the compacted segment.</li>
+<li><strong>Frequently modified (hot) data may have many copies</strong> across multiple generations of compacted segments.</li>
+<li><strong>If the current version is corrupt, a verification pass can scan compacted segments</strong> for prior copies of the same object (matched by <code>ptr_address</code>). The most recent uncorrupted copy can be promoted back to the live tree.</li>
+</ul>
+<p>This is not RAID-style redundancy -- it's a probabilistic, temporal redundancy that falls out naturally from COW + deferred segment recycling. The probability of recovery depends on how recently the data was modified and how aggressively the compactor recycles segments. But for the most common corruption scenario -- damage to hot, recently-written data -- the odds of finding an intact prior copy are meaningful.</p>
+<p>No other database in the comparison set offers this property. In-place-update databases (MDBX, PostgreSQL, SQLite) destroy the old version on write. LSM-trees (RocksDB, TidesDB) do maintain multiple versions across levels, but compaction merges and discards old versions -- there is no guarantee that a prior copy survives independently. PsiTri's segment-based compaction preserves complete, independently-checksummed copies until the segment is recycled.</p>
+<h2 id="repair-strategies">Repair Strategies<a class="headerlink" href="#repair-strategies" title="Permanent link">&para;</a></h2>
+<p>The verification result captures enough context per failure to drive targeted repair without re-scanning the database. Future <code>psitri-tool repair</code> modes include:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>What it fixes</th>
+<th>Data loss</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>--repair=hashes</code></strong></td>
+<td>Recompute key hashes and value checksums from intact data</td>
+<td>None</td>
+</tr>
+<tr>
+<td><strong><code>--repair=prune</code></strong></td>
+<td>Remove dangling pointers and corrupt nodes</td>
+<td>Keys under pruned subtrees</td>
+</tr>
+<tr>
+<td><strong><code>--repair=rebuild</code></strong></td>
+<td>Harvest readable keys from corrupt subtrees, rebuild</td>
+<td>Only unreadable leaves</td>
+</tr>
+<tr>
+<td><strong><code>--repair=recover</code></strong></td>
+<td>Scan compacted segments for prior copies of corrupt objects</td>
+<td>None if prior copy found</td>
+</tr>
+<tr>
+<td><strong><code>--repair=salvage</code></strong></td>
+<td>Full segment scan for any readable data, rebuild tree</td>
+<td>Only truly unreadable data</td>
+</tr>
+</tbody>
+</table>
+<p>Each failure record includes the node address, physical location, key prefix, root index, and failure type -- everything needed for surgical repair of individual nodes without walking the entire tree again.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/gofractally/arbtrie" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "navigation.top", "navigation.indexes", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

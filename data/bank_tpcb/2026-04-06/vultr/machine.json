@@ -1,0 +1,14 @@
+{
+  "cpu": "AMD EPYC-Turin Processor",
+  "cores": 16,
+  "ram_gb": 121,
+  "os": "Linux 6.17.0-20-generic x86_64",
+  "filesystem": "ext4",
+  "page_size": 4096,
+  "git_commit": "ec383f2",
+  "git_branch": "main",
+  "git_dirty": false,
+  "compiler": "clang++-20",
+  "build_type": "Release",
+  "date": "2026-04-06T23:21:18Z"
+}

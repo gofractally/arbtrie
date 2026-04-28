@@ -1,0 +1,84 @@
+=== Bank Benchmark: System-SQLite ===
+  Accounts:     1,000,000
+  Transactions: 1,000,000
+  Batch size:   1
+  Sync every:   never commits
+  Sync mode:    none
+  Seed:         12345
+  Read mode:    latest
+  DB path:      /tmp/bench_bank_system-sqlite
+
+Phase 1: Account Generation
+  Loaded 104,334 dictionary words
+  Account generation              0.050 sec      19,879,657 ops/sec
+
+Phase 2: Bulk Load
+  Bulk load                       1.876 sec         533,075 ops/sec
+  Size: file=58.8 MB  live=58.8 MB  free=0.0 MB
+
+Warm-up: 100,000 transactions (not measured)
+  Warm-up                         1.984 sec          50,404 ops/sec
+  Successful: 97,020  Skipped: 2,980
+  Size: file=2456.1 MB  live=2456.1 MB  free=0.0 MB
+  commit                avg=   9 us  p50=  16 us  p99=  32 us  p99.9=  512 us  max=  472 us  (n=100000)
+  commit latency distribution:
+         <1 us:     1798  (  1.8%)
+        1-2 us:     1179  (  1.2%)
+        4-8 us:     9367  (  9.4%)
+       8-16 us:    86412  ( 86.4%)
+      16-32 us:      907  (  0.9%)
+      32-64 us:       26  (  0.0%)
+     64-128 us:        6  (  0.0%)
+    128-256 us:      122  (  0.1%)
+    256-512 us:      183  (  0.2%)
+
+Phase 3a: Transactions (write-only)
+  1,000,000 / 1,000,000  (49,738 tx/sec, 811,292 ok, 188,708 skip)
+  Write-only                     20.105 sec          49,738 ops/sec
+  Successful: 811,292  Skipped: 188,708
+  Size: file=23033.0 MB  live=23033.0 MB  free=0.0 MB
+  commit                avg=   7 us  p50=  16 us  p99=  32 us  p99.9=  128 us  max=  479 us  (n=1000000)
+  commit latency distribution:
+         <1 us:   112074  ( 11.2%)
+        1-2 us:    76459  (  7.6%)
+        2-4 us:       24  (  0.0%)
+        4-8 us:    49827  (  5.0%)
+       8-16 us:   749640  ( 75.0%)
+      16-32 us:     8911  (  0.9%)
+      32-64 us:      445  (  0.0%)
+     64-128 us:     1992  (  0.2%)
+    128-256 us:      624  (  0.1%)
+    256-512 us:        4  (  0.0%)
+
+Phase 3b: Transactions (with 1 reader, 100 reads/batch)
+  1,000,000 / 1,000,000  (15,499 tx/sec, 715,997 ok, 284,003 skip)
+  Write+Read                     64.526 sec          15,497 ops/sec
+  Successful: 715,997  Skipped: 284,003
+  Reader: 1,027,100 reads in 64.525s (15,917 reads/sec, 1,027,100 found = 100.0%)
+  Size: file=40872.2 MB  live=40872.2 MB  free=0.0 MB
+  commit                avg=   9 us  p50=  16 us  p99=  32 us  p99.9=  128 us  max=  266 us  (n=1000000)
+  commit latency distribution:
+         <1 us:   127970  ( 12.8%)
+        1-2 us:   142807  ( 14.3%)
+        2-4 us:    12253  (  1.2%)
+        4-8 us:     1853  (  0.2%)
+       8-16 us:   569778  ( 57.0%)
+      16-32 us:   139527  ( 14.0%)
+      32-64 us:     3555  (  0.4%)
+     64-128 us:     2118  (  0.2%)
+    128-256 us:      136  (  0.0%)
+    256-512 us:        3  (  0.0%)
+
+  --- Phase 3 Summary ---
+  Write-only: 49,738 tx/sec  (248,690 KV ops/sec)
+  Write+Read: 15,497 tx/sec  (77,485 KV ops/sec, write impact: -68.8%)
+  Reader:     15,917 reads/sec
+
+Phase 4: Validation
+  Validation scan                35.568 sec          71,055 ops/sec
+  Accounts found: 1,000,000 (expected 1,000,000)
+  Log entries:    1,527,289 (expected 1,527,289)
+  Total balance:  1,000,000,847,512 (expected 1,000,000,000,000)  *** FAIL ***
+  Size: file=40872.2 MB  live=40872.2 MB  free=0.0 MB
+
+FAIL  Total wall clock: 127.239 sec

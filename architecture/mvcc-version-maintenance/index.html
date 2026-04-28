@@ -1,0 +1,2719 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A persistent, transactional key-value store built on an adaptive radix trie. 3x faster than RocksDB. ~9x less write amplification than page-based COW.">
+      
+      
+      
+        <link rel="canonical" href="https://gofractally.github.io/arbtrie/architecture/mvcc-version-maintenance/">
+      
+      
+        <link rel="prev" href="../control-blocks/">
+      
+      
+        <link rel="next" href="../sal/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>MVCC Version Maintenance - PsiTri</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#mvcc-version-maintenance-design" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="PsiTri" class="md-header__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            PsiTri
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              MVCC Version Maintenance
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../why-psitri/problem/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Why PsiTri
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quickstart/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../overview/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  How It Works
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../benchmarks/bank/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Benchmarks
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="PsiTri" class="md-nav__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    PsiTri
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why PsiTri
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Why PsiTri
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/problem/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Problem
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/tradeoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tradeoffs & Limitations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/transaction-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transaction Contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/rocksdb-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RocksDB Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/mdbx-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MDBX Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/sqlite-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How It Works
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    How It Works
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dwal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DWAL: ART-Buffered Write Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../control-blocks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Blocks & Addressing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MVCC Version Maintenance
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MVCC Version Maintenance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#core-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cow-is-physical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        COW Is Physical
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prune-floors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prune Floors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-cleans-old-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who Cleans Old Versions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Who Cleans Old Versions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#active-and-passive-rewrites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Active and Passive Rewrites
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#relocation-side-effects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relocation Side Effects
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#leaf-rewrite-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Leaf Rewrite Policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#circular-version-tokens" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Circular Version Tokens
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#epoch-interval-and-refcount-pressure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Epoch Interval And Refcount Pressure
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API Contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implementation-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation Checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#test-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Test Checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segment Allocator (SAL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../branchless-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Branchless Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../smart-pointers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smart Pointers & Thread Safety
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concurrent-writers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrent Writers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Caching, Compaction & Beyond-RAM Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/write-protection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Write Protection & Durability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/data-integrity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Integrity & Verification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Benchmarks
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/bank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bank Transaction Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/random-upsert/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Random Upsert (200M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/scale/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scale Benchmark (419M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/rocksdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: RocksDB API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/sqlite-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: SQLite API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/duckdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: DuckDB Storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/coverage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code Coverage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/x86_simd/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x86 SIMD Optimizations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/known-issues/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Known Issues
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#core-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core Model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cow-is-physical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        COW Is Physical
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prune-floors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prune Floors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-cleans-old-versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who Cleans Old Versions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Who Cleans Old Versions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#active-and-passive-rewrites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Active and Passive Rewrites
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#relocation-side-effects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relocation Side Effects
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#leaf-rewrite-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Leaf Rewrite Policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#circular-version-tokens" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Circular Version Tokens
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#epoch-interval-and-refcount-pressure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Epoch Interval And Refcount Pressure
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API Contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implementation-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation Checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#test-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Test Checklist
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="mvcc-version-maintenance-design">MVCC Version Maintenance Design<a class="headerlink" href="#mvcc-version-maintenance-design" title="Permanent link">&para;</a></h1>
+<p>This document defines the cleanup model for PsiTri now that MVCC is the normal
+write model. It supersedes the older "COW mode versus MVCC mode" language in
+<code>docs/MVCC.md</code> for epoch policy, old-version cleanup, and the relationship
+between public <code>upsert/remove</code> APIs and internal explicit-version write helpers.</p>
+<h2 id="core-model">Core Model<a class="headerlink" href="#core-model" title="Permanent link">&para;</a></h2>
+<p>MVCC has three different kinds of version-like state. They must not be treated
+as the same thing.</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>write_version</code></td>
+<td>The logical transaction version for user-visible writes. Values, tombstones, and branch-creation records are tagged with this.</td>
+</tr>
+<tr>
+<td><code>root_version</code></td>
+<td>The exact committed or transaction-local version that a root/tree reads as.</td>
+</tr>
+<tr>
+<td><code>last_unique_version</code></td>
+<td>Structural metadata on inner nodes: the root version at which this physical node was last made unique/refreshed for a root path.</td>
+</tr>
+</tbody>
+</table>
+<p><code>last_unique_version</code> replaces the current <code>_epoch</code> concept. The value is not a
+separate epoch counter. It lives in the same version-token space as root/value
+versions.</p>
+<p>The epoch boundary remains a coarse refresh trigger:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">epoch_base</span><span class="p">(</span><span class="n">root_version</span><span class="p">)</span><span class="w"> </span><span class="o">=</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">    </span><span class="p">(</span><span class="n">root_version</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">epoch_interval</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">epoch_interval</span><span class="p">;</span>
+</span></code></pre></div>
+<p>When descending through an inner node:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>if node.last_unique_version is older than epoch_base(root_version):
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    the node must be made unique/refreshed before descending farther
+</span></code></pre></div>
+<p>After the node is physically rewritten or otherwise refreshed for the current
+root path:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>node.last_unique_version = root_version
+</span></code></pre></div>
+<p>That stamp means: "this structural node has been refreshed for the current
+root's visibility floor." It does not create a logical write version by itself.</p>
+<h2 id="cow-is-physical">COW Is Physical<a class="headerlink" href="#cow-is-physical" title="Permanent link">&para;</a></h2>
+<p>Copy-on-write is a physical ownership/layout operation. It is not necessarily a
+logical version creation event.</p>
+<p>A single write transaction has exactly one logical <code>write_version</code>. Physical
+rewrites performed inside that transaction reuse that version where they change
+reader-visible history. Rewrites that only move, compact, expand, split, or
+refresh nodes do not allocate new logical versions.</p>
+<p>Physical COW can happen for several reasons:</p>
+<table>
+<thead>
+<tr>
+<th>Reason</th>
+<th>Creates logical version?</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Make a shared node unique</td>
+<td>No</td>
+<td>Enables mutation/compaction for the current root path.</td>
+</tr>
+<tr>
+<td>Refresh a stale <code>last_unique_version</code></td>
+<td>No</td>
+<td>Stamps structural node with <code>root_version</code>.</td>
+</tr>
+<tr>
+<td>Leaf insert/update/remove</td>
+<td>Yes, once per transaction/write</td>
+<td>The key/value history gets <code>write_version</code>.</td>
+</tr>
+<tr>
+<td>Split/merge/collapse/prefix rewrite</td>
+<td>No by itself</td>
+<td>Parent notification occurs only when child address set changes.</td>
+</tr>
+<tr>
+<td>Compactor or MFU relocation</td>
+<td>No</td>
+<td>May normalize histories while moving data.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="prune-floors">Prune Floors<a class="headerlink" href="#prune-floors" title="Permanent link">&para;</a></h2>
+<p>Old-version cleanup is driven by a <code>prune_floor</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>prune_floor = oldest version that must still be readable for this node rewrite
+</span></code></pre></div>
+<p>The rewrite must preserve the state visible at <code>prune_floor</code>, but it does not
+need to preserve older version labels.</p>
+<p>For a single key history:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>history:
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>  v10 = A
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>  v20 = B
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>  v30 = C
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>  v40 = D
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>prune_floor = v25
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>after rewrite:
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>  v25 = B
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>  v30 = C
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>  v40 = D
+</span></code></pre></div>
+<p>Mechanically:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>it = first entry after prune_floor in retained version order
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>floor_state = predecessor(it), if any
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>drop entries before floor_state
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>if floor_state exists:
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    emit floor_state&#39;s value/tombstone at version prune_floor
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>emit entries from it onward unchanged
+</span></code></pre></div>
+<p>For tombstones:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>history:
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>  v10 = A
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>  v20 = tombstone
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>  v40 = B
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>prune_floor = v25
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>after rewrite:
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>  v25 = tombstone
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>  v40 = B
+</span></code></pre></div>
+<p>If the key did not exist at <code>prune_floor</code>, no floor entry is emitted. If a key is
+tombstoned at <code>prune_floor</code> and has no later recreation, a leaf rewrite may drop
+the branch entirely.</p>
+<h2 id="who-cleans-old-versions">Who Cleans Old Versions<a class="headerlink" href="#who-cleans-old-versions" title="Permanent link">&para;</a></h2>
+<p>Cleanup is not owned by one API. Any physical rewrite can normalize history.</p>
+<table>
+<thead>
+<tr>
+<th>Actor</th>
+<th>When</th>
+<th>Prune floor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Write path</td>
+<td><code>insert</code>, <code>update</code>, <code>upsert</code>, <code>remove</code>, split/merge/collapse, stale-epoch refresh</td>
+<td><code>root_version</code> when the path from root to rewritten node has been made unique; otherwise the global oldest retained version.</td>
+</tr>
+<tr>
+<td>Defrag tree walk</td>
+<td>Explicit/background traversal with parent context</td>
+<td><code>root_version</code> for unique paths; otherwise global oldest retained version.</td>
+</tr>
+<tr>
+<td>Segment compactor</td>
+<td>Moving nodes out of dirty/cold segments</td>
+<td>Global oldest retained version unless it can prove unique-to-root ownership.</td>
+</tr>
+<tr>
+<td>MFU active visitor</td>
+<td>Moving/promoting hot nodes</td>
+<td>Same as compactor: apply the same rewrite filter while moving the node.</td>
+</tr>
+<tr>
+<td>Version release thread</td>
+<td>Does not rewrite nodes</td>
+<td>Publishes retained-version state used by writers/compactors.</td>
+</tr>
+</tbody>
+</table>
+<p>The important implementation rule:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>Do not copy a node and then prune it in a second pass.
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>Pruning is a filter applied while copying values/branches for the rewrite.
+</span></code></pre></div>
+<p>A node rewrite is one composed operation:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>source node
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>  -&gt; structural edit filter
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>  -&gt; version-normalization filter
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>  -&gt; layout policy
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>  -&gt; destination node
+</span></code></pre></div>
+<p>The structural edit may be insert/update/remove/split/merge/prefix rewrite. The
+version-normalization filter applies <code>prune_floor</code>. The layout policy chooses
+whether the destination is hot-expanded or cold-compacted.</p>
+<h3 id="active-and-passive-rewrites">Active and Passive Rewrites<a class="headerlink" href="#active-and-passive-rewrites" title="Permanent link">&para;</a></h3>
+<p>Rewrite methods split into two families. Do not hide this behind a boolean mode
+or broad enum; the method name should say whether the caller is allowed to make
+persistent side effects.</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Caller</th>
+<th>Race behavior</th>
+<th>Dropped references</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Active rewrite</td>
+<td>Transaction/write path, defrag path with explicit ownership context</td>
+<td>Owns the state transition and publishes through the normal writer protocol.</td>
+<td>May queue or call <code>release_node</code> directly as it removes subtree/version references from the published state.</td>
+</tr>
+<tr>
+<td>Passive rewrite</td>
+<td>Segment compactor, MFU promotion, opportunistic relocation</td>
+<td>Copies candidate bytes and yields if another actor releases or moves the object first.</td>
+<td>Must append dropped subtree/version addresses to a caller-owned release vector and perform no release side effects while copying.</td>
+</tr>
+</tbody>
+</table>
+<p>This implies separate operation names, for example:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>active_copy_to(...)
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>active_compact_to(...)
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>passive_copy_to(..., pending_releases)
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>passive_compact_to(..., pending_releases)
+</span></code></pre></div>
+<p>The exact names can follow the local C++ style, but the contract must remain
+visible at the call site. Active methods may retire references as part of the
+state change. Passive methods only describe what would need to be retired if the
+candidate move wins.</p>
+<h3 id="relocation-side-effects">Relocation Side Effects<a class="headerlink" href="#relocation-side-effects" title="Permanent link">&para;</a></h3>
+<p>Compactor and MFU relocation are optimistic. They copy from an old physical
+location, publish the new physical location with a control-block CAS, and lose
+silently when another thread releases the object or moves it first. Therefore a
+relocation rewrite must be side-effect-free until the move wins.</p>
+<p>The relocation protocol is:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>copy old object into candidate new object
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>collect any child/version references omitted by pruning
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>do not retain or release collected references while copying
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>if CAS(old_location -&gt; new_location) fails:
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    discard candidate bytes only
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>    discard collected references without releasing them
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>if CAS(old_location -&gt; new_location) succeeds:
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>    retire the old physical bytes through the normal read-lock grace path
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>    only then release references that existed only in the stale old bytes
+</span></code></pre></div>
+<p>This rule matters for subtree and version references. Pruning data-only value
+history has no persistent side effects and is safe in a losing relocation
+attempt. Pruning subtree entries, chained value-node entries, or any other
+reference-owning payload requires a post-success retire action. The compactor
+does not own a dropped reference merely because it copied a node; it owns that
+reference only after it has successfully deleted the stale reference from the
+published object state and the old physical bytes are being retired.</p>
+<h2 id="leaf-rewrite-policy">Leaf Rewrite Policy<a class="headerlink" href="#leaf-rewrite-policy" title="Permanent link">&para;</a></h2>
+<p>Leaf nodes are special on the hot write path.</p>
+<p>If descent proves the path from the transaction root to the edited leaf is
+unique, the edited key should finish with only the current value visible from
+that leaf. Older readers are on older roots, so carrying a private value-node
+history in the unique leaf wastes memory and defeats the hot-update path.</p>
+<p>When a write must physically rewrite or COW a leaf for active editing:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>allocate max_leaf_size
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>copy once with edit + prune_floor normalization
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>leave spare capacity for future edits while the leaf remains unique/hot
+</span></code></pre></div>
+<p>The compactor, defragger, and MFU visitor may instead choose:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>copy_and_compact
+</span></code></pre></div>
+<p>for idle, cold, or shared leaves. This packs storage tightly and may demote
+single-version value nodes back inline when parent context is available.</p>
+<p>This means <code>can_apply(edit)</code> is not enough for rewrite planning. The planner
+needs to answer:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>Can edit + prune normalization fit in the chosen destination policy?
+</span></code></pre></div>
+<p>For the hot write path, the chosen policy is normally "expanded max leaf".</p>
+<h2 id="circular-version-tokens">Circular Version Tokens<a class="headerlink" href="#circular-version-tokens" title="Permanent link">&para;</a></h2>
+<p>Persisted version fields are bounded. Current relevant widths are:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Current width</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SAL custom control-block value</td>
+<td>41 bits (<code>control_block_data::cacheline_offset</code>)</td>
+</tr>
+<tr>
+<td>Inner node <code>_epoch</code> field</td>
+<td>39 bits</td>
+</tr>
+<tr>
+<td>Leaf <code>version48</code> table entries</td>
+<td>48 bits</td>
+</tr>
+<tr>
+<td>Value-node packed entries</td>
+<td>48 bits</td>
+</tr>
+</tbody>
+</table>
+<p>If inner nodes store <code>last_unique_version</code> in the current 39-bit field, any
+comparison involving that field must use a 39-bit version token. Wider fields may
+store more bits for diagnostics or future layout changes, but correctness must
+not depend on bits that are not present in every compared field.</p>
+<p>Let:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">VERSION_BITS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">39</span><span class="p">;</span><span class="w"> </span><span class="c1">// until inner node layout changes</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="n">VERSION_MOD</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="mi">1ull</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">VERSION_BITS</span><span class="p">;</span>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="n">VERSION_MASK</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">VERSION_MOD</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span></code></pre></div>
+<p>The system invariant is:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>newest_version - oldest_retained_version &lt; VERSION_MOD
+</span></code></pre></div>
+<p>This bounds the live MVCC window, not the database lifetime. The global
+transaction counter may continue forever if persisted/recovery metadata can
+recover an absolute generation, but node-local comparisons use masked version
+tokens inside the active window.</p>
+<p>Avoid unanchored comparisons such as:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">entry_version</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">read_version</span>
+</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="n">node_epoch</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">current_epoch</span>
+</span></code></pre></div>
+<p>Those are wrong across wrap. Compare by distance from a known anchor.</p>
+<p>For entries retained in <code>[floor, newest]</code>, branchless helpers can be shaped as:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="k">constexpr</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">version_mask</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="mi">1ull</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">VERSION_BITS</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>
+</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="kr">inline</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="nf">version_token</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">v</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span>
+</span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="p">{</span>
+</span><span id="__span-17-5"><a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a><span class="w">   </span><span class="k">return</span><span class="w"> </span><span class="n">v</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">version_mask</span><span class="p">;</span>
+</span><span id="__span-17-6"><a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a><span class="p">}</span>
+</span><span id="__span-17-7"><a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a>
+</span><span id="__span-17-8"><a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a><span class="kr">inline</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="nf">version_distance</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">from</span><span class="p">,</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">to</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span>
+</span><span id="__span-17-9"><a id="__codelineno-17-9" name="__codelineno-17-9" href="#__codelineno-17-9"></a><span class="p">{</span>
+</span><span id="__span-17-10"><a id="__codelineno-17-10" name="__codelineno-17-10" href="#__codelineno-17-10"></a><span class="w">   </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">to</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">from</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">version_mask</span><span class="p">;</span>
+</span><span id="__span-17-11"><a id="__codelineno-17-11" name="__codelineno-17-11" href="#__codelineno-17-11"></a><span class="p">}</span>
+</span><span id="__span-17-12"><a id="__codelineno-17-12" name="__codelineno-17-12" href="#__codelineno-17-12"></a>
+</span><span id="__span-17-13"><a id="__codelineno-17-13" name="__codelineno-17-13" href="#__codelineno-17-13"></a><span class="kr">inline</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="nf">version_visible_at</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">entry</span><span class="p">,</span>
+</span><span id="__span-17-14"><a id="__codelineno-17-14" name="__codelineno-17-14" href="#__codelineno-17-14"></a><span class="w">                               </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">read</span><span class="p">,</span>
+</span><span id="__span-17-15"><a id="__codelineno-17-15" name="__codelineno-17-15" href="#__codelineno-17-15"></a><span class="w">                               </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">floor</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span>
+</span><span id="__span-17-16"><a id="__codelineno-17-16" name="__codelineno-17-16" href="#__codelineno-17-16"></a><span class="p">{</span>
+</span><span id="__span-17-17"><a id="__codelineno-17-17" name="__codelineno-17-17" href="#__codelineno-17-17"></a><span class="w">   </span><span class="k">return</span><span class="w"> </span><span class="n">version_distance</span><span class="p">(</span><span class="n">floor</span><span class="p">,</span><span class="w"> </span><span class="n">entry</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;=</span>
+</span><span id="__span-17-18"><a id="__codelineno-17-18" name="__codelineno-17-18" href="#__codelineno-17-18"></a><span class="w">          </span><span class="n">version_distance</span><span class="p">(</span><span class="n">floor</span><span class="p">,</span><span class="w"> </span><span class="n">read</span><span class="p">);</span>
+</span><span id="__span-17-19"><a id="__codelineno-17-19" name="__codelineno-17-19" href="#__codelineno-17-19"></a><span class="p">}</span>
+</span><span id="__span-17-20"><a id="__codelineno-17-20" name="__codelineno-17-20" href="#__codelineno-17-20"></a>
+</span><span id="__span-17-21"><a id="__codelineno-17-21" name="__codelineno-17-21" href="#__codelineno-17-21"></a><span class="kr">inline</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="nf">version_older_than</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">a</span><span class="p">,</span>
+</span><span id="__span-17-22"><a id="__codelineno-17-22" name="__codelineno-17-22" href="#__codelineno-17-22"></a><span class="w">                               </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">b</span><span class="p">,</span>
+</span><span id="__span-17-23"><a id="__codelineno-17-23" name="__codelineno-17-23" href="#__codelineno-17-23"></a><span class="w">                               </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">newest</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span>
+</span><span id="__span-17-24"><a id="__codelineno-17-24" name="__codelineno-17-24" href="#__codelineno-17-24"></a><span class="p">{</span>
+</span><span id="__span-17-25"><a id="__codelineno-17-25" name="__codelineno-17-25" href="#__codelineno-17-25"></a><span class="w">   </span><span class="k">return</span><span class="w"> </span><span class="n">version_distance</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">newest</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span>
+</span><span id="__span-17-26"><a id="__codelineno-17-26" name="__codelineno-17-26" href="#__codelineno-17-26"></a><span class="w">          </span><span class="n">version_distance</span><span class="p">(</span><span class="n">b</span><span class="p">,</span><span class="w"> </span><span class="n">newest</span><span class="p">);</span>
+</span><span id="__span-17-27"><a id="__codelineno-17-27" name="__codelineno-17-27" href="#__codelineno-17-27"></a><span class="p">}</span>
+</span><span id="__span-17-28"><a id="__codelineno-17-28" name="__codelineno-17-28" href="#__codelineno-17-28"></a>
+</span><span id="__span-17-29"><a id="__codelineno-17-29" name="__codelineno-17-29" href="#__codelineno-17-29"></a><span class="kr">inline</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="nf">needs_unique_refresh</span><span class="p">(</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">last_unique_version</span><span class="p">,</span>
+</span><span id="__span-17-30"><a id="__codelineno-17-30" name="__codelineno-17-30" href="#__codelineno-17-30"></a><span class="w">                                 </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">epoch_base</span><span class="p">,</span>
+</span><span id="__span-17-31"><a id="__codelineno-17-31" name="__codelineno-17-31" href="#__codelineno-17-31"></a><span class="w">                                 </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">root_version</span><span class="p">)</span><span class="w"> </span><span class="k">noexcept</span>
+</span><span id="__span-17-32"><a id="__codelineno-17-32" name="__codelineno-17-32" href="#__codelineno-17-32"></a><span class="p">{</span>
+</span><span id="__span-17-33"><a id="__codelineno-17-33" name="__codelineno-17-33" href="#__codelineno-17-33"></a><span class="w">   </span><span class="k">return</span><span class="w"> </span><span class="n">version_older_than</span><span class="p">(</span><span class="n">last_unique_version</span><span class="p">,</span>
+</span><span id="__span-17-34"><a id="__codelineno-17-34" name="__codelineno-17-34" href="#__codelineno-17-34"></a><span class="w">                             </span><span class="n">epoch_base</span><span class="p">,</span>
+</span><span id="__span-17-35"><a id="__codelineno-17-35" name="__codelineno-17-35" href="#__codelineno-17-35"></a><span class="w">                             </span><span class="n">root_version</span><span class="p">);</span>
+</span><span id="__span-17-36"><a id="__codelineno-17-36" name="__codelineno-17-36" href="#__codelineno-17-36"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>This uses subtraction, mask, and compare. The compare can compile without a
+branch. More importantly, it uses the full token ring as the live-window bound;
+it does not rely on arbitrary pairwise signed comparisons that cut the usable
+range in half.</p>
+<p>Value histories should be ordered relative to a stable base, normally their
+first retained entry or the rewrite's <code>prune_floor</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>entry_order = version_distance(history_base, entry_version)
+</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>read_order  = version_distance(history_base, read_version)
+</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>visible entry = greatest entry_order &lt;= read_order
+</span></code></pre></div>
+<p>The current linear scans and binary searches that use raw numeric <code>&lt;=</code> are
+legacy and must be replaced with anchored token comparisons.</p>
+<h2 id="epoch-interval-and-refcount-pressure">Epoch Interval And Refcount Pressure<a class="headerlink" href="#epoch-interval-and-refcount-pressure" title="Permanent link">&para;</a></h2>
+<p>The epoch interval is tied to refcount capacity because it controls how many
+versions can share the same physical root path before refresh creates a new
+unique path.</p>
+<p>The hard correctness bound is:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>active_version_span &lt; 2^VERSION_BITS
+</span></code></pre></div>
+<p>where:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>active_version_span = newest_version - oldest_retained_version
+</span></code></pre></div>
+<p>The operational refcount bound is workload dependent:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a>max retained handles sharing one physical object &lt; control_block::max_ref_count
+</span></code></pre></div>
+<p>Worst case, if an application retains one tree/snapshot for every transaction
+within an epoch, a root can accumulate roughly <code>epoch_interval</code> references before
+the next epoch refresh creates a new physical root. In that worst case:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a>epoch_interval &lt;= max_ref_count - safety_margin
+</span></code></pre></div>
+<p>Cold children may be shared by several epoch roots. If the live retained window
+spans many epochs, their refcount pressure is roughly:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a>retained_epoch_roots_that_share_child ~= active_version_span / epoch_interval
+</span></code></pre></div>
+<p>So <code>epoch_interval</code> has both an upper and lower pressure:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-24-1"><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a>too large: many snapshots share one physical root
+</span><span id="__span-24-2"><a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a>too small: many epoch roots share unchanged cold children
+</span></code></pre></div>
+<p>The implementation should track high-water refcounts and retained-window span so
+the configured epoch interval can be validated instead of guessed.</p>
+<h2 id="public-api-contract">Public API Contract<a class="headerlink" href="#public-api-contract" title="Permanent link">&para;</a></h2>
+<p>The public API has only normal write verbs:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-25-1"><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="n">insert</span>
+</span><span id="__span-25-2"><a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="n">update</span>
+</span><span id="__span-25-3"><a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="n">upsert</span>
+</span><span id="__span-25-4"><a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a><span class="n">remove</span>
+</span></code></pre></div>
+<p>"MVCC" is the storage model, not a separate user operation. Public callers must
+not see or choose a separate MVCC write path. The engine may still expose
+internal helpers that accept an already allocated write version so tests can
+exercise exact-version behavior.</p>
+<p>A normal write pipeline should:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-26-1"><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a>1. allocate or receive the write_version
+</span><span id="__span-26-2"><a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a>2. descend with root_version, epoch_base, and prune_floor context
+</span><span id="__span-26-3"><a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a>3. refresh stale structural nodes before descending through them
+</span><span id="__span-26-4"><a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a>4. try same-address value/leaf mutation where valid
+</span><span id="__span-26-5"><a id="__codelineno-26-5" name="__codelineno-26-5" href="#__codelineno-26-5"></a>5. rewrite with edit + prune filters when physical COW is needed
+</span><span id="__span-26-6"><a id="__codelineno-26-6" name="__codelineno-26-6" href="#__codelineno-26-6"></a>6. report parent effects only for real structural address-set changes
+</span></code></pre></div>
+<h2 id="implementation-checklist">Implementation Checklist<a class="headerlink" href="#implementation-checklist" title="Permanent link">&para;</a></h2>
+<p>Checked rows are backed by focused tests or an audit command. Open rows are not
+complete; they remain here so future work cannot hide in prose.</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Area</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>[x]</td>
+<td>Public <code>write_session</code> exposes <code>upsert/remove</code>, not explicit-version write helpers.</td>
+<td><code>[public-api]</code> has compile-time assertions for <code>upsert/remove</code> and against <code>upsert_at_version/remove_at_version</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>User-facing <code>mvcc_upsert/mvcc_remove</code> names are gone.</td>
+<td>The legacy-name audit returns no matches under psitri headers/tests.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Internal exact-version tests use explicit-version names, not public-looking MVCC verbs.</td>
+<td>Internal tests call <code>tree_context::upsert_at_version</code>, <code>remove_at_version</code>, <code>try_upsert_at_version</code>, and <code>try_remove_at_version</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td><code>_epoch</code> has been normalized to <code>last_unique_version</code> for inner-node structural freshness.</td>
+<td><code>[epoch]</code> covers insert, fallback, replace-branch, and collapse stamping.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td><code>current_epoch()</code> is now version-space <code>current_epoch_base()</code>.</td>
+<td><code>database_state::current_epoch_base()</code> returns <code>(global_version / interval) * interval</code>; callers pass both epoch base and root version.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Stale inner nodes are refreshed before descent and stamped with <code>root_version</code>.</td>
+<td><code>[epoch]</code>, <code>[tree_ops][collapse][phase2]</code>, and <code>[tree_ops][shared][collapse]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Circular version-token comparisons are centralized.</td>
+<td><code>version_compare.hpp</code>; <code>[mvcc][wrap]</code> and <code>[value_node][mvcc][wrap]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Value-node <code>prune_floor</code> copies preserve predecessor, exact, tombstone, absent, and wrap cases.</td>
+<td><code>[value_node][mvcc][prune]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Hot leaf rewrites allocate max leaf size and preserve branch creation versions.</td>
+<td><code>[leaf_node][transform][mvcc]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Unique transaction updates collapse private history and demote value nodes back inline when possible.</td>
+<td><code>[per_txn][phaseA]</code> and <code>[per_txn][phaseD]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Physical COW/transaction maintenance does not allocate extra logical versions.</td>
+<td><code>[per_txn][phaseB]</code> and <code>[per_txn][phaseC]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Same-root immediate writes preserve snapshot-visible history until the version is reclaimable.</td>
+<td><code>[mvcc_write]</code>, <code>[mvcc_read]</code>, and <code>[mvcc_snapshot][stress]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Explicit-version slow helpers do not carry a duplicated structural fallback traversal.</td>
+<td><code>upsert_at_version()</code> / <code>remove_at_version()</code> try the stripe-safe exact-version path, then delegate to the normal structural writer on fallback; covered by <code>[mvcc_write]</code> and <code>[per_txn]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td><code>live_range_map</code> publishes a conservative retained floor.</td>
+<td><code>snapshot::oldest_retained_floor()</code> reports the first version not proven dead by a contiguous dead prefix; <code>[live_range_map][floor]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Leaf rewrite applies value-history normalization during the leaf rebuild itself.</td>
+<td><code>leaf_rewrite_plan</code> preallocates normalized value nodes and leaf copy constructors consume <code>op::leaf_value_rewrite</code>; <code>normalize_leaf_value_nodes()</code> has been removed. Covered by <code>[per_txn][phaseA][cow][leaf_rewrite]</code>, <code>[leaf_node][transform]</code>, and <code>[per_txn]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Rewrite contexts consume retained floors where semantically safe.</td>
+<td><code>defrag_leaf()</code> uses <code>snapshot::oldest_retained_floor()</code> with <code>value_node::prune_floor_policy</code> for data and unchained subtree value nodes. Chained value nodes are skipped until their child-retain policy is explicit. Covered by <code>[defrag][floor]</code>, <code>[defrag]</code>, <code>[subtree]</code>, and <code>[live_range_map]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>SAL object dispatch is allocator-instance scoped, not process-global.</td>
+<td><code>sal::object_type_ops</code> is installed per allocator; PsiTri owns per-database node ops objects, so future compactor/MFU relocation policy can access database-owned version state through <code>this</code> instead of SAL globals.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>SAL relocation call sites distinguish active owner rewrites from passive opportunistic rewrites.</td>
+<td>Writer COW calls <code>active_copy_to()</code>. Compactor/MFU relocation calls <code>passive_compact_to()</code> with caller-owned pending-release storage and discards the candidate on overflow or CAS loss.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Passive relocation prunes unchained value-node histories and accounts for dropped subtree references.</td>
+<td><code>psitri_value_node_ops::passive_compact_to()</code> applies <code>snapshot::oldest_retained_floor()</code> to non-flat, unchained value nodes. Dropped subtree <code>tree_id</code> root/version refs are appended to the pending-release list and released only if relocation wins. Covered by <code>[value_node][mvcc][prune][passive]</code> and <code>[value_node][mvcc][prune][passive][subtree]</code>.</td>
+</tr>
+<tr>
+<td>[x]</td>
+<td>Active same-CB rewrites release subtree refs omitted by dead-entry and prune-floor rewrites.</td>
+<td><code>value_node</code> reports dropped <code>tree_id</code> refs for dead-entry strip, prune-floor normalization, and replace-last tombstone. <code>tree_context</code> releases them after successful same-CB <code>mvcc_realloc</code>. Covered by <code>[value_node][mvcc][prune][subtree]</code>, <code>[value_node][mvcc][subtree]</code>, <code>[defrag]</code>, <code>[mvcc_write]</code>, and <code>[subtree]</code>.</td>
+</tr>
+<tr>
+<td>[ ]</td>
+<td>Chained value-node pruning should release omitted <code>next_ptr</code> children only after the winning rewrite.</td>
+<td>Base-node data/subtree entries are handled. <code>num_next() != 0</code> histories are still copied conservatively because pruning them requires choosing the floor-visible child entry and retiring omitted child value_nodes with the same active/passive ownership rules.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="test-checklist">Test Checklist<a class="headerlink" href="#test-checklist" title="Permanent link">&para;</a></h2>
+<p>Run these before checking off the completed rows above:</p>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-27-1"><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a>cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>psitri-tests<span class="w"> </span>-j<span class="w"> </span><span class="m">8</span>
+</span><span id="__span-27-2"><a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[public-api]&quot;</span>
+</span><span id="__span-27-3"><a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[leaf_node][transform]&quot;</span>
+</span><span id="__span-27-4"><a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[value_node]&quot;</span>
+</span><span id="__span-27-5"><a id="__codelineno-27-5" name="__codelineno-27-5" href="#__codelineno-27-5"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[value_node][mvcc][prune][passive]&quot;</span>
+</span><span id="__span-27-6"><a id="__codelineno-27-6" name="__codelineno-27-6" href="#__codelineno-27-6"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[value_node][subtree]&quot;</span>
+</span><span id="__span-27-7"><a id="__codelineno-27-7" name="__codelineno-27-7" href="#__codelineno-27-7"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[live_range_map]&quot;</span>
+</span><span id="__span-27-8"><a id="__codelineno-27-8" name="__codelineno-27-8" href="#__codelineno-27-8"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[defrag]&quot;</span>
+</span><span id="__span-27-9"><a id="__codelineno-27-9" name="__codelineno-27-9" href="#__codelineno-27-9"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[subtree]&quot;</span>
+</span><span id="__span-27-10"><a id="__codelineno-27-10" name="__codelineno-27-10" href="#__codelineno-27-10"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[defrag][floor]&quot;</span>
+</span><span id="__span-27-11"><a id="__codelineno-27-11" name="__codelineno-27-11" href="#__codelineno-27-11"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[epoch]&quot;</span>
+</span><span id="__span-27-12"><a id="__codelineno-27-12" name="__codelineno-27-12" href="#__codelineno-27-12"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[tree_ops][collapse][phase2]&quot;</span>
+</span><span id="__span-27-13"><a id="__codelineno-27-13" name="__codelineno-27-13" href="#__codelineno-27-13"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[tree_ops][shared][collapse]&quot;</span>
+</span><span id="__span-27-14"><a id="__codelineno-27-14" name="__codelineno-27-14" href="#__codelineno-27-14"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[mvcc_write]&quot;</span>
+</span><span id="__span-27-15"><a id="__codelineno-27-15" name="__codelineno-27-15" href="#__codelineno-27-15"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[mvcc_read]&quot;</span>
+</span><span id="__span-27-16"><a id="__codelineno-27-16" name="__codelineno-27-16" href="#__codelineno-27-16"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[per_txn]&quot;</span>
+</span><span id="__span-27-17"><a id="__codelineno-27-17" name="__codelineno-27-17" href="#__codelineno-27-17"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[per_txn][phaseA][cow][leaf_rewrite]&quot;</span>
+</span><span id="__span-27-18"><a id="__codelineno-27-18" name="__codelineno-27-18" href="#__codelineno-27-18"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[mvcc_lifecycle]&quot;</span>
+</span><span id="__span-27-19"><a id="__codelineno-27-19" name="__codelineno-27-19" href="#__codelineno-27-19"></a><span class="nv">PSITRI_FROM_RUN_TESTS</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>build/bin/psitri-tests<span class="w"> </span><span class="s2">&quot;[cow_prune]&quot;</span>
+</span><span id="__span-27-20"><a id="__codelineno-27-20" name="__codelineno-27-20" href="#__codelineno-27-20"></a>rg<span class="w"> </span><span class="s2">&quot;mvcc_upsert|mvcc_remove|try_mvcc|append_mvcc|mvcc_find_target&quot;</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-27-21"><a id="__codelineno-27-21" name="__codelineno-27-21" href="#__codelineno-27-21"></a><span class="w">  </span>libraries/psitri/include/psitri<span class="w"> </span>libraries/psitri/tests
+</span></code></pre></div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/gofractally/arbtrie" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "navigation.top", "navigation.indexes", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

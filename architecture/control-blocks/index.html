@@ -1,0 +1,2659 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A persistent, transactional key-value store built on an adaptive radix trie. 3x faster than RocksDB. ~9x less write amplification than page-based COW.">
+      
+      
+      
+        <link rel="canonical" href="https://gofractally.github.io/arbtrie/architecture/control-blocks/">
+      
+      
+        <link rel="prev" href="../dwal/">
+      
+      
+        <link rel="next" href="../mvcc-version-maintenance/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Control Blocks & Addressing - PsiTri</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#control-blocks-address-allocation" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="PsiTri" class="md-header__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            PsiTri
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Control Blocks & Addressing
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../why-psitri/problem/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Why PsiTri
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/quickstart/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../overview/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  How It Works
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../benchmarks/bank/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Benchmarks
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="PsiTri" class="md-nav__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    PsiTri
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why PsiTri
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Why PsiTri
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/problem/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Problem
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/tradeoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tradeoffs & Limitations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/transaction-contract/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transaction Contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/rocksdb-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RocksDB Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/mdbx-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MDBX Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/sqlite-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How It Works
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    How It Works
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dwal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DWAL: ART-Buffered Write Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Blocks & Addressing
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Blocks & Addressing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-real-bottleneck-cache-misses-not-cpu-cycles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Real Bottleneck: Cache Misses, Not CPU Cycles
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The Real Bottleneck: Cache Misses, Not CPU Cycles">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-problem-with-pointer-based-trees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Problem with Pointer-Based Trees
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#psitris-approach-separate-and-compress-the-indirection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PsiTri's Approach: Separate and Compress the Indirection
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-control-block-array" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Control Block Array
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#engineered-cacheline-co-location" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Engineered Cacheline Co-Location
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-byte-branch-encoding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1-Byte Branch Encoding
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1-Byte Branch Encoding">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-child-pointer-overhead-how-psitri-compares" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-Child Pointer Overhead: How PsiTri Compares
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-cascade-effect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Cascade Effect
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#comparison-cache-lines-per-tree-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Comparison: Cache Lines Per Tree Operation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#o1-object-relocation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        O(1) Object Relocation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#control-block-bit-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Control Block Bit Layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#simd-accelerated-branch-remapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SIMD-Accelerated Branch Remapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-all-fits-together" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How It All Fits Together
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mvcc-version-maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MVCC Version Maintenance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segment Allocator (SAL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../branchless-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Branchless Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../smart-pointers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smart Pointers & Thread Safety
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../concurrent-writers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrent Writers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Caching, Compaction & Beyond-RAM Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/write-protection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Write Protection & Durability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/data-integrity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Integrity & Verification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Benchmarks
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/bank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bank Transaction Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/random-upsert/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Random Upsert (200M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/scale/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scale Benchmark (419M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/rocksdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: RocksDB API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/sqlite-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: SQLite API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/duckdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: DuckDB Storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/coverage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code Coverage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/x86_simd/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x86 SIMD Optimizations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/known-issues/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Known Issues
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-real-bottleneck-cache-misses-not-cpu-cycles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Real Bottleneck: Cache Misses, Not CPU Cycles
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The Real Bottleneck: Cache Misses, Not CPU Cycles">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-problem-with-pointer-based-trees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Problem with Pointer-Based Trees
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#psitris-approach-separate-and-compress-the-indirection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PsiTri's Approach: Separate and Compress the Indirection
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-control-block-array" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Control Block Array
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#engineered-cacheline-co-location" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Engineered Cacheline Co-Location
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-byte-branch-encoding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1-Byte Branch Encoding
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="1-Byte Branch Encoding">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-child-pointer-overhead-how-psitri-compares" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-Child Pointer Overhead: How PsiTri Compares
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-cascade-effect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Cascade Effect
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#comparison-cache-lines-per-tree-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Comparison: Cache Lines Per Tree Operation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#o1-object-relocation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        O(1) Object Relocation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#control-block-bit-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Control Block Bit Layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#simd-accelerated-branch-remapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SIMD-Accelerated Branch Remapping
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-all-fits-together" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How It All Fits Together
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="control-blocks-address-allocation">Control Blocks &amp; Address Allocation<a class="headerlink" href="#control-blocks-address-allocation" title="Permanent link">&para;</a></h1>
+<h2 id="the-real-bottleneck-cache-misses-not-cpu-cycles">The Real Bottleneck: Cache Misses, Not CPU Cycles<a class="headerlink" href="#the-real-bottleneck-cache-misses-not-cpu-cycles" title="Permanent link">&para;</a></h2>
+<p>The conventional wisdom in data structure design focuses on minimizing comparisons, branch mispredictions, and algorithmic complexity. PsiTri is built on a different premise: <strong>for modern hardware, the dominant cost in tree traversal is cache line loads, not CPU instructions.</strong></p>
+<p>A modern CPU can execute hundreds of instructions in the time it takes to load a single cache line from main memory (~100ns). An L1 cache hit is ~1ns. That's a 100x difference. The entire design of PsiTri's addressing system exists to minimize the number of cache lines touched during tree operations.</p>
+<h3 id="the-problem-with-pointer-based-trees">The Problem with Pointer-Based Trees<a class="headerlink" href="#the-problem-with-pointer-based-trees" title="Permanent link">&para;</a></h3>
+<p>Every pointer-based tree structure -- B-trees, ART, red-black trees, skip lists -- pays a hidden cost that grows with branching factor. Consider what happens when an inner node with N children needs to visit those children:</p>
+<p><strong>Traditional 4-8 byte pointers</strong>: Each child reference is a 4-8 byte pointer or ID. Dereferencing it loads a control structure (reference count, location, etc.) at an unpredictable memory address. With N children scattered across memory, that's <strong>N cache line loads</strong> just to read the metadata -- before touching any child data.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Traditional tree node with 16 children:
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>  Node (128+ bytes for pointers alone)
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>  ┌─────────────────────────────────────────────────────┐
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>  │ ptr[0]=0x7f3a...  ptr[1]=0x7f8c...  ptr[2]=0x7fb1..│  8 bytes each
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>  │ ptr[3]=0x7f22...  ptr[4]=0x7fa0...  ...             │
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>  └─────────────────────────────────────────────────────┘
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>       │                    │                   │
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>       v                    v                   v
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>   ┌────────┐          ┌────────┐          ┌────────┐
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>   │ ref=3  │          │ ref=1  │          │ ref=2  │     Each at a random
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>   │ loc=.. │          │ loc=.. │          │ loc=.. │     memory address
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>   └────────┘          └────────┘          └────────┘
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>   cacheline A         cacheline B         cacheline C    = 16 cache misses
+</span></code></pre></div>
+<p>This is the fundamental bottleneck in every existing persistent tree:</p>
+<table>
+<thead>
+<tr>
+<th>Structure</th>
+<th>Pointer size</th>
+<th>Node with 16 children</th>
+<th>Cache lines to visit all children</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B-tree (LMDB)</td>
+<td>8 bytes (page ID)</td>
+<td>128 bytes of pointers</td>
+<td>Up to 16</td>
+</tr>
+<tr>
+<td>ART Node256</td>
+<td>8 bytes</td>
+<td>2,048 bytes of pointers</td>
+<td>Up to 256</td>
+</tr>
+<tr>
+<td><code>std::shared_ptr</code> tree</td>
+<td>16 bytes (ptr + control)</td>
+<td>256 bytes of pointers</td>
+<td>Up to 32</td>
+</tr>
+<tr>
+<td>Red-black / AVL</td>
+<td>8 bytes x 2-3</td>
+<td>16-24 bytes</td>
+<td>2-3 per node, but deep</td>
+</tr>
+</tbody>
+</table>
+<p>The node itself is also bloated by all those pointers. A B-tree node with 256 children spends 2 KB just on child pointers. That's 32 cache lines for the node alone, before any key data. Bigger nodes mean more cache lines loaded per traversal step, which means more evictions of other useful data from the CPU cache.</p>
+<p><strong>This is the real write amplification problem.</strong> Copy-on-write databases copy entire nodes on mutation. A 4 KB B-tree page holds ~200 keys but wastes most of its space on pointers and alignment. Copying 4 KB to change one key is bad, but the deeper problem is that the page was 4 KB in the first place because the pointers are so large.</p>
+<h3 id="psitris-approach-separate-and-compress-the-indirection">PsiTri's Approach: Separate and Compress the Indirection<a class="headerlink" href="#psitris-approach-separate-and-compress-the-indirection" title="Permanent link">&para;</a></h3>
+<p>An obvious objection: PsiTri adds a level of indirection -- every pointer dereference must first look up the control block to find the physical location, then load the actual node. Don't you pay <em>more</em> cache misses, not fewer?</p>
+<p>The answer is no -- and the benefit comes in two layers.</p>
+<p><strong>Layer 1: Separation alone is already a partial win.</strong> Even without intentional co-location, a flat metadata array has two advantages over inline metadata. First, some siblings will randomly land on the same cache lines -- with 8 control blocks per cache line, random placement still yields incidental sharing. Second, the control block array is compact (8 bytes per object vs 64+ byte node pages) and can be pinned to RAM, ensuring metadata access never triggers a disk page fault. When inline metadata is stored in node data pages, a cold node means the refcount access pays the worst-case cost: a disk read of an entire 4 KB page just to touch 4 bytes. With a separated, pinned control block array, metadata access is always a RAM hit -- never a disk fault.</p>
+<p><strong>Layer 2: Intentional co-location turns a partial win into a decisive one.</strong> PsiTri's allocator actively co-locates sibling control blocks on shared cachelines. When a node allocates a child, it passes hints (the <code>ptr_address</code> values of existing siblings), and the allocator places the new control block in the same 16-slot group. This converts N scattered RAM loads into a small constant number of loads -- typically 1-2 cache lines for nodes with up to 16 children.</p>
+<p>Most persistent tree structures that support snapshots or MVCC face this same scattered-metadata problem. Systems like WiredTiger, InnoDB, PostgreSQL, and CouchDB all store reference counts or version metadata inline with each node or row. When they need to retain, release, or scan children, they pay the full cost of loading each child's data page just to touch a few bytes of metadata. None of them separate the metadata, and none of them attempt co-location -- because without the flat control block array, there is no natural structure to co-locate <em>into</em>.</p>
+<p><strong>The result of separation + co-location together:</strong></p>
+<p>Traditional trees <em>also</em> load metadata (reference counts, flags) on every traversal -- they just hide it by storing it inline with each node's data. When a traditional tree node with 256 children needs to retain or release those children (copy-on-write, snapshot, destruction), it must load each child's data page just to touch the refcount. That's <strong>256 cache line loads of 64+ bytes each</strong> -- and on modern CPUs that prefetch in 128-byte pairs, potentially <strong>256 x 128 = 32 KB of memory bandwidth</strong>, every byte of which evicts something useful from the CPU cache.</p>
+<p>PsiTri separates the metadata into a dense, flat, contiguous control block array <strong>and co-locates siblings within it</strong>. The same 256-child retain/release operation touches at most <strong>16 cacheline groups x 128 bytes = 2 KB</strong> -- the control blocks of all 256 children packed into 16 groups. That is <strong>16x less memory bandwidth</strong> and <strong>16x less cache pollution</strong>. The control block array is small (8 bytes per object; ~4.6 MB for 580K nodes at 30M keys), heavily accessed, and stays hot in L2/L3 cache.</p>
+<p>For a single lookup traversal, PsiTri loads one control block (likely already in cache because siblings keep the surrounding entries hot) and then one node. Traditional trees load one node page but that page is 4 KB. PsiTri's path touches fewer total bytes.</p>
+<hr />
+<h2 id="the-control-block-array">The Control Block Array<a class="headerlink" href="#the-control-block-array" title="Permanent link">&para;</a></h2>
+<p>Every allocated object gets a permanent 32-bit ID (<code>ptr_address</code>). This ID indexes into a flat, contiguous array of <strong>8-byte atomic control blocks</strong> -- one per object, 8 per 64-byte cache line (though the allocator operates on 16-slot groups spanning two adjacent cache lines):</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ptr_address (32-bit permanent ID)
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>     |
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>     v  array lookup (O(1))
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>control_block (64-bit atomic)
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>  ┌──────────────────────────────────────────────────────────────┐
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>  │ ref_count (21b) │ cacheline_offset (41b) │ active │ pending  │
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>  └──────────────────────────────────────────────────────────────┘
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>     |
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>     v  direct memory access
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>Object Data (at physical location in memory-mapped segment)
+</span></code></pre></div>
+<p>The <code>ptr_address</code> never changes for the lifetime of the object. The physical location can change at any time -- the control block is the single source of truth.</p>
+<p>Because the array is flat and contiguous, adjacent <code>ptr_address</code> IDs share the same CPU cache line. This is not incidental -- it's the foundation of everything that follows.</p>
+<hr />
+<h2 id="engineered-cacheline-co-location">Engineered Cacheline Co-Location<a class="headerlink" href="#engineered-cacheline-co-location" title="Permanent link">&para;</a></h2>
+<p>PsiTri's allocator deliberately places sibling nodes' control blocks in the <strong>same 16-slot group</strong> (128 bytes, spanning two adjacent cache lines).</p>
+<p>When a node allocates a child, it passes <strong>allocation hints</strong> -- the <code>ptr_address</code> values of existing siblings. The allocator rounds down to a 16-element boundary and tries to place the new object in the <strong>same 16-slot group</strong> in the control block array:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>Random allocation (no hints):
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>  Control block array:
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>  │ ..A.........   │ │ ......B.....   │ │ .C..........   │
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>  └── cacheline 0 ─┘ └── cacheline 1 ─┘ └── cacheline 2 ─┘
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>  3 siblings = 3 cache line loads
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>Hint-based allocation (co-located):
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>  │ .ABC........   │ │ ..............  │ │ ..............  │
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>  └── cacheline 0 ─┘ └── cacheline 1 ─┘ └── cacheline 2 ─┘
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>  3 siblings = 1 cache line load
+</span></code></pre></div>
+<p>A node with 16 children that all share one 16-slot group does <strong>1-2 cache line loads</strong> to dereference all of them, instead of 16. Even a node with the maximum 256 children (spread across up to 16 groups) only needs 16-32 cache line loads -- compared to 256 in a traditional design.</p>
+<h2 id="1-byte-branch-encoding">1-Byte Branch Encoding<a class="headerlink" href="#1-byte-branch-encoding" title="Permanent link">&para;</a></h2>
+<p>Co-location enables an extreme pointer compression scheme. Instead of storing 4-byte addresses to children, inner nodes store <strong>1-byte branch references</strong>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>branch (1 byte)
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>┌──────────────┬──────────────┐
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>│ high nibble  │ low nibble   │
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>│ cacheline    │ slot within  │
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>│ index (0-15) │ line (0-15)  │
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>└──────────────┴──────────────┘
+</span></code></pre></div>
+<p>Each inner node stores up to 16 <strong>cacheline base addresses</strong> (4 bytes each). To resolve a branch to a full <code>ptr_address</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>full_address = clines[branch &gt;&gt; 4].base() + (branch &amp; 0x0f)
+</span></code></pre></div>
+<p>This supports up to <strong>256 branches</strong> (16 cachelines x 16 slots) per node:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>Traditional:  256 branches x 4-byte addresses            = 1,024 bytes  (16 cache lines)
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>PsiTri:       256 branches x 1-byte refs + 16 x 4-byte  =   320 bytes  ( 5 cache lines)
+</span></code></pre></div>
+<h3 id="per-child-pointer-overhead-how-psitri-compares">Per-Child Pointer Overhead: How PsiTri Compares<a class="headerlink" href="#per-child-pointer-overhead-how-psitri-compares" title="Permanent link">&para;</a></h3>
+<p>The 1-byte branch encoding gives PsiTri the lowest per-child pointer overhead of any pointer-based tree structure. Each child costs 1 byte (the branch) plus its share of the cacheline base table (4 bytes per cacheline group, amortized across all branches using that group). The more branches share each cacheline group, the lower the per-child cost:</p>
+<p><strong>PsiTri inner_node overhead by configuration:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Branches</th>
+<th>Clines</th>
+<th>Raw bytes</th>
+<th>Alloc size</th>
+<th>Per-child total</th>
+<th>Per-child pointer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td>1</td>
+<td>27</td>
+<td>64</td>
+<td>32.0 B</td>
+<td>3.00 B</td>
+</tr>
+<tr>
+<td>4</td>
+<td>1</td>
+<td>31</td>
+<td>64</td>
+<td>16.0 B</td>
+<td>2.00 B</td>
+</tr>
+<tr>
+<td>8</td>
+<td>2</td>
+<td>43</td>
+<td>64</td>
+<td>8.0 B</td>
+<td>2.00 B</td>
+</tr>
+<tr>
+<td>16</td>
+<td>2</td>
+<td>59</td>
+<td>64</td>
+<td>4.0 B</td>
+<td>1.50 B</td>
+</tr>
+<tr>
+<td>32</td>
+<td>4</td>
+<td>99</td>
+<td>128</td>
+<td>4.0 B</td>
+<td>1.50 B</td>
+</tr>
+<tr>
+<td>64</td>
+<td>8</td>
+<td>179</td>
+<td>192</td>
+<td>3.0 B</td>
+<td>1.50 B</td>
+</tr>
+<tr>
+<td>128</td>
+<td>12</td>
+<td>323</td>
+<td>384</td>
+<td>3.0 B</td>
+<td>1.38 B</td>
+</tr>
+<tr>
+<td>256</td>
+<td>16</td>
+<td>595</td>
+<td>640</td>
+<td>2.5 B</td>
+<td>1.25 B</td>
+</tr>
+</tbody>
+</table>
+<p><em>Raw bytes = 19 + 2×branches + clines×4 (header + dividers + branches + cline table). Alloc size = round_up to 64-byte multiple. Per-child pointer = (branches×1 + clines×4) / branches.</em></p>
+<p>The "per-child pointer" column isolates the cost of encoding child references. At 256 branches with 16 cacheline groups, each child reference costs just <strong>1.25 bytes</strong>. Even at typical sizes (8-32 branches), it's <strong>1.5-2.0 bytes per child</strong>.</p>
+<p><strong>Comparison with other tree structures:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Data Structure</th>
+<th>Per-Child Pointer</th>
+<th>Total Per-Child</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>PsiTri (16 branches, 2 clines)</strong></td>
+<td><strong>1.50 B</strong></td>
+<td><strong>4.0 B</strong></td>
+<td>This project</td>
+</tr>
+<tr>
+<td><strong>PsiTri (256 branches, 16 clines)</strong></td>
+<td><strong>1.25 B</strong></td>
+<td><strong>2.5 B</strong></td>
+<td>This project</td>
+</tr>
+<tr>
+<td>InnoDB B+tree</td>
+<td>4 B</td>
+<td>~9 B + key</td>
+<td>32-bit page IDs</td>
+</tr>
+<tr>
+<td>LMDB B+tree</td>
+<td>6 B</td>
+<td>~10 B + key</td>
+<td>48-bit pgno packed in 8 B header + 2 B offset</td>
+</tr>
+<tr>
+<td>BoltDB B+tree</td>
+<td>8 B</td>
+<td>16 B + key</td>
+<td><code>branchPageElement</code> = 16 B</td>
+</tr>
+<tr>
+<td>ART Node16</td>
+<td>8 B</td>
+<td>10.0 B</td>
+<td>160 B / 16 children (Leis et al. 2013)</td>
+</tr>
+<tr>
+<td>ART Node256</td>
+<td>8 B</td>
+<td>8.1 B</td>
+<td>2,064 B / 256 children</td>
+</tr>
+<tr>
+<td>ART Node48</td>
+<td>8 B</td>
+<td>13.7 B</td>
+<td>656 B / 48 children (256 B index array)</td>
+</tr>
+<tr>
+<td>HOT</td>
+<td>8 B</td>
+<td>~11-14 B</td>
+<td>Binna et al. 2018</td>
+</tr>
+<tr>
+<td>Masstree</td>
+<td>8 B</td>
+<td>~15.5 B</td>
+<td>8 B key slice + 8 B pointer (Mao et al. 2012)</td>
+</tr>
+<tr>
+<td>Red-black tree</td>
+<td>8 B</td>
+<td>12.5 B</td>
+<td>2 children + parent + color</td>
+</tr>
+<tr>
+<td>Skip list (p=0.5)</td>
+<td>8 B</td>
+<td>16.0 B</td>
+<td>Expected 2 pointers per node</td>
+</tr>
+<tr>
+<td>Bw-tree</td>
+<td>8 B</td>
+<td>16.0 B</td>
+<td>8 B PID + 8 B mapping table entry</td>
+</tr>
+<tr>
+<td>WiredTiger</td>
+<td>8 B</td>
+<td>56 B</td>
+<td>In-memory <code>WT_REF</code> struct</td>
+</tr>
+</tbody>
+</table>
+<p>Every other structure pays at least <strong>4 bytes per child</strong> for the pointer alone -- and most pay <strong>8 bytes</strong> (a full 64-bit pointer or page ID). PsiTri's 1-byte branch encoding with amortized cacheline bases achieves <strong>1.25-2.0 bytes per child</strong>, a 4-6x reduction over the state of the art.</p>
+<p>The key insight: by separating addressing into a flat control block array and encoding sibling references relative to shared cacheline groups, PsiTri converts what is normally a per-child cost (pointer storage) into a per-<em>group</em> cost (cacheline base address), then amortizes that cost across all children sharing the group.</p>
+<h3 id="the-cascade-effect">The Cascade Effect<a class="headerlink" href="#the-cascade-effect" title="Permanent link">&para;</a></h3>
+<p>Smaller pointers create a cascade of benefits:</p>
+<ol>
+<li><strong>Smaller pointers</strong> -&gt; smaller nodes (typically 1-2 cache lines vs 4 KB)</li>
+<li><strong>Smaller nodes</strong> -&gt; fewer cache lines loaded per traversal step</li>
+<li><strong>Fewer cache lines per node</strong> -&gt; less cache pollution, more of the working set stays hot</li>
+<li><strong>Smaller nodes</strong> -&gt; node-level copy-on-write becomes practical (copying 1-2 cache lines vs 4 KB)</li>
+<li><strong>Node-level COW</strong> -&gt; dramatically less write amplification per mutation</li>
+<li><strong>Co-located siblings</strong> -&gt; dereferencing N children costs 1-2 cache line loads, not N</li>
+</ol>
+<p>None of this is possible with 4-byte pointers stored directly. The 1-byte branch encoding and the flat control block array are the enablers.</p>
+<h3 id="comparison-cache-lines-per-tree-operation">Comparison: Cache Lines Per Tree Operation<a class="headerlink" href="#comparison-cache-lines-per-tree-operation" title="Permanent link">&para;</a></h3>
+<p>For a point lookup traversing 5 levels in a tree with 30M keys:</p>
+<table>
+<thead>
+<tr>
+<th>Structure</th>
+<th>Cache lines per level</th>
+<th>Total for 5 levels</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B-tree (4KB pages)</td>
+<td>~4-8 per page load</td>
+<td>20-40</td>
+<td>Plus page cache overhead</td>
+</tr>
+<tr>
+<td>ART Node48</td>
+<td>1-3 per node</td>
+<td>5-15</td>
+<td>In-memory only, not persistent</td>
+</tr>
+<tr>
+<td>ART Node256</td>
+<td>4+ per node</td>
+<td>20+</td>
+<td>2KB per node</td>
+</tr>
+<tr>
+<td><code>std::map</code> (red-black)</td>
+<td>1 per node, but ~20 levels</td>
+<td>~20</td>
+<td>Deep tree, poor locality</td>
+</tr>
+<tr>
+<td><strong>PsiTri</strong></td>
+<td><strong>1-2 per node</strong></td>
+<td><strong>5-10</strong></td>
+<td><strong>Persistent, COW, crash-safe</strong></td>
+</tr>
+</tbody>
+</table>
+<p>PsiTri achieves cache performance competitive with in-memory-only data structures while providing full persistence, copy-on-write, and crash safety.</p>
+<hr />
+<h2 id="o1-object-relocation">O(1) Object Relocation<a class="headerlink" href="#o1-object-relocation" title="Permanent link">&para;</a></h2>
+<p>The control block indirection also enables the compactor to move any object with a single atomic instruction:</p>
+<ol>
+<li>Copy the object data to a new location</li>
+<li>Atomically swap the location in the control block (<code>compare_exchange</code>)</li>
+</ol>
+<p>No pointer updates anywhere in the tree. No tracing. No pause. Concurrent readers that already resolved the old location are safe -- the reference count prevents the old copy from being freed until they release.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>Compactor                          Reader thread
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    |                                   |
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    |  memcpy(new_loc, old_loc, size)   |
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    |                                   |
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    |  CAS(control_block,               |  ptr = control_block.load()
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    |      old_loc -&gt; new_loc)          |  // gets new location
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    |                                   |
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    |  (old_loc freed when              |  read(ptr)  // valid data
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>    |   last reader releases)           |
+</span></code></pre></div>
+<table>
+<thead>
+<tr>
+<th>System</th>
+<th>Object Relocation Cost</th>
+<th>Concurrent?</th>
+<th>Persistent?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Java ZGC</td>
+<td>Read barrier on every pointer access</td>
+<td>Yes</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Go GC</td>
+<td>Stop-the-world + pointer updates</td>
+<td>Partially</td>
+<td>No</td>
+</tr>
+<tr>
+<td>LMDB</td>
+<td>Cannot relocate (offline copy only)</td>
+<td>N/A</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>PostgreSQL VACUUM</td>
+<td>O(indexes) per row</td>
+<td>Limited</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>RocksDB compaction</td>
+<td>Rewrite entire SST file</td>
+<td>Background</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><strong>PsiTri SAL</strong></td>
+<td><strong>memcpy + 1 atomic CAS</strong></td>
+<td><strong>Fully</strong></td>
+<td><strong>Yes</strong></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="control-block-bit-layout">Control Block Bit Layout<a class="headerlink" href="#control-block-bit-layout" title="Permanent link">&para;</a></h2>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>┌──────────────────────────────────────────────────────────────────┐
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>│ bit 63        bit 62     bits 61..21                bits 20..0   │
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>│ pending_cache active     cacheline_offset (41b)     ref (21b)    │
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>└──────────────────────────────────────────────────────────────────┘
+</span></code></pre></div>
+<ul>
+<li><strong>ref (21 bits)</strong>: Atomic reference count. <code>ref == 1</code> means unique ownership -- in-place modification is safe. <code>ref &gt; 1</code> triggers copy-on-write. Maximum ~2 million concurrent references.</li>
+<li><strong>cacheline_offset (41 bits)</strong>: Physical location as a 64-byte cacheline index. The 41-bit field can theoretically address 128 TB; the configured limit is 32 TB.</li>
+<li><strong>active (1 bit)</strong>: Set when the object is accessed. Used by the MFU caching algorithm.</li>
+<li><strong>pending_cache (1 bit)</strong>: Set when an already-active object is accessed again. Signals to the compactor that this object is hot and should be promoted to pinned memory.</li>
+</ul>
+<p>Reference counting uses <code>fetch_add</code> (faster than CAS) with a buffer of 64 below the 21-bit maximum to absorb concurrent overshoots from up to 64 threads.</p>
+<p>The zone-striped ID allocator that powers hint-based co-location is covered in detail in <a href="../concurrent-writers/#zone-striped-id-allocation">Concurrent Writers</a>.</p>
+<hr />
+<h2 id="simd-accelerated-branch-remapping">SIMD-Accelerated Branch Remapping<a class="headerlink" href="#simd-accelerated-branch-remapping" title="Permanent link">&para;</a></h2>
+<p>When inner nodes are split, merged, or cloned, branches must be <strong>remapped</strong> because the set of referenced cachelines changes. If an inner node with 16 cachelines is split into two nodes, each child node only references a subset of the original cachelines -- so the cacheline indices in each branch byte must be rewritten.</p>
+<p>PsiTri does this with a <strong>branchless NEON/SIMD transformation</strong>:</p>
+<ol>
+<li>Build a frequency table: which cachelines are referenced by this subset of branches?</li>
+<li>Compute a rank lookup table: original cacheline index -&gt; compacted index</li>
+<li>Apply the LUT to all branches in a single SIMD pass:<ul>
+<li>High nibble (cacheline index) is replaced via the LUT</li>
+<li>Low nibble (slot within cacheline) is preserved</li>
+</ul>
+</li>
+</ol>
+<p>This is faster than scalar byte-by-byte transformation and completely branchless.</p>
+<hr />
+<h2 id="how-it-all-fits-together">How It All Fits Together<a class="headerlink" href="#how-it-all-fits-together" title="Permanent link">&para;</a></h2>
+<p>The control block system creates a virtuous cycle:</p>
+<ol>
+<li><strong>Permanent IDs</strong> mean pointers in the tree never need updating</li>
+<li><strong>Flat array layout</strong> means adjacent IDs share cache lines</li>
+<li><strong>Hint-based allocation</strong> places siblings on shared cache lines</li>
+<li><strong>1-byte branch encoding</strong> exploits shared cache lines for 6x pointer compression</li>
+<li><strong>Compressed inner nodes</strong> (typically 1-2 cache lines) make node-level copy-on-write practical</li>
+<li><strong>Node-level COW</strong> means mutations write ~2.3 KB (4 inner nodes + 1 leaf) instead of ~20 KB</li>
+<li><strong>O(1) relocation</strong> via CAS means the compactor can defragment without pausing anything</li>
+</ol>
+<p>Remove any one piece and the others lose their leverage. The control block is the keystone that holds it all together.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/gofractally/arbtrie" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "navigation.top", "navigation.indexes", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,82 @@
+=== Bank Benchmark: RocksDB ===
+  Accounts:     1,000,000
+  Transactions: 1,000,000
+  Batch size:   1
+  Sync every:   never commits
+  Sync mode:    none
+  Seed:         12345
+  Read mode:    latest
+  DB path:      /tmp/bench_bank_rocksdb
+
+Phase 1: Account Generation
+  Loaded 104,334 dictionary words
+  Account generation              0.044 sec      22,620,114 ops/sec
+
+Phase 2: Bulk Load
+  Bulk load                       0.741 sec       1,350,387 ops/sec
+  Size: file=18.2 MB  live=0.0 MB  free=18.2 MB
+
+Warm-up: 100,000 transactions (not measured)
+  Warm-up                         0.649 sec         153,989 ops/sec
+  Successful: 97,020  Skipped: 2,980
+  Size: file=27.4 MB  live=0.0 MB  free=27.4 MB
+  commit                avg=   1 us  p50=   4 us  p99=   4 us  p99.9=   16 us  max=  465 us  (n=100000)
+  commit latency distribution:
+         <1 us:     1125  (  1.1%)
+        1-2 us:    24727  ( 24.7%)
+        2-4 us:    73470  ( 73.5%)
+        4-8 us:      442  (  0.4%)
+       8-16 us:      232  (  0.2%)
+      16-32 us:        2  (  0.0%)
+    256-512 us:        2  (  0.0%)
+
+Phase 3a: Transactions (write-only)
+  1,000,000 / 1,000,000  (157,588 tx/sec, 811,292 ok, 188,708 skip)
+  Write-only                      6.346 sec         157,588 ops/sec
+  Successful: 811,292  Skipped: 188,708
+  Size: file=92.0 MB  live=52.4 MB  free=39.6 MB
+  commit                avg=   1 us  p50=   4 us  p99=   4 us  p99.9=   16 us  max=13208 us  (n=1000000)
+  commit latency distribution:
+         <1 us:    71065  (  7.1%)
+        1-2 us:   294346  ( 29.4%)
+        2-4 us:   629246  ( 62.9%)
+        4-8 us:     4012  (  0.4%)
+       8-16 us:     1284  (  0.1%)
+      16-32 us:       32  (  0.0%)
+      32-64 us:        9  (  0.0%)
+     64-128 us:        1  (  0.0%)
+    128-256 us:        1  (  0.0%)
+    256-512 us:        2  (  0.0%)
+      8-16 ms:        2  (  0.0%)
+
+Phase 3b: Transactions (with 1 reader, 100 reads/batch)
+  1,000,000 / 1,000,000  (114,754 tx/sec, 715,997 ok, 284,003 skip)
+  Write+Read                      8.714 sec         114,752 ops/sec
+  Successful: 715,997  Skipped: 284,003
+  Reader: 2,523,900 reads in 8.714s (289,627 reads/sec, 2,523,900 found = 100.0%)
+  Size: file=207.0 MB  live=69.8 MB  free=137.2 MB
+  commit                avg=   1 us  p50=   4 us  p99=   8 us  p99.9=   16 us  max=13537 us  (n=1000000)
+  commit latency distribution:
+         <1 us:   105351  ( 10.5%)
+        1-2 us:   186555  ( 18.7%)
+        2-4 us:   694774  ( 69.5%)
+        4-8 us:    12084  (  1.2%)
+       8-16 us:     1203  (  0.1%)
+      16-32 us:       20  (  0.0%)
+      32-64 us:       10  (  0.0%)
+    256-512 us:        1  (  0.0%)
+      8-16 ms:        2  (  0.0%)
+
+  --- Phase 3 Summary ---
+  Write-only: 157,588 tx/sec
+  Write+Read: 114,752 tx/sec  (write impact: -27.2%)
+  Reader:     289,627 reads/sec
+
+Phase 4: Validation
+  Validation scan                 0.331 sec       7,637,167 ops/sec
+  Accounts found: 1,000,000 (expected 1,000,000)
+  Log entries:    1,527,289 (expected 1,527,289)
+  Total balance:  1,000,000,000,000 (expected 1,000,000,000,000)  PASS
+  Size: file=207.0 MB  live=69.8 MB  free=137.2 MB
+
+PASS  Total wall clock: 16.845 sec

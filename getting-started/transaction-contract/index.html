@@ -1,0 +1,2981 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A persistent, transactional key-value store built on an adaptive radix trie. 3x faster than RocksDB. ~9x less write amplification than page-based COW.">
+      
+      
+      
+        <link rel="canonical" href="https://gofractally.github.io/arbtrie/getting-started/transaction-contract/">
+      
+      
+        <link rel="prev" href="../../examples/">
+      
+      
+        <link rel="next" href="../rocksdb-migration/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Transaction Contract - PsiTri</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#transaction-and-cursor-contract" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="PsiTri" class="md-header__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            PsiTri
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Transaction Contract
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="amber"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../why-psitri/problem/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Why PsiTri
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../quickstart/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/overview/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  How It Works
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../benchmarks/bank/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Benchmarks
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="PsiTri" class="md-nav__button md-logo" aria-label="PsiTri" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    PsiTri
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/gofractally/arbtrie" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gofractally/arbtrie
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why PsiTri
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Why PsiTri
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/problem/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Problem
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design Philosophy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-psitri/tradeoffs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tradeoffs & Limitations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transaction Contract
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transaction Contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#mental-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mental Model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#write-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Write Sessions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#basic-write-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Basic Write Transaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#zero-copy-reads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Zero-Copy Reads
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-key-fast-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known-Key Fast Paths
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tree-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tree Objects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#speculative-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Speculative Transaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#current-state-cursors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current-State Cursors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snapshot-cursors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snapshot Cursors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nested-transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nested Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#subtree-transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subtree Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi-root-transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-Root Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-cursor-apis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing Cursor APIs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mdbx-shim-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MDBX Shim Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testable-promises" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testable Promises
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rocksdb-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RocksDB Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mdbx-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MDBX Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqlite-migration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite Migration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How It Works
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    How It Works
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/dwal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DWAL: ART-Buffered Write Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/control-blocks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Control Blocks & Addressing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/mvcc-version-maintenance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MVCC Version Maintenance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/sal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segment Allocator (SAL)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/branchless-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Branchless Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/smart-pointers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smart Pointers & Thread Safety
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/concurrent-writers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concurrent Writers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/caching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Caching, Compaction & Beyond-RAM Scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/write-protection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Write Protection & Durability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/data-integrity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Integrity & Verification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/recovery/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Benchmarks
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/bank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bank Transaction Benchmark
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/random-upsert/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Random Upsert (200M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/scale/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scale Benchmark (419M Keys)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/rocksdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: RocksDB API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/sqlite-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: SQLite API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/duckdb-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Drop-In: DuckDB Storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/coverage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code Coverage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../benchmarks/x86_simd/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    x86 SIMD Optimizations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/known-issues/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Known Issues
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#mental-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mental Model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#write-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Write Sessions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#basic-write-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Basic Write Transaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#zero-copy-reads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Zero-Copy Reads
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#known-key-fast-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known-Key Fast Paths
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tree-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tree Objects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#speculative-transaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Speculative Transaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#current-state-cursors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current-State Cursors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snapshot-cursors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snapshot Cursors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nested-transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nested Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#subtree-transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subtree Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi-root-transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-Root Transactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-cursor-apis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing Cursor APIs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mdbx-shim-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MDBX Shim Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testable-promises" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testable Promises
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="transaction-and-cursor-contract">Transaction and Cursor Contract<a class="headerlink" href="#transaction-and-cursor-contract" title="Permanent link">&para;</a></h1>
+<p>This page defines the public transaction contract for PsiTri. The implementation
+must satisfy this developer experience. Internal data structures, cursor pools,
+and MDBX compatibility code should be shaped by this contract, not the other way
+around.</p>
+<h2 id="mental-model">Mental Model<a class="headerlink" href="#mental-model" title="Permanent link">&para;</a></h2>
+<p>PsiTri has up to 512 top-level roots. Each root is an independent ordered key
+space. A committed top-level root is visible to readers and is treated as shared
+state.</p>
+<p>A write transaction creates current write state for the root or tree it opens.
+Reads inside that transaction read the current write state, including writes
+that have not been turned back into a <code>tree</code> yet. This is the default and cheap
+path.</p>
+<p>A tree does not have to start from a top-level root. Use
+<code>create_temporary_tree()</code> to build a detached tree, then put it somewhere by
+upserting it as a subtree value or publishing it to a top-level root with
+<code>set_root()</code>.</p>
+<p>PsiTri can hand application code an explicit retained <code>tree</code> object. A <code>tree</code>
+may come from <code>create_temporary_tree()</code>, a top-level root snapshot, or an
+existing subtree. Passing a <code>tree</code> to <code>upsert_subtree()</code> or <code>set_root()</code> stores
+that tree identity in a new place. This is powerful: applications can manage
+their own snapshots and copy them between roots and subtrees without
+deep-copying all keys and values.</p>
+<p>To modify a <code>tree</code>, start a write transaction from it:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">edit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_write_transaction</span><span class="p">(</span><span class="n">tree_handle</span><span class="p">,</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">                                        </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">edit</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;field&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;value&quot;</span><span class="p">);</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="k">auto</span><span class="w"> </span><span class="n">updated_tree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">edit</span><span class="p">.</span><span class="n">get_tree</span><span class="p">();</span>
+</span></code></pre></div>
+<p><code>start_write_transaction(tree)</code> does not give the transaction a root slot or
+parent key to publish into. It only edits that tree and lets the caller ask for
+the resulting <code>tree</code>. Publishing is a separate step: store the returned tree
+with <code>upsert_subtree()</code> or <code>set_root()</code>.</p>
+<p>That power has a real footgun. PsiTri stores subtrees by reference-counted tree
+identity. If application code stores a tree inside itself, inside one of its
+descendants, or otherwise creates a cycle, the cycle may keep storage alive
+forever. The public API makes tree movement explicit, but it does not try to
+prove the user's ownership graph is acyclic.</p>
+<p>Snapshot ownership is different from current-state reads. A snapshot cursor
+pins a stable view so it can survive later mutation. A copyable <code>tree</code> obtained
+from <code>get_root()</code> or <code>get_subtree()</code> can also retain a stable tree identity.
+That is useful and correct when the application needs isolation or wants to
+archive a tree, but it can make later writes copy more data.</p>
+<h2 id="write-sessions">Write Sessions<a class="headerlink" href="#write-sessions" title="Permanent link">&para;</a></h2>
+<p>A write session is a thread-owned allocator context. It owns a 32 MB write
+buffer that is flushed and recycled when the session closes. Create the session
+on the thread that will use it, keep it for the life of that worker thread, and
+create many transactions from it.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kt">void</span><span class="w"> </span><span class="nf">writer_thread</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">shared_ptr</span><span class="o">&lt;</span><span class="n">psitri</span><span class="o">::</span><span class="n">database</span><span class="o">&gt;</span><span class="w"> </span><span class="n">db</span><span class="p">)</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="p">{</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="o">-&gt;</span><span class="n">start_write_session</span><span class="p">();</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">   </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">job</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">next_job</span><span class="p">())</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">   </span><span class="p">{</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">      </span><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="n">job</span><span class="p">.</span><span class="n">root</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">      </span><span class="n">apply_job</span><span class="p">(</span><span class="n">tx</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">job</span><span class="p">);</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">      </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">   </span><span class="p">}</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Do not create a write session for each small operation:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">job</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">jobs</span><span class="p">)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="p">{</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="o">-&gt;</span><span class="n">start_write_session</span><span class="p">();</span><span class="w"> </span><span class="c1">// wrong: creates allocator contexts repeatedly</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="n">job</span><span class="p">.</span><span class="n">root</span><span class="p">);</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">   </span><span class="n">apply_job</span><span class="p">(</span><span class="n">tx</span><span class="p">,</span><span class="w"> </span><span class="n">job</span><span class="p">);</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">   </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li>A write session must be created by the thread that uses it.</li>
+<li>A write session must not be passed to another thread.</li>
+<li>A write session should be long-lived, normally one per worker thread.</li>
+<li>Each write session owns a 32 MB write buffer. Applications should budget for
+  that per active write session.</li>
+<li>Closing a write session flushes/recycles its write buffer.</li>
+<li>Transactions, cursors, and subtree scopes are the short-lived objects.</li>
+<li>An application may have at most 50 active write sessions. The allocator has
+  64 session slots total; 14 are reserved for background work such as current
+  and future compaction services.</li>
+<li>Creating write sessions repeatedly for small operations is an API misuse and
+  should show up clearly in examples, docs, and diagnostics.</li>
+</ul>
+<h2 id="basic-write-transaction">Basic Write Transaction<a class="headerlink" href="#basic-write-transaction" title="Permanent link">&para;</a></h2>
+<p>Use <code>expect_success</code> when the transaction is likely to commit and may perform
+many writes to the same root.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;psitri/database.hpp&gt;</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;psitri/transaction.hpp&gt;</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="k">auto</span><span class="w"> </span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">database</span><span class="o">::</span><span class="n">open</span><span class="p">(</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="s">&quot;app.db&quot;</span><span class="p">,</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">    </span><span class="n">psitri</span><span class="o">::</span><span class="n">open_mode</span><span class="o">::</span><span class="n">create_or_open</span><span class="p">);</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="k">auto</span><span class="w"> </span><span class="n">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="o">-&gt;</span><span class="n">start_write_session</span><span class="p">();</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;account:alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;100&quot;</span><span class="p">);</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;account:bob&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;50&quot;</span><span class="p">);</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="kt">bool</span><span class="w"> </span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">&quot;account:alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">[](</span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="w">   </span><span class="n">assert</span><span class="p">(</span><span class="n">value</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;100&quot;</span><span class="p">);</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="p">});</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="n">assert</span><span class="p">(</span><span class="n">found</span><span class="p">);</span>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>
+</span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li><code>get()</code> inside a write transaction reads the transaction's current write
+  state.</li>
+<li><code>get(key, lambda)</code> is the zero-copy read path. The <code>value_view</code> passed to the
+  lambda is valid only for the life of that lambda call.</li>
+<li><code>get&lt;std::string&gt;(key)</code> and <code>get(key, buffer)</code> are copying convenience APIs.
+  Use them when the value must outlive the read callback.</li>
+<li><code>commit()</code> publishes the final state atomically.</li>
+<li>Destroying a live transaction aborts it.</li>
+<li><code>expect_success</code> may prepare a private writable version at transaction start.</li>
+<li>A transaction does not hold a compactor/recycling read lock for its whole
+  lifetime. PsiTri takes short internal read locks around operations that need
+  them. Longer zero-copy value lifetimes must be explicit at the call site.</li>
+</ul>
+<h2 id="zero-copy-reads">Zero-Copy Reads<a class="headerlink" href="#zero-copy-reads" title="Permanent link">&para;</a></h2>
+<p>Use the lambda form for hot reads:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="kt">bool</span><span class="w"> </span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">[](</span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">   </span><span class="n">parse_user</span><span class="p">(</span><span class="n">value</span><span class="p">);</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="p">});</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li>The <code>value_view</code> is borrowed directly from the tree; PsiTri does not copy the
+  value into a temporary buffer.</li>
+<li><code>get(key, lambda)</code> returns <code>true</code> when the key contains a normal value and
+  the lambda was called. It returns <code>false</code> for a missing key; subtree values
+  are accessed through subtree APIs.</li>
+<li>The view is valid only during the lambda call. Do not store it, return it, or
+  pass it to asynchronous work.</li>
+<li>The lambda should be short-running. While the view is live, PsiTri may hold a
+  read lock or equivalent protection that delays compaction/recycling.</li>
+<li>Do CPU-light parsing, comparison, or immediate serialization inside the
+  lambda. Copy the value out first if later work may block, allocate heavily,
+  call user plugins, wait on I/O, or take locks.</li>
+</ul>
+<p>If a caller intentionally needs a borrowed value view to live beyond one
+callback, make that cost visible with an explicit RAII pin:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">pin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">pin_values</span><span class="p">();</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="k">auto</span><span class="w"> </span><span class="n">cur</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">cursor</span><span class="p">();</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cur</span><span class="p">.</span><span class="n">lower_bound</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">cur</span><span class="p">.</span><span class="n">key</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;user:alice&quot;</span><span class="p">)</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="p">{</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">   </span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur</span><span class="p">.</span><span class="n">value</span><span class="p">(</span><span class="n">pin</span><span class="p">);</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">   </span><span class="n">parse_and_compare</span><span class="p">(</span><span class="n">value</span><span class="p">);</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li>A value pin protects the memory backing borrowed <code>value_view</code> objects from
+  compactor/recycling movement until the pin is destroyed.</li>
+<li>A value pin is not a snapshot. It does not make a current-state cursor stable
+  across writes, commits, aborts, or cursor invalidation.</li>
+<li>Keep value pins tightly scoped. Holding a pin longer than necessary can delay
+  compaction and segment reuse.</li>
+<li>Prefer <code>get(key, lambda)</code> for normal hot reads and copying reads for values
+  that must survive slow work.</li>
+</ul>
+<p>Copying reads are still useful when ownership matters:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">owned</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">);</span><span class="w"> </span><span class="c1">// copies</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">reused</span><span class="p">;</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">reused</span><span class="p">);</span><span class="w">                  </span><span class="c1">// copies into caller buffer</span>
+</span></code></pre></div>
+<h2 id="known-key-fast-paths">Known-Key Fast Paths<a class="headerlink" href="#known-key-fast-paths" title="Permanent link">&para;</a></h2>
+<p>PsiTri has separate paths for exact-key operations and ordered operations. Use
+the exact-key APIs when the application already knows the key.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1">// Exact-key point read. Fast lookup path; lambda form is also zero-copy.</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">[](</span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">   </span><span class="n">use_user</span><span class="p">(</span><span class="n">value</span><span class="p">);</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="p">});</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="c1">// Exact-key owned read. Fast lookup path, then copies into std::string.</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="k">auto</span><span class="w"> </span><span class="n">owned</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">);</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="c1">// Ordered search. Use this when you need the first key at or after a boundary.</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="k">auto</span><span class="w"> </span><span class="n">cur</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">cursor</span><span class="p">();</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="n">cur</span><span class="p">.</span><span class="n">lower_bound</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">);</span>
+</span></code></pre></div>
+<p>The same distinction applies to writes:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">// Fast path when the key is expected to exist.</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">tx</span><span class="p">.</span><span class="n">update</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">new_value</span><span class="p">))</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">   </span><span class="n">handle_missing_user</span><span class="p">();</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="c1">// General path when the key may or may not exist.</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;user:alice&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">new_value</span><span class="p">);</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li><code>get(key, lambda)</code>, <code>get&lt;T&gt;(key)</code>, and <code>get(key, buffer*)</code> are point reads.
+  When the exact key is known, they can use the hash lookup fast path.</li>
+<li><code>lower_bound()</code> is an ordered-positioning operation. It must find the first
+  key at or after the search key, so it uses ordered search semantics even when
+  the caller passes an exact key.</li>
+<li><code>update(key, value)</code> is the preferred write when the caller knows the key
+  should already exist. It can use the existing-key fast path and reports
+  missing keys with <code>false</code>.</li>
+<li><code>upsert(key, value)</code> is the general insert-or-update API. Because it must
+  handle both existing and missing keys, it uses ordered search semantics.</li>
+</ul>
+<h2 id="tree-objects">Tree Objects<a class="headerlink" href="#tree-objects" title="Permanent link">&para;</a></h2>
+<p>Use <code>create_temporary_tree()</code> when you want an empty tree that is not yet
+attached to any top-level root. It returns a <code>tree</code>. Edit that tree by starting
+a write transaction from it.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">profile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">create_temporary_tree</span><span class="p">();</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="k">auto</span><span class="w"> </span><span class="n">build_profile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_write_transaction</span><span class="p">(</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">profile</span><span class="p">),</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">    </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="n">build_profile</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;name&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Alice&quot;</span><span class="p">);</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="n">build_profile</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;timezone&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;America/Chicago&quot;</span><span class="p">);</span>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>
+</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a><span class="n">profile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">build_profile</span><span class="p">.</span><span class="n">get_tree</span><span class="p">();</span>
+</span></code></pre></div>
+<p>The detached tree can be stored under a key:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">users</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;user:alice:profile&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">profile</span><span class="p">));</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="n">users</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Use <code>std::move()</code> when you do not need the handle afterward. Moving avoids the
+extra reference-count retain/release traffic that a copy would perform.</p>
+<p>Or it can become a top-level root:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">create_temporary_tree</span><span class="p">();</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="k">auto</span><span class="w"> </span><span class="n">index_edit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_write_transaction</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">index</span><span class="p">),</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="w">                                              </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="n">index_edit</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;email:alice@example.com&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;user:alice&quot;</span><span class="p">);</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="n">index_edit</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;email:bob@example.com&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;user:bob&quot;</span><span class="p">);</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">index_edit</span><span class="p">.</span><span class="n">get_tree</span><span class="p">();</span>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="n">ws</span><span class="o">-&gt;</span><span class="n">set_root</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">index</span><span class="p">));</span>
+</span></code></pre></div>
+<p>Tree handles can also come from existing roots or subtrees. This stores the
+same tree identity somewhere else; it is not a deep copy of every key/value
+pair.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">rs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="o">-&gt;</span><span class="n">start_read_session</span><span class="p">();</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="c1">// Retains the root snapshot visible to this read session.</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="n">psitri</span><span class="o">::</span><span class="n">tree</span><span class="w"> </span><span class="n">root_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rs</span><span class="o">-&gt;</span><span class="n">get_root</span><span class="p">(</span><span class="mi">2</span><span class="p">);</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="k">auto</span><span class="w"> </span><span class="n">archive</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="n">archive</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;snapshots/root-2&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">root_snapshot</span><span class="p">);</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="n">archive</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>If the same snapshot should be installed in more than one place, copy the
+<code>tree</code> handle or pass the same handle again. Copying a <code>tree</code> copies the
+underlying smart pointer. It points at the same tree identity; it is not a deep
+copy.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">root_snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rs</span><span class="o">-&gt;</span><span class="n">get_root</span><span class="p">(</span><span class="mi">2</span><span class="p">);</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="k">auto</span><span class="w"> </span><span class="n">another_handle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">root_snapshot</span><span class="p">;</span><span class="w"> </span><span class="c1">// copies the tree smart pointer</span>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;copy-a&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">root_snapshot</span><span class="p">);</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;copy-b&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">another_handle</span><span class="p">);</span>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li>A <code>tree</code> object is a copyable retained smart pointer to a tree identity.</li>
+<li>Copying a <code>tree</code> retains the same tree identity. It is a shallow smart-pointer
+  copy, not a deep data copy.</li>
+<li>A tree created by <code>create_temporary_tree()</code> is detached. It is not attached
+  to any top-level root slot until it is stored.</li>
+<li>A detached tree is edited through <code>start_write_transaction(tree, mode)</code>.</li>
+<li><code>start_write_transaction(tree)</code> has no commit target. It never publishes to
+  a root slot or parent key by itself.</li>
+<li><code>get_tree()</code> on a write transaction returns the transaction's current tree.
+  That returned <code>tree</code> can then be stored with <code>upsert_subtree()</code> or
+  <code>set_root()</code>.</li>
+<li>A detached tree is not visible to readers until it is stored with
+  <code>upsert_subtree()</code> on a transaction that eventually commits to a top-level
+  root, or stored directly with <code>set_root()</code>.</li>
+<li>Passing a <code>tree</code> to <code>upsert_subtree()</code> or <code>set_root()</code> stores a retained copy
+  of that tree identity.</li>
+<li>Moving a <code>tree</code> into <code>upsert_subtree()</code> or <code>set_root()</code> stores the same tree
+  identity while avoiding extra reference-count traffic on the caller's handle.</li>
+<li><code>commit()</code> is not meaningful for a write transaction that was opened from a
+  <code>tree</code>, because there is no root slot or parent key to publish to.</li>
+<li>Abort or destruction releases an unstored detached tree and discards an
+  unfinished write transaction.</li>
+</ul>
+<p>Cycle footgun:</p>
+<ul>
+<li>A stored subtree is a reference to a tree identity, not an owned deep copy.</li>
+<li>Do not store a tree inside itself.</li>
+<li>Do not store a tree inside one of its descendants.</li>
+<li>Do not build an indirect cycle such as <code>A</code> contains <code>B</code>, <code>B</code> contains <code>C</code>,
+  and <code>C</code> contains <code>A</code>.</li>
+<li>PsiTri may not be able to detect all cycles cheaply. Code that creates cycles
+  can leak storage because reference counts never drain.</li>
+</ul>
+<p>These shapes are legal only when the application knows they do not create a
+cycle:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">get_subtree</span><span class="p">(</span><span class="s">&quot;key&quot;</span><span class="p">);</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;key2&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">tree</span><span class="p">);</span>
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="k">auto</span><span class="w"> </span><span class="n">root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rs</span><span class="o">-&gt;</span><span class="n">get_root</span><span class="p">(</span><span class="mi">2</span><span class="p">);</span>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;data&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">root</span><span class="p">);</span>
+</span></code></pre></div>
+<p>To make an independent deep copy, iterate the source tree into a new detached
+tree, then store that tree in its destination.</p>
+<h2 id="speculative-transaction">Speculative Transaction<a class="headerlink" href="#speculative-transaction" title="Permanent link">&para;</a></h2>
+<p>Use <code>expect_failure</code> when abort is common or the transaction may do only a few
+writes. The API contract is the same: reads still see writes made by the
+transaction.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_failure</span><span class="p">);</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;session:42&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;pending&quot;</span><span class="p">);</span>
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>
+</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a><span class="kt">bool</span><span class="w"> </span><span class="n">found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">&quot;session:42&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">[](</span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a><span class="w">   </span><span class="n">assert</span><span class="p">(</span><span class="n">value</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;pending&quot;</span><span class="p">);</span>
+</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="p">});</span>
+</span><span id="__span-15-8"><a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a><span class="n">assert</span><span class="p">(</span><span class="n">found</span><span class="p">);</span>
+</span><span id="__span-15-9"><a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a>
+</span><span id="__span-15-10"><a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">request_is_valid</span><span class="p">())</span>
+</span><span id="__span-15-11"><a id="__codelineno-15-11" name="__codelineno-15-11" href="#__codelineno-15-11"></a><span class="w">   </span><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span><span id="__span-15-12"><a id="__codelineno-15-12" name="__codelineno-15-12" href="#__codelineno-15-12"></a><span class="k">else</span>
+</span><span id="__span-15-13"><a id="__codelineno-15-13" name="__codelineno-15-13" href="#__codelineno-15-13"></a><span class="w">   </span><span class="n">tx</span><span class="p">.</span><span class="n">abort</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li><code>expect_failure</code> may buffer writes before touching the persistent tree.</li>
+<li>Point reads and range cursors must still read buffered writes.</li>
+<li>Commit produces the same visible result as <code>expect_success</code>.</li>
+</ul>
+<h2 id="current-state-cursors">Current-State Cursors<a class="headerlink" href="#current-state-cursors" title="Permanent link">&para;</a></h2>
+<p>Use <code>cursor()</code> on a write transaction when you want to read or iterate the
+transaction's current write state.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>
+</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;user:001&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Alice&quot;</span><span class="p">);</span>
+</span><span id="__span-16-4"><a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;user:002&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Bob&quot;</span><span class="p">);</span>
+</span><span id="__span-16-5"><a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>
+</span><span id="__span-16-6"><a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a><span class="p">{</span>
+</span><span id="__span-16-7"><a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">cur</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">cursor</span><span class="p">();</span>
+</span><span id="__span-16-8"><a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a>
+</span><span id="__span-16-9"><a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a><span class="w">   </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">cur</span><span class="p">.</span><span class="n">lower_bound</span><span class="p">(</span><span class="s">&quot;user:&quot;</span><span class="p">);</span><span class="w"> </span><span class="o">!</span><span class="n">cur</span><span class="p">.</span><span class="n">is_end</span><span class="p">();</span><span class="w"> </span><span class="n">cur</span><span class="p">.</span><span class="n">next</span><span class="p">())</span>
+</span><span id="__span-16-10"><a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a><span class="w">   </span><span class="p">{</span>
+</span><span id="__span-16-11"><a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a><span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">cur</span><span class="p">.</span><span class="n">key</span><span class="p">().</span><span class="n">starts_with</span><span class="p">(</span><span class="s">&quot;user:&quot;</span><span class="p">))</span>
+</span><span id="__span-16-12"><a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a><span class="w">         </span><span class="k">break</span><span class="p">;</span>
+</span><span id="__span-16-13"><a id="__codelineno-16-13" name="__codelineno-16-13" href="#__codelineno-16-13"></a>
+</span><span id="__span-16-14"><a id="__codelineno-16-14" name="__codelineno-16-14" href="#__codelineno-16-14"></a><span class="w">      </span><span class="n">cur</span><span class="p">.</span><span class="n">get_value</span><span class="p">([</span><span class="o">&amp;</span><span class="p">](</span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-16-15"><a id="__codelineno-16-15" name="__codelineno-16-15" href="#__codelineno-16-15"></a><span class="w">         </span><span class="n">process_user</span><span class="p">(</span><span class="n">cur</span><span class="p">.</span><span class="n">key</span><span class="p">(),</span><span class="w"> </span><span class="n">value</span><span class="p">);</span>
+</span><span id="__span-16-16"><a id="__codelineno-16-16" name="__codelineno-16-16" href="#__codelineno-16-16"></a><span class="w">      </span><span class="p">});</span>
+</span><span id="__span-16-17"><a id="__codelineno-16-17" name="__codelineno-16-17" href="#__codelineno-16-17"></a><span class="w">   </span><span class="p">}</span>
+</span><span id="__span-16-18"><a id="__codelineno-16-18" name="__codelineno-16-18" href="#__codelineno-16-18"></a><span class="p">}</span>
+</span><span id="__span-16-19"><a id="__codelineno-16-19" name="__codelineno-16-19" href="#__codelineno-16-19"></a>
+</span><span id="__span-16-20"><a id="__codelineno-16-20" name="__codelineno-16-20" href="#__codelineno-16-20"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;user:003&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Carol&quot;</span><span class="p">);</span>
+</span><span id="__span-16-21"><a id="__codelineno-16-21" name="__codelineno-16-21" href="#__codelineno-16-21"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li><code>tx.cursor()</code> does not create a snapshot and does not pin the root.</li>
+<li>The cursor sees committed data plus uncommitted writes in the transaction.</li>
+<li>Creating and destroying current-state cursors is cheap after warmup.</li>
+<li>A current-state cursor is valid only until the transaction mutates, commits,
+  aborts, or is destroyed.</li>
+</ul>
+<p>Do not mutate while a current-state cursor is live:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">cur</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">cursor</span><span class="p">();</span>
+</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="n">cur</span><span class="p">.</span><span class="n">lower_bound</span><span class="p">(</span><span class="s">&quot;user:&quot;</span><span class="p">);</span>
+</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>
+</span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;user:004&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Dana&quot;</span><span class="p">);</span><span class="w"> </span><span class="c1">// invalid: cur is still live</span>
+</span></code></pre></div>
+<p>The implementation must catch this in debug builds, and may return an error in
+checked release APIs. End the cursor scope before mutating:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="p">{</span>
+</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">cur</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">cursor</span><span class="p">();</span>
+</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="w">   </span><span class="n">cur</span><span class="p">.</span><span class="n">lower_bound</span><span class="p">(</span><span class="s">&quot;user:&quot;</span><span class="p">);</span>
+</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="w">   </span><span class="n">read_some_keys</span><span class="p">(</span><span class="n">cur</span><span class="p">);</span>
+</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="p">}</span>
+</span><span id="__span-18-6"><a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>
+</span><span id="__span-18-7"><a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;user:004&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Dana&quot;</span><span class="p">);</span><span class="w"> </span><span class="c1">// ok</span>
+</span></code></pre></div>
+<h2 id="snapshot-cursors">Snapshot Cursors<a class="headerlink" href="#snapshot-cursors" title="Permanent link">&para;</a></h2>
+<p>Use <code>snapshot_cursor()</code> only when you need a stable view that survives later
+mutation.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>
+</span><span id="__span-19-3"><a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;k1&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;before&quot;</span><span class="p">);</span>
+</span><span id="__span-19-4"><a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a>
+</span><span id="__span-19-5"><a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a><span class="k">auto</span><span class="w"> </span><span class="n">snapshot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">snapshot_cursor</span><span class="p">();</span>
+</span><span id="__span-19-6"><a id="__codelineno-19-6" name="__codelineno-19-6" href="#__codelineno-19-6"></a>
+</span><span id="__span-19-7"><a id="__codelineno-19-7" name="__codelineno-19-7" href="#__codelineno-19-7"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;k1&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;after&quot;</span><span class="p">);</span>
+</span><span id="__span-19-8"><a id="__codelineno-19-8" name="__codelineno-19-8" href="#__codelineno-19-8"></a>
+</span><span id="__span-19-9"><a id="__codelineno-19-9" name="__codelineno-19-9" href="#__codelineno-19-9"></a><span class="n">assert</span><span class="p">(</span><span class="n">snapshot</span><span class="p">.</span><span class="n">get</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s">&quot;k1&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">{</span><span class="s">&quot;before&quot;</span><span class="p">});</span>
+</span><span id="__span-19-10"><a id="__codelineno-19-10" name="__codelineno-19-10" href="#__codelineno-19-10"></a><span class="n">assert</span><span class="p">(</span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s">&quot;k1&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">{</span><span class="s">&quot;after&quot;</span><span class="p">});</span><span class="w"> </span><span class="c1">// copies</span>
+</span></code></pre></div>
+<p>Read-only sessions also use explicit snapshot naming:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">rs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="o">-&gt;</span><span class="n">start_read_session</span><span class="p">();</span>
+</span><span id="__span-20-2"><a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="k">auto</span><span class="w"> </span><span class="n">cur</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rs</span><span class="o">-&gt;</span><span class="n">snapshot_cursor</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li><code>snapshot_cursor()</code> pins a retained tree view.</li>
+<li>A snapshot cursor remains stable across later writes.</li>
+<li>A snapshot cursor may force later writes to copy shared nodes.</li>
+<li>Snapshot cursor creation is explicit in the API name.</li>
+<li>Retained tree snapshot ownership is explicit in the return type:
+  <code>get_root()</code> and <code>get_subtree()</code> return <code>tree</code>, not <code>cursor</code>.</li>
+<li>A snapshot cursor is a read-only isolation handle. Use <code>get_root()</code> or
+  <code>get_subtree()</code> when the application needs a retained tree handle.</li>
+<li>A subtree opened from a snapshot uses the subtree version stored in that
+  snapshot.</li>
+</ul>
+<p>Snapshot implications:</p>
+<ul>
+<li>A snapshot keeps the objects it can see alive until the snapshot is released.</li>
+<li>Writes after the snapshot may need to COW nodes that the snapshot still sees.</li>
+<li>Long-lived snapshots can delay reclamation and compaction.</li>
+<li>Use snapshots for stable reads, but release them promptly on write-heavy
+  workloads.</li>
+</ul>
+<p>There are two different ways to copy from a snapshot.</p>
+<p>To preserve the exact tree snapshot without deep-copying every key/value pair,
+move a <code>tree</code> handle:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">rs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="o">-&gt;</span><span class="n">start_read_session</span><span class="p">();</span>
+</span><span id="__span-21-2"><a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="k">auto</span><span class="w"> </span><span class="n">old_root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rs</span><span class="o">-&gt;</span><span class="n">get_root</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+</span><span id="__span-21-3"><a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a>
+</span><span id="__span-21-4"><a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-21-5"><a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;archived-root-0&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">old_root</span><span class="p">);</span>
+</span><span id="__span-21-6"><a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>To create an independent deep copy, iterate the snapshot into a new detached
+tree:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">rs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">db</span><span class="o">-&gt;</span><span class="n">start_read_session</span><span class="p">();</span>
+</span><span id="__span-22-2"><a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="k">auto</span><span class="w"> </span><span class="n">old_profile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rs</span><span class="o">-&gt;</span><span class="n">get_root</span><span class="p">(</span><span class="mi">0</span><span class="p">).</span><span class="n">get_subtree</span><span class="p">(</span><span class="s">&quot;user:alice:profile&quot;</span><span class="p">);</span>
+</span><span id="__span-22-3"><a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="k">auto</span><span class="w"> </span><span class="n">old_profile_cur</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">old_profile</span><span class="p">.</span><span class="n">cursor</span><span class="p">();</span>
+</span><span id="__span-22-4"><a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a>
+</span><span id="__span-22-5"><a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a><span class="k">auto</span><span class="w"> </span><span class="n">copy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">create_temporary_tree</span><span class="p">();</span>
+</span><span id="__span-22-6"><a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a><span class="k">auto</span><span class="w"> </span><span class="n">copy_edit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_write_transaction</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">copy</span><span class="p">),</span>
+</span><span id="__span-22-7"><a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a><span class="w">                                             </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-22-8"><a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a>
+</span><span id="__span-22-9"><a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">old_profile_cur</span><span class="p">.</span><span class="n">seek_begin</span><span class="p">();</span><span class="w"> </span><span class="o">!</span><span class="n">old_profile_cur</span><span class="p">.</span><span class="n">is_end</span><span class="p">();</span><span class="w"> </span><span class="n">old_profile_cur</span><span class="p">.</span><span class="n">next</span><span class="p">())</span>
+</span><span id="__span-22-10"><a id="__codelineno-22-10" name="__codelineno-22-10" href="#__codelineno-22-10"></a><span class="p">{</span>
+</span><span id="__span-22-11"><a id="__codelineno-22-11" name="__codelineno-22-11" href="#__codelineno-22-11"></a><span class="w">   </span><span class="n">old_profile_cur</span><span class="p">.</span><span class="n">get_value</span><span class="p">([</span><span class="o">&amp;</span><span class="p">](</span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-22-12"><a id="__codelineno-22-12" name="__codelineno-22-12" href="#__codelineno-22-12"></a><span class="w">      </span><span class="n">copy_edit</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="n">old_profile_cur</span><span class="p">.</span><span class="n">key</span><span class="p">(),</span><span class="w"> </span><span class="n">value</span><span class="p">);</span>
+</span><span id="__span-22-13"><a id="__codelineno-22-13" name="__codelineno-22-13" href="#__codelineno-22-13"></a><span class="w">   </span><span class="p">});</span>
+</span><span id="__span-22-14"><a id="__codelineno-22-14" name="__codelineno-22-14" href="#__codelineno-22-14"></a><span class="p">}</span>
+</span><span id="__span-22-15"><a id="__codelineno-22-15" name="__codelineno-22-15" href="#__codelineno-22-15"></a>
+</span><span id="__span-22-16"><a id="__codelineno-22-16" name="__codelineno-22-16" href="#__codelineno-22-16"></a><span class="n">copy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">copy_edit</span><span class="p">.</span><span class="n">get_tree</span><span class="p">();</span>
+</span><span id="__span-22-17"><a id="__codelineno-22-17" name="__codelineno-22-17" href="#__codelineno-22-17"></a>
+</span><span id="__span-22-18"><a id="__codelineno-22-18" name="__codelineno-22-18" href="#__codelineno-22-18"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-22-19"><a id="__codelineno-22-19" name="__codelineno-22-19" href="#__codelineno-22-19"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert_subtree</span><span class="p">(</span><span class="s">&quot;user:bob:profile&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">copy</span><span class="p">));</span>
+</span><span id="__span-22-20"><a id="__codelineno-22-20" name="__codelineno-22-20" href="#__codelineno-22-20"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>The first form stores another reference to the same snapshot tree. The second
+form creates a new tree with independent contents.</p>
+<h2 id="nested-transactions">Nested Transactions<a class="headerlink" href="#nested-transactions" title="Permanent link">&para;</a></h2>
+<p>Use <code>sub_transaction()</code> when part of a larger transaction should be committed or
+aborted independently before the parent commits.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-23-2"><a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a>
+</span><span id="__span-23-3"><a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;order:100&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;open&quot;</span><span class="p">);</span>
+</span><span id="__span-23-4"><a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a>
+</span><span id="__span-23-5"><a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a><span class="p">{</span>
+</span><span id="__span-23-6"><a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">save</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">sub_transaction</span><span class="p">();</span>
+</span><span id="__span-23-7"><a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a><span class="w">   </span><span class="n">save</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;order:100:item:1&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;book&quot;</span><span class="p">);</span>
+</span><span id="__span-23-8"><a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a><span class="w">   </span><span class="n">save</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;order:100:item:2&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;pen&quot;</span><span class="p">);</span>
+</span><span id="__span-23-9"><a id="__codelineno-23-9" name="__codelineno-23-9" href="#__codelineno-23-9"></a><span class="w">   </span><span class="n">save</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span><span id="__span-23-10"><a id="__codelineno-23-10" name="__codelineno-23-10" href="#__codelineno-23-10"></a><span class="p">}</span>
+</span><span id="__span-23-11"><a id="__codelineno-23-11" name="__codelineno-23-11" href="#__codelineno-23-11"></a>
+</span><span id="__span-23-12"><a id="__codelineno-23-12" name="__codelineno-23-12" href="#__codelineno-23-12"></a><span class="n">assert</span><span class="p">(</span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s">&quot;order:100:item:1&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">{</span><span class="s">&quot;book&quot;</span><span class="p">});</span>
+</span><span id="__span-23-13"><a id="__codelineno-23-13" name="__codelineno-23-13" href="#__codelineno-23-13"></a>
+</span><span id="__span-23-14"><a id="__codelineno-23-14" name="__codelineno-23-14" href="#__codelineno-23-14"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Abort drops only the child work:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-24-1"><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-24-2"><a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a>
+</span><span id="__span-24-3"><a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a><span class="n">tx</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;cart:1&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;open&quot;</span><span class="p">);</span>
+</span><span id="__span-24-4"><a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a>
+</span><span id="__span-24-5"><a id="__codelineno-24-5" name="__codelineno-24-5" href="#__codelineno-24-5"></a><span class="p">{</span>
+</span><span id="__span-24-6"><a id="__codelineno-24-6" name="__codelineno-24-6" href="#__codelineno-24-6"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">save</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">sub_transaction</span><span class="p">();</span>
+</span><span id="__span-24-7"><a id="__codelineno-24-7" name="__codelineno-24-7" href="#__codelineno-24-7"></a><span class="w">   </span><span class="n">save</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;cart:1:coupon&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;INVALID&quot;</span><span class="p">);</span>
+</span><span id="__span-24-8"><a id="__codelineno-24-8" name="__codelineno-24-8" href="#__codelineno-24-8"></a><span class="w">   </span><span class="n">save</span><span class="p">.</span><span class="n">abort</span><span class="p">();</span>
+</span><span id="__span-24-9"><a id="__codelineno-24-9" name="__codelineno-24-9" href="#__codelineno-24-9"></a><span class="p">}</span>
+</span><span id="__span-24-10"><a id="__codelineno-24-10" name="__codelineno-24-10" href="#__codelineno-24-10"></a>
+</span><span id="__span-24-11"><a id="__codelineno-24-11" name="__codelineno-24-11" href="#__codelineno-24-11"></a><span class="n">assert</span><span class="p">(</span><span class="o">!</span><span class="n">tx</span><span class="p">.</span><span class="n">get</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="p">(</span><span class="s">&quot;cart:1:coupon&quot;</span><span class="p">));</span>
+</span><span id="__span-24-12"><a id="__codelineno-24-12" name="__codelineno-24-12" href="#__codelineno-24-12"></a>
+</span><span id="__span-24-13"><a id="__codelineno-24-13" name="__codelineno-24-13" href="#__codelineno-24-13"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li>A subtransaction is move-only and cannot outlive its parent.</li>
+<li>Committing a subtransaction saves its final state into the parent
+  transaction.</li>
+<li>Aborting a subtransaction leaves the parent unchanged.</li>
+<li>Parent commit is still required to publish the final result.</li>
+</ul>
+<h2 id="subtree-transactions">Subtree Transactions<a class="headerlink" href="#subtree-transactions" title="Permanent link">&para;</a></h2>
+<p>A subtree transaction edits a tree stored as a value under a parent key. On
+commit, the subtree transaction writes its final tree identity back to that key
+in the parent transaction.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-25-1"><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-25-2"><a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a>
+</span><span id="__span-25-3"><a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="p">{</span>
+</span><span id="__span-25-4"><a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">profile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">subtree_transaction</span><span class="p">(</span>
+</span><span id="__span-25-5"><a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a><span class="w">       </span><span class="s">&quot;user:alice:profile&quot;</span><span class="p">,</span>
+</span><span id="__span-25-6"><a id="__codelineno-25-6" name="__codelineno-25-6" href="#__codelineno-25-6"></a><span class="w">       </span><span class="n">psitri</span><span class="o">::</span><span class="n">subtree_open</span><span class="o">::</span><span class="n">create_if_missing</span><span class="p">);</span>
+</span><span id="__span-25-7"><a id="__codelineno-25-7" name="__codelineno-25-7" href="#__codelineno-25-7"></a>
+</span><span id="__span-25-8"><a id="__codelineno-25-8" name="__codelineno-25-8" href="#__codelineno-25-8"></a><span class="w">   </span><span class="n">profile</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;name&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Alice&quot;</span><span class="p">);</span>
+</span><span id="__span-25-9"><a id="__codelineno-25-9" name="__codelineno-25-9" href="#__codelineno-25-9"></a><span class="w">   </span><span class="n">profile</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;timezone&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;America/Chicago&quot;</span><span class="p">);</span>
+</span><span id="__span-25-10"><a id="__codelineno-25-10" name="__codelineno-25-10" href="#__codelineno-25-10"></a><span class="w">   </span><span class="n">profile</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span><span id="__span-25-11"><a id="__codelineno-25-11" name="__codelineno-25-11" href="#__codelineno-25-11"></a><span class="p">}</span>
+</span><span id="__span-25-12"><a id="__codelineno-25-12" name="__codelineno-25-12" href="#__codelineno-25-12"></a>
+</span><span id="__span-25-13"><a id="__codelineno-25-13" name="__codelineno-25-13" href="#__codelineno-25-13"></a><span class="n">assert</span><span class="p">(</span><span class="n">tx</span><span class="p">.</span><span class="n">is_subtree</span><span class="p">(</span><span class="s">&quot;user:alice:profile&quot;</span><span class="p">));</span>
+</span><span id="__span-25-14"><a id="__codelineno-25-14" name="__codelineno-25-14" href="#__codelineno-25-14"></a>
+</span><span id="__span-25-15"><a id="__codelineno-25-15" name="__codelineno-25-15" href="#__codelineno-25-15"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Open an existing subtree the same way:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-26-1"><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-26-2"><a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a>
+</span><span id="__span-26-3"><a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a><span class="p">{</span>
+</span><span id="__span-26-4"><a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a><span class="w">   </span><span class="k">auto</span><span class="w"> </span><span class="n">profile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">subtree_transaction</span><span class="p">(</span>
+</span><span id="__span-26-5"><a id="__codelineno-26-5" name="__codelineno-26-5" href="#__codelineno-26-5"></a><span class="w">       </span><span class="s">&quot;user:alice:profile&quot;</span><span class="p">,</span>
+</span><span id="__span-26-6"><a id="__codelineno-26-6" name="__codelineno-26-6" href="#__codelineno-26-6"></a><span class="w">       </span><span class="n">psitri</span><span class="o">::</span><span class="n">subtree_open</span><span class="o">::</span><span class="n">must_exist</span><span class="p">);</span>
+</span><span id="__span-26-7"><a id="__codelineno-26-7" name="__codelineno-26-7" href="#__codelineno-26-7"></a>
+</span><span id="__span-26-8"><a id="__codelineno-26-8" name="__codelineno-26-8" href="#__codelineno-26-8"></a><span class="w">   </span><span class="n">profile</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;timezone&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;UTC&quot;</span><span class="p">);</span>
+</span><span id="__span-26-9"><a id="__codelineno-26-9" name="__codelineno-26-9" href="#__codelineno-26-9"></a><span class="w">   </span><span class="n">profile</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span><span id="__span-26-10"><a id="__codelineno-26-10" name="__codelineno-26-10" href="#__codelineno-26-10"></a><span class="p">}</span>
+</span><span id="__span-26-11"><a id="__codelineno-26-11" name="__codelineno-26-11" href="#__codelineno-26-11"></a>
+</span><span id="__span-26-12"><a id="__codelineno-26-12" name="__codelineno-26-12" href="#__codelineno-26-12"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li>A subtree transaction has the same read, cursor, subtransaction, and
+  <code>expect_success</code> / <code>expect_failure</code> behavior as a top-root transaction.</li>
+<li>A subtree commit updates the parent transaction at exactly one key.</li>
+<li>A subtree abort leaves the parent key unchanged.</li>
+<li>A stored subtree is a full <code>tree_id</code>, not just a root address.</li>
+<li>A freshly-created subtree can be built as a detached tree and
+  then stored with <code>upsert_subtree()</code>.</li>
+<li>Snapshot cursors that open a subtree get a read-only snapshot view using the
+  subtree version stored in their snapshot.</li>
+</ul>
+<h2 id="multi-root-transactions">Multi-Root Transactions<a class="headerlink" href="#multi-root-transactions" title="Permanent link">&para;</a></h2>
+<p>Use a multi-root transaction when one logical operation must update independent
+top-level roots atomically.</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-27-1"><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="n">std</span><span class="o">::</span><span class="n">array</span><span class="w"> </span><span class="n">roots</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-27-2"><a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="w">   </span><span class="n">psitri</span><span class="o">::</span><span class="n">root_access</span><span class="p">{</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">root_mode</span><span class="o">::</span><span class="n">write</span><span class="p">},</span><span class="w"> </span><span class="c1">// users</span>
+</span><span id="__span-27-3"><a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a><span class="w">   </span><span class="n">psitri</span><span class="o">::</span><span class="n">root_access</span><span class="p">{</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">root_mode</span><span class="o">::</span><span class="n">write</span><span class="p">},</span><span class="w"> </span><span class="c1">// email index</span>
+</span><span id="__span-27-4"><a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="w">   </span><span class="n">psitri</span><span class="o">::</span><span class="n">root_access</span><span class="p">{</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="n">psitri</span><span class="o">::</span><span class="n">root_mode</span><span class="o">::</span><span class="n">read</span><span class="p">},</span><span class="w">  </span><span class="c1">// config</span>
+</span><span id="__span-27-5"><a id="__codelineno-27-5" name="__codelineno-27-5" href="#__codelineno-27-5"></a><span class="p">};</span>
+</span><span id="__span-27-6"><a id="__codelineno-27-6" name="__codelineno-27-6" href="#__codelineno-27-6"></a>
+</span><span id="__span-27-7"><a id="__codelineno-27-7" name="__codelineno-27-7" href="#__codelineno-27-7"></a><span class="k">auto</span><span class="w"> </span><span class="n">tx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ws</span><span class="o">-&gt;</span><span class="n">start_transaction</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">span</span><span class="p">{</span><span class="n">roots</span><span class="p">},</span>
+</span><span id="__span-27-8"><a id="__codelineno-27-8" name="__codelineno-27-8" href="#__codelineno-27-8"></a><span class="w">                                </span><span class="n">psitri</span><span class="o">::</span><span class="n">tx_mode</span><span class="o">::</span><span class="n">expect_success</span><span class="p">);</span>
+</span><span id="__span-27-9"><a id="__codelineno-27-9" name="__codelineno-27-9" href="#__codelineno-27-9"></a>
+</span><span id="__span-27-10"><a id="__codelineno-27-10" name="__codelineno-27-10" href="#__codelineno-27-10"></a><span class="k">auto</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">root</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+</span><span id="__span-27-11"><a id="__codelineno-27-11" name="__codelineno-27-11" href="#__codelineno-27-11"></a><span class="k">auto</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">root</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+</span><span id="__span-27-12"><a id="__codelineno-27-12" name="__codelineno-27-12" href="#__codelineno-27-12"></a><span class="k">auto</span><span class="w"> </span><span class="n">cfg</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="n">tx</span><span class="p">.</span><span class="n">root</span><span class="p">(</span><span class="mi">2</span><span class="p">);</span>
+</span><span id="__span-27-13"><a id="__codelineno-27-13" name="__codelineno-27-13" href="#__codelineno-27-13"></a>
+</span><span id="__span-27-14"><a id="__codelineno-27-14" name="__codelineno-27-14" href="#__codelineno-27-14"></a><span class="n">users</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;user:42&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">user_record</span><span class="p">);</span>
+</span><span id="__span-27-15"><a id="__codelineno-27-15" name="__codelineno-27-15" href="#__codelineno-27-15"></a><span class="n">email</span><span class="p">.</span><span class="n">upsert</span><span class="p">(</span><span class="s">&quot;alice@example.com&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;user:42&quot;</span><span class="p">);</span>
+</span><span id="__span-27-16"><a id="__codelineno-27-16" name="__codelineno-27-16" href="#__codelineno-27-16"></a>
+</span><span id="__span-27-17"><a id="__codelineno-27-17" name="__codelineno-27-17" href="#__codelineno-27-17"></a><span class="n">cfg</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">&quot;signup_policy&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="o">&amp;</span><span class="p">](</span><span class="n">psitri</span><span class="o">::</span><span class="n">value_view</span><span class="w"> </span><span class="n">policy</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-27-18"><a id="__codelineno-27-18" name="__codelineno-27-18" href="#__codelineno-27-18"></a><span class="w">   </span><span class="n">apply_policy</span><span class="p">(</span><span class="n">policy</span><span class="p">);</span>
+</span><span id="__span-27-19"><a id="__codelineno-27-19" name="__codelineno-27-19" href="#__codelineno-27-19"></a><span class="p">});</span>
+</span><span id="__span-27-20"><a id="__codelineno-27-20" name="__codelineno-27-20" href="#__codelineno-27-20"></a>
+</span><span id="__span-27-21"><a id="__codelineno-27-21" name="__codelineno-27-21" href="#__codelineno-27-21"></a><span class="n">tx</span><span class="p">.</span><span class="n">commit</span><span class="p">();</span>
+</span></code></pre></div>
+<p>Contract:</p>
+<ul>
+<li>Each top-level root has independent current write state.</li>
+<li>Write roots are published atomically by the transaction commit.</li>
+<li>Read roots are readable but not writable.</li>
+<li>Roots are locked in deterministic root-index order.</li>
+<li>A current-state cursor from one root is invalidated by writes to that same
+  root. It is not invalidated by writes to independent roots.</li>
+</ul>
+<h2 id="choosing-cursor-apis">Choosing Cursor APIs<a class="headerlink" href="#choosing-cursor-apis" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>API</th>
+<th>Copies value?</th>
+<th>Pins root?</th>
+<th>Sees uncommitted writes?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hot point read inside writer</td>
+<td><code>tx.get(key, lambda)</code></td>
+<td>No</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Owned point read</td>
+<td><code>tx.get&lt;std::string&gt;(key)</code></td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Reused caller buffer</td>
+<td><code>tx.get(key, &amp;buffer)</code></td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Borrow view across a small local scope</td>
+<td><code>auto pin = tx.pin_values()</code> + <code>cur.value(pin)</code></td>
+<td>No</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Iterate current writer state</td>
+<td><code>tx.cursor()</code></td>
+<td>No by default</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Stable writer snapshot</td>
+<td><code>tx.snapshot_cursor()</code></td>
+<td>Optional per read</td>
+<td>Yes</td>
+<td>State at creation</td>
+</tr>
+<tr>
+<td>Read-only snapshot</td>
+<td><code>read_session::snapshot_cursor(root)</code></td>
+<td>Optional per read</td>
+<td>Yes</td>
+<td>Committed state only</td>
+</tr>
+<tr>
+<td>Movable root/subtree snapshot</td>
+<td><code>get_root()</code> / <code>get_subtree()</code></td>
+<td>No by default</td>
+<td>Yes</td>
+<td>State at handle creation</td>
+</tr>
+<tr>
+<td>Build detached tree</td>
+<td><code>write_session::create_temporary_tree()</code></td>
+<td>No</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>MDBX read-write cursor</td>
+<td>transaction current-state cursor</td>
+<td>No by default</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>MDBX read-only cursor</td>
+<td>snapshot cursor</td>
+<td>No by default</td>
+<td>Yes</td>
+<td>Committed state only</td>
+</tr>
+</tbody>
+</table>
+<h2 id="mdbx-shim-reference">MDBX Shim Reference<a class="headerlink" href="#mdbx-shim-reference" title="Permanent link">&para;</a></h2>
+<p>The MDBX shim uses the same contract:</p>
+<table>
+<thead>
+<tr>
+<th>MDBX operation</th>
+<th>PsiTri behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mdbx_get()</code> in a read-write transaction</td>
+<td>Reads the current write state, including prior <code>mdbx_put()</code> and <code>mdbx_del()</code> calls in that transaction.</td>
+</tr>
+<tr>
+<td><code>mdbx_cursor_open()</code> in a read-write transaction</td>
+<td>Acquires a pooled current-state cursor from the <code>MDBX_txn</code>. It does not open a PsiTri snapshot.</td>
+</tr>
+<tr>
+<td><code>mdbx_cursor_get()</code> in a read-write transaction</td>
+<td>Iterates committed data plus uncommitted writes from the same transaction.</td>
+</tr>
+<tr>
+<td><code>mdbx_put()</code> / <code>mdbx_del()</code></td>
+<td>Invalidates current-state cursors opened earlier on the same DBI/root unless the write is performed through that cursor API and the shim explicitly repositions it.</td>
+</tr>
+<tr>
+<td><code>mdbx_txn_commit()</code> / <code>mdbx_txn_abort()</code></td>
+<td>Invalidates all cursors owned by that transaction and returns their storage to the transaction cursor pool.</td>
+</tr>
+<tr>
+<td><code>mdbx_txn_begin(... MDBX_TXN_RDONLY ...)</code></td>
+<td>Opens an explicit snapshot lifetime. Read-only cursors are snapshot cursors.</td>
+</tr>
+<tr>
+<td><code>mdbx_txn_reset()</code> / <code>mdbx_txn_renew()</code></td>
+<td>Releases snapshot ownership and cursor state, then reuses the transaction/session storage where possible.</td>
+</tr>
+</tbody>
+</table>
+<p>The shim must not accidentally convert read-write cursor opens into snapshot
+opens. Native MDBX users expect read-write transactions to read their own
+writes; PsiTri must preserve that behavior without pinning the current root on
+every short cursor session.</p>
+<h2 id="testable-promises">Testable Promises<a class="headerlink" href="#testable-promises" title="Permanent link">&para;</a></h2>
+<p>The implementation should have tests for each promise below:</p>
+<ul>
+<li>A write transaction <code>get(key, lambda)</code> sees its own insert, update, remove,
+  and range remove before commit without copying the value.</li>
+<li>The zero-copy value view passed to <code>get(key, lambda)</code> is invalid after the
+  lambda returns.</li>
+<li>Long-running zero-copy callbacks are documented as delaying compaction or
+  recycling while the protected view is live.</li>
+<li><code>get&lt;std::string&gt;(key)</code> copies into an owned temporary.</li>
+<li>Exact-key <code>get()</code> is the documented fast path when the caller knows the key;
+  <code>lower_bound()</code> is for ordered positioning and range scans.</li>
+<li><code>update()</code> is the documented fast path when the caller knows the key should
+  exist; <code>upsert()</code> is the general insert-or-update path.</li>
+<li>A write transaction <code>cursor()</code> sees its own inserts and hides its own
+  tombstones before commit.</li>
+<li>Repeated current-state cursor acquire/release allocates only during warmup.</li>
+<li>Creating a current-state cursor does not retain the root and does not force
+  COW.</li>
+<li>Mutating a tree while one of its current-state cursors is live is caught.</li>
+<li>A snapshot cursor remains stable after later writes.</li>
+<li>A snapshot cursor can open a subtree and sees the subtree version stored in
+  that snapshot.</li>
+<li>A subtree transaction commit upserts exactly one subtree <code>tree_id</code> into its
+  parent key.</li>
+<li>A subtree transaction abort leaves the parent key unchanged.</li>
+<li><code>create_temporary_tree()</code> can build a detached <code>tree</code>; copying it retains the
+  same tree identity, while moving it into <code>upsert_subtree()</code> or <code>set_root()</code>
+  avoids extra reference-count traffic.</li>
+<li><code>start_write_transaction(tree)</code> can modify a tree without publishing it to a
+  root slot or parent key.</li>
+<li><code>get_tree()</code> on a write transaction returns the edited tree, and storing that
+  returned tree is the explicit publish step.</li>
+<li>A detached tree is not visible to readers until it is stored in a transaction
+  that commits to a top-level root or is installed with <code>set_root()</code>.</li>
+<li><code>get_root()</code> and <code>get_subtree()</code> return copyable retained tree objects that
+  can be stored elsewhere.</li>
+<li>Copying or moving a snapshot tree into another root/subtree preserves the
+  snapshot's tree identity; it does not deep-copy the contents.</li>
+<li>The docs and diagnostics clearly warn that storing trees cyclically can leak
+  storage.</li>
+<li>A nested transaction commit saves into its parent; nested abort leaves the
+  parent unchanged.</li>
+<li>A multi-root transaction publishes all write roots atomically.</li>
+<li>MDBX read-write <code>mdbx_get()</code> and <code>mdbx_cursor_get()</code> read their own writes.</li>
+<li>MDBX read-only transactions retain snapshot isolation.</li>
+<li>Creating more than 50 active application write sessions fails clearly or is
+  rejected by configuration.</li>
+<li>Examples and benchmarks create write sessions once per worker thread, not once
+  per operation.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/gofractally/arbtrie" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.instant.progress", "navigation.tracking", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.expand", "navigation.top", "navigation.indexes", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

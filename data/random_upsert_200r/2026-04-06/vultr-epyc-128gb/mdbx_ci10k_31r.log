@@ -1,0 +1,38 @@
+mdbx-benchmark: db=./mdbxdb
+rounds=200 items=1,000,000 batch=100 value_size=256 sync=none
+
+---------------------  dense random upsert  --------------------------------------------------
+rounds: 200  items: 1,000,000 batch: 100
+-----------------------------------------------------------------------
+0       1,000,000       435,087  upserts/sec
+1       2,000,000       398,073  upserts/sec
+2       3,000,000       303,149  upserts/sec
+3       4,000,000       274,607  upserts/sec
+4       5,000,000       262,058  upserts/sec
+5       6,000,000       255,469  upserts/sec
+6       7,000,000       246,835  upserts/sec
+7       8,000,000       248,451  upserts/sec
+8       9,000,000       310,139  upserts/sec
+9      10,000,000       278,311  upserts/sec
+10     11,000,000       305,586  upserts/sec
+11     12,000,000       298,437  upserts/sec
+12     13,000,000       296,266  upserts/sec
+13     14,000,000       305,031  upserts/sec
+14     15,000,000       304,576  upserts/sec
+15     16,000,000       252,067  upserts/sec
+16     17,000,000       240,117  upserts/sec
+17     18,000,000       239,706  upserts/sec
+18     19,000,000       261,511  upserts/sec
+19     20,000,000       254,258  upserts/sec
+20     21,000,000       255,092  upserts/sec
+21     22,000,000       257,016  upserts/sec
+22     23,000,000       249,407  upserts/sec
+23     24,000,000       239,985  upserts/sec
+24     25,000,000       233,872  upserts/sec
+25     26,000,000       217,964  upserts/sec
+26     27,000,000       197,228  upserts/sec
+27     28,000,000       181,754  upserts/sec
+28     29,000,000       169,087  upserts/sec
+29     30,000,000       154,291  upserts/sec
+30     31,000,000       118,311  upserts/sec
+mdbx error -30792 (MDBX_MAP_FULL: Environment mapsize limit reached) at /home/dlarimer/arbtrie/programs/mdbx_bench.cpp:282: mdbx_put(txn, mdb.dbi, &k, &v, MDBX_UPSERT)
