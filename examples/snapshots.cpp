@@ -23,7 +23,7 @@ int main()
 
    // Take a snapshot — O(1), just increments a reference count on the root
    auto rs       = db->start_read_session();
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
 
    // Mutate the live tree
    {
@@ -46,7 +46,7 @@ int main()
 
    // Current state sees the new values
    std::cout << "\n=== Current state (after mutation) ===\n";
-   auto current = rs->create_cursor(0);
+   auto current = rs->snapshot_cursor(0);
    current.seek_begin();
    while (!current.is_end())
    {

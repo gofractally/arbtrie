@@ -682,12 +682,13 @@ namespace psitri::dwal
          }
       }
 
-      auto& tlc = detail::thread_local_cache();
-      if (tlc.cursor_db != static_cast<void*>(_db.get()))
+      auto& tlc      = detail::thread_local_cache();
+      auto  db_owner = std::static_pointer_cast<void>(_db);
+      if (!detail::same_owner(tlc.cursor_db.lock(), db_owner))
       {
          auto rs            = _db->start_read_session();
          tlc.cursor_session = std::static_pointer_cast<void>(rs);
-         tlc.cursor_db      = static_cast<void*>(_db.get());
+         tlc.cursor_db      = db_owner;
       }
       auto session =
           std::static_pointer_cast<read_session_type>(tlc.cursor_session);
@@ -701,12 +702,13 @@ namespace psitri::dwal
    template <class LockPolicy>
    psitri::cursor basic_dwal_database<LockPolicy>::create_tri_cursor(uint32_t root_index)
    {
-      auto& tlc = detail::thread_local_cache();
-      if (tlc.cursor_db != static_cast<void*>(_db.get()))
+      auto& tlc      = detail::thread_local_cache();
+      auto  db_owner = std::static_pointer_cast<void>(_db);
+      if (!detail::same_owner(tlc.cursor_db.lock(), db_owner))
       {
          auto rs            = _db->start_read_session();
          tlc.cursor_session = std::static_pointer_cast<void>(rs);
-         tlc.cursor_db      = static_cast<void*>(_db.get());
+         tlc.cursor_db      = db_owner;
       }
       auto session =
           std::static_pointer_cast<read_session_type>(tlc.cursor_session);
@@ -717,15 +719,16 @@ namespace psitri::dwal
    typename basic_dwal_database<LockPolicy>::lookup_result
    basic_dwal_database<LockPolicy>::tri_get(uint32_t root_index, std::string_view key)
    {
-      auto& tlc = detail::thread_local_cache();
+      auto& tlc      = detail::thread_local_cache();
+      auto  db_owner = std::static_pointer_cast<void>(_db);
 
-      if (tlc.tri_db != static_cast<void*>(_db.get()))
+      if (!detail::same_owner(tlc.tri_db.lock(), db_owner))
       {
          delete tlc.tri_cursor;
          tlc.tri_cursor  = nullptr;
          auto rs         = _db->start_read_session();
          tlc.tri_session = std::static_pointer_cast<void>(rs);
-         tlc.tri_db      = static_cast<void*>(_db.get());
+         tlc.tri_db      = db_owner;
       }
 
       auto session =

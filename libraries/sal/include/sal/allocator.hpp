@@ -1,12 +1,15 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <new>
 #include <ucc/padded_atomic.hpp>
 #include <stdexcept>
+#include <sal/alloc_header.hpp>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block_alloc.hpp>
+#include <sal/debug/free_range_tracker.hpp>
 #include <sal/mapped_memory/allocator_state.hpp>
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/segment_thread.hpp>
@@ -69,8 +72,32 @@ namespace sal
       /// 64 bits for session id
       static constexpr uint32_t max_session_count = 64;
 
-      allocator(std::filesystem::path dir, runtime_config cfg = runtime_config());
+      allocator(std::filesystem::path dir, runtime_config cfg = runtime_config(),
+                bool start_threads_now = true);
       ~allocator();
+
+      template <typename T>
+      void register_type_ops(const object_type_ops& ops) noexcept
+      {
+         static_assert(uint8_t(T::type_id) < 128, "type_id out of range");
+         _type_ops[uint8_t(T::type_id)] = &ops;
+      }
+
+      template <typename T>
+      void register_type_ops() noexcept
+      {
+         register_type_ops<T>(default_object_type_ops<T>());
+      }
+
+      const object_type_ops& type_ops(header_type type) const noexcept
+      {
+         return *_type_ops[uint8_t(type)];
+      }
+
+      const object_type_ops& type_ops(const alloc_header* obj) const noexcept
+      {
+         return type_ops(obj->type());
+      }
 
       /**
        * @brief Initialize shared ownership for cross-thread shared_smart_ptr use.
@@ -276,8 +303,7 @@ namespace sal
       {
          assert(ro < _root_objects->size() && "invalid root object number");
          std::shared_lock<std::shared_mutex> lock(_root_object_mutex[*ro]);
-         auto packed = _root_objects->at(*ro).load(std::memory_order_acquire);
-         auto tid = tree_id::unpack(packed);
+         auto tid = _root_objects->at(*ro).load(std::memory_order_acquire);
          SAL_TRACE("get root object: {} adr: {}", ro, tid.root);
          if (tid.root != null_ptr_address)
             retain(tid.root);
@@ -290,13 +316,17 @@ namespace sal
        * Caller is responsible for *giving* a valid reference (both root and ver),
        * and releasing the returned tree_id.
        */
-      [[nodiscard]] tree_id set(root_object_number ro, tree_id tid, sync_type st) noexcept
+      [[nodiscard]] tree_id set(root_object_number ro,
+                                tree_id            tid,
+                                sync_type          st,
+                                uint64_t           root_version = 0) noexcept
       {
          std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
          std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-         auto result = _root_objects->at(*ro).exchange(tid.pack(), std::memory_order_release);
+         auto result = _root_objects->at(*ro).exchange(tid, root_version,
+                                                       std::memory_order_release);
          sync(st);
-         return tree_id::unpack(result);
+         return result;
       }
 
       /**
@@ -307,14 +337,26 @@ namespace sal
       bool cas_root(root_object_number ro,
                     tree_id            expect,
                     tree_id            desire,
-                    sync_type          st) noexcept
+                    sync_type          st,
+                    uint64_t           root_version = 0) noexcept
+      {
+         return cas_root(ro, expect, desire, st, root_version, []() noexcept {});
+      }
+
+      template <typename OnCommit>
+      bool cas_root(root_object_number ro,
+                    tree_id            expect,
+                    tree_id            desire,
+                    sync_type          st,
+                    uint64_t           root_version,
+                    OnCommit&&         on_commit) noexcept
       {
          std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
          std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-         auto expect_packed = expect.pack();
-         if (_root_objects->at(*ro).compare_exchange_strong(expect_packed, desire.pack(),
-                                                            std::memory_order_release))
+         if (_root_objects->at(*ro).compare_exchange(expect, desire, root_version,
+                                                     std::memory_order_release))
          {
+            on_commit();
             sync(st);
             return true;
          }
@@ -342,13 +384,15 @@ namespace sal
        */
       [[nodiscard]] tree_id transaction_commit(root_object_number ro,
                                                tree_id            desired,
-                                               sync_type          st) noexcept
+                                               sync_type          st,
+                                               uint64_t           root_version = 0) noexcept
       {
          assert(ro < _root_objects->size() && "invalid root object number");
-         auto result = _root_objects->at(*ro).exchange(desired.pack(), std::memory_order_release);
+         auto result = _root_objects->at(*ro).exchange(desired, root_version,
+                                                       std::memory_order_release);
          sync(st);
          _write_mutex[*ro].unlock();
-         return tree_id::unpack(result);
+         return result;
       }
 
       /**
@@ -367,7 +411,91 @@ namespace sal
 
       friend class allocator_session;
       friend class read_lock;
-      using root_object_array = std::array<std::atomic<uint64_t>, 1024>;
+      static uint64_t root_object_check(uint64_t packed_tree,
+                                        uint64_t root_version) noexcept
+      {
+         uint64_t x = packed_tree ^ (root_version + 0x9e3779b97f4a7c15ull +
+                                     (packed_tree << 6) + (packed_tree >> 2));
+         x ^= x >> 30;
+         x *= 0xbf58476d1ce4e5b9ull;
+         x ^= x >> 27;
+         x *= 0x94d049bb133111ebull;
+         x ^= x >> 31;
+         return x ? x : 1;
+      }
+
+      struct root_object_record
+      {
+         root_object_record() noexcept
+         {
+            store(null_tree_id, 0, std::memory_order_relaxed);
+         }
+
+         tree_id load(std::memory_order order) const noexcept
+         {
+            return tree_id::unpack(tree.load(order));
+         }
+
+         uint64_t version_for(tree_id tid) const noexcept
+         {
+            auto root_version = version.load(std::memory_order_relaxed);
+            auto expected = root_object_check(tid.pack(), root_version);
+            if (check.load(std::memory_order_relaxed) != expected)
+               return 0;
+            return root_version;
+         }
+
+         void store(tree_id tid,
+                    uint64_t root_version,
+                    std::memory_order order) noexcept
+         {
+            auto packed = tid.pack();
+            version.store(root_version, std::memory_order_relaxed);
+            check.store(root_object_check(packed, root_version),
+                        std::memory_order_relaxed);
+            tree.store(packed, order);
+         }
+
+         tree_id exchange(tree_id tid,
+                          uint64_t root_version,
+                          std::memory_order order) noexcept
+         {
+            auto packed = tid.pack();
+            version.store(root_version, std::memory_order_relaxed);
+            check.store(root_object_check(packed, root_version),
+                        std::memory_order_relaxed);
+            return tree_id::unpack(tree.exchange(packed, order));
+         }
+
+         bool compare_exchange(tree_id expect,
+                               tree_id desire,
+                               uint64_t root_version,
+                               std::memory_order order) noexcept
+         {
+            auto expect_packed = expect.pack();
+            if (!tree.compare_exchange_strong(expect_packed, desire.pack(), order))
+               return false;
+            version.store(root_version, std::memory_order_relaxed);
+            check.store(root_object_check(desire.pack(), root_version),
+                        std::memory_order_relaxed);
+            return true;
+         }
+
+         void copy_from(const root_object_record& other) noexcept
+         {
+            tree.store(other.tree.load(std::memory_order_relaxed),
+                       std::memory_order_relaxed);
+            version.store(other.version.load(std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+            check.store(other.check.load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+         }
+
+         std::atomic<uint64_t> tree;
+         std::atomic<uint64_t> version;
+         std::atomic<uint64_t> check;
+      };
+      using root_object_array = std::array<root_object_record, 1024>;
 
       mapped_memory::allocator_state* _mapped_state;
       control_block_alloc             _ptr_alloc;
@@ -376,6 +504,7 @@ namespace sal
       mapping                         _seg_alloc_state_file;
       mapping                         _root_object_file;
       root_object_array*              _root_objects;
+      std::array<const object_type_ops*, 128> _type_ops;
       std::mutex                      _sync_mutex;
       /// used by readers/writers to grab/update a root object
       std::array<std::shared_mutex, 1024> _root_object_mutex;
@@ -398,18 +527,17 @@ namespace sal
       }
 
      private:
-
       inline bool config_validate_checksum_on_compact() const;
       inline bool config_update_checksum_on_compact() const;
       inline bool config_update_checksum_on_modify() const;
 
       void mlock_pinned_segments();
-      void recursive_retain_all(ptr_address addr);
+      void recursive_retain_all(ptr_address addr, void* visited);
       // Implementation helper for reachable_size(); defined in allocator.cpp
       void recursive_sum_size(ptr_address addr, uint64_t& total, void* visited);
       /// Reconstruct custom control blocks from root slots during recovery.
       /// Custom CBs have no segment data and must be rebuilt from known positions.
-      void reconstruct_custom_cbs_from_roots();
+      void reconstruct_custom_cbs_from_roots(const void* recovered_versions = nullptr);
       bool compactor_release_objects(allocator_session& ses);
 
       /**
@@ -455,9 +583,11 @@ namespace sal
        */
       void compactor_loop(segment_thread& thread);
 
-      void compact_segment(allocator_session& ses, segment_number seg_num);
-      bool compact_pinned_segment(allocator_session& ses);
-      bool compact_unpinned_segment(allocator_session& ses);
+      void compact_segment(allocator_session& ses,
+                           segment_number     seg_num,
+                           const segment_thread* thread = nullptr);
+      bool compact_pinned_segment(allocator_session& ses, const segment_thread* thread = nullptr);
+      bool compact_unpinned_segment(allocator_session& ses, const segment_thread* thread = nullptr);
       bool compactor_promote_rcache_data(allocator_session& ses);
 
       // segment_thread implementation for the compactor
@@ -523,7 +653,8 @@ namespace sal
         * @param seg The segment number containing the object
         */
       template <typename T>
-      inline void record_freed_space(allocator_session_number /*ses_num*/, T* obj);
+      inline void record_freed_space(allocator_session_number /*ses_num*/, T* obj,
+                                     const char* tag);
       /*
       {
          //static std::vector<T*> ptrs;
@@ -629,6 +760,9 @@ namespace sal
          shp->_provider_sequence = _mapped_state->_segment_provider._next_alloc_seq.fetch_add(
              1, std::memory_order_relaxed);
          _mapped_state->_segment_data.allocated_by_session(segnum);
+         // Drop any tracker entries from the segment's prior life so a fresh
+         // session starts with a clean accounting.
+         SAL_TRACK_SEG_RESET(shp, segment_size);
          return {segnum, shp};
       }
 

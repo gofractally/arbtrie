@@ -1,6 +1,11 @@
 # MDBX Drop-In Migration
 
-PsiTriMDBX provides an MDBX-compatible API backed by PsiTri's DWAL (Durable Write-Ahead Log) layer. Existing applications that use the libmdbx C or C++ API can switch to PsiTri by relinking — no code changes required for standard operations.
+PsiTriMDBX provides an MDBX-compatible API backed by PsiTri's direct COW transaction path by default. Existing applications that use the libmdbx C or C++ API can switch to PsiTri by relinking — no code changes required for standard operations. The DWAL-backed path is available only as an explicit PsiTri extension for compatibility and recovery experiments.
+
+Transaction and cursor behavior follows the PsiTri [Transaction and Cursor
+Contract](transaction-contract.md). In particular, read-write MDBX
+transactions read their own writes through current-state cursors, while
+read-only MDBX transactions use explicit snapshot lifetimes.
 
 ## Quick Migration
 
@@ -95,7 +100,7 @@ auto val = ro.get(map, mdbx::slice("alice"));
 | `mdbx_drop` | Supported | Both clear (del=0) and delete (del=1) |
 | `mdbx_dbi_stat` | Supported | Real entry counting |
 | `mdbx_replace` | Supported | |
-| `MDBX_DUPSORT` | Supported | Composite key encoding |
+| `MDBX_DUPSORT` | Supported | Stored as ordered composite keys; encoded key plus duplicate value must fit PsiTri's 1 KiB key limit |
 | `MDBX_NOOVERWRITE` / `MDBX_UPSERT` | Supported | |
 | `mdbx_env_set_userctx` / `mdbx_env_get_userctx` | Supported | |
 | C++ API (`mdbx::env_managed`, `mdbx::txn_managed`, etc.) | Supported | |
@@ -110,9 +115,9 @@ auto val = ro.get(map, mdbx::slice("alice"));
 | Multi-DBI transaction atomicity | Each DBI commits independently |
 | Geometry enforcement | PsiTri self-manages storage; geometry parameters are accepted but ignored |
 
-## PsiTri Extension: Read Modes
+## PsiTri Extension: DWAL Read Modes
 
-PsiTriMDBX exposes a read mode selector that controls how read-only transactions query the three-layer DWAL architecture (RW btree, RO snapshot, trie). This allows applications to choose the optimal tradeoff between read freshness, read throughput, and write contention.
+The default direct backend captures explicit PsiTri root snapshots for read-only transactions and does not need a DWAL read-mode selector. `mdbx_env_set_read_mode()` applies to the optional DWAL-backed path, where read-only transactions can query the three-layer DWAL architecture (RW btree, RO snapshot, trie).
 
 ```cpp
 #include <mdbx.h>
@@ -127,10 +132,9 @@ mdbx_env_set_read_mode(env, PSITRI_READ_MODE_BUFFERED);
 |------|----------|--------|---------------|----------|
 | **Trie** | `PSITRI_READ_MODE_TRIE` | Tri only | None | Reads only data merged into the COW trie. Fastest, most stale. |
 | **Buffered** | `PSITRI_READ_MODE_BUFFERED` | RO + Tri | None | Reads the frozen RO snapshot plus trie. Staleness bounded by flush interval. No writer interaction. |
-| **Fresh** | `PSITRI_READ_MODE_FRESH` | RO + Tri (after forced swap) | None | Reader waits for the next RW→RO swap, then reads. Blocks only itself — the writer and other readers are unaffected. Best when you need all committed data without impacting write throughput. |
 | **Latest** | `PSITRI_READ_MODE_LATEST` | RW + RO + Tri | Blocks next tx | Reader acquires shared lock on the RW layer, blocking until the writer finishes its current transaction. While held, the writer cannot start a new transaction. Sees all committed data. |
 
-The default mode is **Latest**, which matches native MDBX semantics (readers see the most recently committed data). For workloads where write throughput matters more than read freshness, **Buffered** or **Fresh** avoid writer contention entirely.
+For the optional DWAL path, the default mode is **Latest**, which matches native MDBX semantics (readers see the most recently committed data). For workloads where write throughput matters more than read freshness, **Buffered** avoids writer contention entirely.
 
 ### How It Works
 

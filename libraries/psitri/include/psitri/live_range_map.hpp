@@ -42,6 +42,7 @@ namespace psitri
       {
          std::vector<uint64_t> lows;
          std::vector<uint64_t> highs;
+         uint64_t              retained_floor = 0;
 
          /// Returns true if version V falls in any dead range.
          bool is_dead(uint64_t v) const noexcept
@@ -58,6 +59,10 @@ namespace psitri
          }
 
          uint64_t num_ranges() const noexcept { return lows.size(); }
+
+         /// Conservative oldest retained version implied by contiguous dead
+         /// ranges starting at 0. If version 0 is not dead, the floor remains 0.
+         uint64_t oldest_retained_floor() const noexcept { return retained_floor; }
       };
 
       static constexpr uint32_t pending_capacity = 16;
@@ -106,6 +111,7 @@ namespace psitri
          auto snap   = std::make_shared<snapshot>();
          snap->lows  = _lows;
          snap->highs = _highs;
+         snap->retained_floor = retained_floor_locked();
          _published_owner = snap;
          _published_ptr.store(snap.get(), std::memory_order_release);
       }
@@ -131,6 +137,16 @@ namespace psitri
       {
          // No lock needed for diagnostic use
          return _lows.size();
+      }
+
+      /// Conservative oldest retained version implied by contiguous dead
+      /// ranges starting at 0 in the working copy.
+      uint64_t oldest_retained_floor() noexcept
+      {
+         std::lock_guard lock(_mutex);
+         if (_pending_count > 0)
+            merge_pending_locked();
+         return retained_floor_locked();
       }
 
       /// Number of pending versions not yet merged.
@@ -160,6 +176,15 @@ namespace psitri
          --it;
          auto idx = it - _lows.begin();
          return v <= _highs[idx];
+      }
+
+      uint64_t retained_floor_locked() const noexcept
+      {
+         if (_lows.empty() || _lows[0] != 0)
+            return 0;
+         if (_highs[0] == UINT64_MAX)
+            return UINT64_MAX;
+         return _highs[0] + 1;
       }
 
       /// Merge pending buffer into sorted range arrays.

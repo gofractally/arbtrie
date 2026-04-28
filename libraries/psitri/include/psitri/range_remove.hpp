@@ -138,8 +138,19 @@ namespace psitri
                _session.release(leaf->get_value(branch_number(i)).address());
          }
 
-         op::leaf_remove_range rm{.src = *leaf.obj(), .lo = lo, .hi = hi};
-         return _session.alloc<leaf_node>(parent_hint, rm);
+         auto                  rewrite_plan = make_leaf_rewrite_plan_skipping(*leaf.obj(), lo, hi);
+         auto                  rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+         op::leaf_remove_range rm{
+             .src = *leaf.obj(), .lo = lo, .hi = hi, .rewrite = &rewrite_policy};
+         if (!leaf->rebuilt_size_fits(rm))
+         {
+            release_leaf_rewrite_replacements(rewrite_plan);
+            rm.rewrite = nullptr;
+         }
+         auto result = _session.alloc<leaf_node>(parent_hint, rm);
+         if (rm.rewrite)
+            release_leaf_rewrite_sources(rewrite_plan);
+         return result;
       }
    }
 
@@ -273,20 +284,31 @@ namespace psitri
                // UNLESS the shared dispatch already released it (child had ref > 1).
                if (!badr_shared)
                   _session.release(badr);
-               node.modify(
-                   [&](auto* n)
-                   {
-                      n->remove_branch(start);
-                   });
-               return node.address();
+	               node.modify(
+	                   [&](auto* n)
+	                   {
+	                      n->remove_branch(start);
+	                      n->set_last_unique_version(_root_version);
+	                   });
+	               return node.address();
             }
             else
             {
-               op::inner_remove_branch rm{start};
-               if constexpr (is_inner_node<NodeT>)
-                  return _session.alloc<NodeT>(parent_hint, node.obj(), rm);
-               else
-                  return _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
+	               op::inner_remove_branch rm{start};
+	               if constexpr (is_inner_node<NodeT>)
+	               {
+	                  auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
+	                  auto ref = _session.get_ref<NodeT>(result);
+	                  ref.modify()->set_last_unique_version(_root_version);
+	                  return result;
+	               }
+	               else
+	               {
+	                  auto result = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
+	                  auto ref = _session.get_ref<NodeT>(result);
+	                  ref.modify()->set_last_unique_version(_root_version);
+	                  return result;
+	               }
             }
          }
 
@@ -675,12 +697,13 @@ namespace psitri
                // then handle changed addresses via merge_branches afterward.
                op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi)};
                ptr_address new_addr;
-               if constexpr (is_inner_node<NodeT>)
-                  new_addr = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
-               else
-                  new_addr = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
+	               if constexpr (is_inner_node<NodeT>)
+	                  new_addr = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
+	               else
+	                  new_addr = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
 
-               auto new_ref = _session.get_ref<NodeT>(new_addr);
+	               auto new_ref = _session.get_ref<NodeT>(new_addr);
+	               new_ref.modify()->set_last_unique_version(_root_version);
 
                // Now replace changed branches
                if (!start_empty && start_changed)
@@ -728,11 +751,21 @@ namespace psitri
             }
 
             // Simple case: no address changes, just remove the range
-            op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi)};
-            if constexpr (is_inner_node<NodeT>)
-               return _session.alloc<NodeT>(parent_hint, node.obj(), rm);
-            else
-               return _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
+	            op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi)};
+	            if constexpr (is_inner_node<NodeT>)
+	            {
+	               auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
+	               auto ref = _session.get_ref<NodeT>(result);
+	               ref.modify()->set_last_unique_version(_root_version);
+	               return result;
+	            }
+	            else
+	            {
+	               auto result = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
+	               auto ref = _session.get_ref<NodeT>(result);
+	               ref.modify()->set_last_unique_version(_root_version);
+	               return result;
+	            }
          }
       }
    }

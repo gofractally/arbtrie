@@ -34,10 +34,7 @@ namespace
                ("psitri_mvcc_" + std::to_string(getpid()) + "_" + std::to_string(ts));
          std::filesystem::remove_all(dir);
          alloc = std::make_unique<sal::allocator>(dir, sal::runtime_config());
-         sal::register_type_vtable<leaf_node>();
-         sal::register_type_vtable<inner_prefix_node>();
-         sal::register_type_vtable<inner_node>();
-         sal::register_type_vtable<value_node>();
+         detail::register_node_types(*alloc);
          ses = alloc->get_session();
       }
       ~mvcc_db() { std::filesystem::remove_all(dir); }
@@ -72,7 +69,7 @@ namespace
    }
 }  // namespace
 
-TEST_CASE("mvcc_upsert: update existing key via value_node append", "[mvcc_write]")
+TEST_CASE("upsert_at_version: update existing key via value_node append", "[mvcc_write]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -91,7 +88,7 @@ TEST_CASE("mvcc_upsert: update existing key via value_node append", "[mvcc_write
    // MVCC upsert: update key1 at version 1
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key1"), value_type(to_vv("val_v1")), 1);
+      ctx.upsert_at_version(to_kv("key1"), value_type(to_vv("val_v1")), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -106,7 +103,7 @@ TEST_CASE("mvcc_upsert: update existing key via value_node append", "[mvcc_write
    // MVCC upsert again: update key1 at version 2 (appends to value_node)
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key1"), value_type(to_vv("val_v2")), 2);
+      ctx.upsert_at_version(to_kv("key1"), value_type(to_vv("val_v2")), 2);
       db.set_root(ctx.take_root());
    }
 
@@ -117,7 +114,7 @@ TEST_CASE("mvcc_upsert: update existing key via value_node append", "[mvcc_write
    }
 }
 
-TEST_CASE("mvcc_upsert: insert new key", "[mvcc_write]")
+TEST_CASE("upsert_at_version: insert new key", "[mvcc_write]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -133,7 +130,7 @@ TEST_CASE("mvcc_upsert: insert new key", "[mvcc_write]")
    // MVCC insert a new key
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("mmm"), value_type(to_vv("val_m")), 1);
+      ctx.upsert_at_version(to_kv("mmm"), value_type(to_vv("val_m")), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -146,7 +143,7 @@ TEST_CASE("mvcc_upsert: insert new key", "[mvcc_write]")
    }
 }
 
-TEST_CASE("mvcc_upsert: inline to value_node promotion", "[mvcc_write]")
+TEST_CASE("upsert_at_version: inline to value_node promotion", "[mvcc_write]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -161,7 +158,7 @@ TEST_CASE("mvcc_upsert: inline to value_node promotion", "[mvcc_write]")
    // MVCC update promotes inline value to value_node
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key"), value_type(to_vv("new")), 1);
+      ctx.upsert_at_version(to_kv("key"), value_type(to_vv("new")), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -181,7 +178,7 @@ TEST_CASE("mvcc_upsert: inline to value_node promotion", "[mvcc_write]")
    }
 }
 
-TEST_CASE("mvcc_remove: tombstone via value_node", "[mvcc_write]")
+TEST_CASE("remove_at_version: tombstone via value_node", "[mvcc_write]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -197,7 +194,7 @@ TEST_CASE("mvcc_remove: tombstone via value_node", "[mvcc_write]")
    // MVCC remove key1 at version 1
    {
       tree_context ctx(db.root());
-      ctx.mvcc_remove(to_kv("key1"), 1);
+      ctx.remove_at_version(to_kv("key1"), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -224,7 +221,7 @@ TEST_CASE("mvcc_remove: tombstone via value_node", "[mvcc_write]")
    }
 }
 
-TEST_CASE("mvcc_upsert: multiple versions accumulate", "[mvcc_write]")
+TEST_CASE("upsert_at_version: multiple versions accumulate", "[mvcc_write]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -240,7 +237,7 @@ TEST_CASE("mvcc_upsert: multiple versions accumulate", "[mvcc_write]")
    {
       tree_context ctx(db.root());
       std::string val = std::to_string(v);
-      ctx.mvcc_upsert(to_kv("counter"), value_type(to_vv(val)), v);
+      ctx.upsert_at_version(to_kv("counter"), value_type(to_vv(val)), v);
       db.set_root(ctx.take_root());
    }
 
@@ -260,7 +257,7 @@ TEST_CASE("mvcc_upsert: multiple versions accumulate", "[mvcc_write]")
    }
 }
 
-TEST_CASE("mvcc_upsert: many keys stress test", "[mvcc_write]")
+TEST_CASE("upsert_at_version: many keys stress test", "[mvcc_write]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -288,7 +285,7 @@ TEST_CASE("mvcc_upsert: many keys stress test", "[mvcc_write]")
          char key[32], val[32];
          snprintf(key, sizeof(key), "key%06d", i);
          snprintf(val, sizeof(val), "val%06d_v1", i);
-         ctx.mvcc_upsert(to_kv(std::string(key)), value_type(to_vv(std::string(val))), 1);
+         ctx.upsert_at_version(to_kv(std::string(key)), value_type(to_vv(std::string(val))), 1);
       }
       db.set_root(ctx.take_root());
    }
@@ -327,14 +324,14 @@ TEST_CASE("mvcc_read: version-filtered reads at different versions", "[mvcc_read
    // MVCC update at version 5
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key"), value_type(to_vv("v5")), 5);
+      ctx.upsert_at_version(to_kv("key"), value_type(to_vv("v5")), 5);
       db.set_root(ctx.take_root());
    }
 
    // MVCC update at version 10
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key"), value_type(to_vv("v10")), 10);
+      ctx.upsert_at_version(to_kv("key"), value_type(to_vv("v10")), 10);
       db.set_root(ctx.take_root());
    }
 
@@ -373,7 +370,7 @@ TEST_CASE("mvcc_read: tombstone visibility at different versions", "[mvcc_read]"
    // MVCC remove bbb at version 3
    {
       tree_context ctx(db.root());
-      ctx.mvcc_remove(to_kv("bbb"), 3);
+      ctx.remove_at_version(to_kv("bbb"), 3);
       db.set_root(ctx.take_root());
    }
 
@@ -431,7 +428,7 @@ TEST_CASE("mvcc_read: reverse iteration skips tombstones", "[mvcc_read]")
    // Tombstone bbb
    {
       tree_context ctx(db.root());
-      ctx.mvcc_remove(to_kv("bbb"), 1);
+      ctx.remove_at_version(to_kv("bbb"), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -463,7 +460,7 @@ TEST_CASE("mvcc_read: cursor version reads multi-version value_node", "[mvcc_rea
    {
       tree_context ctx(db.root());
       std::string val = std::to_string(v);
-      ctx.mvcc_upsert(to_kv("counter"), value_type(to_vv(val)), v);
+      ctx.upsert_at_version(to_kv("counter"), value_type(to_vv(val)), v);
       db.set_root(ctx.take_root());
    }
 
@@ -515,7 +512,7 @@ TEST_CASE("mvcc_immediate: single-thread upsert and read", "[mvcc_immediate]")
    }
 
    // Immediate MVCC upsert
-   auto v1 = ws->mvcc_upsert(0, "key1", "val1_v1");
+   auto v1 = ws->upsert(0, "key1", "val1_v1");
    CHECK(v1 > 0);
 
    // Read latest value
@@ -529,7 +526,7 @@ TEST_CASE("mvcc_immediate: single-thread upsert and read", "[mvcc_immediate]")
    }
 
    // Multiple immediate upserts
-   auto v2 = ws->mvcc_upsert(0, "key1", "val1_v2");
+   auto v2 = ws->upsert(0, "key1", "val1_v2");
    CHECK(v2 > v1);
 
    {
@@ -555,7 +552,7 @@ TEST_CASE("mvcc_immediate: remove via tombstone", "[mvcc_immediate]")
       tx.commit();
    }
 
-   ws->mvcc_remove(0, "bbb");
+   ws->remove(0, "bbb");
 
    // bbb hidden at latest version
    {
@@ -612,7 +609,7 @@ TEST_CASE("mvcc_immediate: multi-threaded concurrent upserts", "[mvcc_immediate]
              for (int i = 1; i <= OPS_PER_THREAD; ++i)
              {
                 std::string val = std::to_string(i);
-                ws->mvcc_upsert(0, kv, value_view(val.data(), val.size()));
+                ws->upsert(0, kv, value_view(val.data(), val.size()));
              }
           });
    }
@@ -656,7 +653,7 @@ TEST_CASE("mvcc_immediate: version numbers increase monotonically", "[mvcc_immed
    for (int i = 0; i < 20; ++i)
    {
       std::string val = "v" + std::to_string(i + 1);
-      auto ver = ws->mvcc_upsert(0, "key", value_view(val.data(), val.size()));
+      auto ver = ws->upsert(0, "key", value_view(val.data(), val.size()));
       CHECK(ver > prev);
       prev = ver;
    }
@@ -693,12 +690,12 @@ TEST_CASE("version_reclamation: dead versions recorded in live_range_map", "[ver
    for (int i = 0; i < 5; ++i)
    {
       std::string val = "v" + std::to_string(i + 1);
-      auto ver = ws->mvcc_upsert(0, "key1", value_view(val.data(), val.size()));
+      auto ver = ws->upsert(0, "key1", value_view(val.data(), val.size()));
       versions.push_back(ver);
    }
 
    // At this point, versions[0]..versions[3] should have been released
-   // (each mvcc_upsert releases the previous version CB).
+   // (each upsert_at_version releases the previous version CB).
    // versions[4] is the current version — still alive in the root slot.
 
    // Wait for the release thread to drain the queues
@@ -733,13 +730,13 @@ TEST_CASE("version_reclamation: snapshot holds version alive", "[version_reclama
    }
 
    // MVCC upsert: version 1
-   auto ver1 = ws->mvcc_upsert(0, "key1", to_vv("v1"));
+   auto ver1 = ws->upsert(0, "key1", to_vv("v1"));
 
    // Take a snapshot (retains root + version CB)
    auto snapshot = ws->get_root(0);
 
    // MVCC upsert: version 2 (releases ver1's CB from root slot)
-   auto ver2 = ws->mvcc_upsert(0, "key1", to_vv("v2"));
+   auto ver2 = ws->upsert(0, "key1", to_vv("v2"));
 
    // Wait for release thread
    REQUIRE(idb.db->wait_for_compactor());
@@ -749,12 +746,12 @@ TEST_CASE("version_reclamation: snapshot holds version alive", "[version_reclama
 
    // ver1 should NOT be dead yet — snapshot still holds a reference
    // (the snapshot's smart_ptr retained ver1's CB, keeping refcount > 0)
-   // NOTE: ver1 was the version CB that get_root retained in mvcc_upsert;
+   // NOTE: ver1 was the version CB that get_root retained in upsert_at_version;
    // that was explicitly released. But the snapshot taken AFTER ver1 was
    // set actually holds ver2's predecessor. Let me check...
-   // Actually: after mvcc_upsert(ver1), the root slot has ver1.
+   // Actually: after upsert_at_version(ver1), the root slot has ver1.
    // snapshot = get_root(0) retains ver1 (refcount = 2: slot + snapshot).
-   // mvcc_upsert(ver2): releases ver1 from slot (-1) and explicitly (-1).
+   // upsert_at_version(ver2): releases ver1 from slot (-1) and explicitly (-1).
    // But snapshot still holds ver1 (+1), so refcount = 1, NOT 0.
    // So ver1 should still be alive.
    CHECK_FALSE(dv.is_dead(ver1));
@@ -791,7 +788,7 @@ TEST_CASE("version_reclamation: published snapshot query", "[version_reclamation
    for (int i = 0; i < 8; ++i)
    {
       std::string val = "v" + std::to_string(i);
-      ws->mvcc_upsert(0, "key1", value_view(val.data(), val.size()));
+      ws->upsert(0, "key1", value_view(val.data(), val.size()));
    }
 
    REQUIRE(idb.db->wait_for_compactor());
@@ -820,12 +817,12 @@ TEST_CASE("opportunistic_cleanup: dead entries stripped during value_node COW", 
       tx.commit();
    }
 
-   // Create several MVCC versions — mvcc_upsert #1 gets version 2, etc.
+   // Create several MVCC versions — upsert_at_version #1 gets version 2, etc.
    std::vector<uint64_t> versions;
    for (int i = 1; i <= 5; ++i)
    {
       std::string val = "v" + std::to_string(i);
-      auto ver = ws->mvcc_upsert(0, "key1", value_view(val.data(), val.size()));
+      auto ver = ws->upsert(0, "key1", value_view(val.data(), val.size()));
       versions.push_back(ver);
    }
    // versions = [2, 3, 4, 5, 6].
@@ -850,7 +847,7 @@ TEST_CASE("opportunistic_cleanup: dead entries stripped during value_node COW", 
 
    // Now do another MVCC upsert — this triggers a value_node COW that should
    // strip dead entries via the published snapshot.
-   auto ver_final = ws->mvcc_upsert(0, "key1", to_vv("v6"));
+   auto ver_final = ws->upsert(0, "key1", to_vv("v6"));
 
    // Verify the latest value is correct
    {
@@ -888,7 +885,7 @@ TEST_CASE("opportunistic_cleanup: value_node entry count reduced after cleanup",
    // MVCC upsert to create a 2-entry value_node (promotes inline v0 + adds v1)
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key1"), value_type(to_vv("v1")), 1);
+      ctx.upsert_at_version(to_kv("key1"), value_type(to_vv("v1")), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -896,7 +893,7 @@ TEST_CASE("opportunistic_cleanup: value_node entry count reduced after cleanup",
    for (uint64_t ver = 2; ver <= 4; ++ver)
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key1"), value_type(to_vv("v" + std::to_string(ver))), ver);
+      ctx.upsert_at_version(to_kv("key1"), value_type(to_vv("v" + std::to_string(ver))), ver);
       db.set_root(ctx.take_root());
    }
 
@@ -924,7 +921,7 @@ TEST_CASE("opportunistic_cleanup: value_node entry count reduced after cleanup",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(drm.load_snapshot());
-      ctx.mvcc_upsert(to_kv("key1"), value_type(to_vv("v5")), 5);
+      ctx.upsert_at_version(to_kv("key1"), value_type(to_vv("v5")), 5);
       db.set_root(ctx.take_root());
    }
 
@@ -951,9 +948,9 @@ TEST_CASE("opportunistic_cleanup: value_node entry count reduced after cleanup",
    }
 }
 
-// ─── Epoch stamping tests ─────────────────────────────────────────
+// ─── last_unique_version stamping tests ───────────────────────────
 
-TEST_CASE("inner nodes get current epoch during COW insert", "[epoch]")
+TEST_CASE("inner nodes get current root version during COW insert", "[epoch]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -961,7 +958,7 @@ TEST_CASE("inner nodes get current epoch during COW insert", "[epoch]")
    // Insert enough keys to create inner nodes (need > 1 leaf to get a split)
    {
       tree_context ctx(db.root());
-      ctx.set_current_epoch(42);
+      ctx.set_epoch_base(42);
       for (int i = 0; i < 300; ++i)
       {
          char key[16];
@@ -973,24 +970,24 @@ TEST_CASE("inner nodes get current epoch during COW insert", "[epoch]")
       db.set_root(ctx.take_root());
    }
 
-   // Root should be an inner node with epoch == 42
+   // Root should be an inner node with last_unique_version == 42
    {
       auto ref = db.ses->get_ref(db.root().address());
       auto nt  = node_type(ref->type());
       REQUIRE((nt == node_type::inner_prefix || nt == node_type::inner));
-      uint64_t root_epoch = (nt == node_type::inner_prefix)
-                                ? ref.as<inner_prefix_node>()->epoch()
-                                : ref.as<inner_node>()->epoch();
-      CHECK(root_epoch == 42);
+      uint64_t root_last_unique_version = (nt == node_type::inner_prefix)
+                                ? ref.as<inner_prefix_node>()->last_unique_version()
+                                : ref.as<inner_node>()->last_unique_version();
+      CHECK(root_last_unique_version == 42);
    }
 }
 
-TEST_CASE("inner nodes get epoch 0 when no epoch set", "[epoch]")
+TEST_CASE("inner nodes get last_unique_version 0 when no epoch base set", "[epoch]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
 
-   // Insert without setting epoch (default _current_epoch == 0)
+   // Insert without setting epoch (default _epoch_base == 0)
    {
       tree_context ctx(db.root());
       for (int i = 0; i < 300; ++i)
@@ -1004,19 +1001,19 @@ TEST_CASE("inner nodes get epoch 0 when no epoch set", "[epoch]")
       db.set_root(ctx.take_root());
    }
 
-   // Root inner node should have epoch == 0
+   // Root inner node should have last_unique_version == 0
    {
       auto ref = db.ses->get_ref(db.root().address());
       auto nt  = node_type(ref->type());
       REQUIRE((nt == node_type::inner_prefix || nt == node_type::inner));
-      uint64_t root_epoch = (nt == node_type::inner_prefix)
-                                ? ref.as<inner_prefix_node>()->epoch()
-                                : ref.as<inner_node>()->epoch();
-      CHECK(root_epoch == 0);
+      uint64_t root_last_unique_version = (nt == node_type::inner_prefix)
+                                ? ref.as<inner_prefix_node>()->last_unique_version()
+                                : ref.as<inner_node>()->last_unique_version();
+      CHECK(root_last_unique_version == 0);
    }
 }
 
-TEST_CASE("MVCC fallback to COW stamps epoch on inner nodes", "[epoch]")
+TEST_CASE("MVCC fallback to COW stamps last_unique_version on inner nodes", "[epoch]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -1040,20 +1037,20 @@ TEST_CASE("MVCC fallback to COW stamps epoch on inner nodes", "[epoch]")
       auto ref = db.ses->get_ref(db.root().address());
       auto nt  = node_type(ref->type());
       REQUIRE((nt == node_type::inner_prefix || nt == node_type::inner));
-      uint64_t root_epoch = (nt == node_type::inner_prefix)
-                                ? ref.as<inner_prefix_node>()->epoch()
-                                : ref.as<inner_node>()->epoch();
-      CHECK(root_epoch == 0);
+      uint64_t root_last_unique_version = (nt == node_type::inner_prefix)
+                                ? ref.as<inner_prefix_node>()->last_unique_version()
+                                : ref.as<inner_node>()->last_unique_version();
+      CHECK(root_last_unique_version == 0);
    }
 
    // MVCC upsert that causes a structural change (new key, leaf overflow → split)
    // uses the COW fallback path, which should stamp epoch on new inner nodes
    {
       tree_context ctx(db.root());
-      ctx.set_current_epoch(7);
+      ctx.set_epoch_base(7);
       // Insert a new key via MVCC — if the leaf is full, this falls back to COW
       // which creates inner nodes with the current epoch
-      ctx.mvcc_upsert(to_kv("zzz_new_key"), value_type(to_vv("new_value")), 1);
+      ctx.upsert_at_version(to_kv("zzz_new_key"), value_type(to_vv("new_value")), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -1065,7 +1062,7 @@ TEST_CASE("MVCC fallback to COW stamps epoch on inner nodes", "[epoch]")
    }
 }
 
-TEST_CASE("COW replace_branch preserves clone epoch", "[epoch]")
+TEST_CASE("COW replace_branch refreshes last_unique_version", "[epoch]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -1073,7 +1070,7 @@ TEST_CASE("COW replace_branch preserves clone epoch", "[epoch]")
    // Build tree with epoch 10
    {
       tree_context ctx(db.root());
-      ctx.set_current_epoch(10);
+      ctx.set_epoch_base(10);
       for (int i = 0; i < 300; ++i)
       {
          char key[16], val[16];
@@ -1089,32 +1086,31 @@ TEST_CASE("COW replace_branch preserves clone epoch", "[epoch]")
       auto ref = db.ses->get_ref(db.root().address());
       auto nt  = node_type(ref->type());
       REQUIRE((nt == node_type::inner_prefix || nt == node_type::inner));
-      uint64_t root_epoch = (nt == node_type::inner_prefix)
-                                ? ref.as<inner_prefix_node>()->epoch()
-                                : ref.as<inner_node>()->epoch();
-      CHECK(root_epoch == 10);
+      uint64_t root_last_unique_version = (nt == node_type::inner_prefix)
+                                ? ref.as<inner_prefix_node>()->last_unique_version()
+                                : ref.as<inner_node>()->last_unique_version();
+      CHECK(root_last_unique_version == 10);
    }
 
-   // COW update with epoch 20 — the replace_branch path copies clone epoch,
-   // but any split that creates new inner nodes uses the new epoch
+   // COW update with epoch base 20 refreshes the existing root path to the
+   // transaction's root version even if the structural edit is small.
    {
       tree_context ctx(db.root());
-      ctx.set_current_epoch(20);
+      ctx.set_epoch_base(20);
       ctx.upsert(to_kv("k00050"), value_type(to_vv("updated_value")));
       db.set_root(ctx.take_root());
    }
 
-   // Root was COW'd via replace_branch which copies clone's epoch (10).
-   // The root epoch stays 10 because replace_branch copies from clone.
+   // Root was refreshed during descent, so it must not silently preserve the
+   // stale structural stamp from the clone.
    {
       auto ref = db.ses->get_ref(db.root().address());
       auto nt  = node_type(ref->type());
       REQUIRE((nt == node_type::inner_prefix || nt == node_type::inner));
-      uint64_t root_epoch = (nt == node_type::inner_prefix)
-                                ? ref.as<inner_prefix_node>()->epoch()
-                                : ref.as<inner_node>()->epoch();
-      // replace_branch copies clone's epoch, so root keeps 10
-      CHECK(root_epoch == 10);
+      uint64_t root_last_unique_version = (nt == node_type::inner_prefix)
+                                ? ref.as<inner_prefix_node>()->last_unique_version()
+                                : ref.as<inner_node>()->last_unique_version();
+      CHECK(root_last_unique_version == 20);
    }
 
    // Verify data is correct
@@ -1122,6 +1118,45 @@ TEST_CASE("COW replace_branch preserves clone epoch", "[epoch]")
       tree_context ctx(db.root());
       CHECK(read_value(ctx, "k00050") == "updated_value");
    }
+}
+
+TEST_CASE("inner_prefix collapse refreshes last_unique_version", "[epoch]")
+{
+   sal::set_current_thread_name("main");
+   mvcc_db db;
+
+   auto make_key = [](char prefix_byte, int idx) {
+      std::string key(1000, 'K');
+      key[0] = prefix_byte;
+      snprintf(key.data() + 1, 999, "collapse-g%02d", idx);
+      return key;
+   };
+
+   {
+      tree_context ctx(db.root());
+      ctx.set_epoch_base(10);
+      for (int i = 0; i < 3; ++i)
+         ctx.upsert(to_kv(make_key(0x00, i)), value_type(to_vv("keep")));
+      ctx.upsert(to_kv(make_key(0x01, 0)), value_type(to_vv("remove")));
+      db.set_root(ctx.take_root());
+   }
+
+   {
+      tree_context ctx(db.root());
+      ctx.set_epoch_base(20);
+      ctx.remove(to_kv(make_key(0x01, 0)));
+      db.set_root(ctx.take_root());
+   }
+
+   auto ref = db.ses->get_ref(db.root().address());
+   auto nt  = node_type(ref->type());
+   REQUIRE(nt == node_type::inner_prefix);
+   CHECK(ref.as<inner_prefix_node>()->last_unique_version() == 20);
+
+   tree_context ctx(db.root());
+   for (int i = 0; i < 3; ++i)
+      CHECK(read_value(ctx, make_key(0x00, i)) == "keep");
+   CHECK(read_value(ctx, make_key(0x01, 0)).empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1144,14 +1179,14 @@ TEST_CASE("defrag strips dead entries from value_nodes", "[defrag]")
    // MVCC upsert at version 1
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert("key_a", value_type("val_a_v1"), 1);
+      ctx.upsert_at_version("key_a", value_type("val_a_v1"), 1);
       db.set_root(ctx.take_root());
    }
 
    // MVCC upsert at version 2
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert("key_a", value_type("val_a_v2"), 2);
+      ctx.upsert_at_version("key_a", value_type("val_a_v2"), 2);
       db.set_root(ctx.take_root());
    }
 
@@ -1209,7 +1244,7 @@ TEST_CASE("defrag is no-op when no dead versions exist", "[defrag]")
    }
    {
       tree_context ctx(db.root());
-      ctx.mvcc_upsert("key_a", value_type("v1"), 1);
+      ctx.upsert_at_version("key_a", value_type("v1"), 1);
       db.set_root(ctx.take_root());
    }
 
@@ -1293,12 +1328,14 @@ TEST_CASE("defrag_tree via write_session", "[defrag]")
    }
 
    // MVCC upsert a few keys
-   ws->mvcc_upsert(0, "k0000", "v0000_1");
-   ws->mvcc_upsert(0, "k0001", "v0001_1");
-   ws->mvcc_upsert(0, "k0002", "v0002_1");
+   ws->upsert(0, "k0000", "v0000_1");
+   ws->upsert(0, "k0001", "v0001_1");
+   ws->upsert(0, "k0002", "v0002_1");
 
-   // Mark version 1 as dead (initial COW insert version)
-   db->dead_versions().add_dead_version(1);
+   // Mark the implicit initial value version as dead. The later upserts
+   // promoted the touched keys to value_nodes with old version 0 plus the
+   // update version.
+   db->dead_versions().add_dead_version(0);
    db->dead_versions().publish_snapshot();
 
    // Defrag — should strip dead entries
@@ -1307,15 +1344,70 @@ TEST_CASE("defrag_tree via write_session", "[defrag]")
 
    // Data should still be readable
    auto rs = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.lower_bound("k0000");
    REQUIRE(!cur.is_end());
 
    std::filesystem::remove_all(db_path);
 }
 
+TEST_CASE("defrag_tree normalizes value history to retained floor", "[defrag][floor]")
+{
+   sal::set_current_thread_name("main");
+   mvcc_db db;
 
-TEST_CASE("cow prunes old version entries from value_nodes", "[mvcc_write][cow_prune]")
+   std::string v0(100, 'A');
+   std::string v1(100, 'B');
+   std::string v2(100, 'C');
+   std::string v3(100, 'D');
+
+   {
+      tree_context ctx(db.root());
+      ctx.insert(to_kv("key"), value_type(to_vv(v0)));
+      db.set_root(ctx.take_root());
+   }
+
+   for (uint64_t version = 1; version <= 3; ++version)
+   {
+      const std::string& value = version == 1 ? v1 : (version == 2 ? v2 : v3);
+      tree_context       ctx(db.root());
+      ctx.upsert_at_version(to_kv("key"), value_type(to_vv(value)), version);
+      db.set_root(ctx.take_root());
+   }
+
+   live_range_map dead;
+   dead.add_dead_version(0);
+   dead.add_dead_version(1);
+   dead.flush_pending();
+   dead.publish_snapshot();
+
+   {
+      tree_context ctx(db.root());
+      ctx.set_dead_versions(dead.load_snapshot());
+      CHECK(ctx.defrag() == 1);
+      db.set_root(ctx.take_root());
+   }
+
+   auto root = db.root();
+   cursor c(root);
+   auto   info = c.get_key_info(to_kv("key"));
+   REQUIRE(info.leaf_addr != sal::null_ptr_address);
+
+   auto leaf = root.session()->get_ref<leaf_node>(info.leaf_addr);
+   auto bn   = leaf->get(to_kv("key"));
+   REQUIRE(bn != leaf->num_branches());
+   REQUIRE(leaf->get_value_type(bn) == leaf_node::value_type_flag::value_node);
+
+   auto vref = root.session()->get_ref<value_node>(leaf->get_value_address(bn));
+   REQUIRE(vref->num_versions() == 2);
+   CHECK(vref->get_entry_version(0) == 2);
+   CHECK(vref->get_entry_version(1) == 3);
+   CHECK(std::string(vref->get_entry_value(0).data(), vref->get_entry_value(0).size()) == v2);
+   CHECK(std::string(vref->get_entry_value(1).data(), vref->get_entry_value(1).size()) == v3);
+}
+
+
+TEST_CASE("cow keeps reachable value_node history without retained floor", "[mvcc_write][cow_prune]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -1349,8 +1441,8 @@ TEST_CASE("cow prunes old version entries from value_nodes", "[mvcc_write][cow_p
    {
       std::string val(100, 'B' + i);
       tree_context ctx(db.root());
-      ctx.mvcc_upsert(to_kv("key1"), value_type(to_vv(val)), i + 1);
-      ctx.mvcc_upsert(to_kv("key2"), value_type(to_vv(val)), i + 1);
+      ctx.upsert_at_version(to_kv("key1"), value_type(to_vv(val)), i + 1);
+      ctx.upsert_at_version(to_kv("key2"), value_type(to_vv(val)), i + 1);
       db.set_root(ctx.take_root());
    }
 
@@ -1364,27 +1456,23 @@ TEST_CASE("cow prunes old version entries from value_nodes", "[mvcc_write][cow_p
       REQUIRE(s.total_version_entries > 3);
    }
 
-   // Step 3: COW transaction — upsert key1 to trigger COW on the path
+   // Step 3: COW transaction without a retained floor. The update may replace
+   // key1's latest value, but it must not use the transaction/root version as a
+   // proof that old history for other keys in the leaf can be released.
    {
       tree_context ctx(db.root());
       ctx.upsert<upsert_mode::unique>(to_kv("key1"), value_type(to_vv(big_val_final)));
       db.set_root(ctx.take_root());
    }
 
-   // Verify: after COW, value_nodes on the COW'd path should be pruned
-   // key1's value_node should have only 1 entry (the final value)
-   // key3's value_node should have 1 entry (untouched by MVCC)
-   // key2's value_node may still have multiple entries (not on COW path)
+   // Verify: without a retained floor, key2's old versions remain reachable.
    {
       tree_context ctx(db.root());
       auto s = ctx.get_stats();
       INFO("After COW: value_nodes=" << s.value_nodes
            << " total_version_entries=" << s.total_version_entries);
-      // At minimum, the COW'd key1 should be pruned.
-      // Ideal: all value_nodes in the new tree are pruned to 1 entry each.
-      // For now, verify that the total is less than before the COW.
-      // The exact count depends on whether COW touches key2's leaf.
-      CHECK(s.total_version_entries <= s.value_nodes);  // 1 entry per value_node
+      CHECK(s.value_nodes == 3);
+      CHECK(s.total_version_entries > s.value_nodes);
    }
 
    // Verify data correctness: latest values readable
@@ -1399,6 +1487,63 @@ TEST_CASE("cow prunes old version entries from value_nodes", "[mvcc_write][cow_p
       REQUIRE(c.seek(to_kv("key3")));
       CHECK(c.value<std::string>().value_or("") == big_val_v0);
    }
+}
+
+TEST_CASE("cow prunes value_node history at retained floor", "[mvcc_write][cow_prune]")
+{
+   sal::set_current_thread_name("main");
+   mvcc_db db;
+
+   std::string big_val_v0(100, 'A');
+   std::string big_val_final(100, 'Z');
+
+   {
+      tree_context ctx(db.root());
+      ctx.insert(to_kv("key1"), value_type(to_vv(big_val_v0)));
+      ctx.insert(to_kv("key2"), value_type(to_vv(big_val_v0)));
+      ctx.insert(to_kv("key3"), value_type(to_vv(big_val_v0)));
+      db.set_root(ctx.take_root());
+   }
+
+   for (int i = 0; i < 3; ++i)
+   {
+      std::string val(100, 'B' + i);
+      tree_context ctx(db.root());
+      ctx.upsert_at_version(to_kv("key1"), value_type(to_vv(val)), i + 1);
+      ctx.upsert_at_version(to_kv("key2"), value_type(to_vv(val)), i + 1);
+      db.set_root(ctx.take_root());
+   }
+
+   live_range_map dead;
+   for (uint64_t v = 0; v <= 3; ++v)
+      dead.add_dead_version(v);
+   dead.flush_pending();
+   dead.publish_snapshot();
+
+   {
+      tree_context ctx(db.root());
+      ctx.set_dead_versions(dead.load_snapshot());
+      ctx.upsert<upsert_mode::unique>(to_kv("key1"), value_type(to_vv(big_val_final)));
+      db.set_root(ctx.take_root());
+   }
+
+   {
+      tree_context ctx(db.root());
+      auto s = ctx.get_stats();
+      INFO("After retained-floor COW: value_nodes=" << s.value_nodes
+           << " total_version_entries=" << s.total_version_entries);
+      CHECK(s.value_nodes == 3);
+      CHECK(s.total_version_entries == s.value_nodes);
+   }
+
+   cursor c(db.root());
+   REQUIRE(c.seek(to_kv("key1")));
+   CHECK(c.value<std::string>().value_or("") == big_val_final);
+   REQUIRE(c.seek(to_kv("key2")));
+   std::string expected_key2(100, 'D');
+   CHECK(c.value<std::string>().value_or("") == expected_key2);
+   REQUIRE(c.seek(to_kv("key3")));
+   CHECK(c.value<std::string>().value_or("") == big_val_v0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1432,7 +1577,7 @@ TEST_CASE("version entries accumulate then clean up after snapshot release", "[m
 
    // Step 2: Take a snapshot to hold old versions alive
    auto rs       = db->start_read_session();
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
 
    // Step 3: MVCC-update all keys multiple rounds — accumulates version entries
    for (int round = 1; round <= num_rounds; ++round)
@@ -1442,7 +1587,7 @@ TEST_CASE("version entries accumulate then clean up after snapshot release", "[m
          char key[16], val[32];
          snprintf(key, sizeof(key), "key_%04d", i);
          snprintf(val, sizeof(val), "val_%04d_v%d", i, round);
-         ws->mvcc_upsert(0, key, val);
+         ws->upsert(0, key, val);
       }
    }
 
@@ -1523,7 +1668,7 @@ TEST_CASE("version entries accumulate then clean up after snapshot release", "[m
 
    // Step 9: Verify data is still correct — latest values readable
    {
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       for (int i = 0; i < num_keys; ++i)
       {
          char key[16], expected[32];
@@ -1557,18 +1702,18 @@ TEST_CASE("held snapshot prevents version cleanup", "[mvcc_lifecycle]")
    }
 
    // Take snapshot at version 1
-   auto snapshot_v1 = rs->create_cursor(0);
+   auto snapshot_v1 = rs->snapshot_cursor(0);
 
    // MVCC-update both keys
-   ws->mvcc_upsert(0, "key_a", "val_a_v1");
-   ws->mvcc_upsert(0, "key_b", "val_b_v1");
+   ws->upsert(0, "key_a", "val_a_v1");
+   ws->upsert(0, "key_b", "val_b_v1");
 
    // Take snapshot at version 3
-   auto snapshot_v3 = rs->create_cursor(0);
+   auto snapshot_v3 = rs->snapshot_cursor(0);
 
    // MVCC-update again
-   ws->mvcc_upsert(0, "key_a", "val_a_v2");
-   ws->mvcc_upsert(0, "key_b", "val_b_v2");
+   ws->upsert(0, "key_a", "val_a_v2");
+   ws->upsert(0, "key_b", "val_b_v2");
 
    // Count version entries — should have accumulated
    {
@@ -1627,7 +1772,7 @@ TEST_CASE("held snapshot prevents version cleanup", "[mvcc_lifecycle]")
    }
 
    // Latest values still correct
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek("key_a");
    REQUIRE(!cur.is_end());
    CHECK(cur.value<std::string>().value_or("") == "val_a_v2");
@@ -1685,7 +1830,7 @@ TEST_CASE("snapshot survives many MVCC writes and defrag", "[mvcc_snapshot][stre
 
    // Step 2: Take a snapshot — this will be held while mutations accumulate
    auto rs       = db->start_read_session();
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
 
    // Compute expected hash from the snapshot state
    uint64_t expected_hash = hash_tree_contents(snapshot);
@@ -1710,7 +1855,7 @@ TEST_CASE("snapshot survives many MVCC writes and defrag", "[mvcc_snapshot][stre
          snprintf(key, sizeof(key), "key_%04d", i);
          char val[32];
          snprintf(val, sizeof(val), "val_%04d_v%d", i, round + 1);
-         ws->mvcc_upsert(0, key, val);
+         ws->upsert(0, key, val);
       }
    }
 
@@ -1745,7 +1890,7 @@ TEST_CASE("snapshot survives many MVCC writes and defrag", "[mvcc_snapshot][stre
    CHECK(snapshot.value<std::string>().value_or("") == "val_0049_v0");
 
    // Step 6: Verify the LATEST values are correct too
-   auto latest = rs->create_cursor(0);
+   auto latest = rs->snapshot_cursor(0);
    latest.seek("key_0000");
    REQUIRE(!latest.is_end());
    char expected_latest[32];
@@ -1782,7 +1927,7 @@ TEST_CASE("snapshot survives COW epoch transitions", "[mvcc_snapshot][stress]")
 
    // Take snapshot after initial seed
    auto rs       = db->start_read_session();
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
    uint64_t expected_hash = hash_tree_contents(snapshot);
 
    // Run multiple epochs: MVCC writes, then a COW batch (epoch boundary)
@@ -1794,7 +1939,7 @@ TEST_CASE("snapshot survives COW epoch transitions", "[mvcc_snapshot][stress]")
          char key[16], val[32];
          snprintf(key, sizeof(key), "key_%04d", i);
          snprintf(val, sizeof(val), "epoch%d_v%d", epoch, i);
-         ws->mvcc_upsert(0, key, val);
+         ws->upsert(0, key, val);
       }
 
       // COW batch transaction to force epoch boundary (new root, prunes old versions)
@@ -1861,7 +2006,7 @@ TEST_CASE("multiple snapshots at different versions coexist", "[mvcc_snapshot][s
    for (int ver = 0; ver < num_versions; ++ver)
    {
       // Take snapshot
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       uint64_t h = hash_tree_contents(cur);
       snapshots.push_back({std::move(cur), h});
 
@@ -1871,13 +2016,13 @@ TEST_CASE("multiple snapshots at different versions coexist", "[mvcc_snapshot][s
          char key[16], val[32];
          snprintf(key, sizeof(key), "key_%04d", i);
          snprintf(val, sizeof(val), "v%d_%d", ver + 1, i);
-         ws->mvcc_upsert(0, key, val);
+         ws->upsert(0, key, val);
       }
    }
 
    // Take final snapshot
    {
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       uint64_t h = hash_tree_contents(cur);
       snapshots.push_back({std::move(cur), h});
    }
@@ -1935,7 +2080,7 @@ TEST_CASE("automatic version reclamation pipeline", "[mvcc_lifecycle]")
    }
 
    // Step 2: Take snapshot (holds version 1 alive)
-   auto snapshot = rs->create_cursor(0);
+   auto snapshot = rs->snapshot_cursor(0);
 
    // Step 3: MVCC-update all keys multiple rounds
    for (int round = 1; round <= num_rounds; ++round)
@@ -1945,7 +2090,7 @@ TEST_CASE("automatic version reclamation pipeline", "[mvcc_lifecycle]")
          char key[16], val[32];
          snprintf(key, sizeof(key), "key_%04d", i);
          snprintf(val, sizeof(val), "val_%04d_v%d", i, round);
-         ws->mvcc_upsert(0, key, val);
+         ws->upsert(0, key, val);
       }
    }
 
@@ -1984,7 +2129,7 @@ TEST_CASE("automatic version reclamation pipeline", "[mvcc_lifecycle]")
 
    // Step 7: Latest values still readable
    {
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       for (int i = 0; i < num_keys; ++i)
       {
          char key[16], expected[32];
@@ -2038,7 +2183,7 @@ TEST_CASE("epoch boundary triggers COW maintenance and bounds version bloat",
       char key[16], val[32];
       snprintf(key, sizeof(key), "key_%04d", i % num_keys);
       snprintf(val, sizeof(val), "v%d_%d", i / num_keys + 1, i % num_keys);
-      ws->mvcc_upsert(0, key, val);
+      ws->upsert(0, key, val);
    }
 
    // Check that version entries are bounded — epoch-triggered COW prunes them.
@@ -2064,7 +2209,7 @@ TEST_CASE("epoch boundary triggers COW maintenance and bounds version bloat",
    // Verify latest values
    {
       auto rs  = db->start_read_session();
-      auto cur = rs->create_cursor(0);
+      auto cur = rs->snapshot_cursor(0);
       for (int i = 0; i < num_keys; ++i)
       {
          char key[16], expected[32];
@@ -2157,7 +2302,7 @@ TEST_CASE("dictionary MVCC random update throughput", "[mvcc_bench]")
       auto& word = words[rng() % words.size()];
       char  val[64];
       snprintf(val, sizeof(val), "updated_%d", i);
-      ws->mvcc_upsert(0, word, val);
+      ws->upsert(0, word, val);
    }
 
    auto end     = std::chrono::high_resolution_clock::now();
@@ -2181,7 +2326,7 @@ TEST_CASE("dictionary MVCC random update throughput", "[mvcc_bench]")
 
    // Spot-check a value
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek(words[0]);
    REQUIRE(!cur.is_end());
 
@@ -2228,7 +2373,7 @@ TEST_CASE("dictionary COW random update throughput", "[mvcc_bench]")
 
    // Spot-check
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek(words[0]);
    REQUIRE(!cur.is_end());
 
@@ -2261,7 +2406,7 @@ TEST_CASE("dictionary single-key hot update throughput", "[mvcc_bench]")
       {
          char val[64];
          snprintf(val, sizeof(val), "hot_%d", i);
-         ws->mvcc_upsert(0, hot_key, val);
+         ws->upsert(0, hot_key, val);
       }
       auto end     = std::chrono::high_resolution_clock::now();
       auto elapsed = std::chrono::duration<double>(end - start).count();
@@ -2290,7 +2435,7 @@ TEST_CASE("dictionary single-key hot update throughput", "[mvcc_bench]")
 
    // Verify latest value
    auto rs  = db->start_read_session();
-   auto cur = rs->create_cursor(0);
+   auto cur = rs->snapshot_cursor(0);
    cur.seek(hot_key);
    REQUIRE(!cur.is_end());
 

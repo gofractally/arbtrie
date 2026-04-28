@@ -148,7 +148,7 @@ namespace psitri
          assert(asize == alloc_size(clone, prefix));
          _num_branches = clone->_num_branches;
          _num_cline    = clone->_num_cline;
-         _epoch        = clone->_epoch;
+         _last_unique_version        = clone->_last_unique_version;
          _prefix_cap   = prefix.size();
          set_prefix(prefix);
          memcpy(divisions(), clone->divisions(), clone->num_branches() - 1);
@@ -172,8 +172,11 @@ namespace psitri
          return (const branch*)(divisions() + num_divisions());
       }
       uint16_t num_branches() const noexcept { return _num_branches; }
-      uint64_t epoch() const noexcept { return _epoch; }
-      void     set_epoch(uint64_t e) noexcept { _epoch = e; }
+      uint64_t last_unique_version() const noexcept { return _last_unique_version; }
+      void     set_last_unique_version(uint64_t e) noexcept
+      {
+         _last_unique_version = version_token(e, last_unique_version_bits);
+      }
 
       void set_prefix(key_view pre) noexcept
       {
@@ -195,11 +198,11 @@ namespace psitri
       using inner_node_base<inner_prefix_node>::destroy;
 
      protected:
-      static int reg_type;  // =sal::register_type_vtable<inner_prefix_node>();
+      static int reg_type;
 
       template <typename T>
       friend class inner_node_base;
-      uint64_t _epoch : 39;  ///< epoch counter for MVCC structural maintenance
+      uint64_t _last_unique_version : 39;  ///< root version when this node was last refreshed
       uint64_t _num_branches : 9;  ///< a maximum of 256 branches per node (16 clines * 16 indices)
       uint64_t _num_cline : 5;     ///< only 16 cline are possible w/ 4 bit branch index
       uint64_t _prefix_len : 11;   ///< prefix length in bytes
@@ -299,8 +302,11 @@ namespace psitri
 
       using inner_node_base<inner_node>::remove_branch;
       uint16_t num_branches() const noexcept { return _num_branches; }
-      uint64_t epoch() const noexcept { return _epoch; }
-      void     set_epoch(uint64_t e) noexcept { _epoch = e; }
+      uint64_t last_unique_version() const noexcept { return _last_unique_version; }
+      void     set_last_unique_version(uint64_t e) noexcept
+      {
+         _last_unique_version = version_token(e, last_unique_version_bits);
+      }
 
       const branch* const_branches() const noexcept
       {
@@ -318,7 +324,7 @@ namespace psitri
       branch*        branches_end() noexcept { return branches() + num_branches(); }
 
      private:
-      uint64_t _epoch : 39;  // epoch counter for MVCC structural maintenance
+      uint64_t _last_unique_version : 39;  // root version when this node was last refreshed
       uint64_t _num_branches : 9;  // a maximum of 256 branches per node (16 clines * 16 indices)
       uint64_t _num_cline : 5;     /// only 16 cline are possible w/ 4 bit branch index
       uint64_t _unused : 11;       /// maybe store used_cline (_num_cline-used_cline = free_clines)

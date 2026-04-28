@@ -6,6 +6,10 @@ namespace psitri
    template <class LockPolicy> class basic_database;
    template <class LockPolicy> class basic_read_session;
    template <class LockPolicy> class basic_write_session;
+   class tree;
+   class transaction;
+   class value_pin;
+   class write_transaction;
 
    using database      = basic_database<std_lock_policy>;
    using read_session  = basic_read_session<std_lock_policy>;

@@ -6,16 +6,12 @@
 
 namespace psitri::detail
 {
-   void register_node_types()
+   void register_node_types(sal::allocator& alloc)
    {
-      static bool registered = false;
-      if (registered)
-         return;
-      registered = true;
-      sal::register_type_vtable<leaf_node>();
-      sal::register_type_vtable<inner_node>();
-      sal::register_type_vtable<inner_prefix_node>();
-      sal::register_type_vtable<value_node>();
+      alloc.register_type_ops<leaf_node>();
+      alloc.register_type_ops<inner_node>();
+      alloc.register_type_ops<inner_prefix_node>();
+      alloc.register_type_ops<value_node>();
    }
 
    // database method implementations now live in database_impl.hpp as
@@ -55,7 +51,7 @@ namespace psitri::detail
          {
             ++result.object_checksums.unknown;
          }
-         else if (sal::vcall::verify_checksum(obj))
+         else if (alloc.type_ops(obj).verify_checksum(obj))
          {
             ++result.object_checksums.passed;
          }
@@ -201,7 +197,7 @@ namespace psitri::detail
       auto  num_roots = std::min<uint32_t>(roots.size(), num_top_roots);
       for (uint32_t i = 0; i < num_roots; ++i)
       {
-         auto tid = sal::tree_id::unpack(roots[i].load(std::memory_order_relaxed));
+         auto tid = roots[i].load(std::memory_order_relaxed);
          if (tid.root != sal::null_ptr_address)
          {
             ++result.roots_checked;

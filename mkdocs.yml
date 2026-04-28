@@ -100,6 +100,7 @@ nav:
   - Getting Started:
       - Quick Start: getting-started/quickstart.md
       - Examples: examples.md
+      - Transaction Contract: getting-started/transaction-contract.md
       - RocksDB Migration: getting-started/rocksdb-migration.md
       - MDBX Migration: getting-started/mdbx-migration.md
       - SQLite Migration: getting-started/sqlite-migration.md
@@ -108,6 +109,7 @@ nav:
       - Overview: architecture/overview.md
       - "DWAL: ART-Buffered Write Path": architecture/dwal.md
       - Control Blocks & Addressing: architecture/control-blocks.md
+      - MVCC Version Maintenance: architecture/mvcc-version-maintenance.md
       - Segment Allocator (SAL): architecture/sal.md
       - Branchless Design: architecture/branchless-design.md
       - Smart Pointers & Thread Safety: architecture/smart-pointers.md

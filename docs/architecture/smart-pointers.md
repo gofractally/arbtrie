@@ -60,7 +60,7 @@ Reference counts live in the [control block](control-blocks.md), separate from t
 The most common pattern. A writer commits data, then shares a snapshot with reader threads.
 
 ```cpp
-auto db = psitri::database::create("mydb");
+auto db = psitri::database::open("mydb", psitri::open_mode::create_or_open);
 auto ws = db->start_write_session();
 
 // Writer populates and commits

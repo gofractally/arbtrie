@@ -1,6 +1,8 @@
 #pragma once
 #include <psitri/cursor.hpp>
+#include <psitri/tree.hpp>
 #include <psitri/tree_ops.hpp>
+#include <utility>
 
 namespace psitri
 {
@@ -10,13 +12,21 @@ namespace psitri
       using ptr = std::shared_ptr<write_cursor>;
 
       /// Create a write cursor on an empty (transient) tree
-      write_cursor(sal::allocator_session_ptr session)
-          : _ctx(sal::smart_ptr<sal::alloc_header>(session, sal::null_ptr_address))
-      {
-      }
+      write_cursor(sal::allocator_session_ptr session, uint64_t epoch_base = 0)
+	          : _ctx(sal::smart_ptr<sal::alloc_header>(session, sal::null_ptr_address))
+	      {
+	         _ctx.set_epoch_base(epoch_base);
+	      }
 
-      /// Create a write cursor on an existing root
-      write_cursor(sal::smart_ptr<sal::alloc_header> root) : _ctx(std::move(root)) {}
+	      /// Create a write cursor on an existing root
+	      write_cursor(sal::smart_ptr<sal::alloc_header> root, uint64_t epoch_base = 0)
+	          : _ctx(std::move(root))
+	      {
+	         _ctx.set_epoch_base(epoch_base);
+	      }
+
+	      void set_epoch_base(uint64_t epoch_base) { _ctx.set_epoch_base(epoch_base); }
+	      void set_root_version(uint64_t root_version) { _ctx.set_root_version(root_version); }
 
       // -- Mutations --
 
@@ -57,12 +67,22 @@ namespace psitri
          _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(tid));
       }
 
+      void upsert_subtree(key_view key, tree subtree)
+      {
+         upsert(key, std::move(subtree).take_root());
+      }
+
       /// Sorted variant of subtree upsert.
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
          auto tid = subtree_root.get_tree_id();
          subtree_root.take();  // release ownership without decrementing ref
          _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type::make_subtree(tid));
+      }
+
+      void upsert_subtree_sorted(key_view key, tree subtree)
+      {
+         upsert_sorted(key, std::move(subtree).take_root());
       }
 
       /// Remove key. Returns size of removed value, or -1 if not found.
@@ -91,6 +111,12 @@ namespace psitri
       {
          cursor c(_ctx.get_root());
          return c.get<T>(key);
+      }
+
+      bool get(key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         cursor c(_ctx.get_root());
+         return c.get(key, std::forward<decltype(lambda)>(lambda));
       }
 
       /// Point lookup into a buffer. Returns bytes read, or cursor::value_not_found.

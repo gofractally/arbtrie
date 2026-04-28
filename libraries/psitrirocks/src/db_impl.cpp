@@ -555,7 +555,7 @@ namespace rocksdb
             auto* snap = static_cast<const PsiTriSnapshot*>(options.snapshot);
             auto  root = snap->root();
             if (!root)
-               root = get_read_session()->get_root(root_idx);
+               root = get_read_session()->get_root(root_idx).copy_root();
             return new PsiTriIterator(std::move(root));
          }
 

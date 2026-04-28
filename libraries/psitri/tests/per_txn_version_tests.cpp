@@ -1,22 +1,22 @@
 // Per-txn version + value_node coalescing tests.
 //
-// Validates that try_mvcc_upsert / try_mvcc_remove collapse repeated writes
+// Validates that try_upsert_at_version / try_remove_at_version collapse repeated writes
 // to the same key under a fixed version into a single chain entry instead
 // of growing the chain linearly. This is the building block that makes
 // per-txn versioning viable: a transaction that writes the same key 100
 // times produces 1 chain entry, not 100.
 
+#include <unistd.h>
 #include <catch2/catch_all.hpp>
 #include <chrono>
 #include <psitri/cursor.hpp>
 #include <psitri/database.hpp>
 #include <psitri/database_impl.hpp>
 #include <psitri/node/value_node.hpp>
+#include <psitri/read_session_impl.hpp>
 #include <psitri/tree_ops.hpp>
 #include <psitri/write_session_impl.hpp>
-#include <psitri/read_session_impl.hpp>
 #include <sal/sal.hpp>
-#include <unistd.h>
 
 using namespace psitri;
 using sal::alloc_header;
@@ -34,30 +34,29 @@ namespace
       {
          auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
          dir     = std::filesystem::temp_directory_path() /
-               ("psitri_ptv_" + std::to_string(getpid()) + "_" +
-                std::to_string(ts));
+                   ("psitri_ptv_" + std::to_string(getpid()) + "_" + std::to_string(ts));
          std::filesystem::remove_all(dir);
          alloc = std::make_unique<sal::allocator>(dir, sal::runtime_config());
-         sal::register_type_vtable<leaf_node>();
-         sal::register_type_vtable<inner_prefix_node>();
-         sal::register_type_vtable<inner_node>();
-         sal::register_type_vtable<value_node>();
+         detail::register_node_types(*alloc);
          ses = alloc->get_session();
       }
       ~ptv_db() { std::filesystem::remove_all(dir); }
 
-      smart_ptr<alloc_header> root()
-      {
-         return ses->get_root<>(sal::root_object_number(0));
-      }
-      void set_root(smart_ptr<alloc_header> r)
+      smart_ptr<alloc_header> root() { return ses->get_root<>(sal::root_object_number(0)); }
+      void                    set_root(smart_ptr<alloc_header> r)
       {
          ses->set_root(sal::root_object_number(0), std::move(r), sal::sync_type::none);
       }
    };
 
-   key_view   to_kv(const std::string& s) { return key_view(s.data(), s.size()); }
-   value_view to_vv(const std::string& s) { return value_view(s.data(), s.size()); }
+   key_view to_kv(const std::string& s)
+   {
+      return key_view(s.data(), s.size());
+   }
+   value_view to_vv(const std::string& s)
+   {
+      return value_view(s.data(), s.size());
+   }
 
    // Total version-chain entries across all value_nodes in the tree.
    // For these tests we only have one key, so this equals that key's
@@ -75,8 +74,7 @@ namespace
    }
 }  // namespace
 
-TEST_CASE("per-txn version: repeated upserts at same version coalesce",
-          "[per_txn][coalesce]")
+TEST_CASE("per-txn version: repeated upserts at same version coalesce", "[per_txn][coalesce]")
 {
    ptv_db db;
 
@@ -92,8 +90,8 @@ TEST_CASE("per-txn version: repeated upserts at same version coalesce",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(nullptr);
-      ctx.set_current_epoch(0);
-      bool ok = ctx.try_mvcc_upsert(to_kv("key1"), value_type(to_vv("v5a")), 5);
+      ctx.set_epoch_base(0);
+      bool ok = ctx.try_upsert_at_version(to_kv("key1"), value_type(to_vv("v5a")), 5);
       REQUIRE(ok);
       db.set_root(ctx.take_root());
    }
@@ -108,8 +106,8 @@ TEST_CASE("per-txn version: repeated upserts at same version coalesce",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(nullptr);
-      ctx.set_current_epoch(0);
-      bool ok = ctx.try_mvcc_upsert(to_kv("key1"), value_type(to_vv("v5b")), 5);
+      ctx.set_epoch_base(0);
+      bool ok = ctx.try_upsert_at_version(to_kv("key1"), value_type(to_vv("v5b")), 5);
       REQUIRE(ok);
       db.set_root(ctx.take_root());
    }
@@ -128,8 +126,8 @@ TEST_CASE("per-txn version: repeated upserts at same version coalesce",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(nullptr);
-      ctx.set_current_epoch(0);
-      bool ok = ctx.try_mvcc_upsert(to_kv("key1"), value_type(to_vv("v6")), 6);
+      ctx.set_epoch_base(0);
+      bool ok = ctx.try_upsert_at_version(to_kv("key1"), value_type(to_vv("v6")), 6);
       REQUIRE(ok);
       db.set_root(ctx.take_root());
    }
@@ -155,9 +153,8 @@ TEST_CASE("per-txn version: 100 writes at same version produce 1 chain entry",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(nullptr);
-      ctx.set_current_epoch(0);
-      bool ok =
-          ctx.try_mvcc_upsert(to_kv("key1"), value_type(to_vv("first")), 42);
+      ctx.set_epoch_base(0);
+      bool ok = ctx.try_upsert_at_version(to_kv("key1"), value_type(to_vv("first")), 42);
       REQUIRE(ok);
       db.set_root(ctx.take_root());
    }
@@ -168,11 +165,11 @@ TEST_CASE("per-txn version: 100 writes at same version produce 1 chain entry",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(nullptr);
-      ctx.set_current_epoch(0);
+      ctx.set_epoch_base(0);
       char val[16];
       std::snprintf(val, sizeof(val), "iter_%d", i);
-      bool ok = ctx.try_mvcc_upsert(
-          to_kv("key1"), value_type(value_view(val, std::strlen(val))), 42);
+      bool ok =
+          ctx.try_upsert_at_version(to_kv("key1"), value_type(value_view(val, std::strlen(val))), 42);
       REQUIRE(ok);
       db.set_root(ctx.take_root());
    }
@@ -191,8 +188,7 @@ TEST_CASE("per-txn version: 100 writes at same version produce 1 chain entry",
    }
 }
 
-TEST_CASE("per-txn version: tombstone coalesces too",
-          "[per_txn][coalesce]")
+TEST_CASE("per-txn version: tombstone coalesces too", "[per_txn][coalesce]")
 {
    ptv_db db;
 
@@ -205,8 +201,8 @@ TEST_CASE("per-txn version: tombstone coalesces too",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(nullptr);
-      ctx.set_current_epoch(0);
-      ctx.try_mvcc_upsert(to_kv("key1"), value_type(to_vv("v7")), 7);
+      ctx.set_epoch_base(0);
+      ctx.try_upsert_at_version(to_kv("key1"), value_type(to_vv("v7")), 7);
       db.set_root(ctx.take_root());
    }
 
@@ -215,8 +211,8 @@ TEST_CASE("per-txn version: tombstone coalesces too",
    {
       tree_context ctx(db.root());
       ctx.set_dead_versions(nullptr);
-      ctx.set_current_epoch(0);
-      bool ok = ctx.try_mvcc_remove(to_kv("key1"), 7);
+      ctx.set_epoch_base(0);
+      bool ok = ctx.try_remove_at_version(to_kv("key1"), 7);
       REQUIRE(ok);
       db.set_root(ctx.take_root());
    }
@@ -235,6 +231,45 @@ TEST_CASE("per-txn version: tombstone coalesces too",
    }
 }
 
+TEST_CASE("per-txn version: cursor skips value_node entries newer than its version",
+          "[per_txn][cursor]")
+{
+   ptv_db db;
+
+   const std::string future_v5 = "future-v5";
+   const std::string future_v6 = "future-v6";
+
+   {
+      auto vn_addr =
+          db.ses->alloc<value_node>(uint64_t(5), to_vv(future_v5), uint64_t(6), to_vv(future_v6));
+
+      tree_context ctx(db.root());
+      ctx.insert(to_kv("future"), value_type::make_value_node(vn_addr));
+      ctx.insert(to_kv("later"), value_type(to_vv("visible")));
+      db.set_root(ctx.take_root());
+   }
+
+   auto root = db.root();
+
+   cursor before(root, 4);
+   CHECK_FALSE(before.seek(to_kv("future")));
+   REQUIRE(before.lower_bound(to_kv("future")));
+   CHECK(std::string(before.key().data(), before.key().size()) == "later");
+
+   std::string buf;
+   CHECK(before.get(to_kv("future"), &buf) == cursor::value_not_found);
+
+   bool called = false;
+   CHECK_FALSE(before.get(to_kv("future"), [&](value_view) { called = true; }));
+   CHECK_FALSE(called);
+
+   cursor at_v5(root, 5);
+   REQUIRE(at_v5.seek(to_kv("future")));
+   auto visible = at_v5.value<std::string>();
+   REQUIRE(visible.has_value());
+   CHECK(*visible == future_v5);
+}
+
 // ════════════════════════════════════════════════════════════════════
 // End-to-end: Phase A per-txn version flow through the public API
 // ════════════════════════════════════════════════════════════════════
@@ -251,8 +286,7 @@ namespace
       {
          auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
          dir     = std::filesystem::temp_directory_path() /
-               ("psitri_ptv_pub_" + std::to_string(getpid()) + "_" +
-                std::to_string(ts));
+                   ("psitri_ptv_pub_" + std::to_string(getpid()) + "_" + std::to_string(ts));
          std::filesystem::remove_all(dir);
          std::filesystem::create_directories(dir / "data");
          db  = database::open(dir);
@@ -273,16 +307,17 @@ namespace
 
       uint64_t global_version() const { return db->dump().total_segments; /* unused */ }
    };
-}
+}  // namespace
 
-TEST_CASE("Phase A: 100 updates to one key in one txn coalesce to ≤ 2 chain entries",
-          "[per_txn][phaseA][coalesce]")
+TEST_CASE("Phase A: unique transaction updates collapse to one current value",
+          "[per_txn][phaseA][unique]")
 {
    ptv_pubapi_db t;
 
    // Use values >64 bytes so make_value forces a value_node allocation.
    // (Smaller values stay inline in the leaf and never form a chain.)
-   auto big = [](char c, int idx) {
+   auto big = [](char c, int idx)
+   {
       std::string s(80, c);
       char        buf[32];
       std::snprintf(buf, sizeof(buf), "_%03d", idx);
@@ -299,10 +334,10 @@ TEST_CASE("Phase A: 100 updates to one key in one txn coalesce to ≤ 2 chain en
    }
    CHECK(t.chain_length_of(0, to_kv("k")) == 1);
 
-   // Second txn: 100 updates to the same key. With per-txn version
-   // threading, the first update appends to the chain (2 entries: committed
-   // v0 + this txn's first iter). Subsequent 99 updates coalesce because
-   // they all share the same txn version. Chain stays at exactly 2.
+   // Second txn: 100 updates to the same key. The transaction owns the path
+   // to the leaf, so older readers are on older roots. The hot leaf should
+   // keep only the current value for this key instead of accumulating a
+   // private version chain.
    {
       auto tx = t.ses->start_transaction(0);
       for (int i = 0; i < 100; ++i)
@@ -313,10 +348,10 @@ TEST_CASE("Phase A: 100 updates to one key in one txn coalesce to ≤ 2 chain en
       tx.commit();
    }
 
-   // Exactly 2 chain entries: committed v0 + this txn's coalesced top.
+   // Exactly 1 chain entry: the latest current value in the unique leaf.
    auto chain = t.chain_length_of(0, to_kv("k"));
    INFO("chain entries after 100 same-txn updates: " << chain);
-   CHECK(chain == 2);
+   CHECK(chain == 1);
 
    // Verify the latest value is the last one written.
    auto root = t.ses->get_root(0);
@@ -327,6 +362,245 @@ TEST_CASE("Phase A: 100 updates to one key in one txn coalesce to ≤ 2 chain en
    REQUIRE(v.has_value());
    auto expected = big('B', 99);
    CHECK(*v == expected);
+}
+
+TEST_CASE("Phase A: unique transaction update collapses prior MVCC history",
+          "[per_txn][phaseA][unique]")
+{
+   ptv_pubapi_db t;
+
+   auto big = [](char c, int idx)
+   {
+      std::string s(80, c);
+      char        buf[32];
+      std::snprintf(buf, sizeof(buf), "_%03d", idx);
+      s.append(buf);
+      return s;
+   };
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto v0 = big('A', 0);
+      tx.upsert(to_kv("k"), value_view(v0.data(), v0.size()));
+      tx.commit();
+   }
+   CHECK(t.chain_length_of(0, to_kv("k")) == 1);
+
+   auto mvcc_value = big('M', 1);
+   t.ses->upsert(0, to_kv("k"), value_view(mvcc_value.data(), mvcc_value.size()));
+   REQUIRE(t.chain_length_of(0, to_kv("k")) == 2);
+
+   auto final_value = big('U', 2);
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), value_view(final_value.data(), final_value.size()));
+      tx.commit();
+   }
+
+   auto chain = t.chain_length_of(0, to_kv("k"));
+   INFO("chain entries after unique update of prior MVCC history: " << chain);
+   CHECK(chain == 1);
+
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   cursor c(root);
+   REQUIRE(c.seek(to_kv("k")));
+   auto v = c.value<std::string>();
+   REQUIRE(v.has_value());
+   CHECK(*v == final_value);
+}
+
+TEST_CASE("Phase A: shared leaf COW normalizes value history during copy",
+          "[per_txn][phaseA][cow][leaf_rewrite]")
+{
+   ptv_db db;
+
+   auto big = [](char c)
+   {
+      std::string s(80, c);
+      return s;
+   };
+
+   {
+      tree_context ctx(db.root());
+      auto         seed = big('A');
+      ctx.insert(to_kv("a"), value_type(to_vv(seed)));
+      db.set_root(ctx.take_root());
+   }
+
+   {
+      tree_context ctx(db.root());
+      ctx.set_root_version(2);
+      REQUIRE(ctx.try_upsert_at_version(to_kv("a"), value_type(to_vv(big('B'))), 2));
+      db.set_root(ctx.take_root());
+   }
+
+   {
+      tree_context ctx(db.root());
+      CHECK(total_chain_entries(ctx) == 2);
+   }
+
+   auto old_snapshot = db.root();
+
+   {
+      tree_context ctx(db.root());
+      ctx.set_epoch_base(0);
+      ctx.set_root_version(3);
+      ctx.upsert(to_kv("b"), value_type(to_vv("small")));
+      db.set_root(ctx.take_root());
+   }
+
+   {
+      tree_context ctx(db.root());
+      CHECK(total_chain_entries(ctx) == 1);
+   }
+
+   cursor old_cur(old_snapshot, 2);
+   REQUIRE(old_cur.seek(to_kv("a")));
+   auto old_val = old_cur.value<std::string>();
+   REQUIRE(old_val.has_value());
+   CHECK(*old_val == big('B'));
+   CHECK_FALSE(old_cur.seek(to_kv("b")));
+
+   auto latest_root = db.root();
+   cursor latest(latest_root);
+   REQUIRE(latest.seek(to_kv("a")));
+   auto latest_a = latest.value<std::string>();
+   REQUIRE(latest_a.has_value());
+   CHECK(*latest_a == big('B'));
+   REQUIRE(latest.seek(to_kv("b")));
+   CHECK(latest.value<std::string>().value_or("") == "small");
+}
+
+TEST_CASE("Phase A: unique transaction update demotes value_node history to inline",
+          "[per_txn][phaseA][unique]")
+{
+   ptv_pubapi_db t;
+
+   std::string seed(80, 'S');
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), value_view(seed.data(), seed.size()));
+      tx.commit();
+   }
+   CHECK(t.chain_length_of(0, to_kv("k")) == 1);
+
+   std::string mvcc_value(80, 'M');
+   t.ses->upsert(0, to_kv("k"), value_view(mvcc_value.data(), mvcc_value.size()));
+   REQUIRE(t.chain_length_of(0, to_kv("k")) == 2);
+
+   const std::string inline_value = "fits-inline";
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("k"), to_vv(inline_value));
+      tx.commit();
+   }
+
+   auto chain = t.chain_length_of(0, to_kv("k"));
+   INFO("chain entries after demoting unique value_node history: " << chain);
+   CHECK(chain == 0);
+
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   cursor c(root);
+   REQUIRE(c.seek(to_kv("k")));
+   auto v = c.value<std::string>();
+   REQUIRE(v.has_value());
+   CHECK(*v == inline_value);
+}
+
+TEST_CASE("Phase A: upsert_at_version new keys stay hidden from older snapshots",
+          "[per_txn][phaseA][snapshot]")
+{
+   ptv_pubapi_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("base"), to_vv("seed"));
+      tx.commit();
+   }
+
+   auto old_root = t.ses->get_root(0);
+   REQUIRE(old_root);
+   cursor old_info_cursor(old_root);
+   auto   base_info = old_info_cursor.get_key_info(to_kv("base"));
+   REQUIRE(base_info.leaf_addr != sal::null_ptr_address);
+
+   const std::string value = "new-value";
+   t.ses->upsert(0, to_kv("new"), to_vv(value));
+
+   cursor old_cursor(old_root);
+   CHECK_FALSE(old_cursor.seek(to_kv("new")));
+
+   std::string old_buf;
+   CHECK(old_cursor.get(to_kv("new"), &old_buf) == cursor::value_not_found);
+
+   auto   latest_root = t.ses->get_root(0);
+   cursor latest_cursor(latest_root);
+   REQUIRE(latest_cursor.seek(to_kv("new")));
+   auto new_info = latest_cursor.get_key_info(to_kv("new"));
+   CHECK(new_info.leaf_addr == base_info.leaf_addr);
+   auto latest = latest_cursor.value<std::string>();
+   REQUIRE(latest.has_value());
+   CHECK(*latest == value);
+}
+
+TEST_CASE("Phase A: branch creation version survives inline promotion",
+          "[per_txn][phaseA][snapshot]")
+{
+   ptv_pubapi_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      tx.upsert(to_kv("base"), to_vv("seed"));
+      tx.commit();
+   }
+
+   auto before_new_root = t.ses->get_root(0);
+   REQUIRE(before_new_root);
+
+   const std::string first     = "first-inline-value";
+   auto              first_ver = t.ses->upsert(0, to_kv("new"), to_vv(first));
+
+   auto after_new_root = t.ses->get_root(0);
+   REQUIRE(after_new_root);
+   cursor after_new_info_cursor(after_new_root);
+   auto   branch_info = after_new_info_cursor.get_key_info(to_kv("new"));
+   REQUIRE(branch_info.leaf_addr != sal::null_ptr_address);
+   {
+      auto leaf = after_new_root.session()->get_ref<leaf_node>(branch_info.leaf_addr);
+      auto bn   = leaf->get(to_kv("new"));
+      REQUIRE(bn != leaf->num_branches());
+      CHECK(leaf->get_version(bn) == first_ver);
+   }
+
+   const std::string second(96, 'B');
+   auto              second_ver = t.ses->upsert(0, to_kv("new"), to_vv(second));
+   REQUIRE(second_ver > first_ver);
+
+   cursor before_new(before_new_root);
+   CHECK_FALSE(before_new.seek(to_kv("new")));
+
+   cursor at_creation(after_new_root, first_ver);
+   REQUIRE(at_creation.seek(to_kv("new")));
+   auto created_value = at_creation.value<std::string>();
+   REQUIRE(created_value.has_value());
+   CHECK(*created_value == first);
+
+   auto   latest_root = t.ses->get_root(0);
+   cursor latest(latest_root);
+   REQUIRE(latest.seek(to_kv("new")));
+   auto latest_info = latest.get_key_info(to_kv("new"));
+   CHECK(latest_info.leaf_addr == branch_info.leaf_addr);
+   {
+      auto leaf = latest_root.session()->get_ref<leaf_node>(latest_info.leaf_addr);
+      auto bn   = leaf->get(to_kv("new"));
+      REQUIRE(bn != leaf->num_branches());
+      CHECK(leaf->get_version(bn) == first_ver);
+   }
+   auto latest_value = latest.value<std::string>();
+   REQUIRE(latest_value.has_value());
+   CHECK(*latest_value == second);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -346,16 +620,16 @@ namespace
       // Cleanest: the tx's primary().get_stats().total_version_entries
       // doesn't directly tell us the global. Use a sentinel txn to
       // sample by allocating a ver and inspecting it.
-      auto ws       = db.start_write_session();
-      auto tx       = ws->start_transaction(0, tx_mode::expect_success);
-      auto root     = tx.primary().read_cursor().get_root();
+      auto     ws   = db.start_write_session();
+      auto     tx   = ws->start_transaction(0, tx_mode::expect_success);
+      auto     root = tx.primary().read_cursor().get_root();
       uint64_t ver  = 0;
       if (root.ver() != sal::null_ptr_address)
          ver = root.session()->read_custom_cb(root.ver());
       tx.abort();
       return ver;
    }
-}
+}  // namespace
 
 TEST_CASE("Phase B: expect_failure with no writes does not bump global_version",
           "[per_txn][phaseB][lazy]")
@@ -403,8 +677,7 @@ TEST_CASE("Phase B: expect_failure with reads only does not bump global_version"
    CHECK(after - before == 1);  // just the sentinel, no per-txn bump
 }
 
-TEST_CASE("Phase B: expect_failure with writes commits and bumps once",
-          "[per_txn][phaseB][lazy]")
+TEST_CASE("Phase B: expect_failure with writes commits and bumps once", "[per_txn][phaseB][lazy]")
 {
    ptv_pubapi_db t;
 
@@ -457,8 +730,7 @@ TEST_CASE("Phase B: 1000 start+abort cycles in expect_failure produce zero delta
 // Phase C: abort releases the version
 // ════════════════════════════════════════════════════════════════════
 
-TEST_CASE("Phase C: aborted expect_success txn registers ver as dead",
-          "[per_txn][phaseC][abort]")
+TEST_CASE("Phase C: aborted expect_success txn registers ver as dead", "[per_txn][phaseC][abort]")
 {
    ptv_pubapi_db t;
 
@@ -472,7 +744,7 @@ TEST_CASE("Phase C: aborted expect_success txn registers ver as dead",
    // Sample dead_versions before. Aborted versions should appear in
    // the snapshot after abort.
    t.db->wait_for_compactor(std::chrono::milliseconds(500));
-   auto dead_before = t.db->dead_versions().load_snapshot();
+   auto     dead_before       = t.db->dead_versions().load_snapshot();
    uint64_t dead_count_before = 0;
    if (dead_before)
       dead_count_before = dead_before->num_ranges();
@@ -485,13 +757,13 @@ TEST_CASE("Phase C: aborted expect_success txn registers ver as dead",
    }
 
    t.db->wait_for_compactor(std::chrono::milliseconds(500));
-   auto dead_after = t.db->dead_versions().load_snapshot();
+   auto     dead_after       = t.db->dead_versions().load_snapshot();
    uint64_t dead_count_after = 0;
    if (dead_after)
       dead_count_after = dead_after->num_ranges();
 
-   INFO("dead version count before/after abort: "
-        << dead_count_before << " / " << dead_count_after);
+   INFO("dead version count before/after abort: " << dead_count_before << " / "
+                                                  << dead_count_after);
    CHECK(dead_count_after > dead_count_before);
 
    // Verify the aborted write didn't make it.
@@ -567,7 +839,7 @@ TEST_CASE("Phase C: expect_failure aborted after forced flush releases version",
    }
 
    t.db->wait_for_compactor(std::chrono::milliseconds(2000));
-   auto dead_before = t.db->dead_versions().load_snapshot();
+   auto     dead_before       = t.db->dead_versions().load_snapshot();
    uint64_t dead_count_before = dead_before ? dead_before->num_ranges() : 0;
 
    // expect_failure txn that triggers a forced flush via remove_range,
@@ -579,11 +851,11 @@ TEST_CASE("Phase C: expect_failure aborted after forced flush releases version",
    }
 
    t.db->wait_for_compactor(std::chrono::milliseconds(500));
-   auto dead_after = t.db->dead_versions().load_snapshot();
+   auto     dead_after       = t.db->dead_versions().load_snapshot();
    uint64_t dead_count_after = dead_after ? dead_after->num_ranges() : 0;
 
-   INFO("dead version count before/after expect_failure abort: "
-        << dead_count_before << " / " << dead_count_after);
+   INFO("dead version count before/after expect_failure abort: " << dead_count_before << " / "
+                                                                 << dead_count_after);
    CHECK(dead_count_after > dead_count_before);
 
    // Verify the removes were rolled back.
@@ -615,10 +887,9 @@ TEST_CASE("Phase D: 10k hot-key updates allocate ≤ 5 new objects (perf gate)",
    t.db->wait_for_compactor(std::chrono::milliseconds(2000));
    auto baseline_alloc = t.ses->get_total_allocated_objects();
 
-   // 10000 same-size updates in one expect_success txn. Phase D's
-   // try_coalesce_in_place fires every iteration after the first promote,
-   // so allocations stay bounded (1 ver CB + at most 1 leaf realloc + 1
-   // chain promote, no per-iter VN allocs).
+   // 10000 same-size updates in one expect_success txn. Once the transaction
+   // owns the path, the existing value_node is a single current value and the
+   // same-size writes overwrite that slot in place.
    {
       auto tx = t.ses->start_transaction(0, tx_mode::expect_success);
       for (int i = 0; i < 10000; ++i)
@@ -632,8 +903,8 @@ TEST_CASE("Phase D: 10k hot-key updates allocate ≤ 5 new objects (perf gate)",
    t.db->wait_for_compactor(std::chrono::milliseconds(5000));
    auto post_alloc = t.ses->get_total_allocated_objects();
 
-   INFO("baseline=" << baseline_alloc << " post_10k_updates="
-                    << post_alloc << " delta=" << (post_alloc - baseline_alloc));
+   INFO("baseline=" << baseline_alloc << " post_10k_updates=" << post_alloc
+                    << " delta=" << (post_alloc - baseline_alloc));
    // Expectation: a small handful of new allocations (the new ver CB +
    // possibly a leaf cline shift), but NOT 10000 of them. Without Phase
    // D's in-place memcpy we'd see allocator growth proportional to the
@@ -651,8 +922,7 @@ TEST_CASE("Phase D: 10k hot-key updates allocate ≤ 5 new objects (perf gate)",
    CHECK(*v == expected);
 }
 
-TEST_CASE("Phase D: smaller-size updates also coalesce in place",
-          "[per_txn][phaseD][in_place]")
+TEST_CASE("Phase D: smaller-size updates demote once they fit inline", "[per_txn][phaseD][in_place]")
 {
    ptv_pubapi_db t;
 
@@ -667,7 +937,9 @@ TEST_CASE("Phase D: smaller-size updates also coalesce in place",
    t.db->wait_for_compactor(std::chrono::milliseconds(2000));
    auto baseline_alloc = t.ses->get_total_allocated_objects();
 
-   // Update with progressively smaller values within the slot's capacity.
+   // Update with progressively smaller values. The >64 byte values reuse the
+   // value_node slot; once the current value fits inline, collapse demotes it
+   // back into the leaf.
    {
       auto tx = t.ses->start_transaction(0, tx_mode::expect_success);
       for (int sz = 70; sz >= 1; --sz)
@@ -682,7 +954,7 @@ TEST_CASE("Phase D: smaller-size updates also coalesce in place",
    auto post_alloc = t.ses->get_total_allocated_objects();
 
    INFO("baseline=" << baseline_alloc << " post_smaller_updates=" << post_alloc);
-   CHECK(post_alloc - baseline_alloc <= 5);
+   CHECK(post_alloc <= baseline_alloc + 5);
 
    // Final value: the last (1-byte) update.
    auto root = t.ses->get_root(0);
@@ -693,10 +965,44 @@ TEST_CASE("Phase D: smaller-size updates also coalesce in place",
    REQUIRE(v.has_value());
    CHECK(v->size() == 1);
    CHECK(*v == "B");
+   CHECK(t.chain_length_of(0, to_kv("k")) == 0);
 }
 
-TEST_CASE("Phase A: cross-txn updates leave the latest value visible",
-          "[per_txn][phaseA]")
+TEST_CASE("Phase D: shared leaf rewrite skips flat value_nodes", "[per_txn][phaseD][flat]")
+{
+   ptv_db t;
+
+   // Values larger than value_node::max_inline_entry_size use flat value_node
+   // storage: they have one implicit current value and no explicit version
+   // entries. Leaf rewrite pruning must not ask them for entry version 0.
+   std::string huge(value_node::max_inline_entry_size + 1, 'F');
+   {
+      tree_context ctx(t.root());
+      ctx.insert(to_kv("flat"), value_type(to_vv(huge)));
+      t.set_root(ctx.take_root());
+   }
+
+   {
+      tree_context ctx(t.root());
+      auto old_size =
+          ctx.upsert<upsert_mode::shared_insert>(to_kv("next"), value_type(to_vv("small")));
+      CHECK(old_size == -1);
+      t.set_root(ctx.take_root());
+   }
+
+   tree_context ctx(t.root());
+   cursor       c(ctx.get_root());
+   REQUIRE(c.seek(to_kv("flat")));
+   auto flat = c.value<std::string>();
+   REQUIRE(flat.has_value());
+   CHECK(flat->size() == huge.size());
+   REQUIRE(c.seek(to_kv("next")));
+   auto next = c.value<std::string>();
+   REQUIRE(next.has_value());
+   CHECK(*next == "small");
+}
+
+TEST_CASE("Phase A: cross-txn updates leave the latest value visible", "[per_txn][phaseA]")
 {
    // Across-txn chain semantics depend on the COW prune behavior in
    // shared-mode update — currently the COW path strips multi-version

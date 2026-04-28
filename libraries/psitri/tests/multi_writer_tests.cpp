@@ -324,7 +324,7 @@ TEST_CASE("multi-writer with concurrent readers", "[multi-writer][reader]")
              uint32_t iterations = 0;
              while (!writers_done.load(std::memory_order_relaxed) || iterations < 10)
              {
-                auto cur = rs->create_cursor(root_index);
+                auto cur = rs->snapshot_cursor(root_index);
                 cur.seek_begin();
                 while (!cur.is_end())
                    cur.next();

@@ -1,7 +1,9 @@
 #include <catch2/catch_all.hpp>
 #include <cstdlib>
 #include <cstring>
+#include <psitri/database.hpp>
 #include <psitri/node/value_node.hpp>
+#include <psitri/version_compare.hpp>
 #include <string>
 #include <vector>
 
@@ -54,6 +56,18 @@ namespace
       return ValueNodePtr(node);
    }
 }  // namespace
+
+TEST_CASE("version comparison helpers are ring-aware", "[mvcc][wrap]")
+{
+   constexpr uint64_t mask39 = (uint64_t(1) << psitri::last_unique_version_bits) - 1;
+
+   CHECK(psitri::version_token(mask39 + 1, psitri::last_unique_version_bits) == 0);
+   CHECK(psitri::version_distance(mask39 - 1, 1, psitri::last_unique_version_bits) == 3);
+   CHECK(psitri::needs_unique_refresh(mask39 - 1, 0, 1));
+   CHECK_FALSE(psitri::needs_unique_refresh(0, 0, 1));
+   CHECK(psitri::version_newer_than(1, mask39 - 1, psitri::last_unique_version_bits));
+   CHECK_FALSE(psitri::version_newer_than(mask39 - 1, 1, psitri::last_unique_version_bits));
+}
 
 TEST_CASE("value_node single data value", "[value_node]")
 {
@@ -317,6 +331,87 @@ namespace
           psitri::value_node::replace_last_tag{});
       return ValueNodePtr(node);
    }
+
+   ValueNodePtr append_tombstone(const psitri::value_node* src, uint64_t version)
+   {
+      uint32_t asize  = psitri::value_node::alloc_size(src, version, nullptr);
+      void*    buffer = std::aligned_alloc(64, asize);
+      REQUIRE(buffer != nullptr);
+      std::memset(buffer, 0, asize);
+      psitri::ptr_address_seq seq = {psitri::ptr_address(0), 0};
+      auto* node = new (buffer) psitri::value_node(asize, seq, src, version, nullptr);
+      return ValueNodePtr(node);
+   }
+
+   ValueNodePtr replace_last_with_tombstone(const psitri::value_node* src, uint64_t version)
+   {
+      uint32_t asize  = psitri::value_node::alloc_size(src, version, nullptr,
+                                                       psitri::value_node::replace_last_tag{});
+      void*    buffer = std::aligned_alloc(64, asize);
+      REQUIRE(buffer != nullptr);
+      std::memset(buffer, 0, asize);
+      psitri::ptr_address_seq seq = {psitri::ptr_address(0), 0};
+      auto* node = new (buffer)
+          psitri::value_node(asize, seq, src, version, nullptr,
+                             psitri::value_node::replace_last_tag{});
+      return ValueNodePtr(node);
+   }
+
+   ValueNodePtr copy_with_dead_snapshot(const psitri::value_node*     src,
+                                        const psitri::live_range_map::snapshot* dead)
+   {
+      uint32_t asize  = psitri::value_node::alloc_size(src, dead);
+      void*    buffer = std::aligned_alloc(64, asize);
+      REQUIRE(buffer != nullptr);
+      std::memset(buffer, 0, asize);
+      psitri::ptr_address_seq seq = {psitri::ptr_address(0), 0};
+      auto* node = new (buffer) psitri::value_node(asize, seq, src, dead);
+      return ValueNodePtr(node);
+   }
+
+   ValueNodePtr copy_with_prune_floor(const psitri::value_node* src, uint64_t floor)
+   {
+      psitri::value_node::prune_floor_policy prune{floor};
+      uint32_t asize  = psitri::value_node::alloc_size(src, prune);
+      void*    buffer = std::aligned_alloc(64, asize);
+      REQUIRE(buffer != nullptr);
+      std::memset(buffer, 0, asize);
+      psitri::ptr_address_seq seq = {psitri::ptr_address(0), 0};
+      auto* node = new (buffer) psitri::value_node(asize, seq, src, prune);
+      return ValueNodePtr(node);
+   }
+
+   ValueNodePtr append_with_prune_floor(const psitri::value_node* src,
+                                        uint64_t                  floor,
+                                        uint64_t                  version,
+                                        psitri::value_view        new_val)
+   {
+      psitri::value_node::prune_floor_policy prune{floor};
+      uint32_t asize  = psitri::value_node::alloc_size(src, version, new_val, prune);
+      void*    buffer = std::aligned_alloc(64, asize);
+      REQUIRE(buffer != nullptr);
+      std::memset(buffer, 0, asize);
+      psitri::ptr_address_seq seq = {psitri::ptr_address(0), 0};
+      auto* node = new (buffer) psitri::value_node(asize, seq, src, version, new_val, prune);
+      return ValueNodePtr(node);
+   }
+
+   sal::tree_id entry_tree_id(const psitri::value_node* node, uint8_t idx)
+   {
+      auto view = node->get_entry_value(idx);
+      REQUIRE(view.size() == sizeof(sal::tree_id));
+      sal::tree_id tid{};
+      std::memcpy(&tid, view.data(), sizeof(tid));
+      return tid;
+   }
+
+   void check_entry_tree_id(const psitri::value_node* node, uint8_t idx, sal::tree_id expected)
+   {
+      sal::tree_id actual = entry_tree_id(node, idx);
+      CHECK(actual.root == expected.root);
+      CHECK(actual.ver == expected.ver);
+   }
+
 }
 
 TEST_CASE("value_node coalesce: append vs replace_last", "[value_node][coalesce]")
@@ -363,4 +458,416 @@ TEST_CASE("value_node coalesce: replace_last on single-version source", "[value_
    CHECK(v1->latest_version() == 5);
    psitri::value_view final = v1->get_data();
    CHECK(std::string(final.data(), final.size()) == "new");
+}
+
+TEST_CASE("value_node lookup uses 48-bit circular version order", "[value_node][mvcc][wrap]")
+{
+   constexpr uint64_t max48 = (uint64_t(1) << 48) - 1;
+
+   auto v0 = create_value_node(psitri::value_view("seed", 4));
+   auto v1 = replace_last_version(v0.get(), max48 - 1, psitri::value_view("pre", 3));
+   auto v2 = append_version(v1.get(), max48, psitri::value_view("max", 3));
+   auto v3 = append_version(v2.get(), max48 + 1, psitri::value_view("zero", 4));
+   auto v4 = append_version(v3.get(), max48 + 2, psitri::value_view("one", 3));
+
+   CHECK(v4->get_entry_version(0) == max48 - 1);
+   CHECK(v4->get_entry_version(1) == max48);
+   CHECK(v4->get_entry_version(2) == 0);
+   CHECK(v4->get_entry_version(3) == 1);
+   CHECK(v4->latest_version() == 1);
+
+   auto at_pre = v4->get_value_at_version(max48 - 1);
+   CHECK(std::string(at_pre.data(), at_pre.size()) == "pre");
+
+   CHECK(v4->get_value_at_version(max48 - 2).empty());
+
+   auto at_max = v4->get_value_at_version(max48);
+   CHECK(std::string(at_max.data(), at_max.size()) == "max");
+
+   auto at_zero = v4->get_value_at_version(0);
+   CHECK(std::string(at_zero.data(), at_zero.size()) == "zero");
+
+   auto at_one = v4->get_value_at_version(1);
+   CHECK(std::string(at_one.data(), at_one.size()) == "one");
+
+   auto future = v4->get_value_at_version(2);
+   CHECK(std::string(future.data(), future.size()) == "one");
+}
+
+TEST_CASE("value_node prune floor preserves floor-visible state", "[value_node][mvcc][prune]")
+{
+   auto v0  = create_value_node(psitri::value_view("seed", 4));
+   auto v10 = replace_last_version(v0.get(), 10, psitri::value_view("A", 1));
+   auto v20 = append_version(v10.get(), 20, psitri::value_view("B", 1));
+   auto v30 = append_version(v20.get(), 30, psitri::value_view("C", 1));
+   auto v40 = append_version(v30.get(), 40, psitri::value_view("D", 1));
+
+   auto pruned = copy_with_prune_floor(v40.get(), 25);
+
+   REQUIRE(pruned->num_versions() == 3);
+   CHECK(pruned->get_entry_version(0) == 25);
+   CHECK(std::string(pruned->get_entry_value(0).data(), pruned->get_entry_value(0).size()) == "B");
+   CHECK(pruned->get_entry_version(1) == 30);
+   CHECK(std::string(pruned->get_entry_value(1).data(), pruned->get_entry_value(1).size()) == "C");
+   CHECK(pruned->get_entry_version(2) == 40);
+   CHECK(std::string(pruned->get_entry_value(2).data(), pruned->get_entry_value(2).size()) == "D");
+
+   CHECK(pruned->get_value_at_version(24).empty());
+   auto at_floor = pruned->get_value_at_version(25);
+   CHECK(std::string(at_floor.data(), at_floor.size()) == "B");
+   auto at_29 = pruned->get_value_at_version(29);
+   CHECK(std::string(at_29.data(), at_29.size()) == "B");
+}
+
+TEST_CASE("value_node prune floor preserves exact floor entry", "[value_node][mvcc][prune]")
+{
+   auto v0  = create_value_node(psitri::value_view("seed", 4));
+   auto v10 = replace_last_version(v0.get(), 10, psitri::value_view("A", 1));
+   auto v20 = append_version(v10.get(), 20, psitri::value_view("B", 1));
+   auto v30 = append_version(v20.get(), 30, psitri::value_view("C", 1));
+
+   auto pruned = copy_with_prune_floor(v30.get(), 20);
+
+   REQUIRE(pruned->num_versions() == 2);
+   CHECK(pruned->get_entry_version(0) == 20);
+   CHECK(std::string(pruned->get_entry_value(0).data(), pruned->get_entry_value(0).size()) == "B");
+   CHECK(pruned->get_entry_version(1) == 30);
+   CHECK(std::string(pruned->get_entry_value(1).data(), pruned->get_entry_value(1).size()) == "C");
+}
+
+TEST_CASE("value_node prune floor preserves absent-at-floor state", "[value_node][mvcc][prune]")
+{
+   auto v0  = create_value_node(psitri::value_view("seed", 4));
+   auto v10 = replace_last_version(v0.get(), 10, psitri::value_view("A", 1));
+   auto v20 = append_version(v10.get(), 20, psitri::value_view("B", 1));
+
+   auto pruned = copy_with_prune_floor(v20.get(), 5);
+
+   REQUIRE(pruned->num_versions() == 2);
+   CHECK(pruned->get_entry_version(0) == 10);
+   CHECK(std::string(pruned->get_entry_value(0).data(), pruned->get_entry_value(0).size()) == "A");
+   CHECK(pruned->get_entry_version(1) == 20);
+   CHECK(std::string(pruned->get_entry_value(1).data(), pruned->get_entry_value(1).size()) == "B");
+   CHECK(pruned->get_value_at_version(5).empty());
+}
+
+TEST_CASE("value_node prune floor preserves tombstones", "[value_node][mvcc][prune]")
+{
+   auto v0  = create_value_node(psitri::value_view("seed", 4));
+   auto v10 = replace_last_version(v0.get(), 10, psitri::value_view("A", 1));
+   auto v20 = append_tombstone(v10.get(), 20);
+   auto v40 = append_version(v20.get(), 40, psitri::value_view("B", 1));
+
+   auto pruned = copy_with_prune_floor(v40.get(), 25);
+
+   REQUIRE(pruned->num_versions() == 2);
+   CHECK(pruned->get_entry_version(0) == 25);
+   CHECK(pruned->get_entry_offset(0) == psitri::value_node::offset_tombstone);
+   CHECK(pruned->get_entry_version(1) == 40);
+   CHECK(std::string(pruned->get_entry_value(1).data(), pruned->get_entry_value(1).size()) == "B");
+
+   auto [floor_offset, floor_idx] = pruned->find_version(25);
+   CHECK(floor_idx == 0);
+   CHECK(floor_offset == psitri::value_node::offset_tombstone);
+}
+
+TEST_CASE("value_node prune floor is ring-aware", "[value_node][mvcc][prune][wrap]")
+{
+   constexpr uint64_t max48 = (uint64_t(1) << 48) - 1;
+
+   auto v0 = create_value_node(psitri::value_view("seed", 4));
+   auto v1 = replace_last_version(v0.get(), max48 - 1, psitri::value_view("pre", 3));
+   auto v2 = append_version(v1.get(), max48, psitri::value_view("max", 3));
+   auto v3 = append_version(v2.get(), max48 + 1, psitri::value_view("zero", 4));
+   auto v4 = append_version(v3.get(), max48 + 2, psitri::value_view("one", 3));
+
+   auto pruned = copy_with_prune_floor(v4.get(), max48);
+
+   REQUIRE(pruned->num_versions() == 3);
+   CHECK(pruned->get_entry_version(0) == max48);
+   CHECK(std::string(pruned->get_entry_value(0).data(), pruned->get_entry_value(0).size()) == "max");
+   CHECK(pruned->get_entry_version(1) == 0);
+   CHECK(std::string(pruned->get_entry_value(1).data(), pruned->get_entry_value(1).size()) == "zero");
+   CHECK(pruned->get_entry_version(2) == 1);
+   CHECK(std::string(pruned->get_entry_value(2).data(), pruned->get_entry_value(2).size()) == "one");
+}
+
+TEST_CASE("value_node prune append replaces floor entry at same version",
+          "[value_node][mvcc][prune]")
+{
+   auto v0  = create_value_node(psitri::value_view("seed", 4));
+   auto v10 = replace_last_version(v0.get(), 10, psitri::value_view("A", 1));
+   auto v20 = append_version(v10.get(), 20, psitri::value_view("B", 1));
+
+   auto v30 = append_with_prune_floor(v20.get(), 30, 30, psitri::value_view("C", 1));
+
+   REQUIRE(v30->num_versions() == 1);
+   CHECK(v30->get_entry_version(0) == 30);
+   CHECK(std::string(v30->get_entry_value(0).data(), v30->get_entry_value(0).size()) == "C");
+}
+
+TEST_CASE("passive value_node relocation prunes data-only history without releases",
+          "[value_node][mvcc][prune][passive]")
+{
+   auto v0 = create_value_node(psitri::value_view("A", 1));
+   auto v1 = append_version(v0.get(), 1, psitri::value_view("B", 1));
+   auto v2 = append_version(v1.get(), 2, psitri::value_view("C", 1));
+
+   psitri::live_range_map dead;
+   dead.add_dead_version(0);
+   dead.publish_snapshot();
+
+   psitri::detail::psitri_object_context ctx{dead};
+   psitri::detail::psitri_value_node_ops ops(ctx);
+
+   const uint32_t asize  = ops.compact_size(v2.get());
+   void*          buffer = std::aligned_alloc(64, asize);
+   REQUIRE(buffer != nullptr);
+   std::memset(buffer, 0, asize);
+
+   psitri::ptr_address_seq seq = {psitri::ptr_address(77), 3};
+   auto* header = new (buffer)
+       sal::alloc_header(asize, static_cast<sal::header_type>(psitri::value_node::type_id), seq);
+
+   std::vector<sal::ptr_address> pending_storage;
+   sal::pending_release_list pending_releases(pending_storage);
+   ops.passive_compact_to(v2.get(), header, pending_releases);
+
+   ValueNodePtr pruned(reinterpret_cast<psitri::value_node*>(header));
+   CHECK(pending_releases.empty());
+   REQUIRE(pruned->num_versions() == 2);
+   CHECK(pruned->get_entry_version(0) == 1);
+   CHECK(std::string(pruned->get_entry_value(0).data(), pruned->get_entry_value(0).size()) == "B");
+   CHECK(pruned->get_entry_version(1) == 2);
+   CHECK(std::string(pruned->get_entry_value(1).data(), pruned->get_entry_value(1).size()) == "C");
+}
+
+TEST_CASE("value_node subtree prune reports dropped tree refs",
+          "[value_node][mvcc][prune][subtree]")
+{
+   sal::tree_id tid{psitri::ptr_address(42), psitri::ptr_address(99)};
+   auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
+   auto         tombstone = append_tombstone(sub.get(), 1);
+
+   psitri::value_node::prune_floor_policy prune{1};
+   std::vector<sal::ptr_address> pending_storage;
+   sal::pending_release_list pending(pending_storage);
+
+   CHECK(tombstone->collect_pruned_references(prune, pending));
+   REQUIRE(pending.size() == 2);
+   CHECK(pending[0] == tid.root);
+   CHECK(pending[1] == tid.ver);
+
+   auto pruned = copy_with_prune_floor(tombstone.get(), 1);
+   REQUIRE(pruned->num_versions() == 1);
+   CHECK(pruned->get_entry_version(0) == 1);
+   CHECK(pruned->get_entry_offset(0) == psitri::value_node::offset_tombstone);
+}
+
+TEST_CASE("value_node subtree prune keeps the retained predecessor ref",
+          "[value_node][mvcc][prune][subtree]")
+{
+   sal::tree_id tid{psitri::ptr_address(42), psitri::ptr_address(99)};
+   auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
+   auto         tombstone = append_tombstone(sub.get(), 10);
+
+   SECTION("exact floor keeps the subtree entry without releasing it")
+   {
+      psitri::value_node::prune_floor_policy prune{0};
+      std::vector<sal::ptr_address> pending_storage;
+      sal::pending_release_list pending(pending_storage);
+
+      CHECK(tombstone->collect_pruned_references(prune, pending));
+      CHECK(pending.empty());
+
+      auto pruned = copy_with_prune_floor(tombstone.get(), 0);
+      REQUIRE(pruned->num_versions() == 2);
+      CHECK(pruned->get_entry_version(0) == 0);
+      check_entry_tree_id(pruned.get(), 0, tid);
+      CHECK(pruned->get_entry_version(1) == 10);
+      CHECK(pruned->get_entry_offset(1) == psitri::value_node::offset_tombstone);
+   }
+
+   SECTION("floor between subtree and tombstone rewrites but keeps the same ref")
+   {
+      psitri::value_node::prune_floor_policy prune{5};
+      std::vector<sal::ptr_address> pending_storage;
+      sal::pending_release_list pending(pending_storage);
+
+      CHECK(tombstone->collect_pruned_references(prune, pending));
+      CHECK(pending.empty());
+
+      auto pruned = copy_with_prune_floor(tombstone.get(), 5);
+      REQUIRE(pruned->num_versions() == 2);
+      CHECK(pruned->get_entry_version(0) == 5);
+      check_entry_tree_id(pruned.get(), 0, tid);
+      CHECK(pruned->get_entry_version(1) == 10);
+      CHECK(pruned->get_entry_offset(1) == psitri::value_node::offset_tombstone);
+   }
+}
+
+TEST_CASE("value_node subtree prune handles null version refs and overflow",
+          "[value_node][mvcc][prune][subtree]")
+{
+   sal::tree_id tid{psitri::ptr_address(42), sal::null_ptr_address};
+   auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
+   auto         tombstone = append_tombstone(sub.get(), 1);
+
+   SECTION("null ver only queues the subtree root")
+   {
+      psitri::value_node::prune_floor_policy prune{1};
+      std::vector<sal::ptr_address> pending_storage;
+      sal::pending_release_list pending(pending_storage);
+
+      CHECK(tombstone->collect_pruned_references(prune, pending));
+      REQUIRE(pending.size() == 1);
+      CHECK(pending[0] == tid.root);
+
+      auto pruned = copy_with_prune_floor(tombstone.get(), 1);
+      REQUIRE(pruned->num_versions() == 1);
+      CHECK(pruned->get_entry_version(0) == 1);
+      CHECK(pruned->get_entry_offset(0) == psitri::value_node::offset_tombstone);
+   }
+
+   SECTION("release storage grows for passive collection")
+   {
+      sal::tree_id two_refs{psitri::ptr_address(42), psitri::ptr_address(99)};
+      auto         two_ref_sub = create_value_node(psitri::value_type::make_subtree(two_refs));
+      auto         two_ref_tombstone = append_tombstone(two_ref_sub.get(), 1);
+
+      psitri::value_node::prune_floor_policy prune{1};
+      std::vector<sal::ptr_address> pending_storage;
+      pending_storage.reserve(1);
+      sal::pending_release_list pending(pending_storage);
+
+      CHECK(two_ref_tombstone->collect_pruned_references(prune, pending));
+      CHECK_FALSE(pending.failed());
+      REQUIRE(pending.size() == 2);
+      CHECK(pending[0] == two_refs.root);
+      CHECK(pending[1] == two_refs.ver);
+   }
+}
+
+TEST_CASE("value_node subtree dead-entry cleanup does not release the latest value",
+          "[value_node][mvcc][subtree]")
+{
+   sal::tree_id tid{psitri::ptr_address(70), psitri::ptr_address(71)};
+
+   SECTION("dead latest entry is preserved")
+   {
+      auto sub = create_value_node(psitri::value_type::make_subtree(tid));
+
+      psitri::live_range_map dead;
+      dead.add_dead_version(0);
+      dead.publish_snapshot();
+
+      std::vector<sal::ptr_address> pending_storage;
+      sal::pending_release_list pending(pending_storage);
+
+      CHECK(sub->collect_dead_references(dead.load_snapshot(), pending));
+      CHECK(pending.empty());
+
+      auto copied = copy_with_dead_snapshot(sub.get(), dead.load_snapshot());
+      REQUIRE(copied->num_versions() == 1);
+      CHECK(copied->get_entry_version(0) == 0);
+      check_entry_tree_id(copied.get(), 0, tid);
+   }
+
+   SECTION("dead non-latest subtree entry is released")
+   {
+      auto sub = create_value_node(psitri::value_type::make_subtree(tid));
+      auto tombstone = append_tombstone(sub.get(), 1);
+
+      psitri::live_range_map dead;
+      dead.add_dead_version(0);
+      dead.publish_snapshot();
+
+      std::vector<sal::ptr_address> pending_storage;
+      sal::pending_release_list pending(pending_storage);
+
+      CHECK(tombstone->collect_dead_references(dead.load_snapshot(), pending));
+      REQUIRE(pending.size() == 2);
+      CHECK(pending[0] == tid.root);
+      CHECK(pending[1] == tid.ver);
+
+      auto copied = copy_with_dead_snapshot(tombstone.get(), dead.load_snapshot());
+      REQUIRE(copied->num_versions() == 1);
+      CHECK(copied->get_entry_version(0) == 1);
+      CHECK(copied->get_entry_offset(0) == psitri::value_node::offset_tombstone);
+   }
+}
+
+TEST_CASE("value_node subtree replace-last reports replaced tree refs",
+          "[value_node][mvcc][subtree]")
+{
+   sal::tree_id tid{psitri::ptr_address(7), psitri::ptr_address(8)};
+   auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
+
+   std::vector<sal::ptr_address> pending_storage;
+   sal::pending_release_list pending(pending_storage);
+
+   CHECK(sub->collect_replace_last_references(pending));
+   REQUIRE(pending.size() == 2);
+   CHECK(pending[0] == tid.root);
+   CHECK(pending[1] == tid.ver);
+
+   auto replaced = replace_last_with_tombstone(sub.get(), 0);
+   REQUIRE(replaced->num_versions() == 1);
+   CHECK(replaced->get_entry_version(0) == 0);
+   CHECK(replaced->get_entry_offset(0) == psitri::value_node::offset_tombstone);
+}
+
+TEST_CASE("value_node subtree top replacement helper only releases matching top version",
+          "[value_node][mvcc][prune][subtree]")
+{
+   sal::tree_id tid{psitri::ptr_address(7), psitri::ptr_address(8)};
+   auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
+
+   std::vector<sal::ptr_address> pending_storage;
+   sal::pending_release_list pending(pending_storage);
+   CHECK(sub->collect_replaced_top_references(0, pending));
+   REQUIRE(pending.size() == 2);
+   CHECK(pending[0] == tid.root);
+   CHECK(pending[1] == tid.ver);
+
+   std::vector<sal::ptr_address> untouched_storage;
+   sal::pending_release_list untouched(untouched_storage);
+   CHECK(sub->collect_replaced_top_references(1, untouched));
+   CHECK(untouched.empty());
+}
+
+TEST_CASE("passive value_node relocation prunes subtree history with pending releases",
+          "[value_node][mvcc][prune][passive][subtree]")
+{
+   sal::tree_id tid{psitri::ptr_address(100), psitri::ptr_address(101)};
+   auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
+   auto         tombstone = append_tombstone(sub.get(), 1);
+
+   psitri::live_range_map dead;
+   dead.add_dead_version(0);
+   dead.publish_snapshot();
+
+   psitri::detail::psitri_object_context ctx{dead};
+   psitri::detail::psitri_value_node_ops ops(ctx);
+
+   const uint32_t asize  = ops.compact_size(tombstone.get());
+   void*          buffer = std::aligned_alloc(64, asize);
+   REQUIRE(buffer != nullptr);
+   std::memset(buffer, 0, asize);
+
+   psitri::ptr_address_seq seq = {psitri::ptr_address(78), 4};
+   auto* header = new (buffer)
+       sal::alloc_header(asize, static_cast<sal::header_type>(psitri::value_node::type_id), seq);
+
+   std::vector<sal::ptr_address> pending_storage;
+   sal::pending_release_list pending(pending_storage);
+   ops.passive_compact_to(tombstone.get(), header, pending);
+
+   ValueNodePtr pruned(reinterpret_cast<psitri::value_node*>(header));
+   REQUIRE(pending.size() == 2);
+   CHECK(pending[0] == tid.root);
+   CHECK(pending[1] == tid.ver);
+   REQUIRE(pruned->num_versions() == 1);
+   CHECK(pruned->get_entry_version(0) == 1);
+   CHECK(pruned->get_entry_offset(0) == psitri::value_node::offset_tombstone);
 }

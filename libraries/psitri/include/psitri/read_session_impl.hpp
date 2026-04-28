@@ -15,10 +15,10 @@ namespace psitri
    }
 
    template <class LockPolicy>
-   inline sal::smart_ptr<sal::alloc_header>
-   basic_read_session<LockPolicy>::get_root(uint32_t root_index)
+   inline tree basic_read_session<LockPolicy>::get_root(uint32_t root_index)
    {
-      return _allocator_session->template get_root<>(sal::root_object_number(root_index));
+      return tree(_allocator_session->template get_root<>(
+          sal::root_object_number(root_index)));
    }
 
    template <class LockPolicy>
@@ -32,6 +32,12 @@ namespace psitri
          return cursor(std::move(root), version);
       }
       return cursor(std::move(root));
+   }
+
+   template <class LockPolicy>
+   inline cursor basic_read_session<LockPolicy>::snapshot_cursor(uint32_t root_index)
+   {
+      return create_cursor(root_index);
    }
 
 }  // namespace psitri

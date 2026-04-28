@@ -7,6 +7,7 @@
 namespace psitri
 {
    class transaction;
+   class write_transaction;
 
    template <class LockPolicy>
    class basic_write_session;
@@ -77,6 +78,12 @@ namespace psitri
       transaction start_transaction(uint32_t root_index,
                                     tx_mode  mode = tx_mode::expect_success);
 
+      write_transaction start_write_transaction(
+          tree    base,
+          tx_mode mode = tx_mode::expect_success);
+
+      tree create_temporary_tree();
+
       /// Convert any root smart_ptr (shared or unique) into one that is
       /// uniquely owned by this writer for further mutation. Allocates a
       /// fresh version control block and attaches it to the returned
@@ -94,7 +101,7 @@ namespace psitri
           sal::smart_ptr<sal::alloc_header> root);
 
       /**
-       * @brief Immediate-mode MVCC upsert on a single key.
+       * @brief Immediate-mode upsert on a single key.
        *
        * Two locking paths:
        * - **Fast path** (key has value_node): acquires a stripe lock on the
@@ -113,12 +120,12 @@ namespace psitri
        * @param value      The new value.
        * @return The version number allocated for this write.
        */
-      uint64_t mvcc_upsert(uint32_t root_index, key_view key, value_view value);
+      uint64_t upsert(uint32_t root_index, key_view key, value_view value);
 
       /**
-       * @brief Immediate-mode MVCC remove (tombstone) on a single key.
+       * @brief Immediate-mode remove on a single key.
        *
-       * Same locking semantics as mvcc_upsert: stripe lock on value_node
+       * Same locking semantics as upsert: stripe lock on value_node
        * for keys that already have one, per-root mutex otherwise. Appends
        * a tombstone entry to the key's value_node.
        *
@@ -126,7 +133,7 @@ namespace psitri
        * @param key        The key to tombstone.
        * @return The version number allocated for this write.
        */
-      uint64_t mvcc_remove(uint32_t root_index, key_view key);
+      uint64_t remove(uint32_t root_index, key_view key);
 
       /**
        * @brief Background defrag pass on a single root.
@@ -171,11 +178,11 @@ namespace psitri
       /** @name Root Management */
       ///@{
 
-      sal::smart_ptr<sal::alloc_header> get_root(uint32_t root_index);
+      tree get_root(uint32_t root_index);
 
-      void set_root(uint32_t                          root_index,
-                    sal::smart_ptr<sal::alloc_header> root,
-                    sal::sync_type                    sync = sal::sync_type::none);
+      void set_root(uint32_t       root_index,
+                    tree           root,
+                    sal::sync_type sync = sal::sync_type::none);
 
       /// Create a reference-counted smart_ptr from a raw ptr_address.
       sal::smart_ptr<sal::alloc_header> make_ptr(sal::ptr_address addr, bool retain = false)
@@ -230,7 +237,7 @@ namespace psitri
       typename LockPolicy::mutex_type& root_modify_lock(uint32_t root_index);
 
       /// Allocate a global version CB and publish a new root at root_index.
-      /// Used by callers (e.g. mvcc_upsert one-shot) that don't already
+      /// Used by callers (e.g. immediate one-key upsert) that don't already
       /// hold a version on the new root smart_ptr. Transactions don't
       /// call this directly — their commit funnels through set_root with
       /// a root that already carries the txn's version (allocated at

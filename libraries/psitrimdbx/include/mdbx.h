@@ -67,6 +67,7 @@ typedef enum MDBX_error_t {
    MDBX_TOO_LARGE         = -30417,
    MDBX_THREAD_MISMATCH   = -30416,
    MDBX_TXN_OVERLAPPING   = -30415,
+   MDBX_ENODATA           = -30401,
    MDBX_ENOSYS            = -30400,   /* Feature not implemented */
    MDBX_EINVAL            = -22,
    MDBX_EACCESS           = -13,
@@ -85,6 +86,7 @@ typedef enum MDBX_env_flags_t {
    MDBX_NOTLS              = 0x200000, /* alias */
    MDBX_NORDAHEAD          = 0x800000,
    MDBX_NOMEMINIT          = 0x1000000,
+   MDBX_COALESCE           = 0x2000000,
    MDBX_LIFORECLAIM        = 0x4000000,
    MDBX_EXCLUSIVE          = 0x400000,
    MDBX_ACCEDE             = 0x40000000,
@@ -106,6 +108,7 @@ typedef enum MDBX_txn_flags_t {
    MDBX_TXN_TRY            = 0x10000000,
    MDBX_TXN_NOMETASYNC     = 0x40000,
    MDBX_TXN_NOSYNC         = 0x10000,
+   MDBX_TXN_USE_DWAL       = 0x20000000, /* PsiTri extension: opt into DWAL path */
 } MDBX_txn_flags_t;
 
 /* ── Database (DBI) flags ─────────────────────────────────────────── */
@@ -160,6 +163,28 @@ typedef enum MDBX_cursor_op {
    MDBX_PREV_MULTIPLE,
    MDBX_SET_LOWERBOUND,
    MDBX_SET_UPPERBOUND,
+#ifdef __cplusplus
+   first          = MDBX_FIRST,
+   first_dup      = MDBX_FIRST_DUP,
+   get_both       = MDBX_GET_BOTH,
+   get_both_range = MDBX_GET_BOTH_RANGE,
+   get_current    = MDBX_GET_CURRENT,
+   get_multiple   = MDBX_GET_MULTIPLE,
+   last           = MDBX_LAST,
+   last_dup       = MDBX_LAST_DUP,
+   next           = MDBX_NEXT,
+   next_dup       = MDBX_NEXT_DUP,
+   next_multiple  = MDBX_NEXT_MULTIPLE,
+   next_nodup     = MDBX_NEXT_NODUP,
+   previous       = MDBX_PREV,
+   previous_dup   = MDBX_PREV_DUP,
+   previous_nodup = MDBX_PREV_NODUP,
+   key_exact      = MDBX_SET,
+   key_lowerbound = MDBX_SET_RANGE,
+   multi_nextkey_firstvalue    = MDBX_NEXT_NODUP,
+   multi_currentkey_nextvalue  = MDBX_NEXT_DUP,
+   multi_currentkey_prevvalue  = MDBX_PREV_DUP,
+#endif
 } MDBX_cursor_op;
 
 /* ── Statistics ───────────────────────────────────────────────────── */
@@ -228,7 +253,29 @@ int  mdbx_env_info_ex(const MDBX_env* env, const MDBX_txn* txn,
 void* mdbx_env_get_userctx(const MDBX_env* env);
 int   mdbx_env_set_userctx(MDBX_env* env, void* ctx);
 
-/* ── PsiTri extension: read mode for RO transactions ─────────────── */
+typedef enum MDBX_option_t {
+   MDBX_opt_max_db,
+   MDBX_opt_max_readers,
+   MDBX_opt_sync_bytes,
+   MDBX_opt_sync_period,
+   MDBX_opt_rp_augment_limit,
+   MDBX_opt_loose_limit,
+   MDBX_opt_dp_reserve_limit,
+   MDBX_opt_txn_dp_limit,
+   MDBX_opt_txn_dp_initial,
+   MDBX_opt_spill_max_denominator,
+   MDBX_opt_spill_min_denominator,
+   MDBX_opt_spill_parent4child_denominator,
+   MDBX_opt_merge_threshold_16dot16_percent,
+   MDBX_opt_writethrough_threshold,
+   MDBX_opt_prefault_write_enable,
+} MDBX_option_t;
+
+int   mdbx_env_set_option(MDBX_env* env, MDBX_option_t option, uint64_t value);
+int   mdbx_env_get_option(const MDBX_env* env, MDBX_option_t option, uint64_t* value);
+int   mdbx_env_copy(MDBX_env* env, const char* dest, unsigned flags);
+
+/* ── PsiTri extension: DWAL read mode for RO transactions ────────── */
 /* 0=buffered (RO snapshot+Tri, no locks)                             */
 /* 1=latest (RW+RO+Tri, shared lock on RW, sees all committed data)   */
 /* 2=trie (Tri only, no DWAL layers)                                  */
@@ -300,6 +347,8 @@ int  mdbx_cursor_count(const MDBX_cursor* cursor, size_t* count);
 int  mdbx_cursor_renew(MDBX_txn* txn, MDBX_cursor* cursor);
 MDBX_dbi mdbx_cursor_dbi(const MDBX_cursor* cursor);
 MDBX_txn* mdbx_cursor_txn(const MDBX_cursor* cursor);
+MDBX_cursor* mdbx_cursor_create(void* context);
+int  mdbx_cursor_copy(const MDBX_cursor* src, MDBX_cursor* dest);
 
 /* ── Error handling ───────────────────────────────────────────────── */
 
@@ -323,6 +372,16 @@ typedef struct MDBX_version_info {
 } MDBX_version_info;
 
 extern const MDBX_version_info mdbx_version;
+
+typedef struct MDBX_build_info {
+   const char* datetime;
+   const char* target;
+   const char* options;
+   const char* compiler;
+   const char* flags;
+} MDBX_build_info;
+
+extern const MDBX_build_info mdbx_build;
 
 #ifdef __cplusplus
 }  /* extern "C" */

@@ -5,8 +5,11 @@
 #include <psitri/node/leaf.hpp>
 #include <psitri/node/node.hpp>
 #include <psitri/node/value_node.hpp>
+#include <psitri/value_pin.hpp>
 #include <psitri/value_type.hpp>
 #include <sal/smart_ptr.hpp>
+#include <stdexcept>
+#include <utility>
 
 namespace psitri
 {
@@ -65,7 +68,7 @@ namespace psitri
    struct key_info
    {
       sal::ptr_address leaf_addr = sal::null_ptr_address;  ///< leaf containing the key
-      uint64_t         version   = UINT64_MAX;             ///< 0=inline, VN latest, UINT64_MAX=missing
+      uint64_t         version   = UINT64_MAX;  ///< 0=inline, VN latest, UINT64_MAX=missing
    };
 
    class cursor
@@ -94,7 +97,7 @@ namespace psitri
             _key_len         = other._key_len;
             _root_end_branch = other._root_end_branch;
             _version         = other._version;
-            auto d = other._path_back - other._path.data();
+            auto d           = other._path_back - other._path.data();
             std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
             std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
             _path_back = _path.data() + d;
@@ -123,7 +126,7 @@ namespace psitri
             _key_len         = other._key_len;
             _root_end_branch = other._root_end_branch;
             _version         = other._version;
-            auto d = other._path_back - other._path.data();
+            auto d           = other._path_back - other._path.data();
             std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
             std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
             _path_back       = _path.data() + d;
@@ -169,6 +172,8 @@ namespace psitri
       /// @return the value associated with the current key as a view that is valid for the
       /// the lifetime of the read_lock passed in.
       value_view value(sal::read_lock& rl) const noexcept;
+      value_view value(value_pin& pin) const noexcept { return value(pin.lock()); }
+      value_pin  pin_values() const { return value_pin(_node.session()); }
 
       /// calls lambda with a view of the value for the current key, view is only valid for the lifetime of the lambda
       void get_value(std::invocable<value_view> auto&& lambda) const noexcept;
@@ -184,6 +189,15 @@ namespace psitri
 
       template <ConstructibleBuffer ConstructibleBufferType>
       std::optional<ConstructibleBufferType> get(key_view key) const;
+
+      bool get(key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         cursor c(_node, _version);
+         if (!c.seek(key) || c.is_subtree())
+            return false;
+         c.get_value(std::forward<decltype(lambda)>(lambda));
+         return true;
+      }
 
       /**
        * Get the value at the specified key into a buffer
@@ -256,14 +270,18 @@ namespace psitri
       branch_number                     _root_end_branch;
       uint64_t                          _version = UINT64_MAX;
 
-      /// Check if the current leaf entry is tombstoned at the cursor's version.
-      bool is_leaf_entry_tombstoned(const leaf_node* l, branch_number bn) const noexcept
+      /// Check if the current leaf entry is hidden at the cursor's version.
+      bool is_leaf_entry_hidden(const leaf_node* l, branch_number bn) const noexcept
       {
+         const uint64_t created_at = l->get_version(bn);
+         if (_version != UINT64_MAX && created_at != 0 &&
+             version_newer_than(created_at, _version, value_version_bits))
+            return true;
          if (l->get_value_type(bn) != leaf_node::value_type_flag::value_node)
             return false;
-         auto        ref       = _node.session()->get_ref<value_node>(l->get_value_address(bn));
-         auto [offset, idx]    = ref->find_version(_version);
-         return offset == value_node::offset_tombstone;
+         auto ref           = _node.session()->get_ref<value_node>(l->get_value_address(bn));
+         auto [offset, idx] = ref->find_version(_version);
+         return offset == value_node::offset_tombstone || offset == value_node::offset_null;
       }
 
       void append_key(key_view key) noexcept;
@@ -272,8 +290,21 @@ namespace psitri
       void push(ptr_address adr) noexcept;
       void push_end(ptr_address adr) noexcept;
       void next_branch(key_view key) noexcept;
-
    };
+   inline bool is_cursor_root_type(sal::header_type type) noexcept
+   {
+      switch (node_type(type))
+      {
+         case node_type::leaf:
+         case node_type::inner:
+         case node_type::inner_prefix:
+         case node_type::value:
+            return true;
+         default:
+            return false;
+      }
+   }
+
    inline auto cursor::visit(ptr_address adr, auto&& lambda)
    {
       auto ref = _node.session()->get_ref(adr);
@@ -288,7 +319,7 @@ namespace psitri
          case node_type::value:
             return lambda(*ref.as<value_node>());
          default:
-            std::unreachable();
+            throw std::runtime_error("psitri cursor root is not a tree node");
       }
    }
    inline cursor::cursor(sal::smart_ptr<sal::alloc_header> n, uint64_t version)
@@ -305,6 +336,8 @@ namespace psitri
          return;
       }
       auto read_lock = _node.session()->lock();
+      if (!is_cursor_root_type(_node.session()->get_ref(_node.address())->type()))
+         throw std::runtime_error("psitri cursor root is not a tree node");
       _root_end_branch =
           visit(_node.address(), [](auto&& node) { return branch_number(node.num_branches()); });
    }
@@ -330,6 +363,8 @@ namespace psitri
          return;
       }
       auto read_lock = _node.session()->lock();
+      if (!is_cursor_root_type(_node.session()->get_ref(_node.address())->type()))
+         throw std::runtime_error("psitri cursor root is not a tree node");
       _root_end_branch =
           visit(_node.address(), [](auto&& node) { return branch_number(node.num_branches()); });
    }
@@ -345,7 +380,7 @@ namespace psitri
          return false;  // at end — nothing >= key
       if (this->key() == key)
          return next();  // skip exact match; true=found next, false=at end
-      return true;  // already positioned past key
+      return true;       // already positioned past key
    }
    inline bool cursor::lower_bound_impl(key_view key) noexcept
    {
@@ -366,7 +401,7 @@ namespace psitri
                   return pop() and next_impl();
                }
                _path_back->branch = branch;
-               if (is_leaf_entry_tombstoned(l, branch))
+               if (is_leaf_entry_hidden(l, branch))
                {
                   append_key(l->get_key(branch));
                   return next_impl();
@@ -425,7 +460,7 @@ namespace psitri
    template <ConstructibleBuffer ConstructibleBufferType>
    std::optional<ConstructibleBufferType> cursor::get(key_view key) const
    {
-      cursor tmp(*this);
+      cursor                  tmp(*this);
       ConstructibleBufferType buf;
       if (tmp.get(key, &buf) >= 0)
          return buf;
@@ -466,6 +501,8 @@ namespace psitri
                _path_back->branch = l->get(key);
                if (_path_back->branch == l->num_branches())
                   return seek_end(), cursor::value_not_found;
+               if (is_leaf_entry_hidden(l, _path_back->branch))
+                  return seek_end(), cursor::value_not_found;
                append_key(key);
                switch (l->get_value_type(_path_back->branch))
                {
@@ -484,7 +521,8 @@ namespace psitri
                      auto ref = _node.session()->get_ref<value_node>(
                          l->get_value_address(_path_back->branch));
                      auto [offset, idx] = ref->find_version(_version);
-                     if (offset == value_node::offset_tombstone || offset == value_node::offset_null)
+                     if (offset == value_node::offset_tombstone ||
+                         offset == value_node::offset_null)
                         return seek_end(), cursor::value_not_found;
                      auto vv = ref->get_value_at_version(_version);
                      buffer->resize(vv.size());
@@ -612,11 +650,13 @@ namespace psitri
             }
             [[unlikely]] case node_type::leaf:
             {
-               const auto*   l    = static_cast<const leaf_node*>(n);
-               ptr_address   la   = _path_back->adr;
+               const auto* l      = static_cast<const leaf_node*>(n);
+               ptr_address la     = _path_back->adr;
                _path_back->branch = l->get(key);
                if (_path_back->branch == l->num_branches())
                   return {la, UINT64_MAX};  // key not found; return leaf addr
+               if (is_leaf_entry_hidden(l, _path_back->branch))
+                  return {la, UINT64_MAX};
                switch (l->get_value_type(_path_back->branch))
                {
                   case leaf_node::value_type_flag::null:
@@ -678,7 +718,7 @@ namespace psitri
                auto* l = static_cast<const leaf_node*>(n);
                if (++_path_back->branch == l->num_branches()) [[unlikely]]
                   break;
-               if (is_leaf_entry_tombstoned(l, _path_back->branch))
+               if (is_leaf_entry_hidden(l, _path_back->branch))
                   continue;
                return next_branch(l->get_key(_path_back->branch)), true;
             }
@@ -730,7 +770,7 @@ namespace psitri
                   _path_back->branch = branch_number(l->num_branches());
                if (--_path_back->branch == branch_number(-1)) [[unlikely]]
                   break;
-               if (is_leaf_entry_tombstoned(l, _path_back->branch))
+               if (is_leaf_entry_hidden(l, _path_back->branch))
                   continue;
                return next_branch(l->get_key(_path_back->branch)), true;
             }
@@ -782,6 +822,8 @@ namespace psitri
       auto* l = static_cast<const leaf_node*>(n);
       if (_path_back->branch >= l->num_branches())
          return value_not_found;
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return value_not_found;
       switch (l->get_value_type(_path_back->branch))
       {
          case leaf_node::value_type_flag::null:
@@ -790,10 +832,12 @@ namespace psitri
             return l->get_value_view(_path_back->branch).size();
          case leaf_node::value_type_flag::value_node:
          {
-            auto ref = _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
-            auto vv = ref->get_value_at_version(_version);
-            if (ref->find_version(_version).first == value_node::offset_tombstone)
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            auto [offset, idx] = ref->find_version(_version);
+            if (offset == value_node::offset_tombstone || offset == value_node::offset_null)
                return value_not_found;
+            auto vv = ref->get_value_at_version(_version);
             return vv.size();
          }
          case leaf_node::value_type_flag::subtree:
@@ -813,6 +857,8 @@ namespace psitri
       auto* l = static_cast<const leaf_node*>(n);
       if (_path_back->branch >= l->num_branches())
          return value_view();
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return value_view();
       switch (l->get_value_type(_path_back->branch))
       {
          case leaf_node::value_type_flag::null:
@@ -821,8 +867,8 @@ namespace psitri
             return l->get_value_view(_path_back->branch);
          case leaf_node::value_type_flag::value_node:
          {
-            auto ref = _node.session()->get_ref<value_node>(
-                l->get_value_address(_path_back->branch));
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
             return ref->get_value_at_version(_version);
          }
          case leaf_node::value_type_flag::subtree:
@@ -852,6 +898,11 @@ namespace psitri
          lambda(value_view());
          return;
       }
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+      {
+         lambda(value_view());
+         return;
+      }
       switch (l->get_value_type(_path_back->branch))
       {
          case leaf_node::value_type_flag::null:
@@ -862,8 +913,8 @@ namespace psitri
             return;
          case leaf_node::value_type_flag::value_node:
          {
-            auto ref = _node.session()->get_ref<value_node>(
-                l->get_value_address(_path_back->branch));
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
             lambda(ref->get_value_at_version(_version));
             return;
          }
@@ -887,6 +938,8 @@ namespace psitri
       auto* l = static_cast<const leaf_node*>(n);
       if (_path_back->branch >= l->num_branches())
          return std::nullopt;
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return std::nullopt;
       switch (l->get_value_type(_path_back->branch))
       {
          case leaf_node::value_type_flag::null:
@@ -905,12 +958,12 @@ namespace psitri
          }
          case leaf_node::value_type_flag::value_node:
          {
-            auto ref = _node.session()->get_ref<value_node>(
-                l->get_value_address(_path_back->branch));
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
             auto [offset, idx] = ref->find_version(_version);
             if (offset == value_node::offset_tombstone || offset == value_node::offset_null)
                return std::nullopt;
-            auto vv = ref->get_value_at_version(_version);
+            auto                    vv = ref->get_value_at_version(_version);
             ConstructibleBufferType buf;
             buf.resize(vv.size());
             std::memcpy(buf.data(), vv.data(), vv.size());
@@ -934,6 +987,8 @@ namespace psitri
       auto* l = static_cast<const leaf_node*>(n);
       if (_path_back->branch >= l->num_branches())
          return false;
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return false;
       return l->get_value_type(_path_back->branch) == leaf_node::value_type_flag::subtree;
    }
 
@@ -946,7 +1001,7 @@ namespace psitri
       if (n->type() != node_type::leaf)
          return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
       auto* l = static_cast<const leaf_node*>(n);
-      if (_path_back->branch >= l->num_branches() ||
+      if (_path_back->branch >= l->num_branches() || is_leaf_entry_hidden(l, _path_back->branch) ||
           l->get_value_type(_path_back->branch) != leaf_node::value_type_flag::subtree)
          return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
       auto val = l->get_value(_path_back->branch);

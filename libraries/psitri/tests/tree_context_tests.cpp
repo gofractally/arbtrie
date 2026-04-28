@@ -43,6 +43,14 @@ namespace
       operator const std::string&() const { return _str; }
       const char* c_str() const { return _str.c_str(); }
    };
+
+   void register_node_types(sal::allocator& alloc)
+   {
+      alloc.register_type_ops<leaf_node>();
+      alloc.register_type_ops<inner_prefix_node>();
+      alloc.register_type_ops<inner_node>();
+      alloc.register_type_ops<value_node>();
+   }
 }  // namespace
 
 std::vector<std::string> load_words(uint32_t limit = -1)
@@ -62,12 +70,8 @@ TEST_CASE("cursor-prev-next", "[cursor]")
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::register_type_vtable<leaf_node>();
-   sal::register_type_vtable<inner_prefix_node>();
-   sal::register_type_vtable<inner_node>();
-   sal::register_type_vtable<value_node>();
-
    sal::allocator salloc(dbdir, sal::runtime_config());
+   register_node_types(salloc);
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -169,12 +173,8 @@ TEST_CASE("tree_context-insert-remove", "[tree_context][remove]")
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::register_type_vtable<leaf_node>();
-   sal::register_type_vtable<inner_prefix_node>();
-   sal::register_type_vtable<inner_node>();
-   sal::register_type_vtable<value_node>();
-
    sal::allocator salloc(dbdir, sal::runtime_config());
+   register_node_types(salloc);
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -243,12 +243,8 @@ TEST_CASE("tree_context-single-branch-collapse", "[tree_context][remove][collaps
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::register_type_vtable<leaf_node>();
-   sal::register_type_vtable<inner_prefix_node>();
-   sal::register_type_vtable<inner_node>();
-   sal::register_type_vtable<value_node>();
-
    sal::allocator salloc(dbdir, sal::runtime_config());
+   register_node_types(salloc);
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -349,12 +345,8 @@ TEST_CASE("tree_context-subtree-collapse", "[tree_context][remove][collapse]")
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::register_type_vtable<leaf_node>();
-   sal::register_type_vtable<inner_prefix_node>();
-   sal::register_type_vtable<inner_node>();
-   sal::register_type_vtable<value_node>();
-
    sal::allocator salloc(dbdir, sal::runtime_config());
+   register_node_types(salloc);
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -499,10 +491,7 @@ TEST_CASE("tree_context", "[tree_context][!benchmark]")
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
    sal::allocator salloc(dbdir, sal::runtime_config());
-   sal::register_type_vtable<leaf_node>();
-   sal::register_type_vtable<inner_prefix_node>();
-   sal::register_type_vtable<inner_node>();
-   sal::register_type_vtable<value_node>();
+   register_node_types(salloc);
    auto ses  = salloc.get_session();
    auto root = ses->get_root<>(sal::root_object_number(0));
 

@@ -147,7 +147,7 @@ namespace sal
 
       // we have to refetch the pointer just incase the compactor moved the object
       // between when from read it and when we exchanged it.
-      record_freed_space(get<From>(old_control.loc()));
+      record_freed_space(get<From>(old_control.loc()), "session_realloc");
 
       return smart_ref<To>(get_session_ptr(), node_ptr, from.control(),
                            from.control().load(std::memory_order_relaxed));
@@ -174,7 +174,7 @@ namespace sal
       control_block_data old_control = from.control().move(loc);
       // No ref == 1 assertion — MVCC: other snapshots may reference this CB
 
-      record_freed_space(get<From>(old_control.loc()));
+      record_freed_space(get<From>(old_control.loc()), "session_mvcc_realloc");
 
       return smart_ref<To>(get_session_ptr(), node_ptr, from.control(),
                            from.control().load(std::memory_order_relaxed));
@@ -190,20 +190,17 @@ namespace sal
       uint32_t asize;
 
       if constexpr (std::is_same_v<T, alloc_header>)
-         asize = vcall::cow_size(ptr.obj());
+         asize = _sega.type_ops(ptr.obj()).cow_size(ptr.obj());
       else
          asize = ptr->cow_size();
 
       auto [loc, node_ptr] =
           alloc_data<alloc_header>(asize, (sal::header_type)ptr->type(), ptr->address_seq());
 
-      if constexpr (std::is_same_v<T, alloc_header>)
-         vcall::copy_to(ptr, node_ptr);
-      else
-         ptr->copy_to(node_ptr);
+      _sega.type_ops(ptr.obj()).active_copy_to(ptr.obj(), node_ptr, get_session_ptr());
 
       auto old_cached = ptr._control.move(loc);
-      record_freed_space(get<alloc_header>(old_cached.loc()));
+      record_freed_space(get<alloc_header>(old_cached.loc()), "session_move");
       ptr._cached = old_cached;
       ptr._obj    = node_ptr;
       return static_cast<T*>(node_ptr);
@@ -248,9 +245,10 @@ namespace sal
     * @param segment The segment number containing the object
     * @param object_size The size of the object to free
     */
-   inline void allocator_session::record_freed_space(const alloc_header* obj) noexcept
+   inline void allocator_session::record_freed_space(const alloc_header* obj,
+                                                      const char* tag) noexcept
    {
-      _sega.record_freed_space(_session_num, obj);
+      _sega.record_freed_space(_session_num, obj, tag);
    }
 
    /**
@@ -311,7 +309,21 @@ namespace sal
       auto& cb   = const_cast<control_block_alloc&>(_ptr_alloc).get(adr);
       auto  data = cb.load(std::memory_order_acquire);
       assert(is_custom_cb(data));
-      return data.cacheline_offset;
+      return uint64_t(data.cacheline_offset);
+   }
+
+   inline std::optional<uint64_t>
+   allocator_session::try_read_custom_cb(ptr_address adr) const noexcept
+   {
+      auto* cb = const_cast<control_block_alloc&>(_ptr_alloc).try_get(adr);
+      if (!cb)
+         return std::nullopt;
+
+      auto data = cb->load(std::memory_order_acquire);
+      if (!is_custom_cb(data))
+         return std::nullopt;
+
+      return uint64_t(data.cacheline_offset);
    }
 
    inline bool allocator_session::is_custom_cb(control_block_data cbd) noexcept
@@ -328,6 +340,13 @@ namespace sal
       assert(check_thread_ownership());
       auto& cb      = get(adr);
       auto  cur_ref = cb.ref();
+      auto  pre     = cb.load(std::memory_order_relaxed);
+      // Custom CBs carry immediate metadata notifications and have no object destructor.
+      if (cur_ref == 1 and is_custom_cb(pre))
+      {
+         final_release(adr);
+         return;
+      }
       if (cur_ref == 1 and _release_queue.try_push(adr))
          return;
 
@@ -354,8 +373,8 @@ namespace sal
             allocator_session_ptr ptr(this);
 
             const alloc_header* nptr = get<alloc_header>(loc);
-            vcall::destroy(nptr, ptr);
-            record_freed_space(nptr);
+            _sega.type_ops(nptr).destroy(nptr, ptr);
+            record_freed_space(nptr, "release_destroy");
          }
       }
       else if (_sega._on_custom_cb_released) [[unlikely]]
@@ -384,15 +403,27 @@ namespace sal
       auto tid = _sega.get(ro);
       return smart_ptr<T>(allocator_session_ptr(this, true), tid, false);
    }
+
+   inline sync_root_info make_sync_root_info(
+       const allocator_session& session,
+       root_object_number       ro,
+       tree_id                  tid) noexcept
+   {
+      sync_root_info info{*ro, *tid.root, *tid.ver, 0};
+      if (tid.ver != null_ptr_address)
+         info.root_version = session.read_custom_cb(tid.ver);
+      return info;
+   }
+
    template <typename T>
    inline smart_ptr<T> allocator_session::set_root(root_object_number ro,
                                                    smart_ptr<T>       ptr,
                                                    sync_type          st) noexcept
    {
       auto new_tid = ptr.take_tree_id();
-      sync_root_info root_info{*ro, *new_tid.root};
+      auto root_info = make_sync_root_info(*this, ro, new_tid);
       sync(st, _sega._mapped_state->_config, root_info);
-      auto old_tid = _sega.set(ro, new_tid, st);
+      auto old_tid = _sega.set(ro, new_tid, st, root_info.root_version);
       return smart_ptr<T>(allocator_session_ptr(this, true), old_tid, false);
    }
 
@@ -402,11 +433,15 @@ namespace sal
                                                    smart_ptr<U>       desired,
                                                    sync_type          st) noexcept
    {
-      sync_root_info root_info{*ro, *desired.address()};
-      sync(st, _sega._mapped_state->_config, root_info);
       auto expect_tid  = expect.get_tree_id();
       auto desired_tid = desired.get_tree_id();
-      if (_sega.cas_root(ro, expect_tid, desired_tid, st))
+      auto root_info   = make_sync_root_info(*this, ro, desired_tid);
+      if (_sega.cas_root(ro, expect_tid, desired_tid, st,
+                         root_info.root_version,
+                         [this, st, &root_info]() noexcept
+                         {
+                            sync(st, _sega._mapped_state->_config, root_info);
+                         }))
       {
          desired.take_tree_id();  // _sega took it, so don't release it
          // let the caller determine how and when to release prior value
@@ -428,12 +463,13 @@ namespace sal
    inline smart_ptr<alloc_header> allocator_session::transaction_commit(
        root_object_number      ro,
        smart_ptr<alloc_header> desired,
-       sync_type               st) noexcept
+                                                   sync_type               st) noexcept
    {
       auto new_tid = desired.take_tree_id();
-      sync_root_info root_info{*ro, *new_tid.root};
+      auto root_info = make_sync_root_info(*this, ro, new_tid);
       sync(st, _sega._mapped_state->_config, root_info);
-      auto old_tid = _sega.transaction_commit(ro, new_tid, st);
+      auto old_tid =
+          _sega.transaction_commit(ro, new_tid, st, root_info.root_version);
       return smart_ptr<alloc_header>(get_session_ptr(), old_tid, false);
    }
    inline void allocator_session::transaction_abort(root_object_number ro) noexcept

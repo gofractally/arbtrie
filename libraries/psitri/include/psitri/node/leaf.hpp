@@ -11,13 +11,22 @@ namespace psitri
    class leaf_node;
    namespace op
    {
+      struct leaf_value_rewrite
+      {
+         using value_fn = value_type (*)(void*, const leaf_node&, branch_number);
+         value_fn value = nullptr;
+         void*    ctx   = nullptr;
+      };
+
       struct leaf_insert
       {
          const leaf_node& src;
          branch_number    lb;
          key_view         key;
          value_type       value;
-         uint8_t          cline_idx = 0xff;
+         uint8_t          cline_idx  = 0xff;
+         uint64_t         created_at = 0;
+         const leaf_value_rewrite* rewrite = nullptr;
       };
       struct leaf_update
       {
@@ -25,22 +34,26 @@ namespace psitri
          branch_number    lb;
          key_view         key;
          value_type       value;
+         const leaf_value_rewrite* rewrite = nullptr;
       };
       struct leaf_remove
       {
          const leaf_node& src;
          branch_number    bn;
+         const leaf_value_rewrite* rewrite = nullptr;
       };
       struct leaf_remove_range
       {
          const leaf_node& src;
          branch_number    lo;  ///< first branch to remove (inclusive)
          branch_number    hi;  ///< last branch to remove (exclusive)
+         const leaf_value_rewrite* rewrite = nullptr;
       };
       struct leaf_prepend_prefix
       {
          const leaf_node& src;
          key_view         prefix;
+         const leaf_value_rewrite* rewrite = nullptr;
       };
       struct leaf_from_visitor;
    }  // namespace op
@@ -78,6 +91,7 @@ namespace psitri
       {
          leaf_node& _leaf;
          uint16_t   _idx = 0;
+
         public:
          entry_inserter(leaf_node& l) : _leaf(l) {}
          void add(key_view key, value_type val);
@@ -90,9 +104,15 @@ namespace psitri
       /// clone and optimize
       inline static uint32_t alloc_size(const leaf_node* clone) noexcept;
       inline static uint32_t alloc_size(const leaf_node* clone,
+                                        const op::leaf_value_rewrite*) noexcept
+      {
+         return max_leaf_size;
+      }
+      inline static uint32_t alloc_size(const leaf_node* clone,
                                         key_view         cprefix,
                                         branch_number    start,
-                                        branch_number    end)
+                                        branch_number    end,
+                                        const op::leaf_value_rewrite* = nullptr)
       {
          assert(cprefix.size() <= 1024);
          return max_leaf_size;
@@ -110,18 +130,19 @@ namespace psitri
       inline static uint32_t alloc_size(const op::leaf_update& upd) { return max_leaf_size; }
       inline static uint32_t alloc_size(const op::leaf_remove& rm)
       {
-         // no point in growing the node when we are removing a value
-         return rm.src.size();
+         // Maintenance rewrites can move external values to new clines while
+         // removing a branch, so give the rebuild the normal edit workspace.
+         return rm.rewrite ? max_leaf_size : rm.src.size();
       }
       inline static uint32_t alloc_size(const op::leaf_remove_range& rm)
       {
-         return rm.src.size();
+         return rm.rewrite ? max_leaf_size : rm.src.size();
       }
-      inline static uint32_t alloc_size(const op::leaf_prepend_prefix&)
+      inline static uint32_t alloc_size(const op::leaf_prepend_prefix&) { return max_leaf_size; }
+      inline static uint32_t alloc_size(const struct op::leaf_from_visitor&)
       {
          return max_leaf_size;
       }
-      inline static uint32_t alloc_size(const struct op::leaf_from_visitor&) { return max_leaf_size; }
 
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_update& upd);
       leaf_node(size_t alloc_size, ptr_address_seq seq, const op::leaf_remove& rm);
@@ -133,6 +154,10 @@ namespace psitri
       leaf_node(size_t alloc_size, ptr_address_seq seq, key_view key, const value_type& value);
       /// clone and optimize
       leaf_node(size_t alloc_size, ptr_address_seq seq, const leaf_node* clone);
+      leaf_node(size_t           alloc_size,
+                ptr_address_seq  seq,
+                const leaf_node* clone,
+                const op::leaf_value_rewrite* rewrite);
 
       /// clone and optimize subset and truncate keys by cprefix
       leaf_node(size_t           alloc_size,
@@ -140,7 +165,8 @@ namespace psitri
                 const leaf_node* clone,
                 key_view         cprefix,
                 branch_number    start,
-                branch_number    end);
+                branch_number    end,
+                const op::leaf_value_rewrite* rewrite = nullptr);
 
       /// clone and insert key, value
       leaf_node(size_t                 alloc_size,
@@ -160,12 +186,12 @@ namespace psitri
        */
       bool can_insert_address(ptr_address addr) const noexcept;
 
-      void     dump() const;
+      void               dump() const;
       [[nodiscard]] bool validate_invariants() const noexcept;
-      uint16_t alloc_pos() const noexcept { return _alloc_pos; }
-      uint16_t dead_space() const noexcept { return _dead_space; }
-      uint32_t clines_capacity() const noexcept { return _cline_cap; }
-      bool     is_optimal_layout() const noexcept { return _optimal_layout; }
+      uint16_t           alloc_pos() const noexcept { return _alloc_pos; }
+      uint16_t           dead_space() const noexcept { return _dead_space; }
+      uint32_t           clines_capacity() const noexcept { return _cline_cap; }
+      bool               is_optimal_layout() const noexcept { return _optimal_layout; }
 
       uint32_t compact_size() const noexcept;
       void     compact_to(alloc_header* compact_dst) const noexcept;
@@ -250,6 +276,21 @@ namespace psitri
       };
       can_apply_mode can_apply(const op::leaf_insert& ins) const noexcept;
       can_apply_mode can_apply(const op::leaf_update& ins) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_insert& ins,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_update& upd,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_remove& rm,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_remove_range& rm,
+                             uint32_t               max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(const op::leaf_prepend_prefix& pp,
+                             uint32_t max_size = max_leaf_size) const noexcept;
+      bool rebuilt_size_fits(key_view                     common_prefix,
+                             branch_number                start,
+                             branch_number                end,
+                             const op::leaf_value_rewrite* rewrite,
+                             uint32_t max_size = max_leaf_size) const noexcept;
       //      can_apply_mode can_apply(const op::leaf_remove& ins) const noexcept;
 
       /// determines whether there is enough space to insert the key
@@ -456,6 +497,10 @@ namespace psitri
      private:
       void set_num_branches(uint16_t n) noexcept { _num_branches = n; }
       void clone_from(const leaf_node* clone);
+      void set_branch_version(branch_number bn, uint64_t version) noexcept;
+      void copy_branch_version_from(const leaf_node& src,
+                                    branch_number    src_bn,
+                                    branch_number    dst_bn) noexcept;
 
       uint16_t _alloc_pos;
       uint16_t _dead_space;  // tracks freed data in alloc space
@@ -463,7 +508,7 @@ namespace psitri
       uint32_t _optimal_layout : 1;  ///< a bit that gets set when the node is optimized,
                                      /// cleared when optimized invariants broken
       uint32_t _num_branches : 9;
-      uint32_t _num_versions : 5;    ///< number of shared version table entries (0-31)
+      uint32_t _num_versions : 5;  ///< number of shared version table entries (0-31)
       uint32_t _unused : 8;
       uint8_t  _key_hashs[/*num_branches()*/];
       // Dynamic arrays follow sequentially after _key_hashs:
@@ -618,8 +663,7 @@ namespace psitri
       /// 0xFF means no version assigned (default for COW-only mode).
       uint8_t* ver_indices() noexcept
       {
-         return reinterpret_cast<uint8_t*>(
-             const_cast<char*>(clines_end()));
+         return reinterpret_cast<uint8_t*>(const_cast<char*>(clines_end()));
       }
       const uint8_t* ver_indices() const noexcept
       {
@@ -648,10 +692,7 @@ namespace psitri
       }
 
       /// Initialize ver_indices to 0xFF for all branches.
-      void init_ver_indices() noexcept
-      {
-         std::memset(ver_indices(), 0xFF, num_branches());
-      }
+      void init_ver_indices() noexcept { std::memset(ver_indices(), 0xFF, num_branches()); }
 
       /// determine if addr is on an existing cline, or allocate a new one and
       /// return the value_branch for the new cline
@@ -712,8 +753,8 @@ namespace psitri
          //       SAL_INFO("off: {} offhead: {}  val_off_end: {} size: {}", off, size() - *off,
          //               (uint8_t*)value_offsets_end() - (uint8_t*)this, size());
          //        SAL_WARN("space: {}", (uint8_t*)get_key_ptr(off) - (uint8_t*)value_offsets_end());
-         assert((uint8_t*)get_key_ptr(off) >= (uint8_t*)value_offsets_end() &&
-                "Allocation would overlap with value offsets");
+         assert((uint8_t*)get_key_ptr(off) >= (uint8_t*)meta_end() &&
+                "Allocation would overlap with leaf metadata");
          get_key_ptr(off)->set(key);
          return off;
       }
@@ -731,21 +772,20 @@ namespace psitri
          _alloc_pos += value.size() + sizeof(value_data);
          value_offset off = value_offset(_alloc_pos);
          //         SAL_WARN("space: {}", (uint8_t*)get_value_ptr(off) - (uint8_t*)value_offsets_end());
-         assert((uint8_t*)get_value_ptr(off) >= (uint8_t*)value_offsets_end() &&
-                "Allocation would overlap with value offsets");
+         assert((uint8_t*)get_value_ptr(off) >= (uint8_t*)meta_end() &&
+                "Allocation would overlap with leaf metadata");
          get_value_ptr(off)->set(value);
          return off;
       }
       PSITRI_NO_SANITIZE_ALIGNMENT bool can_alloc_key(key_view key) const noexcept
       {
          return (const uint8_t*)get_key_ptr(key_offset(_alloc_pos + key.size() + sizeof(key))) <
-                (const uint8_t*)value_offsets_end();
+                (const uint8_t*)meta_end();
       }
       PSITRI_NO_SANITIZE_ALIGNMENT bool can_alloc_value(value_view value) const noexcept
       {
-         return (const uint8_t*)get_value_ptr(
-                    value_offset(_alloc_pos + value.size() + sizeof(value_data))) <
-                (const uint8_t*)value_offsets_end();
+         return (const uint8_t*)get_value_ptr(value_offset(
+                    _alloc_pos + value.size() + sizeof(value_data))) < (const uint8_t*)meta_end();
       }
       PSITRI_NO_SANITIZE_ALIGNMENT void free_key(key_offset off) noexcept
       {

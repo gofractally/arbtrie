@@ -27,7 +27,7 @@ int main()
 
    // Read-only cursor from a read session
    auto rs     = db->start_read_session();
-   auto cursor = rs->create_cursor(0);
+   auto cursor = rs->snapshot_cursor(0);
 
    // --- Forward iteration over all keys ---
    std::cout << "=== All keys (forward) ===\n";

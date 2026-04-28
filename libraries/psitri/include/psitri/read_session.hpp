@@ -3,6 +3,7 @@
 #include <psitri/cursor.hpp>
 #include <psitri/lock_policy.hpp>
 #include <psitri/node/node.hpp>
+#include <psitri/tree.hpp>
 #include <sal/allocator.hpp>
 #include <sal/smart_ptr.hpp>
 
@@ -17,7 +18,7 @@ namespace psitri
     * @brief A read-only view of the database for one thread.
     *
     * A basic_read_session provides snapshot-isolated reads without blocking
-    * writers. Each call to get_root() or create_cursor() captures the current
+    * writers. Each call to get_root() or snapshot_cursor() captures the current
     * state of the tree at that instant — subsequent writes by other sessions
     * do not affect already-obtained roots or cursors (copy-on-write isolation).
     *
@@ -42,9 +43,11 @@ namespace psitri
       /** @name Tree Access */
       ///@{
 
-      sal::smart_ptr<sal::alloc_header> get_root(uint32_t root_index);
+      tree get_root(uint32_t root_index);
 
       cursor create_cursor(uint32_t root_index);
+      cursor snapshot_cursor(uint32_t root_index);
+      value_pin pin_values() const { return value_pin(_allocator_session); }
 
       /// @brief Access the underlying allocator session.
       sal::allocator_session_ptr allocator_session() const { return _allocator_session; }

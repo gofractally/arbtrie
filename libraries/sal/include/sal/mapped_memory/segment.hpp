@@ -4,6 +4,7 @@
 #include <sal/config.hpp>
 #include <sal/control_block_alloc.hpp>
 #include <sal/debug.hpp>
+#include <sal/debug/free_range_tracker.hpp>
 #include <sal/mapping.hpp>
 #include <sal/numbers.hpp>
 #include <sal/time.hpp>
@@ -18,6 +19,7 @@ namespace sal
 
    namespace mapped_memory
    {
+      struct segment;  // forward decl — defined later in this file
       /// meta data about each segment used by the compactor to
       /// quickly determine which segments are eligible for compaction and
       /// to track data about the segments once segments are read-only.
@@ -37,7 +39,10 @@ namespace sal
          /// tracks the space that could be reclaimed if compacted
          /// written to by any thread objects are released or moved enabling
          /// the space to be reclaimed if compacted.
-         std::atomic<uint32_t> freed_space;
+         // Renamed from freed_space to surface any direct field access
+         // outside add_freed_space — the only path that pairs the
+         // freed_space mutation with SAL_TRACK_FREE under SAL_TRACK_LOCK.
+         std::atomic<uint32_t> _freed_space_LOCKED;
 
          enum segment_flags : uint32_t
          {
@@ -83,13 +88,46 @@ namespace sal
             assert(flags.load(std::memory_order_relaxed) & queued);
             uint32_t new_flags = (flags.load(std::memory_order_relaxed) & pinned) | active;
             flags.store(new_flags, std::memory_order_relaxed);
-            freed_space.store(0, std::memory_order_relaxed);
+            _freed_space_LOCKED.store(0, std::memory_order_relaxed);
          }
 
-         void add_freed_space(uint32_t size)
+         // Record `size` bytes at `obj_byte_range` as freed in this segment.
+         // The pointer is required (in addition to size) so the global
+         // free_range_tracker can validate transitions in debug builds.
+         // Callers MUST pass the actual byte range being freed; passing a
+         // dummy pointer defeats the tracker.
+         void add_freed_space(const void* obj_byte_range,
+                              uint32_t    size,
+                              const char* tag)
          {
-            assert(size + freed_space.load(std::memory_order_relaxed) <= segment_size);
-            freed_space.fetch_add(size, std::memory_order_relaxed);
+            (void)obj_byte_range;  // used only when PSITRI_DEEP_INVARIANTS=1
+            (void)tag;
+            auto cur = _freed_space_LOCKED.load(std::memory_order_relaxed);
+            if (size + cur > segment_size) {
+#if PSITRI_DEEP_INVARIANTS
+                auto& t = ::sal::debug::free_range_tracker::instance();
+                SAL_ERROR("add_freed_space OVERFLOW: cur={} adding={} max={} overshoot={} flags=0x{:x} tag={} | tracker: live_count={} live_bytes={} allocs={} frees={}",
+                          cur, size, (uint32_t)segment_size,
+                          (cur + size) - (uint32_t)segment_size,
+                          flags.load(std::memory_order_relaxed), tag,
+                          t.live_count(), t.total_live_bytes(),
+                          t.alloc_count(), t.free_count());
+#else
+                SAL_ERROR("add_freed_space OVERFLOW: cur={} adding={} max={} overshoot={} flags=0x{:x} tag={}",
+                          cur, size, (uint32_t)segment_size,
+                          (cur + size) - (uint32_t)segment_size,
+                          flags.load(std::memory_order_relaxed), tag);
+#endif
+            }
+            assert(size + _freed_space_LOCKED.load(std::memory_order_relaxed) <= segment_size);
+            _freed_space_LOCKED.fetch_add(size, std::memory_order_relaxed);
+            // Tracker FREE fires the verifier callback; do it AFTER
+            // freed_space is bumped so the invariant
+            //   alloc_pos == freed_space + live_in_seg
+            // holds at the verifier-observation point (mark_free has just
+            // removed `size` bytes from `live`, and we've just added the
+            // same `size` to `freed_space`).
+            SAL_TRACK_FREE(obj_byte_range, size, tag);
          }
 
          /// stores the age and marks it as ready only
@@ -113,7 +151,7 @@ namespace sal
          }
          bool     is_read_only() const { return flags.load(std::memory_order_relaxed) & read_only; }
          bool     is_pinned() const { return flags.load(std::memory_order_relaxed) & pinned; }
-         uint32_t get_freed_space() const { return freed_space.load(std::memory_order_relaxed); }
+         uint32_t get_freed_space() const { return _freed_space_LOCKED.load(std::memory_order_relaxed); }
          uint32_t get_flags() const { return flags.load(std::memory_order_relaxed); }
          uint64_t get_vage() const { return vage.load(std::memory_order_relaxed); }
       };  // segment_meta
@@ -135,14 +173,33 @@ namespace sal
             //           ARBTRIE_INFO("provider q: ", segment);
             meta[*segment].added_to_provider_queue();
          }
+         // Declarations only — bodies are defined out-of-line below
+         // struct segment, since they need seg->get_alloc_pos().
          template <typename T>
-         void add_freed_space(segment_number segment, const T* obj)
+         void add_freed_space(segment_number seg_num, const segment* seg,
+                              const T* obj, const char* tag);
+         void add_freed_space(segment_number seg_num, const segment* seg,
+                              const void* obj_byte_range,
+                              uint32_t size, const char* tag);
+
+         // Single invariant: alloc_pos == freed_space + live_in_seg_range.
+         void verify_invariant(const void* seg_base, uint32_t alloc_pos,
+                               uint32_t seg_idx, const char* when,
+                               const char* tag) const
          {
-            meta[*segment].add_freed_space(obj->size());
-         }
-         void add_freed_space(segment_number segment, uint32_t size)
-         {
-            meta[*segment].add_freed_space(size);
+            (void)seg_base; (void)alloc_pos; (void)seg_idx; (void)when; (void)tag;
+#if PSITRI_DEEP_INVARIANTS
+            const auto* base = (const char*)seg_base;
+            uint64_t live = sal::debug::free_range_tracker::instance()
+                                .live_bytes_in_range(base, base + segment_size);
+            uint64_t freed = meta[seg_idx].get_freed_space();
+            if (live + freed != alloc_pos) {
+                SAL_ERROR("INVARIANT VIOLATED ({} tag={}): seg={} alloc_pos={} live_in_seg={} freed_space={} sum={} delta={}",
+                          when, tag, seg_idx, alloc_pos, live, freed, live + freed,
+                          int64_t(alloc_pos) - int64_t(live + freed));
+                std::abort();
+            }
+#endif
          }
 
          // initial condition of a new segment, given a starting age
@@ -210,7 +267,7 @@ namespace sal
        */
       struct segment
       {
-         uint32_t get_alloc_pos() const { return _alloc_pos; }
+         uint32_t get_alloc_pos() const { return _alloc_pos_LOCKED; }
 
          /// @brief  the amount of space available for allocation
          uint32_t free_space() const { return end() - alloc_ptr(); }
@@ -233,7 +290,7 @@ namespace sal
          void set_alloc_pos(uint32_t pos)
          {
             assert(pos <= end_pos());
-            _alloc_pos = pos;  //.store(pos, std::memory_order_relaxed);
+            _alloc_pos_LOCKED = pos;
          }
 
          /// @brief  helper to convert ptr to pos
@@ -246,7 +303,7 @@ namespace sal
 
          segment()
          {
-            _alloc_pos           = 0;
+            _alloc_pos_LOCKED    = 0;
             _first_writable_page = 0;
             _session_id          = allocator_session_number(-1);
             _seg_sequence        = -1;
@@ -261,8 +318,12 @@ namespace sal
          T* alloc(uint32_t size, auto&&... args)
          {
             assert(can_alloc(size));
-            auto result = new (data + _alloc_pos) T(size, std::forward<decltype(args)>(args)...);
-            _alloc_pos += size;
+            auto result = new (data + _alloc_pos_LOCKED) T(size, std::forward<decltype(args)>(args)...);
+            // Lock the tracker around {alloc_pos bump + mark_alloc} so a
+            // concurrent verifier observation cannot land between them.
+            SAL_TRACK_LOCK();
+            _alloc_pos_LOCKED += size;
+            SAL_TRACK_ALLOC(result, size, "segment_alloc");
             return result;
          }
          void unalloc(uint32_t size)
@@ -270,8 +331,11 @@ namespace sal
             assert(size == ucc::round_up_multiple<64>(size));
             assert(size <= get_alloc_pos());
 
-            assert(_alloc_pos >= size);
-            _alloc_pos -= size;
+            assert(_alloc_pos_LOCKED >= size);
+            // Same atomicity requirement as alloc<T>.
+            SAL_TRACK_LOCK();
+            _alloc_pos_LOCKED -= size;
+            SAL_TRACK_FREE(data + _alloc_pos_LOCKED, size, "segment_unalloc");
          }
 
          /**
@@ -316,7 +380,11 @@ namespace sal
          // thread must check _first_writable_page before before using
          // _alloc_pos.
         private:
-         uint32_t _alloc_pos = 0;  /// number of bytes allocated from data
+         // Renamed from _alloc_pos to surface any direct field access
+         // outside segment::alloc<T> / unalloc / set_alloc_pos — the only
+         // paths that pair the bump with SAL_TRACK_ALLOC/FREE under
+         // SAL_TRACK_LOCK.
+         uint32_t _alloc_pos_LOCKED = 0;  /// number of bytes allocated from data
         public:
          /// The os_page number of the first page that can be written to
          /// advanced by the sync() thread... sync thread waits until all
@@ -346,6 +414,38 @@ namespace sal
          ucc::weighted_average age_accumulator;
       };  // __attribute((packed));
       static_assert(sizeof(segment) == segment_size);
+
+      // Out-of-line so we can dereference `segment*` (full type now).
+      // CRITICAL: alloc_pos MUST be read inside SAL_TRACK_LOCK. A
+      // background-thread free racing a main-thread alloc would
+      // otherwise capture a stale alloc_pos before the lock and pass
+      // it to verify_invariant alongside up-to-date live/freed_space —
+      // producing phantom invariant violations.
+      template <typename T>
+      inline void segment_data::add_freed_space(segment_number seg_num,
+                                                const segment* seg,
+                                                const T*       obj,
+                                                const char*    tag)
+      {
+         SAL_TRACK_LOCK();
+         uint32_t alloc_pos = seg->get_alloc_pos();
+         verify_invariant(seg, alloc_pos, *seg_num, "before add_freed_space", tag);
+         SAL_TRACK_VERIFY_SIZE(obj, obj->size(), tag);
+         meta[*seg_num].add_freed_space(obj, obj->size(), tag);
+      }
+
+      inline void segment_data::add_freed_space(segment_number seg_num,
+                                                const segment* seg,
+                                                const void*    obj_byte_range,
+                                                uint32_t       size,
+                                                const char*    tag)
+      {
+         SAL_TRACK_LOCK();
+         uint32_t alloc_pos = seg->get_alloc_pos();
+         verify_invariant(seg, alloc_pos, *seg_num, "before add_freed_space", tag);
+         SAL_TRACK_VERIFY_SIZE(obj_byte_range, size, tag);
+         meta[*seg_num].add_freed_space(obj_byte_range, size, tag);
+      }
 
    }  // namespace mapped_memory
 }  // namespace sal

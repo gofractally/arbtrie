@@ -34,6 +34,40 @@ namespace
       ~integrity_db() { std::filesystem::remove_all(dir); }
    };
 
+   struct temp_tree_edit
+   {
+      explicit temp_tree_edit(write_session& ses)
+          : tx(ses.start_write_transaction(ses.create_temporary_tree()))
+      {
+      }
+
+      void upsert(key_view key, value_view value) { tx.upsert(key, value); }
+      int  remove(key_view key) { return tx.remove(key); }
+      uint64_t remove_range(key_view lower, key_view upper)
+      {
+         return tx.remove_range(lower, upper);
+      }
+
+      template <ConstructibleBuffer T>
+      std::optional<T> get(key_view key) const
+      {
+         return tx.get<T>(key);
+      }
+
+      int32_t get(key_view key, Buffer auto* buffer) const { return tx.get(key, buffer); }
+
+      cursor snapshot_cursor() const { return tx.snapshot_cursor(); }
+      uint64_t count_keys() const
+      {
+         auto c = snapshot_cursor();
+         return c.count_keys();
+      }
+
+      write_transaction tx;
+   };
+
+   temp_tree_edit start_temp_edit(integrity_db& t) { return temp_tree_edit(*t.ses); }
+
    std::string ikey(int i)
    {
       char buf[32];
@@ -49,19 +83,19 @@ namespace
    }
 
    /// Verify that tree contents exactly match oracle map
-   void verify_oracle(write_cursor_ptr& cur, const std::map<std::string, std::string>& oracle)
+   void verify_oracle(temp_tree_edit& cur, const std::map<std::string, std::string>& oracle)
    {
       // Check each expected key has correct value
       for (auto& [key, val] : oracle)
       {
-         auto result = cur->get<std::string>(to_key_view(key));
+         auto result = cur.get<std::string>(to_key_view(key));
          INFO("key: " << key);
          REQUIRE(result.has_value());
          REQUIRE(*result == val);
       }
 
       // Check iteration produces exactly the right keys (no extras)
-      auto     rc    = cur->read_cursor();
+      auto     rc    = cur.snapshot_cursor();
       uint64_t count = 0;
       rc.seek_begin();
       while (!rc.is_end())
@@ -89,7 +123,7 @@ namespace
 TEST_CASE("integrity: random ops oracle comparison forcing structural changes", "[integrity][oracle]")
 {
    integrity_db t;
-   auto         cur = t.ses->create_write_cursor();
+   auto         cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
    std::mt19937                       rng(98765);
@@ -115,12 +149,12 @@ TEST_CASE("integrity: random ops oracle comparison forcing structural changes", 
          // upsert with value size that sometimes crosses the 64-byte value_node threshold
          int val_size = (rng() % 3 == 0) ? 100 + (rng() % 200) : 5 + (rng() % 20);
          std::string val(val_size, static_cast<char>('A' + (op % 26)));
-         cur->upsert(to_key_view(key), to_value_view(val));
+         cur.upsert(to_key_view(key), to_value_view(val));
          oracle[key] = val;
       }
       else if (action < 85)
       {
-         cur->remove(to_key_view(key));
+         cur.remove(to_key_view(key));
          oracle.erase(key);
       }
       else
@@ -131,7 +165,7 @@ TEST_CASE("integrity: random ops oracle comparison forcing structural changes", 
          snprintf(lo_buf, sizeof(lo_buf), "%03d", i);
          snprintf(hi_buf, sizeof(hi_buf), "%03d", j);
          std::string lo(lo_buf), hi(hi_buf);
-         cur->remove_range(to_key_view(lo), to_key_view(hi));
+         cur.remove_range(to_key_view(lo), to_key_view(hi));
          auto it = oracle.lower_bound(lo);
          while (it != oracle.end() && it->first < hi)
             it = oracle.erase(it);
@@ -141,7 +175,7 @@ TEST_CASE("integrity: random ops oracle comparison forcing structural changes", 
       if ((op + 1) % (500 / INTEG_SCALE) == 0)
       {
          INFO("verification at op " << (op + 1));
-         REQUIRE(cur->count_keys() == oracle.size());
+         REQUIRE(cur.count_keys() == oracle.size());
       }
    }
 
@@ -156,7 +190,7 @@ TEST_CASE("integrity: random ops oracle comparison forcing structural changes", 
 TEST_CASE("integrity: oracle comparison with prefix-heavy keys", "[integrity][oracle]")
 {
    integrity_db t;
-   auto         cur = t.ses->create_write_cursor();
+   auto         cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
    std::mt19937                       rng(11111);
@@ -185,12 +219,12 @@ TEST_CASE("integrity: oracle comparison with prefix-heavy keys", "[integrity][or
       if (action < 2)
       {
          std::string val = ival(op);
-         cur->upsert(to_key_view(key), to_value_view(val));
+         cur.upsert(to_key_view(key), to_value_view(val));
          oracle[key] = val;
       }
       else
       {
-         cur->remove(to_key_view(key));
+         cur.remove(to_key_view(key));
          oracle.erase(key);
       }
    }
@@ -206,7 +240,7 @@ TEST_CASE("integrity: oracle comparison with prefix-heavy keys", "[integrity][or
 TEST_CASE("integrity: oracle with 256-way fan-out insert/remove cycles", "[integrity][oracle]")
 {
    integrity_db t;
-   auto         cur = t.ses->create_write_cursor();
+   auto         cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
 
@@ -216,20 +250,20 @@ TEST_CASE("integrity: oracle with 256-way fan-out insert/remove cycles", "[integ
       std::string key(1, static_cast<char>(b));
       key += "/data";
       std::string val = ival(b);
-      cur->upsert(key_view(key.data(), key.size()), to_value_view(val));
+      cur.upsert(key_view(key.data(), key.size()), to_value_view(val));
       oracle[key] = val;
    }
-   REQUIRE(cur->count_keys() == 256);
+   REQUIRE(cur.count_keys() == 256);
 
    // Phase 2: Remove half (every other first byte)
    for (int b = 0; b < 256; b += 2)
    {
       std::string key(1, static_cast<char>(b));
       key += "/data";
-      cur->remove(key_view(key.data(), key.size()));
+      cur.remove(key_view(key.data(), key.size()));
       oracle.erase(key);
    }
-   REQUIRE(cur->count_keys() == 128);
+   REQUIRE(cur.count_keys() == 128);
 
    // Phase 3: Re-insert removed keys with different values
    for (int b = 0; b < 256; b += 2)
@@ -237,10 +271,10 @@ TEST_CASE("integrity: oracle with 256-way fan-out insert/remove cycles", "[integ
       std::string key(1, static_cast<char>(b));
       key += "/data";
       std::string val = ival(b + 1000);
-      cur->upsert(key_view(key.data(), key.size()), to_value_view(val));
+      cur.upsert(key_view(key.data(), key.size()), to_value_view(val));
       oracle[key] = val;
    }
-   REQUIRE(cur->count_keys() == 256);
+   REQUIRE(cur.count_keys() == 256);
 
    verify_oracle(cur, oracle);
 }
@@ -288,7 +322,7 @@ TEST_CASE("integrity: transaction snapshot consistency", "[integrity][transactio
    auto root_v3 = t.ses->get_root(0);
 
    // Verify all three snapshots independently
-   cursor c1(root_v1);
+   auto c1 = root_v1.snapshot_cursor();
    REQUIRE(c1.count_keys() == static_cast<uint64_t>(N));
    for (int i = 0; i < N; ++i)
    {
@@ -297,7 +331,7 @@ TEST_CASE("integrity: transaction snapshot consistency", "[integrity][transactio
       REQUIRE(buf == ival(i));  // v1 values
    }
 
-   cursor c2(root_v2);
+   auto c2 = root_v2.snapshot_cursor();
    REQUIRE(c2.count_keys() == static_cast<uint64_t>(N * 2));
    for (int i = 0; i < N; ++i)
    {
@@ -306,7 +340,7 @@ TEST_CASE("integrity: transaction snapshot consistency", "[integrity][transactio
       REQUIRE(buf == ival(i + 5000));  // v2 overwritten values
    }
 
-   cursor c3(root_v3);
+   auto c3 = root_v3.snapshot_cursor();
    REQUIRE(c3.count_keys() == static_cast<uint64_t>(N * 2 - N / 4));
    for (int i = 0; i < N / 4; ++i)
    {
@@ -370,7 +404,7 @@ TEST_CASE("integrity: 3-phase persist with structural changes", "[integrity][per
       auto root = ses->get_root(0);
       REQUIRE(root);
 
-      cursor rc(root);
+      auto rc = root.snapshot_cursor();
       REQUIRE(rc.count_keys() == oracle.size());
 
       for (auto& [key, val] : oracle)
@@ -439,7 +473,7 @@ TEST_CASE("integrity: nested sub-transaction rollback under structural pressure"
 
    // Final verification
    auto root = t.ses->get_root(0);
-   cursor rc(root);
+   auto rc = root.snapshot_cursor();
    REQUIRE(rc.count_keys() == 100);
    for (int i = 0; i < 50; ++i)
    {
@@ -462,7 +496,7 @@ TEST_CASE("integrity: nested sub-transaction rollback under structural pressure"
 TEST_CASE("integrity: range_remove across leaf/inner boundaries with oracle", "[integrity][oracle]")
 {
    integrity_db t;
-   auto         cur = t.ses->create_write_cursor();
+   auto         cur = start_temp_edit(t);
 
    std::map<std::string, std::string> oracle;
    const int N = 500 / INTEG_SCALE;
@@ -471,7 +505,7 @@ TEST_CASE("integrity: range_remove across leaf/inner boundaries with oracle", "[
    for (int i = 0; i < N; ++i)
    {
       oracle[ikey(i)] = ival(i);
-      cur->upsert(to_key_view(ikey(i)), to_value_view(ival(i)));
+      cur.upsert(to_key_view(ikey(i)), to_value_view(ival(i)));
    }
 
    // Do several range removes that cross leaf boundaries
@@ -484,7 +518,7 @@ TEST_CASE("integrity: range_remove across leaf/inner boundaries with oracle", "[
 
       auto lower = ikey(lo);
       auto upper = ikey(hi);
-      cur->remove_range(to_key_view(lower), to_key_view(upper));
+      cur.remove_range(to_key_view(lower), to_key_view(upper));
 
       auto it = oracle.lower_bound(lower);
       while (it != oracle.end() && it->first < upper)
@@ -502,7 +536,7 @@ TEST_CASE("integrity: range_remove across leaf/inner boundaries with oracle", "[
 TEST_CASE("integrity: insert/remove oscillation around collapse threshold", "[integrity][structural]")
 {
    integrity_db t;
-   auto         cur = t.ses->create_write_cursor();
+   auto         cur = start_temp_edit(t);
 
    std::set<std::string> present;
 
@@ -511,7 +545,7 @@ TEST_CASE("integrity: insert/remove oscillation around collapse threshold", "[in
    {
       std::string key(1, static_cast<char>(i + 'A'));
       key += "-val";
-      cur->upsert(key_view(key.data(), key.size()), to_value("x"));
+      cur.upsert(key_view(key.data(), key.size()), to_value("x"));
       present.insert(key);
    }
 
@@ -524,7 +558,7 @@ TEST_CASE("integrity: insert/remove oscillation around collapse threshold", "[in
       for (int j = 0; j < 10; ++j)
       {
          --it;
-         cur->remove(key_view(it->data(), it->size()));
+         cur.remove(key_view(it->data(), it->size()));
       }
       // Actually erase from set
       auto erase_it = present.end();
@@ -532,24 +566,24 @@ TEST_CASE("integrity: insert/remove oscillation around collapse threshold", "[in
          --erase_it;
       present.erase(erase_it, present.end());
 
-      REQUIRE(cur->count_keys() == present.size());
+      REQUIRE(cur.count_keys() == present.size());
 
       // Verify all remaining keys
       for (auto& k : present)
       {
          std::string buf;
          INFO("cycle " << cycle << " checking " << k);
-         REQUIRE(cur->get(key_view(k.data(), k.size()), &buf) >= 0);
+         REQUIRE(cur.get(key_view(k.data(), k.size()), &buf) >= 0);
       }
 
       // Re-insert 10 different keys (20 → 30)
       for (int j = 0; j < 10; ++j)
       {
          std::string key = "new" + std::to_string(cycle * 10 + j);
-         cur->upsert(to_key_view(key), to_value("y"));
+         cur.upsert(to_key_view(key), to_value("y"));
          present.insert(key);
       }
 
-      REQUIRE(cur->count_keys() == present.size());
+      REQUIRE(cur.count_keys() == present.size());
    }
 }

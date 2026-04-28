@@ -66,21 +66,30 @@ cmake --build build/release -j8 --target psitri-tests
 
 ## Your First Database
 
-### Create a Database
+### Open a Database
 
 ```cpp
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
 
-// Create or open a database in the given directory
-auto db = psitri::database::create("my_database");
+// Open an existing database, or create it if it does not exist.
+auto db = psitri::database::open(
+    "my_database",
+    psitri::open_mode::create_or_open);
 ```
 
-The database stores data in memory-mapped files within the specified directory. The `create` factory method uses default configuration; for custom settings, construct with a `runtime_config`.
+The database stores data in memory-mapped files within the specified directory.
+Use `open_mode::create_only` when the directory must not already contain a
+database, and `open_mode::open_existing` when startup should fail if the
+database is missing.
 
 ### Write Data
 
-Sessions are thread-affine -- always create them on the thread that will use them. See [API Reference](api.md) for details.
+Write sessions are thread-affine allocator contexts. Each one owns a 32 MB write
+buffer. Create one on the thread that will use it, keep it for the life of that
+worker thread, and create many transactions from it. Do not create a new write
+session for each small operation. See [Transaction and Cursor
+Contract](transaction-contract.md) for details.
 
 ```cpp
 auto session = db->start_write_session();
@@ -106,18 +115,24 @@ tx.commit();  // atomic root swap -- visible to all readers instantly
 // Read within a transaction
 auto tx = session->start_transaction(0);
 
-auto val = tx.get<std::string>("user:alice");
-if (val) {
-    std::cout << "Alice: " << *val << std::endl;
-}
+// Zero-copy: value is valid only inside the lambda.
+bool found = tx.get("user:alice", [](psitri::value_view value) {
+   std::cout << "Alice: " << value << std::endl;
+});
+
+// Copy when the value must outlive the callback.
+auto owned = tx.get<std::string>("user:alice");
 ```
+
+Keep zero-copy callbacks short. Holding the view for a long-running function can
+delay compaction while PsiTri protects the underlying storage.
 
 ### Iterate with a Cursor
 
 ```cpp
 // Create a read-only cursor from a snapshot
 auto read_ses = db->start_read_session();
-auto cursor = read_ses->create_cursor(0);
+auto cursor = read_ses->snapshot_cursor(0);
 
 // Forward iteration
 cursor.seek_begin();
@@ -151,7 +166,7 @@ tx.commit();
 ### Count Keys in a Range
 
 ```cpp
-auto cursor = read_ses->create_cursor(0);
+auto cursor = read_ses->snapshot_cursor(0);
 
 // O(log n) -- does not scan the keys
 uint64_t count = cursor.count_keys("user:", "user:\xFF");
@@ -160,21 +175,35 @@ uint64_t count = cursor.count_keys("user:", "user:\xFF");
 ### Subtrees
 
 ```cpp
+// Build a detached tree, then store it as a subtree value.
+auto sub = session->create_temporary_tree();
+auto sub_tx = session->start_write_transaction(
+    std::move(sub),
+    psitri::tx_mode::expect_success);
+sub_tx.upsert("field1", "value1");
+sub_tx.upsert("field2", "value2");
+sub = sub_tx.get_tree();
+
 auto tx = session->start_transaction(0);
-
-// Create a subtree (independent tree stored as a value)
-auto sub = session->create_write_cursor();
-sub->upsert("field1", "value1");
-sub->upsert("field2", "value2");
-
-// Store the subtree as a value
-tx.upsert("my_subtree", sub->root());
+tx.upsert_subtree("my_subtree", std::move(sub));
 
 // Read back the subtree
-auto subtree_cursor = tx.get_subtree_cursor("my_subtree");
+{
+   auto stored = tx.subtree_transaction("my_subtree", psitri::subtree_open::must_exist);
+   stored.get("field1", [](psitri::value_view field1) {
+      use_field(field1);
+   });
+   stored.abort();
+}
 
 tx.commit();
 ```
+
+Existing roots, snapshots, and stored subtrees can be exposed as copyable tree
+handles when you ask for them. This lets applications archive or copy subtrees
+without deep-copying every key/value pair, but it also means cycles are a real
+footgun: do not store a tree inside itself, inside one of its descendants, or in
+any indirect cycle. Cycles may keep reference-counted storage alive forever.
 
 ### Sync and Durability
 
@@ -208,7 +237,7 @@ tx1.commit();
 Multiple threads can write to **different roots** simultaneously with zero contention. The key rule: create the session on the thread that will use it.
 
 ```cpp
-auto db = psitri::database::create("my_database");
+auto db = psitri::database::open("my_database", psitri::open_mode::create_or_open);
 
 const int num_writers = 4;
 std::vector<std::thread> writers;
@@ -268,7 +297,7 @@ for (int w = 0; w < num_writers; ++w)
 Reader threads can iterate and query concurrently with writers. Readers never block writers, and writers never block readers. Each reader sees a consistent snapshot.
 
 ```cpp
-auto db = psitri::database::create("my_database");
+auto db = psitri::database::open("my_database", psitri::open_mode::create_or_open);
 
 std::atomic<bool> writers_done{false};
 std::vector<std::thread> threads;
@@ -300,8 +329,8 @@ for (int r = 0; r < 4; ++r)
 
       while (!writers_done.load())
       {
-         // Each cursor call takes a snapshot -- sees a consistent view
-         auto cur = session->create_cursor(0);
+         // Each snapshot cursor sees a consistent view
+         auto cur = session->snapshot_cursor(0);
          cur.seek_begin();
          uint64_t count = 0;
          while (!cur.is_end())
@@ -321,10 +350,11 @@ for (auto& t : threads)
 ### Key Points
 
 - **Sessions are thread-affine**: Always call `start_write_session()` or `start_read_session()` from the thread that will use it. Never create a session on one thread and pass it to another.
+- **Write sessions are long-lived**: A write session is an allocator context with a 32 MB write buffer. Use one per writer thread and reuse it for many transactions. Do not create write sessions repeatedly for small operations.
 - **Different roots = zero contention**: Writers to different roots never block each other.
 - **Same root = serialized**: Only one writer per root at a time. `start_transaction()` blocks until the root is available.
 - **Readers never block**: Readers take atomic snapshots and see a consistent view. They never interfere with writers or other readers.
-- **Up to 64 concurrent sessions**: The database supports up to 64 threads with active sessions simultaneously.
+- **Up to 50 application write sessions**: The allocator has 64 session slots total; 14 are reserved for backend and compaction work.
 
 ## Next Steps
 

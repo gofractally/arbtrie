@@ -1,11 +1,14 @@
 #pragma once
 #include <hash/xxhash.h>
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
 #include <sal/allocator_session.hpp>
 #include <sal/time.hpp>
 #include <ucc/fast_memcpy.hpp>
+#include <vector>
 
 namespace sal
 {
@@ -112,158 +115,180 @@ namespace sal
    } __attribute__((packed));
    static_assert(sizeof(alloc_header) == 12);
 
-   /**
-     * Defines a base class for user defined types to define their own 
-     * optimized memory operations. The default impl is to use memcpy 
-     * and full object checksumming, but there may be more efficient
-     * ways to handle this for specific types, such as growing on
-     * COW and compacting to a smaller size later. Or skipping certain
-     * internal bytes or having a custom checksum method.
-    */
-   template <typename T>
-   class vtable
+   class pending_release_list
    {
      public:
-      static constexpr const uint8_t type_id = (uint8_t)T::type_id;
-      static uint32_t                compact_size(const alloc_header* header) noexcept
+      explicit pending_release_list(std::vector<ptr_address>& storage) noexcept
+          : _storage(&storage)
       {
-         return static_cast<const T*>(header)->compact_size();
+         _storage->clear();
       }
-      /**
-       * The size that copy_to would like to reserve in case the copy wants to
-       * grow or shrink the object. Should be a multiple of 64 bytes.
-       */
-      static uint32_t cow_size(const alloc_header* header) noexcept
+
+      bool push(ptr_address address) noexcept
+      {
+         try
+         {
+            _storage->push_back(address);
+            return true;
+         }
+         catch (...)
+         {
+            _failed = true;
+            return false;
+         }
+      }
+
+      std::size_t size() const noexcept { return _storage->size(); }
+      bool        empty() const noexcept { return _storage->empty(); }
+      bool        failed() const noexcept { return _failed; }
+
+      ptr_address operator[](std::size_t idx) const noexcept
+      {
+         assert(idx < _storage->size());
+         return (*_storage)[idx];
+      }
+
+      const ptr_address* begin() const noexcept
+      {
+         return _storage->empty() ? nullptr : _storage->data();
+      }
+      const ptr_address* end() const noexcept
+      {
+         return _storage->empty() ? nullptr : _storage->data() + _storage->size();
+      }
+
+     private:
+      std::vector<ptr_address>* _storage = nullptr;
+      bool                      _failed  = false;
+   };
+
+   class object_type_ops
+   {
+     public:
+      virtual ~object_type_ops() = default;
+
+      virtual uint32_t cow_size(const alloc_header* header) const noexcept = 0;
+      virtual uint32_t compact_size(const alloc_header* header) const noexcept = 0;
+      virtual bool     has_checksum(const alloc_header* header) const noexcept = 0;
+      virtual bool     verify_checksum(const alloc_header* header) const noexcept = 0;
+      virtual void     update_checksum(alloc_header* header) const noexcept = 0;
+      virtual void     active_compact_to(const alloc_header*          src,
+                                         alloc_header*                compact_dst,
+                                         const allocator_session_ptr& session) const noexcept = 0;
+      virtual void     passive_compact_to(const alloc_header*    src,
+                                          alloc_header*          compact_dst,
+                                          pending_release_list&  pending_releases) const noexcept = 0;
+      virtual void     active_copy_to(const alloc_header*          src,
+                                      alloc_header*                dst,
+                                      const allocator_session_ptr& session) const noexcept = 0;
+      virtual void     passive_copy_to(const alloc_header*   src,
+                                       alloc_header*         dst,
+                                       pending_release_list& pending_releases) const noexcept = 0;
+      virtual void     destroy(const alloc_header*          header,
+                               const allocator_session_ptr& session) const noexcept = 0;
+      virtual void visit_children(
+          const alloc_header*                     header,
+          const std::function<void(ptr_address)>& visitor) const noexcept = 0;
+   };
+
+   /**
+    * Adapts a concrete C++ alloc_header-derived type to the SAL runtime object
+    * operations interface. Instances of this adapter live beside an allocator
+    * or database; persisted segment data stores only type ids, never vptrs.
+    */
+   template <typename T>
+   class static_object_type_ops : public object_type_ops
+   {
+     public:
+      static constexpr uint8_t type_id = uint8_t(T::type_id);
+
+      uint32_t cow_size(const alloc_header* header) const noexcept override
       {
          return static_cast<const T*>(header)->cow_size();
       }
-      static bool has_checksum(const alloc_header* header) noexcept
+      uint32_t compact_size(const alloc_header* header) const noexcept override
+      {
+         return static_cast<const T*>(header)->compact_size();
+      }
+      bool has_checksum(const alloc_header* header) const noexcept override
       {
          return static_cast<const T*>(header)->has_checksum();
       }
-      static bool verify_checksum(const alloc_header* header) noexcept
+      bool verify_checksum(const alloc_header* header) const noexcept override
       {
          return static_cast<const T*>(header)->verify_checksum();
       }
-      static void update_checksum(alloc_header* header) noexcept
+      void update_checksum(alloc_header* header) const noexcept override
       {
-         return static_cast<T*>(header)->update_checksum();
+         static_cast<T*>(header)->update_checksum();
       }
-      /**
-       * dst->size() should be compact_size(src)
-       */
-      static void compact_to(const alloc_header* src, alloc_header* compact_dst) noexcept
+      void active_compact_to(const alloc_header*          src,
+                             alloc_header*                compact_dst,
+                             const allocator_session_ptr&) const noexcept override
       {
          static_cast<const T*>(src)->compact_to(compact_dst);
       }
-      /**
-       * dst->size() should be cow_size(src)
-       */
-      static void copy_to(const alloc_header* src, alloc_header* dst) noexcept
+      void passive_compact_to(const alloc_header*   src,
+                              alloc_header*         compact_dst,
+                              pending_release_list&) const noexcept override
+      {
+         static_cast<const T*>(src)->compact_to(compact_dst);
+      }
+      void active_copy_to(const alloc_header*          src,
+                          alloc_header*                dst,
+                          const allocator_session_ptr&) const noexcept override
       {
          static_cast<const T*>(src)->copy_to(dst);
       }
-      /**
-       * This is called when the object is destroyed, in which case the object
-       * may have ptr_address's that need to be recursively released. An object_ref
-       * provides both access to the object being destroyed, but also to the
-       * allocator_session_ptr which enables getting other objects
-       * and releasing them as well.
-       */
-      static void destroy(const alloc_header* header, const allocator_session_ptr& session) noexcept
+      void passive_copy_to(const alloc_header*   src,
+                           alloc_header*         dst,
+                           pending_release_list&) const noexcept override
+      {
+         static_cast<const T*>(src)->copy_to(dst);
+      }
+      void destroy(const alloc_header*          header,
+                   const allocator_session_ptr& session) const noexcept override
       {
          static_cast<const T*>(header)->destroy(session);
       }
-      static void visit_children(const alloc_header*                     header,
-                                 const std::function<void(ptr_address)>& visitor) noexcept
+      void visit_children(
+          const alloc_header*                     header,
+          const std::function<void(ptr_address)>& visitor) const noexcept override
       {
          static_cast<const T*>(header)->visit_children(visitor);
       }
    };
 
-   struct vtable_pointers
-   {
-      template <typename T>
-      static vtable_pointers create()
-      {
-         return {&T::update_checksum, &T::cow_size,        &T::compact_size,
-                 &T::has_checksum,    &T::verify_checksum, &T::compact_to,
-                 &T::copy_to,         &T::destroy,         &T::visit_children};
-      }
-      void (*update_checksum)(alloc_header* header) noexcept;
-
-      uint32_t (*cow_size)(const alloc_header* header) noexcept;
-      uint32_t (*compact_size)(const alloc_header* header) noexcept;
-      bool (*has_checksum)(const alloc_header* header) noexcept;
-      bool (*verify_checksum)(const alloc_header* header) noexcept;
-      void (*compact_to)(const alloc_header* src, alloc_header* compact_dst) noexcept;
-      void (*copy_to)(const alloc_header* src, alloc_header* dst) noexcept;
-      void (*destroy)(const alloc_header* header, const allocator_session_ptr& session) noexcept;
-      void (*visit_children)(const alloc_header*                     header,
-                             const std::function<void(ptr_address)>& visitor) noexcept;
-   };
-
-   std::array<vtable_pointers, 128>& get_type_vtables();
-
    template <typename T>
-   inline static int register_type_vtable()
+   inline const object_type_ops& default_object_type_ops() noexcept
    {
-      static_assert(uint8_t(T::type_id) < 128, "type_id out of range");
-      get_type_vtables()[uint8_t(T::type_id)] = vtable_pointers::create<vtable<T>>();
-      SAL_TRACE("register_type_vtable {} {} destroy ptr: {}", T::type_id, int(T::type_id),
-                get_type_vtables()[uint8_t(T::type_id)].destroy);
-      return int(T::type_id);
+      static const static_object_type_ops<T> ops;
+      return ops;
    }
-
-   namespace vcall
-   {
-      inline static uint32_t cow_size(const alloc_header* header) noexcept
-      {
-         return get_type_vtables()[uint8_t(header->type())].cow_size(header);
-      }
-      inline static uint32_t compact_size(const alloc_header* header) noexcept
-      {
-         return get_type_vtables()[uint8_t(header->type())].compact_size(header);
-      }
-      inline static bool has_checksum(const alloc_header* header) noexcept
-      {
-         return get_type_vtables()[uint8_t(header->type())].has_checksum(header);
-      }
-      inline static bool verify_checksum(const alloc_header* header) noexcept
-      {
-         return get_type_vtables()[uint8_t(header->type())].verify_checksum(header);
-      }
-      inline static void update_checksum(alloc_header* header) noexcept
-      {
-         return get_type_vtables()[uint8_t(header->type())].update_checksum(header);
-      }
-      inline static void compact_to(const alloc_header* src, alloc_header* compact_dst) noexcept
-      {
-         return get_type_vtables()[uint8_t(src->type())].compact_to(src, compact_dst);
-      }
-      inline static void copy_to(const alloc_header* src, alloc_header* dst) noexcept
-      {
-         return get_type_vtables()[uint8_t(src->type())].copy_to(src, dst);
-      }
-      inline static void destroy(const alloc_header*          header,
-                                 const allocator_session_ptr& session) noexcept
-      {
-         return get_type_vtables()[uint8_t(header->type())].destroy(header, session);
-      }
-   }  // namespace vcall
 
    /**
     * Stored in sync_header::user_data to record which root was updated
     * at each commit boundary. Enables root reconstruction from segments
     * during power-loss recovery.
     */
+   inline constexpr uint8_t sync_header_user_data_capacity = 27;
+
    struct sync_root_info
    {
-      uint32_t root_index;    ///< which root was updated
-      uint32_t root_address;  ///< the ptr_address it was set to
+      uint32_t root_index;       ///< which root was updated
+      uint32_t root_address;     ///< the root ptr_address it was set to
+      uint32_t version_address;  ///< custom CB ptr_address for the root version
+      uint64_t root_version;     ///< MVCC version stored in version_address
    };
-   static_assert(sizeof(sync_root_info) == 8);
-   static_assert(sizeof(sync_root_info) <= 27, "must fit in sync_header user_data");
+   static_assert(sizeof(sync_root_info) <= sync_header_user_data_capacity,
+                 "must fit in sync_header user_data");
+
+   struct sync_root_info_v1
+   {
+      uint32_t root_index;
+      uint32_t root_address;
+   };
+   static_assert(sizeof(sync_root_info_v1) == 8);
 
    /**
     * sync_header this is written every time the
@@ -339,6 +364,13 @@ namespace sal
             memcpy(&info, _user_data, sizeof(info));
             return info;
          }
+         if (_user_data_size == sizeof(sync_root_info_v1))
+         {
+            sync_root_info_v1 legacy;
+            memcpy(&legacy, _user_data, sizeof(legacy));
+            return sync_root_info{
+                legacy.root_index, legacy.root_address, *null_ptr_address, 0};
+         }
          return std::nullopt;
       }
 
@@ -348,7 +380,7 @@ namespace sal
       usec_timestamp _time_stamp_usec;
       uint32_t       _prev_aheader_pos;
       uint32_t       _start_checksum_pos;
-      char           _user_data[27];
+      char           _user_data[sync_header_user_data_capacity];
       uint8_t        _user_data_size;
       /// covers entire range from last sync to _sync_checksum
       /// disticnt from alloc_header::_checksum which only covers this object.

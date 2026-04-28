@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <unordered_set>
+#include <vector>
 #include <sal/alloc_header.hpp>
 #include <sal/allocator.hpp>
 #include <sal/allocator_impl.hpp>
@@ -14,6 +15,129 @@
 
 namespace sal
 {
+   class recovery_visit_set
+   {
+     public:
+      explicit recovery_visit_set(uint64_t address_count) : _bits((address_count + 63) / 64) {}
+
+      bool first_visit(ptr_address addr) noexcept
+      {
+         uint64_t index = *addr;
+         uint64_t word  = index >> 6;
+         if (word >= _bits.size())
+            return false;
+
+         uint64_t mask  = uint64_t(1) << (index & 63);
+         bool     first = (_bits[word] & mask) == 0;
+         _bits[word] |= mask;
+         return first;
+      }
+
+     private:
+      std::vector<uint64_t> _bits;
+   };
+
+   class recovery_location_index
+   {
+     public:
+      explicit recovery_location_index(uint64_t address_count)
+          : _seen((address_count + 63) / 64), _sequence(address_count), _location(address_count)
+      {
+      }
+
+      bool should_store(ptr_address addr, uint16_t sequence, location new_loc) noexcept
+      {
+         uint64_t index = *addr;
+         uint64_t word  = index >> 6;
+         if (word >= _seen.size())
+            return false;
+
+         uint64_t mask = uint64_t(1) << (index & 63);
+         if ((_seen[word] & mask) == 0)
+         {
+            _seen[word] |= mask;
+            _sequence[index] = sequence;
+            _location[index] = new_loc;
+            return true;
+         }
+
+         uint16_t current_sequence = _sequence[index];
+         if (sequence_newer(sequence, current_sequence))
+         {
+            _sequence[index] = sequence;
+            _location[index] = new_loc;
+            return true;
+         }
+
+         if (sequence != current_sequence)
+            return false;
+
+         const auto current_loc = _location[index];
+         if (new_loc.segment() != current_loc.segment() ||
+             new_loc.segment_offset() <= current_loc.segment_offset())
+            return false;
+
+         _location[index] = new_loc;
+         return true;
+      }
+
+     private:
+      static bool sequence_newer(uint16_t candidate, uint16_t current) noexcept
+      {
+         return candidate != current &&
+                static_cast<int16_t>(candidate - current) > 0;
+      }
+
+      std::vector<uint64_t> _seen;
+      std::vector<uint16_t> _sequence;
+      std::vector<location> _location;
+   };
+
+   static constexpr std::size_t passive_relocation_release_capacity = 1024;
+
+   static void release_pending_relocation_refs(
+       allocator_session& ses, const pending_release_list& pending_releases) noexcept
+   {
+      for (auto adr : pending_releases)
+         ses.release(adr);
+   }
+
+   class recovery_version_index
+   {
+     public:
+      explicit recovery_version_index(uint64_t address_count) : _versions(address_count) {}
+
+      void record(const sync_root_info& info) noexcept
+      {
+         auto version_addr = ptr_address(info.version_address);
+         if (version_addr == null_ptr_address || info.root_version == 0)
+            return;
+
+         uint64_t index = *version_addr;
+         if (index >= _versions.size())
+            return;
+
+         _versions[index] = std::max(_versions[index], info.root_version);
+      }
+
+      uint64_t version_for(ptr_address addr) const noexcept
+      {
+         if (addr == null_ptr_address)
+            return 0;
+
+         uint64_t index = *addr;
+         if (index >= _versions.size())
+            return 0;
+         return _versions[index];
+      }
+
+     private:
+      std::vector<uint64_t> _versions;
+   };
+
+   static constexpr uint64_t recovered_custom_cb_latest_version =
+      control_block::max_cacheline_offset - 1;
+
    /// Set to true to enable compactor timing and unpinned-segment diagnostics.
    /// When false, all instrumentation is compiled out by the optimizer.
    static constexpr bool debug_compactor = false;
@@ -129,7 +253,7 @@ namespace sal
       return requested;
    }
 
-   allocator::allocator(std::filesystem::path dir, runtime_config cfg)
+   allocator::allocator(std::filesystem::path dir, runtime_config cfg, bool start_threads_now)
        : _ptr_alloc(dir / "ptrs"),
          _block_alloc(dir / "segs", segment_size,
                       static_cast<uint32_t>(
@@ -139,6 +263,8 @@ namespace sal
          _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
          _root_object_file(dir / "roots", access_mode::read_write, true)
    {
+      _type_ops.fill(&default_object_type_ops<alloc_header>());
+
       _allocator_index = alloc_allocator_index();
       if (_seg_alloc_state_file.size() == 0)
       {
@@ -150,13 +276,46 @@ namespace sal
       {
          _root_object_file.resize(system_config::round_to_page(sizeof(root_object_array)));
          auto arr = new (_root_object_file.data()) root_object_array();
-         for (auto& ro : *arr)
-            ro.store(null_tree_id.pack(), std::memory_order_relaxed);
+         (void)arr;
+      }
+      else if (_root_object_file.size() <
+               system_config::round_to_page(sizeof(root_object_array)))
+      {
+         std::array<uint64_t, 1024> legacy_roots{};
+         auto* legacy =
+             reinterpret_cast<std::atomic<uint64_t>*>(_root_object_file.data());
+         for (auto& root : legacy_roots)
+            root = legacy++->load(std::memory_order_relaxed);
+
+         _root_object_file.resize(system_config::round_to_page(sizeof(root_object_array)));
+         auto arr = new (_root_object_file.data()) root_object_array();
+         for (uint32_t i = 0; i < arr->size(); ++i)
+            arr->at(i).store(tree_id::unpack(legacy_roots[i]), 0,
+                             std::memory_order_relaxed);
       }
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
       _root_objects = reinterpret_cast<root_object_array*>(_root_object_file.data());
       assert(_root_objects);
+      // Bind global free-range tracker base to the contiguous-block mmap
+      // base. Available before any segment is allocated; the address-space
+      // reservation happens in block_allocator's ctor.
+      SAL_TRACK_SET_BASE(_block_alloc.mapped_base());
+
+#if PSITRI_DEEP_INVARIANTS
+      // Install verifier callback. Called by the tracker after every
+      // mark_alloc/mark_free; checks the per-segment invariant
+      //     alloc_pos == freed_space + live_in_seg
+      // The first divergence aborts with the offending op's tag.
+      sal::debug::free_range_tracker::instance().set_verifier(
+          [this](const char* when, const char* op_tag,
+                 const void* obj, uint32_t /*size*/) {
+              auto seg_num = get_segment_for_object(obj);
+              auto* seg    = get_segment(seg_num);
+              _mapped_state->_segment_data.verify_invariant(
+                  seg, seg->get_alloc_pos(), *seg_num, when, op_tag);
+          });
+#endif
       // Cap pinned cache budget to what RLIMIT_MEMLOCK will allow, using the value
       // already cached by block_allocator (no extra syscall needed).
       {
@@ -195,7 +354,8 @@ namespace sal
 
       provider_populate_pinned_segments();
       provider_populate_unpinned_segments();
-      start_background_threads();
+      if (start_threads_now)
+         start_background_threads();
    }
 
    /**
@@ -360,11 +520,12 @@ namespace sal
          // Copy root slots (packed tree_ids) and their custom CBs
          for (uint32_t i = 0; i < _root_objects->size(); ++i)
          {
-            auto packed = (*_root_objects)[i].load(std::memory_order_relaxed);
-            (*dest._root_objects)[i].store(packed, std::memory_order_relaxed);
+            auto& src_root = (*_root_objects)[i];
+            auto& dst_root = (*dest._root_objects)[i];
+            dst_root.copy_from(src_root);
 
             // Copy custom CBs (ver_adr) referenced by root slots
-            auto tid = tree_id::unpack(packed);
+            auto tid = src_root.load(std::memory_order_relaxed);
             if (tid.ver != null_ptr_address)
             {
                auto* cb = _ptr_alloc.try_get(tid.ver);
@@ -385,7 +546,7 @@ namespace sal
                objects_copied, bytes_copied);
    }
 
-   void allocator::recursive_retain_all(ptr_address addr)
+   void allocator::recursive_retain_all(ptr_address addr, void* visited_ptr)
    {
       if (addr == null_ptr_address)
          return;
@@ -395,6 +556,9 @@ namespace sal
          return;
 
       auto prev = cb->retain();
+      auto& visited = *static_cast<recovery_visit_set*>(visited_ptr);
+      if (!visited.first_visit(addr))
+         return;
 
       // Custom control blocks: retained but not dereferenced (no segment data)
       if (allocator_session::is_custom_cb(prev))
@@ -408,13 +572,8 @@ namespace sal
       if (obj->address() != addr)
          return;
 
-      auto& vtables  = get_type_vtables();
-      auto  type_idx = uint8_t(obj->type());
-      if (type_idx < vtables.size() && vtables[type_idx].visit_children)
-      {
-         vtables[type_idx].visit_children(
-             obj, [this](ptr_address child) { recursive_retain_all(child); });
-      }
+      type_ops(obj).visit_children(
+          obj, [this, visited_ptr](ptr_address child) { recursive_retain_all(child, visited_ptr); });
    }
 
    void allocator::recursive_sum_size(ptr_address addr, uint64_t& total, void* visited_ptr)
@@ -445,15 +604,10 @@ namespace sal
 
       total += obj->size();
 
-      auto& vtables  = get_type_vtables();
-      auto  type_idx = uint8_t(obj->type());
-      if (type_idx < vtables.size() && vtables[type_idx].visit_children)
-      {
-         vtables[type_idx].visit_children(
-             obj, [this, &total, visited_ptr](ptr_address child) {
-                recursive_sum_size(child, total, visited_ptr);
-             });
-      }
+      type_ops(obj).visit_children(
+          obj, [this, &total, visited_ptr](ptr_address child) {
+             recursive_sum_size(child, total, visited_ptr);
+          });
    }
 
    uint64_t allocator::reachable_size()
@@ -464,7 +618,7 @@ namespace sal
 
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
             recursive_sum_size(tid.root, total, &visited);
          if (tid.ver != null_ptr_address)
@@ -606,26 +760,27 @@ namespace sal
       return results;
    }
 
-   void allocator::reconstruct_custom_cbs_from_roots()
+   void allocator::reconstruct_custom_cbs_from_roots(const void* recovered_versions_ptr)
    {
+      const auto* recovered_versions =
+          static_cast<const recovery_version_index*>(recovered_versions_ptr);
+
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.ver != null_ptr_address)
          {
-            auto& cb   = _ptr_alloc.get_or_alloc(tid.ver);
-            auto  data = cb.load(std::memory_order_relaxed);
-            if (!data.ref)
-            {
-               // Reconstruct as custom CB with ref=1 and the custom marker.
-               // The original version number stored in the location field is lost
-               // (custom CBs have no segment data), so store 0 as placeholder.
-               cb.store(control_block_data()
-                            .set_ref(1)
-                            .set_pending_cache(true)
-                            .set_loc(location::from_cacheline(0)),
-                        std::memory_order_relaxed);
-            }
+            auto& cb = _ptr_alloc.get_or_alloc(tid.ver);
+            auto version = recovered_versions ? recovered_versions->version_for(tid.ver) : 0;
+            if (version == 0)
+               version = _root_objects->at(i).version_for(tid);
+            if (version == 0)
+               version = recovered_custom_cb_latest_version;
+            cb.store(control_block_data()
+                         .set_ref(1)
+                         .set_pending_cache(true)
+                         .set_loc(location::from_cacheline(version)),
+                     std::memory_order_relaxed);
          }
       }
    }
@@ -663,7 +818,9 @@ namespace sal
       _mapped_state->_segment_provider.ready_unpinned_segments.clear();
 
       // Phase 3: Scan each segment, rebuilding object ID -> location mapping
-      uint32_t max_provider_seq = 0;
+      uint32_t                max_provider_seq = 0;
+      recovery_location_index location_index(_ptr_alloc.current_max_address_count());
+      recovery_version_index  version_index(_ptr_alloc.current_max_address_count());
       for (auto seg_idx : age_index)
       {
          auto* seg = get_segment(segment_number(seg_idx));
@@ -690,22 +847,22 @@ namespace sal
 
             if (obj_ptr->type() == header_type::sync_head)
             {
+               auto* sync = reinterpret_cast<const sync_header*>(obj_ptr);
+               if (auto info = sync->get_root_info())
+                  version_index.record(*info);
                obj_ptr = obj_ptr->next();
                continue;
             }
 
             auto  addr = obj_ptr->address();
             auto& cb   = _ptr_alloc.get_or_alloc(addr);
-            auto  cur_loc = cb.loc();
 
             uint64_t abs_addr =
                 uint64_t(seg_idx) * segment_size +
                 (reinterpret_cast<const char*>(obj_ptr) - seg->data);
             auto new_loc = location::from_absolute_address(abs_addr);
 
-            // Update if unseen, or if in the same segment (later offset = newer)
-            auto cur_seg = cur_loc.segment();
-            if (!cur_loc.cacheline() || *cur_seg == seg_idx)
+            if (location_index.should_store(addr, obj_ptr->sequence(), new_loc))
             {
                cb.store(control_block_data().set_loc(new_loc).set_ref(1),
                         std::memory_order_relaxed);
@@ -716,16 +873,17 @@ namespace sal
       }
 
       // Phase 3.5: Reconstruct custom CBs (version addresses) from root slots
-      reconstruct_custom_cbs_from_roots();
+      reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 4: Walk all root objects, recursively retain reachable nodes
+      recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
-            recursive_retain_all(tid.root);
+            recursive_retain_all(tid.root, &visited);
          if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver);
+            recursive_retain_all(tid.ver, &visited);
       }
 
       // Phase 5: Free leaked objects
@@ -752,16 +910,47 @@ namespace sal
 
       _ptr_alloc.reset_all_refs();
 
-      // Reconstruct custom CBs before walking roots
-      reconstruct_custom_cbs_from_roots();
+      recovery_version_index version_index(_ptr_alloc.current_max_address_count());
+      auto                   num_segs = _block_alloc.num_blocks();
+      for (uint32_t seg_idx = 0; seg_idx < num_segs; ++seg_idx)
+      {
+         auto* seg = get_segment(segment_number(seg_idx));
+         if (seg->_provider_sequence == 0 && seg->get_alloc_pos() == 0)
+            continue;
 
+         auto* obj_ptr = reinterpret_cast<const alloc_header*>(seg->data);
+         auto* seg_end = reinterpret_cast<const alloc_header*>(
+             seg->data +
+             std::min<uint32_t>(segment_size - mapped_memory::segment_footer_size,
+                                seg->get_alloc_pos()));
+
+         while (obj_ptr < seg_end && obj_ptr->address() != null_ptr_address)
+         {
+            if (obj_ptr->size() == 0)
+               break;
+
+            if (obj_ptr->type() == header_type::sync_head)
+            {
+               auto* sync = reinterpret_cast<const sync_header*>(obj_ptr);
+               if (auto info = sync->get_root_info())
+                  version_index.record(*info);
+            }
+
+            obj_ptr = obj_ptr->next();
+         }
+      }
+
+      // Reconstruct custom CBs before walking roots
+      reconstruct_custom_cbs_from_roots(&version_index);
+
+      recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
-            recursive_retain_all(tid.root);
+            recursive_retain_all(tid.root, &visited);
          if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver);
+            recursive_retain_all(tid.ver, &visited);
       }
 
       _ptr_alloc.release_unreachable();
@@ -846,10 +1035,14 @@ namespace sal
          usec_timestamp timestamp;
          uint32_t       root_index;
          uint32_t       root_address;
+         uint32_t       version_address;
+         uint64_t       root_version;
       };
       std::vector<root_recovery_entry> recovered_roots;
 
-      uint32_t max_provider_seq = 0;
+      uint32_t                max_provider_seq = 0;
+      recovery_location_index location_index(_ptr_alloc.current_max_address_count());
+      recovery_version_index  version_index(_ptr_alloc.current_max_address_count());
       for (auto seg_idx : age_index)
       {
          auto* seg = get_segment(segment_number(seg_idx));
@@ -886,10 +1079,13 @@ namespace sal
                auto  info    = scan_sh->get_root_info();
                if (info)
                {
-                  SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ts={}",
-                           scan_pos, info->root_index, info->root_address, *scan_sh->timestamp());
+                  version_index.record(*info);
+                  SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ver_addr={} ver={} ts={}",
+                           scan_pos, info->root_index, info->root_address,
+                           info->version_address, info->root_version, *scan_sh->timestamp());
                   recovered_roots.push_back(
-                      {scan_sh->timestamp(), info->root_index, info->root_address});
+                      {scan_sh->timestamp(), info->root_index, info->root_address,
+                       info->version_address, info->root_version});
                }
                if (scan_pos == scan_sh->prev_aheader_pos())
                   break;  // prevent infinite loop
@@ -930,16 +1126,13 @@ namespace sal
 
             auto  addr = obj_ptr->address();
             auto& cb   = _ptr_alloc.get_or_alloc(addr);
-            auto  cur_loc = cb.loc();
 
             uint64_t abs_addr =
                 uint64_t(seg_idx) * segment_size +
                 (reinterpret_cast<const char*>(obj_ptr) - seg->data);
             auto new_loc = location::from_absolute_address(abs_addr);
 
-            // Prefer newer segments (already sorted newest-first), or later offset in same segment
-            auto cur_seg = cur_loc.segment();
-            if (!cur_loc.cacheline() || *cur_seg == seg_idx)
+            if (location_index.should_store(addr, obj_ptr->sequence(), new_loc))
             {
                cb.store(control_block_data().set_loc(new_loc).set_ref(1),
                         std::memory_order_relaxed);
@@ -961,14 +1154,16 @@ namespace sal
       {
          if (entry.root_index < _root_objects->size() && !root_set[entry.root_index])
          {
-            // Verify the ptr_address actually has a valid control block
-            auto* cb = _ptr_alloc.try_get(ptr_address(entry.root_address));
-            if (cb && cb->loc().cacheline())
+            // Verify the ptr_address resolves to a real segment object. Offset
+            // zero is a valid location, so do not treat loc().cacheline() as a
+            // boolean validity check.
+            auto resolved = resolve(ptr_address(entry.root_address));
+            if (resolved.first)
             {
-               // Store as packed tree_id with null ver (sync headers don't store ver)
-               auto recovered_tid = tree_id(ptr_address(entry.root_address));
+               auto recovered_tid =
+                   tree_id(ptr_address(entry.root_address), ptr_address(entry.version_address));
                _root_objects->at(entry.root_index)
-                   .store(recovered_tid.pack(), std::memory_order_relaxed);
+                   .store(recovered_tid, entry.root_version, std::memory_order_relaxed);
                root_set[entry.root_index] = true;
                ++roots_recovered;
                SAL_WARN("recovered root[{}] = {} from sync header (ts={})",
@@ -980,39 +1175,43 @@ namespace sal
       // Validate roots from the roots file — these were synced to disk by
       // allocator::sync() during commit, so they are the primary source.
       // Sync headers are a secondary source for when the roots file is corrupt.
+      uint32_t roots_from_file = 0;
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
          if (!root_set[i])
          {
-            auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+            auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
             if (tid.root != null_ptr_address)
             {
                // Verify the existing root's control block was rebuilt by the segment scan
-               auto* cb = _ptr_alloc.try_get(tid.root);
-               if (!cb || !cb->loc().cacheline())
+               auto resolved = resolve(tid.root);
+               if (!resolved.first)
                {
                   SAL_WARN("root[{}] = {} from roots file is invalid (no control block), clearing", i, *tid.root);
-                  _root_objects->at(i).store(null_tree_id.pack(), std::memory_order_relaxed);
+                  _root_objects->at(i).store(null_tree_id, 0,
+                                             std::memory_order_relaxed);
                }
                else
                {
                   root_set[i] = true;  // existing root is valid, keep it
+                  ++roots_from_file;
                }
             }
          }
       }
 
       // Phase 5.5: Reconstruct custom CBs from root slots
-      reconstruct_custom_cbs_from_roots();
+      reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 6: Walk all valid roots, recursively retain reachable nodes
+      recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
-         auto tid = tree_id::unpack(_root_objects->at(i).load(std::memory_order_relaxed));
+         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
-            recursive_retain_all(tid.root);
+            recursive_retain_all(tid.root, &visited);
          if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver);
+            recursive_retain_all(tid.ver, &visited);
       }
 
       // Phase 7: Free leaked objects
@@ -1028,10 +1227,6 @@ namespace sal
       provider_populate_unpinned_segments();
       start_background_threads();
 
-      uint32_t roots_from_file = 0;
-      for (uint32_t i = 0; i < _root_objects->size(); ++i)
-         if (root_set[i] && i >= roots_recovered)
-            ++roots_from_file;
       SAL_WARN("Power-loss recovery complete. {} roots from sync headers, {} validated from roots file.",
                roots_recovered, roots_from_file);
    }
@@ -1134,10 +1329,10 @@ namespace sal
             auto t0 = clock::now();
             compactor_promote_rcache_data(sesr);
             auto t1 = clock::now();
-            compact_pinned_segment(sesr);
+            compact_pinned_segment(sesr, &thread);
             auto t2 = clock::now();
             compactor_promote_rcache_data(sesr);
-            compact_unpinned_segment(sesr);
+            compact_unpinned_segment(sesr, &thread);
             auto t3 = clock::now();
 
             total_promote_ns += (t1 - t0).count() + (t3 - t2).count();
@@ -1162,9 +1357,9 @@ namespace sal
          while (thread.yield())
          {
             compactor_promote_rcache_data(sesr);
-            compact_pinned_segment(sesr);
+            compact_pinned_segment(sesr, &thread);
             compactor_promote_rcache_data(sesr);
-            compact_unpinned_segment(sesr);
+            compact_unpinned_segment(sesr, &thread);
          }
       }
    }
@@ -1191,7 +1386,7 @@ namespace sal
     * session release queues.  Uses fine-grained read locks so the compactor can
     * continue recycling segments between individual releases.
     *
-    * For each object: lock → dereference → vcall::destroy (cascades children
+    * For each object: lock → dereference → type_ops.destroy (cascades children
     * back to queue or processes inline if full) → unlock → record_freed_space
     * → free control block.
     */
@@ -1215,7 +1410,7 @@ namespace sal
                // Fine-grained read lock prevents the compactor from recycling
                // the segment we're reading from during dereference + destroy.
                // The lock is nested, so recursive final_release calls through
-               // vcall::destroy (when the queue is full) stay protected.
+               // type_ops.destroy (when the queue is full) stay protected.
                sesr.retain_read_lock();
                sesr.final_release(read_ids[i]);
                sesr.release_read_lock();
@@ -1236,6 +1431,15 @@ namespace sal
    {
       bool        more_work = false;
       ptr_address read_ids[1024];
+      std::vector<ptr_address> pending_storage;
+      try
+      {
+         pending_storage.reserve(passive_relocation_release_capacity);
+      }
+      catch (...)
+      {
+         return false;
+      }
 
       // iterate over all sessions and not just the allocated ones
       // to avoid the race condition where a session is deallocated
@@ -1271,30 +1475,40 @@ namespace sal
 
             assert(obj_ref->address() == addr);
 
-            auto compact_size = vcall::compact_size(obj_ref.obj());
+            const auto& ops = type_ops(obj_ref.obj());
+            auto        compact_size = ops.compact_size(obj_ref.obj());
 
             // TODO: return a scoped lock with new_loc and new_header
             //the ses modify lock is held while modifying while allocating
             auto [new_loc, new_header] =
                 ses.alloc_data<alloc_header>(compact_size, obj_ref->type(), obj_ref->address_seq());
 
-            vcall::compact_to(obj_ref.obj(), new_header);
+            pending_release_list pending_releases(pending_storage);
+            ops.passive_compact_to(obj_ref.obj(), new_header, pending_releases);
 
             if (config_update_checksum_on_compact())
-               if (not vcall::has_checksum(new_header))
-                  vcall::update_checksum(new_header);
+               if (not type_ops(new_header).has_checksum(new_header))
+                  type_ops(new_header).update_checksum(new_header);
+
+            if (pending_releases.failed())
+            {
+               if (not ses.unalloc(compact_size))
+                  ses.record_freed_space(new_header, "compactor_promote_release_failed");
+               continue;
+            }
 
             /// if the location hasn't changed then we are good to go
             ///     - and the objeect is still valid ref count
             if (obj_ref.control().cas_move(start_loc, new_loc))
             {
                _mapped_state->_cache_difficulty_state.compactor_promote_bytes(obj_ref->size());
-               ses.record_freed_space(obj_ref.obj());
+               ses.record_freed_space(obj_ref.obj(), "compactor_promote_move");
+               release_pending_relocation_refs(ses, pending_releases);
             }
             else
             {
                if (not ses.unalloc(compact_size))
-                  ses.record_freed_space(new_header);
+                  ses.record_freed_space(new_header, "compactor_promote_unalloc_failed");
             }
          }
       }
@@ -1313,7 +1527,7 @@ namespace sal
     * Overall performance is based upon the % of data in memory and limiting
     * the number of SSD IO operations.  
     */
-   bool allocator::compact_pinned_segment(allocator_session& ses)
+   bool allocator::compact_pinned_segment(allocator_session& ses, const segment_thread* thread)
    {
       auto total_segs = _block_alloc.num_blocks();
 
@@ -1346,11 +1560,15 @@ namespace sal
       }
 
       for (uint32_t i = 0; i < total_qualifying; ++i)
-         compact_segment(ses, qualifying_segments[i].first);
+      {
+         if (thread && thread->get_stop_flag().load(std::memory_order_relaxed))
+            return false;
+         compact_segment(ses, qualifying_segments[i].first, thread);
+      }
       return total_qualifying != N;
    }
 
-   bool allocator::compact_unpinned_segment(allocator_session& ses)
+   bool allocator::compact_unpinned_segment(allocator_session& ses, const segment_thread* thread)
    {
       auto   total_segs       = _block_alloc.num_blocks();
       size_t total_qualifying = 0;
@@ -1425,12 +1643,18 @@ namespace sal
 
       // configure the session to not allocate from the pinned segments
       for (uint32_t i = 0; i < total_qualifying; ++i)
-         compact_segment(ses, qualifying_segments[i].first);
+      {
+         if (thread && thread->get_stop_flag().load(std::memory_order_relaxed))
+            return false;
+         compact_segment(ses, qualifying_segments[i].first, thread);
+      }
 
       return total_qualifying != N;
    }
 
-   void allocator::compact_segment(allocator_session& ses, segment_number seg_num)
+   void allocator::compact_segment(allocator_session& ses,
+                                   segment_number     seg_num,
+                                   const segment_thread* thread)
    {
       //      SAL_ERROR("compact_segment: {:L}", seg_num);
       auto        state = ses.lock();
@@ -1446,6 +1670,16 @@ namespace sal
       // cast the start to first object_header
       const alloc_header* foo = (const alloc_header*)(shead);
 
+      std::vector<ptr_address> pending_storage;
+      try
+      {
+         pending_storage.reserve(passive_relocation_release_capacity);
+      }
+      catch (...)
+      {
+         return;
+      }
+
       // define a lambda to help copy nodes and facilitate early exit
       auto try_copy_node = [&](const alloc_header* nh, msec_timestamp vage)
       {
@@ -1458,7 +1692,7 @@ namespace sal
          // Verify checksum — on failure, halt writes rather than crashing
          if (config_validate_checksum_on_compact())
          {
-            if (vcall::has_checksum(nh) and not vcall::verify_checksum(nh))
+            if (type_ops(nh).has_checksum(nh) and not type_ops(nh).verify_checksum(nh))
             {
                SAL_ERROR("corruption detected: obj {} size: {} checksum: {:x} expected: {:x}",
                          nh->address(), nh->size(), nh->checksum(), nh->calculate_checksum());
@@ -1467,32 +1701,46 @@ namespace sal
             }
          }
 
+         const auto& ops = type_ops(nh);
+
          /// acquires the modify lock on the segment, we must release it
-         auto [loc, head] = ses.alloc_data_vage<alloc_header>(vcall::compact_size(nh), vage,
+         auto compact_size = ops.compact_size(nh);
+         auto [loc, head] = ses.alloc_data_vage<alloc_header>(compact_size, vage,
                                                               nh->type(), nh->address_seq());
-         vcall::compact_to(nh, head);
+         pending_release_list pending_releases(pending_storage);
+         ops.passive_compact_to(nh, head, pending_releases);
          // update checksum if needed, because the user may
          // have used config::update_checksum_on_upsert = false
          // to get better user performance and offload the checksum
          // work to the compaction thread.
          if (config_update_checksum_on_compact())
-            if (not vcall::has_checksum(head))
-               vcall::update_checksum(head);
+            if (not type_ops(head).has_checksum(head))
+               type_ops(head).update_checksum(head);
+
+         if (pending_releases.failed())
+         {
+            if (not ses.unalloc(head->size()))
+               ses.record_freed_space(head, "compactor_segment_release_failed");
+            return;
+         }
 
          if (obj_ref.control().cas_move(obj_ref.loc(), loc))
          {
-            ses.record_freed_space(obj_ref.obj());
+            ses.record_freed_space(obj_ref.obj(), "compactor_segment_move");
+            release_pending_relocation_refs(ses, pending_releases);
          }
          else
          {
             if (not ses.unalloc(head->size()))
-               ses.record_freed_space(head);
+               ses.record_freed_space(head, "compactor_segment_unalloc_failed");
          }
       };  /// end try_copy_node lambda
 
       msec_timestamp src_vage(s->age_accumulator.average());
       while (foo < send)
       {
+         if (thread && thread->get_stop_flag().load(std::memory_order_relaxed))
+            return;
          if (foo->type() == header_type::sync_head)
             src_vage =
                 msec_timestamp(*reinterpret_cast<const sync_header*>(foo)->timestamp() / 1000);
@@ -1803,6 +2051,16 @@ namespace sal
       shp->_open_time_usec      = msec_timestamp(0);
       shp->_close_time_usec     = msec_timestamp(0);
       shp->age_accumulator.reset(*now_ms);
+      // CRITICAL: clear any stale tracker entries for this segment's
+      // address range BEFORE it can be re-allocated to a session.
+      // Without this, segment::alloc<T> in the new session bumps
+      // alloc_pos from 0 and adds a fresh live entry, while stale
+      // entries from the segment's prior life still sit in live_, so
+      // the verifier sees live > alloc_pos. There are paths where
+      // bulk-recycle skips per-object record_freed_space because the
+      // whole segment is going free — those entries are only cleared
+      // here.
+      SAL_TRACK_SEG_RESET(shp, segment_size);
 
       //ARBTRIE_WARN("segment_provider: Prepared segment ", seg_num,
       //             " freed space: ", meta.get_free_state().free_space);
@@ -1962,14 +2220,21 @@ namespace sal
             s = nullptr;
       }
 
-      if (not current_session->at(_allocator_index))
+      auto& session = current_session->at(_allocator_index);
+      if (session && &session->get_allocator() != this)
+      {
+         SAL_WARN("get_session: discarding stale session for allocator index {}", _allocator_index);
+         session = nullptr;
+      }
+
+      if (not session)
       {
          SAL_INFO("get_session: creating new session {} ", _allocator_index);
-         return allocator_session_ptr((*current_session)[_allocator_index] =
+         return allocator_session_ptr(session =
                                           new allocator_session(*this, alloc_session_num()));
       }
       SAL_INFO("get_session: returning existing session");
-      auto cs = current_session->at(_allocator_index);
+      auto cs = session;
       cs->retain_session();
       SAL_INFO("get_session: returning existing session {}  allocidx: {}  sessptr: {} ",
                cs->get_session_num(), _allocator_index, current_session->at(_allocator_index));
@@ -1984,16 +2249,4 @@ namespace sal
       (*current_session)[_allocator_index] = nullptr;
       _mapped_state->_session_data.release_session_num(sn);
    }
-   std::array<vtable_pointers, 128>& get_type_vtables()
-   {
-      static std::array<vtable_pointers, 128> _type_vtables = []()
-      {
-         std::array<vtable_pointers, 128> vtables;
-         for (uint8_t i = 0; i < vtables.size(); ++i)
-            vtables[i] = vtable_pointers::create<vtable<alloc_header>>();
-         return vtables;
-      }();
-      return _type_vtables;
-   }
-
 }  // namespace sal

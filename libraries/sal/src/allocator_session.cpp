@@ -100,7 +100,8 @@ namespace sal
       // committed data. Without this, is_read_only() returns false for
       // objects in the current segment even after transaction commit.
       if (_alloc_seg_ptr and not _alloc_seg_ptr->is_finalized() and
-          _alloc_seg_ptr->get_alloc_pos() > _alloc_seg_ptr->get_first_write_pos())
+          (_alloc_seg_ptr->get_alloc_pos() > _alloc_seg_ptr->get_first_write_pos() ||
+           !user_data.empty()))
       {
          auto pos_before = _alloc_seg_ptr->get_alloc_pos();
          _sega.record_session_write(_session_num,
@@ -108,7 +109,12 @@ namespace sal
          // Count sync header padding as reclaimable space so the compactor
          // knows segments filled with many small commits are mostly free.
          auto sync_hdr_size = _alloc_seg_ptr->get_alloc_pos() - pos_before;
-         _sega._mapped_state->_segment_data.add_freed_space(_alloc_seg_num, sync_hdr_size);
+         _sega._mapped_state->_segment_data.add_freed_space(
+             _alloc_seg_num,
+             _alloc_seg_ptr,
+             _alloc_seg_ptr->data + pos_before,
+             sync_hdr_size,
+             "active_sync_padding");
       }
 
       // Process finalized dirty segments
@@ -119,10 +125,58 @@ namespace sal
       {
          auto seg = _sega.get_segment(seg_num);
 
-         _sega.record_session_write(_session_num, seg->sync(st, cfg, user_data));
-         auto ahead = seg->get_last_aheader();
+         // Snapshot alloc_pos before sync(). If sync()'s fall-through path
+         // wrote a small terminal sync_header (the partial-segment finalize
+         // case), the unused tail [pos_before_terminal, segment_size - footer)
+         // is reclaimable by the compactor and must be recorded as
+         // freed_space exactly once. The caller — not segment::sync() — owns
+         // this accounting because the segment-side sync_header's size()
+         // intentionally only covers the marker itself.
+         const uint32_t pos_before = seg->get_alloc_pos();
+         const bool was_partial_finalized =
+             seg->is_finalized() and not seg->is_read_only();
 
-         _sega.record_freed_space(_session_num, ahead);
+         const auto bytes_synced = seg->sync(st, cfg, user_data);
+         _sega.record_session_write(_session_num, bytes_synced);
+
+         // Only attribute last_aheader to freed_space when sync() actually
+         // wrote a new sync_header in *this* drain pass. The natural-fill
+         // path already accounted for the terminal sync_header in the
+         // active-segment block of allocator_session::sync; calling
+         // record_freed_space on the same last_aheader during the drain
+         // would double-count its bytes against this segment's freed_space
+         // counter and trip the overflow assertion when live data is small
+         // (heavy-COW workloads like Bitcoin Core's chainstate flush).
+         if (bytes_synced > 0)
+         {
+            auto ahead = seg->get_last_aheader();
+            _sega.record_freed_space(_session_num, ahead, "drain_terminal_sync_header");
+         }
+
+         // If this drain pass transitioned a partial-finalized segment to
+         // fully read-only via the fall-through path, the bytes past the
+         // 64-byte terminal sync_header are unallocated tail — reclaimable
+         // by the compactor, and must be recorded once.
+         constexpr uint32_t terminal_size = 64;
+         const bool wrote_fall_through_terminal =
+             was_partial_finalized and seg->is_read_only() and bytes_synced > 0 and
+             seg->get_alloc_pos() == pos_before + terminal_size and
+             seg->get_last_aheader()->size() == terminal_size;
+         if (wrote_fall_through_terminal)
+         {
+            constexpr uint32_t footer        = mapped_memory::segment_footer_size;
+            const uint32_t     tail_start    = pos_before + terminal_size;
+            if (tail_start + footer < segment_size)
+            {
+               const uint32_t tail = segment_size - footer - tail_start;
+               _sega._mapped_state->_segment_data.add_freed_space(
+                   seg_num,
+                   seg,
+                   seg->data + tail_start,
+                   tail,
+                   "drain_fall_through_tail");
+            }
+         }
 
          assert(seg->is_finalized() ? seg->is_read_only() : true);
          if (seg->is_read_only())

@@ -14,30 +14,31 @@ int main()
    auto ws = db->start_write_session();
 
    // --- Build a subtree for user metadata ---
-   auto meta_cursor = ws->create_write_cursor();
-   meta_cursor->upsert("schema_version", "3");
-   meta_cursor->upsert("created_by", "admin");
-   meta_cursor->upsert("engine", "psitri");
-   auto meta_root = meta_cursor->root();
+   auto meta = ws->create_temporary_tree();
+   auto meta_tx = ws->start_write_transaction(std::move(meta));
+   meta_tx.upsert("schema_version", "3");
+   meta_tx.upsert("created_by", "admin");
+   meta_tx.upsert("engine", "psitri");
+   meta = meta_tx.get_tree();
 
    // --- Build the main tree and embed the subtree ---
    {
       auto tx = ws->start_transaction(0);
       tx.upsert("users/alice", "engineer");
       tx.upsert("users/bob", "designer");
-      tx.upsert("metadata", std::move(meta_root));  // subtree as a value
+      tx.upsert_subtree("metadata", std::move(meta));  // subtree as a value
       tx.commit();
    }
 
    // --- Read back the subtree ---
    {
-      auto tx = ws->start_transaction(0);
+      auto root = ws->get_root(0);
 
-      if (tx.is_subtree("metadata"))
+      auto metadata = root.get_subtree("metadata");
+      if (metadata)
       {
          std::cout << "=== metadata subtree ===\n";
-         auto sub_cursor = tx.get_subtree_cursor("metadata");
-         auto rc         = sub_cursor.read_cursor();
+         auto rc = metadata.snapshot_cursor();
          rc.seek_begin();
          while (!rc.is_end())
          {
@@ -49,7 +50,7 @@ int main()
 
       // Regular keys work alongside subtree keys
       std::cout << "\n=== top-level keys ===\n";
-      auto rc = tx.read_cursor();
+      auto rc = root.snapshot_cursor();
       rc.seek_begin();
       while (!rc.is_end())
       {
@@ -62,8 +63,6 @@ int main()
          }
          rc.next();
       }
-
-      tx.abort();
    }
 
    std::filesystem::remove_all(dir);

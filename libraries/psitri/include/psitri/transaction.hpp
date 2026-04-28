@@ -4,9 +4,12 @@
 #include <optional>
 #include <psitri/detail/write_buffer.hpp>
 #include <psitri/fwd.hpp>
+#include <psitri/tree.hpp>
 #include <psitri/tx_mode.hpp>
+#include <psitri/value_pin.hpp>
 #include <psitri/write_cursor.hpp>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace psitri
@@ -25,6 +28,7 @@ namespace psitri
    {
       std::optional<write_cursor>         cursor;
       std::optional<detail::write_buffer> buffer;
+      bool                                dirty = false;
 
       /// If this tree was obtained from a parent tree, records how to write
       /// the subtree root back into the parent on commit.
@@ -61,16 +65,20 @@ namespace psitri
       void     update(key_view key, value_view value);
       void     upsert(key_view key, value_view value);
       void     upsert_sorted(key_view key, value_view value);
+      void     upsert_subtree(key_view key, tree subtree);
+      void     upsert_subtree_sorted(key_view key, tree subtree);
       int      remove(key_view key);
       uint64_t remove_range(key_view lower, key_view upper);
 
       // ── Reads ─────────────────────────────────────────────────────────
       cursor read_cursor() const;
+      cursor snapshot_cursor() const;
 
       template <ConstructibleBuffer T>
       std::optional<T> get(key_view key) const;
 
       int32_t get(key_view key, Buffer auto* buffer) const;
+      bool    get(key_view key, std::invocable<value_view> auto&& lambda) const;
 
       cursor lower_bound(key_view key) const;
       cursor upper_bound(key_view key) const;
@@ -121,17 +129,21 @@ namespace psitri
       void     upsert_sorted(key_view key, value_view value);
       void     upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root);
       void     upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root);
+      void     upsert_subtree(key_view key, tree subtree);
+      void     upsert_subtree_sorted(key_view key, tree subtree);
       int      remove(key_view key);
       uint64_t remove_range(key_view lower, key_view upper);
 
       // ── Read access ───────────────────────────────────────────────────
 
       cursor read_cursor() const;
+      cursor snapshot_cursor() const;
 
       template <ConstructibleBuffer T>
       std::optional<T> get(key_view key) const;
 
       int32_t get(key_view key, Buffer auto* buffer) const;
+      bool    get(key_view key, std::invocable<value_view> auto&& lambda) const;
 
       /// Position a cursor at the first key >= query.
       cursor lower_bound(key_view key) const;
@@ -139,9 +151,8 @@ namespace psitri
       /// Position a cursor at the first key > query.
       cursor upper_bound(key_view key) const;
 
-      bool                              is_subtree(key_view key) const;
-      sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const;
-      write_cursor                      get_subtree_cursor(key_view key) const;
+      bool         is_subtree(key_view key) const;
+      tree         get_subtree(key_view key) const;
 
       // ── Subtree navigation ────────────────────────────────────────────
 
@@ -174,14 +185,16 @@ namespace psitri
    {
      public:
       transaction(sal::allocator_session_ptr                             session,
-                  sal::smart_ptr<sal::alloc_header>                      root,
-                  std::function<void(sal::smart_ptr<sal::alloc_header>)> commit_func,
-                  std::function<void()>                                  rollback_func,
-                  tx_mode                                                mode = tx_mode::expect_success)
-          : _session(std::move(session)),
-            _commit_func(std::move(commit_func)),
-            _rollback_func(std::move(rollback_func)),
-            _mode(mode)
+	                  sal::smart_ptr<sal::alloc_header>                      root,
+	                  std::function<void(sal::smart_ptr<sal::alloc_header>)> commit_func,
+	                  std::function<void()>                                  rollback_func,
+	                  tx_mode                                                mode = tx_mode::expect_success,
+	                  uint64_t                                               epoch_base = 0)
+	          : _session(std::move(session)),
+	            _commit_func(std::move(commit_func)),
+	            _rollback_func(std::move(rollback_func)),
+	            _mode(mode),
+	            _epoch_base(epoch_base)
       {
          init_primary_cs(std::move(root));
       }
@@ -228,6 +241,12 @@ namespace psitri
          auto& cs = cs_at(_primary_index);
          assert(_mode == tx_mode::expect_success && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert(key, std::move(subtree_root));
+         cs.dirty = true;
+      }
+
+      void upsert_subtree(key_view key, tree subtree)
+      {
+         upsert(key, std::move(subtree).take_root());
       }
 
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
@@ -235,6 +254,12 @@ namespace psitri
          auto& cs = cs_at(_primary_index);
          assert(_mode == tx_mode::expect_success && "subtree upsert not supported in buffered mode");
          cs.cursor->upsert_sorted(key, std::move(subtree_root));
+         cs.dirty = true;
+      }
+
+      void upsert_subtree_sorted(key_view key, tree subtree)
+      {
+         upsert_sorted(key, std::move(subtree).take_root());
       }
 
       int remove(key_view key)
@@ -250,6 +275,8 @@ namespace psitri
       // ── Primary tree read access (backward-compatible) ────────────────
 
       cursor read_cursor() const { return cs_at(_primary_index).cursor->read_cursor(); }
+      cursor snapshot_cursor() const { return read_cursor(); }
+      value_pin pin_values() const { return value_pin(_session); }
 
       template <ConstructibleBuffer T>
       std::optional<T> get(key_view key) const
@@ -262,6 +289,11 @@ namespace psitri
          return do_get(_primary_index, key, buffer);
       }
 
+      bool get(key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         return do_get(_primary_index, key, std::forward<decltype(lambda)>(lambda));
+      }
+
       cursor lower_bound(key_view key) const { return do_bound(_primary_index, key, false); }
 
       cursor upper_bound(key_view key) const { return do_bound(_primary_index, key, true); }
@@ -271,22 +303,16 @@ namespace psitri
          return do_is_subtree(_primary_index, key);
       }
 
-      sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const
+      tree get_subtree(key_view key) const
       {
          auto& cs = cs_at(_primary_index);
          if (cs.buffer)
          {
             const auto* entry = cs.buffer->get(key);
             if (entry)
-               return sal::smart_ptr<sal::alloc_header>(
-                   cs.cursor->root().session(), sal::null_ptr_address);
+               return tree(cs.cursor->root().session());
          }
-         return cs.cursor->get_subtree(key);
-      }
-
-      write_cursor get_subtree_cursor(key_view key) const
-      {
-         return cs_at(_primary_index).cursor->get_subtree_cursor(key);
+         return tree(cs.cursor->get_subtree(key));
       }
 
       // ── Transaction control ───────────────────────────────────────────
@@ -302,12 +328,27 @@ namespace psitri
             if (pcs.buffer && !pcs.buffer->empty())
                merge_buffer_to_persistent(pcs);
 
-            _commit_func(pcs.cursor->take_root());
+            if (pcs.dirty)
+               _commit_func(pcs.cursor->take_root());
+            else if (_rollback_func)
+               _rollback_func();
+
             _commit_func   = nullptr;
             _rollback_func = nullptr;
 
             commit_additional_roots();
          }
+      }
+
+      tree get_tree()
+      {
+         commit_subtrees_bottom_up();
+
+         auto& pcs = cs_at(_primary_index);
+         if (pcs.buffer && !pcs.buffer->empty())
+            merge_buffer_to_persistent(pcs);
+
+         return tree(pcs.cursor->root());
       }
 
       void abort() noexcept
@@ -358,7 +399,7 @@ namespace psitri
          // the write_cursor even when _adr is null on a fresh database.
          // For modes that didn't allocate a ver, the smart_ptr is empty
          // either way — no harm.
-         cs.cursor.emplace(std::move(root));
+	         cs.cursor.emplace(std::move(root), _epoch_base);
          if (uses_buffer())
             cs.buffer.emplace();
          _change_sets.push_back(std::move(cs));
@@ -389,11 +430,11 @@ namespace psitri
          if (existing)
             return *existing;
 
-         change_set cs;
-         if (root)
-            cs.cursor.emplace(std::move(*root));
-         else
-            cs.cursor.emplace(_session);
+	         change_set cs;
+	         if (root)
+	            cs.cursor.emplace(std::move(*root), _epoch_base);
+	         else
+	            cs.cursor.emplace(_session, _epoch_base);
          if (uses_buffer())
             cs.buffer.emplace();
          cs.parent = change_set::parent_link{parent_idx, std::string(key)};
@@ -460,17 +501,21 @@ namespace psitri
                if (!children_done)
                   continue;
 
-               // Commit this subtree: merge buffer, get new root
-               if (cs.buffer && !cs.buffer->empty())
-                  merge_buffer_to_persistent(cs);
-
-               auto new_root = cs.cursor->root();
-
-               // Write the new subtree root back into the parent's tree
-               if (cs.parent)
+               if (cs.dirty)
                {
-                  auto& parent_cs = cs_at(cs.parent->parent_cs_index);
-                  parent_cs.cursor->upsert(cs.parent->key, std::move(new_root));
+                  // Commit this subtree: merge buffer, get new root
+                  if (cs.buffer && !cs.buffer->empty())
+                     merge_buffer_to_persistent(cs);
+
+                  auto new_root = cs.cursor->root();
+
+                  // Write the new subtree root back into the parent's tree
+                  if (cs.parent)
+                  {
+                     auto& parent_cs = cs_at(cs.parent->parent_cs_index);
+                     parent_cs.cursor->upsert(cs.parent->key, std::move(new_root));
+                     parent_cs.dirty = true;
+                  }
                }
 
                committed[i] = true;
@@ -490,22 +535,39 @@ namespace psitri
             micro_put(cs, key, value);
          else
             ((*cs.cursor).*op)(key, value);
+         cs.dirty = true;
       }
 
       int do_remove(uint32_t idx, key_view key)
       {
          auto& cs = cs_at(idx);
          if (cs.buffer)
-            return micro_remove(cs, key);
-         return cs.cursor->remove(key);
+         {
+            auto result = micro_remove(cs, key);
+            if (result >= 0)
+               cs.dirty = true;
+            return result;
+         }
+         auto result = cs.cursor->remove(key);
+         if (result >= 0)
+            cs.dirty = true;
+         return result;
       }
 
       uint64_t do_remove_range(uint32_t idx, key_view lower, key_view upper)
       {
          auto& cs = cs_at(idx);
          if (cs.buffer)
-            return micro_remove_range(cs, lower, upper);
-         return cs.cursor->remove_range(lower, upper);
+         {
+            auto removed = micro_remove_range(cs, lower, upper);
+            if (removed)
+               cs.dirty = true;
+            return removed;
+         }
+         auto removed = cs.cursor->remove_range(lower, upper);
+         if (removed)
+            cs.dirty = true;
+         return removed;
       }
 
       // ── Internal read methods ─────────────────────────────────────────
@@ -552,6 +614,24 @@ namespace psitri
          return result;
       }
 
+      bool do_get(uint32_t idx, key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         auto& cs = cs_at(idx);
+         if (cs.buffer)
+         {
+            const auto* entry = cs.buffer->get(key);
+            if (entry)
+            {
+               if (entry->is_tombstone())
+                  return false;
+               auto val = entry->value();
+               lambda(val);
+               return true;
+            }
+         }
+         return cs.cursor->get(key, std::forward<decltype(lambda)>(lambda));
+      }
+
       cursor do_bound(uint32_t idx, key_view key, bool is_upper) const
       {
          auto& cs = cs_at(idx);
@@ -584,6 +664,7 @@ namespace psitri
          uint32_t                                       change_sets_size = 0;
          // Cursor roots of all change_sets at push time, indexed in parallel.
          std::vector<sal::smart_ptr<sal::alloc_header>> cs_roots;
+         std::vector<bool>                              cs_dirty;
       };
 
       bool uses_buffer() const noexcept { return _mode != tx_mode::expect_success; }
@@ -599,8 +680,12 @@ namespace psitri
          }
          f.change_sets_size = static_cast<uint32_t>(_change_sets.size());
          f.cs_roots.reserve(_change_sets.size());
+         f.cs_dirty.reserve(_change_sets.size());
          for (auto& cs : _change_sets)
+         {
             f.cs_roots.push_back(cs.cursor->root());
+            f.cs_dirty.push_back(cs.dirty);
+         }
          _frames.push_back(std::move(f));
       }
 
@@ -621,7 +706,10 @@ namespace psitri
 
          // Restore every cursor root to its pre-frame snapshot.
          for (uint32_t i = 0; i < f.change_sets_size; ++i)
+         {
             _change_sets[i].cursor.emplace(std::move(f.cs_roots[i]));
+            _change_sets[i].dirty = f.cs_dirty[i];
+         }
 
          // Restore primary write buffer in buffered mode.
          if (uses_buffer())
@@ -728,25 +816,25 @@ namespace psitri
          else
          {
             // Forced flush path: cursor->remove_range is a tree-touching
-            // op. Ensure a per-txn ver is attached even when the buffer
+            // op. Materialize a per-txn ver even when the buffer
             // happens to be empty (merge_buffer_to_persistent only fires
             // when there's something to flush).
             if (!cs.buffer->empty())
                merge_buffer_to_persistent(cs);
             else
-               ensure_txn_version();
+               materialize_txn_version();
             return cs.cursor->remove_range(lower, upper);
          }
       }
 
       void merge_buffer_to_persistent(change_set& cs)
       {
-         // First tree-touching action for an expect_failure txn — ensure
-         // a per-txn version is attached to the working root before any
+         // First tree-touching action for an expect_failure txn — materialize
+         // a per-txn version on the working root before any
          // COW write fires. No-op if a ver was already allocated (either
          // expect_success at start_transaction, or an earlier flush in
          // this same expect_failure txn).
-         ensure_txn_version();
+         materialize_txn_version();
 
          auto it  = cs.buffer->begin();
          auto end = cs.buffer->end();
@@ -772,10 +860,11 @@ namespace psitri
             cs.buffer->soft_clear();
       }
 
-      std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
-      std::function<void()>                                    _rollback_func;
-      tx_mode                                                  _mode = tx_mode::expect_success;
-      std::vector<frame>                                       _frames;
+	      std::function<void(sal::smart_ptr<sal::alloc_header>)>   _commit_func;
+	      std::function<void()>                                    _rollback_func;
+	      tx_mode                                                  _mode = tx_mode::expect_success;
+	      uint64_t                                                 _epoch_base = 0;
+	      std::vector<frame>                                       _frames;
 
       // ── Multi-root support ────────────────────────────────────────────
 
@@ -799,7 +888,7 @@ namespace psitri
 
       // Has this txn allocated its own per-txn version yet? Set true by
       // start_transaction(expect_success) (which calls make_unique_root
-      // up front) and by the lazy ensure_txn_version path. Distinguishes
+      // up front) and by the lazy materialize_txn_version path. Distinguishes
       // "the working root carries my ver" from "the working root carries
       // an inherited published ver from get_root."
       bool _has_txn_version = false;
@@ -808,14 +897,14 @@ namespace psitri
       void commit_additional_roots();
       void abort_additional_roots() noexcept;
 
-      /// Lazy per-txn version allocation for expect_failure mode. If the
-      /// primary working root doesn't yet carry a ver (txn has done no
-      /// tree-touching work), allocate one via make_unique_root and
-      /// attach it. Idempotent — no-op when a ver is already attached.
+      /// Lazy per-txn version materialization for expect_failure mode. If
+      /// the primary working root doesn't yet carry a txn-owned ver (txn
+      /// has done no tree-touching work), allocate one via make_unique_root
+      /// and attach it. Idempotent — no-op when a ver is already attached.
       /// Plugged into merge_buffer_to_persistent so the first tree-touch
       /// path in expect_failure ensures the version exists before any
       /// COW write fires.
-      void ensure_txn_version();
+      void materialize_txn_version();
    };
 
    // ═════════════════════════════════════════════════════════════════════
@@ -842,6 +931,20 @@ namespace psitri
       _tx->do_write(_cs_index, key, value, &write_cursor::upsert_sorted);
    }
 
+   inline void tree_handle::upsert_subtree(key_view key, tree subtree)
+   {
+      auto& cs = _tx->cs_at(_cs_index);
+      cs.cursor->upsert(key, std::move(subtree).take_root());
+      cs.dirty = true;
+   }
+
+   inline void tree_handle::upsert_subtree_sorted(key_view key, tree subtree)
+   {
+      auto& cs = _tx->cs_at(_cs_index);
+      cs.cursor->upsert_sorted(key, std::move(subtree).take_root());
+      cs.dirty = true;
+   }
+
    inline int tree_handle::remove(key_view key)
    {
       return _tx->do_remove(_cs_index, key);
@@ -857,6 +960,8 @@ namespace psitri
       return _tx->cs_at(_cs_index).cursor->read_cursor();
    }
 
+   inline cursor tree_handle::snapshot_cursor() const { return read_cursor(); }
+
    template <ConstructibleBuffer T>
    std::optional<T> tree_handle::get(key_view key) const
    {
@@ -866,6 +971,12 @@ namespace psitri
    inline int32_t tree_handle::get(key_view key, Buffer auto* buffer) const
    {
       return _tx->do_get(_cs_index, key, buffer);
+   }
+
+   inline bool tree_handle::get(key_view key,
+                                std::invocable<value_view> auto&& lambda) const
+   {
+      return _tx->do_get(_cs_index, key, std::forward<decltype(lambda)>(lambda));
    }
 
    inline cursor tree_handle::lower_bound(key_view key) const
@@ -934,12 +1045,22 @@ namespace psitri
    {
       _tx->upsert_sorted(key, std::move(subtree_root));
    }
+   inline void transaction_frame_ref::upsert_subtree(key_view key, tree subtree)
+   {
+      _tx->upsert_subtree(key, std::move(subtree));
+   }
+   inline void transaction_frame_ref::upsert_subtree_sorted(key_view key, tree subtree)
+   {
+      _tx->upsert_subtree_sorted(key, std::move(subtree));
+   }
    inline int transaction_frame_ref::remove(key_view key) { return _tx->remove(key); }
    inline uint64_t transaction_frame_ref::remove_range(key_view lower, key_view upper)
    {
       return _tx->remove_range(lower, upper);
    }
    inline cursor transaction_frame_ref::read_cursor() const { return _tx->read_cursor(); }
+
+   inline cursor transaction_frame_ref::snapshot_cursor() const { return read_cursor(); }
 
    inline cursor transaction_frame_ref::lower_bound(key_view key) const
    {
@@ -961,19 +1082,20 @@ namespace psitri
       return _tx->get(key, buffer);
    }
 
+   inline bool transaction_frame_ref::get(key_view key,
+                                          std::invocable<value_view> auto&& lambda) const
+   {
+      return _tx->get(key, std::forward<decltype(lambda)>(lambda));
+   }
+
    inline bool transaction_frame_ref::is_subtree(key_view key) const
    {
       return _tx->is_subtree(key);
    }
-   inline sal::smart_ptr<sal::alloc_header> transaction_frame_ref::get_subtree(key_view key) const
+   inline tree transaction_frame_ref::get_subtree(key_view key) const
    {
       return _tx->get_subtree(key);
    }
-   inline write_cursor transaction_frame_ref::get_subtree_cursor(key_view key) const
-   {
-      return _tx->get_subtree_cursor(key);
-   }
-
    inline tree_handle transaction_frame_ref::open_subtree(key_view key)
    {
       return _tx->primary().open_subtree(key);
@@ -1008,5 +1130,59 @@ namespace psitri
    }
 
    inline tree_context::stats transaction_frame_ref::get_stats() { return _tx->get_stats(); }
+
+   class write_transaction
+   {
+     public:
+      write_transaction(const write_transaction&)            = delete;
+      write_transaction& operator=(const write_transaction&) = delete;
+      write_transaction(write_transaction&&) noexcept        = default;
+      write_transaction& operator=(write_transaction&&)      = delete;
+
+      void insert(key_view key, value_view value) { _tx.insert(key, value); }
+      void update(key_view key, value_view value) { _tx.update(key, value); }
+      void upsert(key_view key, value_view value) { _tx.upsert(key, value); }
+      void upsert_sorted(key_view key, value_view value) { _tx.upsert_sorted(key, value); }
+      void upsert_subtree(key_view key, tree subtree)
+      {
+         _tx.upsert_subtree(key, std::move(subtree));
+      }
+      void upsert_subtree_sorted(key_view key, tree subtree)
+      {
+         _tx.upsert_subtree_sorted(key, std::move(subtree));
+      }
+      int remove(key_view key) { return _tx.remove(key); }
+      uint64_t remove_range(key_view lower, key_view upper)
+      {
+         return _tx.remove_range(lower, upper);
+      }
+
+      bool get(key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         return _tx.get(key, std::forward<decltype(lambda)>(lambda));
+      }
+      template <ConstructibleBuffer T>
+      std::optional<T> get(key_view key) const
+      {
+         return _tx.get<T>(key);
+      }
+      int32_t get(key_view key, Buffer auto* buffer) const { return _tx.get(key, buffer); }
+
+      psitri::cursor cursor() const { return _tx.read_cursor(); }
+      psitri::cursor snapshot_cursor() const { return _tx.snapshot_cursor(); }
+      value_pin      pin_values() const { return _tx.pin_values(); }
+      bool           is_subtree(key_view key) const { return _tx.is_subtree(key); }
+      tree           get_subtree(key_view key) const { return _tx.get_subtree(key); }
+      tree           get_tree() { return _tx.get_tree(); }
+      void           abort() noexcept { _tx.abort(); }
+
+     private:
+      template <class>
+      friend class basic_write_session;
+
+      explicit write_transaction(transaction&& tx) : _tx(std::move(tx)) {}
+
+      transaction _tx;
+   };
 
 }  // namespace psitri
