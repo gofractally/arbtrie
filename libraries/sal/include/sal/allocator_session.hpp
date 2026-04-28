@@ -1,6 +1,7 @@
 #pragma once
 #include <hash/lehmer64.h>
 #include <cstdint>
+#include <optional>
 #include <sal/config.hpp>
 #include <sal/control_block.hpp>
 #include <sal/control_block_alloc.hpp>
@@ -155,6 +156,10 @@ namespace sal
       /// Precondition: adr was allocated via alloc_custom_cb().
       uint64_t read_custom_cb(ptr_address adr) const noexcept;
 
+      /// Read a custom control block only if the address is live and has the
+      /// custom marker. Crash recovery must not trust root metadata blindly.
+      std::optional<uint64_t> try_read_custom_cb(ptr_address adr) const noexcept;
+
       /// Check if a control block is custom (no segment data).
       /// The {active=0, pending_cache=1} bit pattern marks custom CBs.
       static bool is_custom_cb(control_block_data cbd) noexcept;
@@ -241,7 +246,7 @@ namespace sal
       allocator_session(const allocator_session&)            = delete;
       allocator_session& operator=(const allocator_session&) = delete;
 
-      inline void record_freed_space(const alloc_header* obj) noexcept;
+      inline void record_freed_space(const alloc_header* obj, const char* tag) noexcept;
 
       /**
        * Check if a node location has been synced to disk.

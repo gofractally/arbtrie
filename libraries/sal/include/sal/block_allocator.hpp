@@ -210,6 +210,19 @@ namespace sal
          return x > 0 && (x & (x - 1)) == 0;
       }
 
+      /// Base address of the contiguous-block mmap reservation. Valid as
+      /// soon as the block_allocator is constructed (the address-space
+      /// reservation happens in the ctor) — before any block has been
+      /// allocated, before file_size has been bumped. Used by the
+      /// debug free_range_tracker to anchor offset arithmetic.
+      ///
+      /// Prefer the mapped base when populated; fall back to the reservation
+      /// base. Both share the same address (MAP_FIXED maps onto the
+      /// reservation), but `_mapped_base` is null until first resize.
+      const void* mapped_base() const noexcept {
+         return _mapped_base ? _mapped_base : _reserved_base;
+      }
+
      private:
       std::filesystem::path _filename;
       uint64_t              _block_size;

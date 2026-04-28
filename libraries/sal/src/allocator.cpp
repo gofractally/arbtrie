@@ -93,6 +93,15 @@ namespace sal
       std::vector<location> _location;
    };
 
+   static constexpr std::size_t passive_relocation_release_capacity = 1024;
+
+   static void release_pending_relocation_refs(
+       allocator_session& ses, const pending_release_list& pending_releases) noexcept
+   {
+      for (auto adr : pending_releases)
+         ses.release(adr);
+   }
+
    class recovery_version_index
    {
      public:
@@ -244,7 +253,7 @@ namespace sal
       return requested;
    }
 
-   allocator::allocator(std::filesystem::path dir, runtime_config cfg)
+   allocator::allocator(std::filesystem::path dir, runtime_config cfg, bool start_threads_now)
        : _ptr_alloc(dir / "ptrs"),
          _block_alloc(dir / "segs", segment_size,
                       static_cast<uint32_t>(
@@ -254,6 +263,8 @@ namespace sal
          _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
          _root_object_file(dir / "roots", access_mode::read_write, true)
    {
+      _type_ops.fill(&default_object_type_ops<alloc_header>());
+
       _allocator_index = alloc_allocator_index();
       if (_seg_alloc_state_file.size() == 0)
       {
@@ -286,6 +297,25 @@ namespace sal
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
       _root_objects = reinterpret_cast<root_object_array*>(_root_object_file.data());
       assert(_root_objects);
+      // Bind global free-range tracker base to the contiguous-block mmap
+      // base. Available before any segment is allocated; the address-space
+      // reservation happens in block_allocator's ctor.
+      SAL_TRACK_SET_BASE(_block_alloc.mapped_base());
+
+#if PSITRI_DEEP_INVARIANTS
+      // Install verifier callback. Called by the tracker after every
+      // mark_alloc/mark_free; checks the per-segment invariant
+      //     alloc_pos == freed_space + live_in_seg
+      // The first divergence aborts with the offending op's tag.
+      sal::debug::free_range_tracker::instance().set_verifier(
+          [this](const char* when, const char* op_tag,
+                 const void* obj, uint32_t /*size*/) {
+              auto seg_num = get_segment_for_object(obj);
+              auto* seg    = get_segment(seg_num);
+              _mapped_state->_segment_data.verify_invariant(
+                  seg, seg->get_alloc_pos(), *seg_num, when, op_tag);
+          });
+#endif
       // Cap pinned cache budget to what RLIMIT_MEMLOCK will allow, using the value
       // already cached by block_allocator (no extra syscall needed).
       {
@@ -324,7 +354,8 @@ namespace sal
 
       provider_populate_pinned_segments();
       provider_populate_unpinned_segments();
-      start_background_threads();
+      if (start_threads_now)
+         start_background_threads();
    }
 
    /**
@@ -541,13 +572,8 @@ namespace sal
       if (obj->address() != addr)
          return;
 
-      auto& vtables  = get_type_vtables();
-      auto  type_idx = uint8_t(obj->type());
-      if (type_idx < vtables.size() && vtables[type_idx].visit_children)
-      {
-         vtables[type_idx].visit_children(
-             obj, [this, visited_ptr](ptr_address child) { recursive_retain_all(child, visited_ptr); });
-      }
+      type_ops(obj).visit_children(
+          obj, [this, visited_ptr](ptr_address child) { recursive_retain_all(child, visited_ptr); });
    }
 
    void allocator::recursive_sum_size(ptr_address addr, uint64_t& total, void* visited_ptr)
@@ -578,15 +604,10 @@ namespace sal
 
       total += obj->size();
 
-      auto& vtables  = get_type_vtables();
-      auto  type_idx = uint8_t(obj->type());
-      if (type_idx < vtables.size() && vtables[type_idx].visit_children)
-      {
-         vtables[type_idx].visit_children(
-             obj, [this, &total, visited_ptr](ptr_address child) {
-                recursive_sum_size(child, total, visited_ptr);
-             });
-      }
+      type_ops(obj).visit_children(
+          obj, [this, &total, visited_ptr](ptr_address child) {
+             recursive_sum_size(child, total, visited_ptr);
+          });
    }
 
    uint64_t allocator::reachable_size()
@@ -1365,7 +1386,7 @@ namespace sal
     * session release queues.  Uses fine-grained read locks so the compactor can
     * continue recycling segments between individual releases.
     *
-    * For each object: lock → dereference → vcall::destroy (cascades children
+    * For each object: lock → dereference → type_ops.destroy (cascades children
     * back to queue or processes inline if full) → unlock → record_freed_space
     * → free control block.
     */
@@ -1389,7 +1410,7 @@ namespace sal
                // Fine-grained read lock prevents the compactor from recycling
                // the segment we're reading from during dereference + destroy.
                // The lock is nested, so recursive final_release calls through
-               // vcall::destroy (when the queue is full) stay protected.
+               // type_ops.destroy (when the queue is full) stay protected.
                sesr.retain_read_lock();
                sesr.final_release(read_ids[i]);
                sesr.release_read_lock();
@@ -1410,6 +1431,15 @@ namespace sal
    {
       bool        more_work = false;
       ptr_address read_ids[1024];
+      std::vector<ptr_address> pending_storage;
+      try
+      {
+         pending_storage.reserve(passive_relocation_release_capacity);
+      }
+      catch (...)
+      {
+         return false;
+      }
 
       // iterate over all sessions and not just the allocated ones
       // to avoid the race condition where a session is deallocated
@@ -1445,30 +1475,40 @@ namespace sal
 
             assert(obj_ref->address() == addr);
 
-            auto compact_size = vcall::compact_size(obj_ref.obj());
+            const auto& ops = type_ops(obj_ref.obj());
+            auto        compact_size = ops.compact_size(obj_ref.obj());
 
             // TODO: return a scoped lock with new_loc and new_header
             //the ses modify lock is held while modifying while allocating
             auto [new_loc, new_header] =
                 ses.alloc_data<alloc_header>(compact_size, obj_ref->type(), obj_ref->address_seq());
 
-            vcall::compact_to(obj_ref.obj(), new_header);
+            pending_release_list pending_releases(pending_storage);
+            ops.passive_compact_to(obj_ref.obj(), new_header, pending_releases);
 
             if (config_update_checksum_on_compact())
-               if (not vcall::has_checksum(new_header))
-                  vcall::update_checksum(new_header);
+               if (not type_ops(new_header).has_checksum(new_header))
+                  type_ops(new_header).update_checksum(new_header);
+
+            if (pending_releases.failed())
+            {
+               if (not ses.unalloc(compact_size))
+                  ses.record_freed_space(new_header, "compactor_promote_release_failed");
+               continue;
+            }
 
             /// if the location hasn't changed then we are good to go
             ///     - and the objeect is still valid ref count
             if (obj_ref.control().cas_move(start_loc, new_loc))
             {
                _mapped_state->_cache_difficulty_state.compactor_promote_bytes(obj_ref->size());
-               ses.record_freed_space(obj_ref.obj());
+               ses.record_freed_space(obj_ref.obj(), "compactor_promote_move");
+               release_pending_relocation_refs(ses, pending_releases);
             }
             else
             {
                if (not ses.unalloc(compact_size))
-                  ses.record_freed_space(new_header);
+                  ses.record_freed_space(new_header, "compactor_promote_unalloc_failed");
             }
          }
       }
@@ -1620,6 +1660,16 @@ namespace sal
       // cast the start to first object_header
       const alloc_header* foo = (const alloc_header*)(shead);
 
+      std::vector<ptr_address> pending_storage;
+      try
+      {
+         pending_storage.reserve(passive_relocation_release_capacity);
+      }
+      catch (...)
+      {
+         return;
+      }
+
       // define a lambda to help copy nodes and facilitate early exit
       auto try_copy_node = [&](const alloc_header* nh, msec_timestamp vage)
       {
@@ -1632,7 +1682,7 @@ namespace sal
          // Verify checksum — on failure, halt writes rather than crashing
          if (config_validate_checksum_on_compact())
          {
-            if (vcall::has_checksum(nh) and not vcall::verify_checksum(nh))
+            if (type_ops(nh).has_checksum(nh) and not type_ops(nh).verify_checksum(nh))
             {
                SAL_ERROR("corruption detected: obj {} size: {} checksum: {:x} expected: {:x}",
                          nh->address(), nh->size(), nh->checksum(), nh->calculate_checksum());
@@ -1641,26 +1691,38 @@ namespace sal
             }
          }
 
+         const auto& ops = type_ops(nh);
+
          /// acquires the modify lock on the segment, we must release it
-         auto [loc, head] = ses.alloc_data_vage<alloc_header>(vcall::compact_size(nh), vage,
+         auto compact_size = ops.compact_size(nh);
+         auto [loc, head] = ses.alloc_data_vage<alloc_header>(compact_size, vage,
                                                               nh->type(), nh->address_seq());
-         vcall::compact_to(nh, head);
+         pending_release_list pending_releases(pending_storage);
+         ops.passive_compact_to(nh, head, pending_releases);
          // update checksum if needed, because the user may
          // have used config::update_checksum_on_upsert = false
          // to get better user performance and offload the checksum
          // work to the compaction thread.
          if (config_update_checksum_on_compact())
-            if (not vcall::has_checksum(head))
-               vcall::update_checksum(head);
+            if (not type_ops(head).has_checksum(head))
+               type_ops(head).update_checksum(head);
+
+         if (pending_releases.failed())
+         {
+            if (not ses.unalloc(head->size()))
+               ses.record_freed_space(head, "compactor_segment_release_failed");
+            return;
+         }
 
          if (obj_ref.control().cas_move(obj_ref.loc(), loc))
          {
-            ses.record_freed_space(obj_ref.obj());
+            ses.record_freed_space(obj_ref.obj(), "compactor_segment_move");
+            release_pending_relocation_refs(ses, pending_releases);
          }
          else
          {
             if (not ses.unalloc(head->size()))
-               ses.record_freed_space(head);
+               ses.record_freed_space(head, "compactor_segment_unalloc_failed");
          }
       };  /// end try_copy_node lambda
 
@@ -1977,6 +2039,16 @@ namespace sal
       shp->_open_time_usec      = msec_timestamp(0);
       shp->_close_time_usec     = msec_timestamp(0);
       shp->age_accumulator.reset(*now_ms);
+      // CRITICAL: clear any stale tracker entries for this segment's
+      // address range BEFORE it can be re-allocated to a session.
+      // Without this, segment::alloc<T> in the new session bumps
+      // alloc_pos from 0 and adds a fresh live entry, while stale
+      // entries from the segment's prior life still sit in live_, so
+      // the verifier sees live > alloc_pos. There are paths where
+      // bulk-recycle skips per-object record_freed_space because the
+      // whole segment is going free — those entries are only cleared
+      // here.
+      SAL_TRACK_SEG_RESET(shp, segment_size);
 
       //ARBTRIE_WARN("segment_provider: Prepared segment ", seg_num,
       //             " freed space: ", meta.get_free_state().free_space);
@@ -2165,16 +2237,4 @@ namespace sal
       (*current_session)[_allocator_index] = nullptr;
       _mapped_state->_session_data.release_session_num(sn);
    }
-   std::array<vtable_pointers, 128>& get_type_vtables()
-   {
-      static std::array<vtable_pointers, 128> _type_vtables = []()
-      {
-         std::array<vtable_pointers, 128> vtables;
-         for (uint8_t i = 0; i < vtables.size(); ++i)
-            vtables[i] = vtable_pointers::create<vtable<alloc_header>>();
-         return vtables;
-      }();
-      return _type_vtables;
-   }
-
 }  // namespace sal

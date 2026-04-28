@@ -1,12 +1,15 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <new>
 #include <ucc/padded_atomic.hpp>
 #include <stdexcept>
+#include <sal/alloc_header.hpp>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block_alloc.hpp>
+#include <sal/debug/free_range_tracker.hpp>
 #include <sal/mapped_memory/allocator_state.hpp>
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/segment_thread.hpp>
@@ -69,8 +72,32 @@ namespace sal
       /// 64 bits for session id
       static constexpr uint32_t max_session_count = 64;
 
-      allocator(std::filesystem::path dir, runtime_config cfg = runtime_config());
+      allocator(std::filesystem::path dir, runtime_config cfg = runtime_config(),
+                bool start_threads_now = true);
       ~allocator();
+
+      template <typename T>
+      void register_type_ops(const object_type_ops& ops) noexcept
+      {
+         static_assert(uint8_t(T::type_id) < 128, "type_id out of range");
+         _type_ops[uint8_t(T::type_id)] = &ops;
+      }
+
+      template <typename T>
+      void register_type_ops() noexcept
+      {
+         register_type_ops<T>(default_object_type_ops<T>());
+      }
+
+      const object_type_ops& type_ops(header_type type) const noexcept
+      {
+         return *_type_ops[uint8_t(type)];
+      }
+
+      const object_type_ops& type_ops(const alloc_header* obj) const noexcept
+      {
+         return type_ops(obj->type());
+      }
 
       /**
        * @brief Initialize shared ownership for cross-thread shared_smart_ptr use.
@@ -477,6 +504,7 @@ namespace sal
       mapping                         _seg_alloc_state_file;
       mapping                         _root_object_file;
       root_object_array*              _root_objects;
+      std::array<const object_type_ops*, 128> _type_ops;
       std::mutex                      _sync_mutex;
       /// used by readers/writers to grab/update a root object
       std::array<std::shared_mutex, 1024> _root_object_mutex;
@@ -499,7 +527,6 @@ namespace sal
       }
 
      private:
-
       inline bool config_validate_checksum_on_compact() const;
       inline bool config_update_checksum_on_compact() const;
       inline bool config_update_checksum_on_modify() const;
@@ -624,7 +651,8 @@ namespace sal
         * @param seg The segment number containing the object
         */
       template <typename T>
-      inline void record_freed_space(allocator_session_number /*ses_num*/, T* obj);
+      inline void record_freed_space(allocator_session_number /*ses_num*/, T* obj,
+                                     const char* tag);
       /*
       {
          //static std::vector<T*> ptrs;
@@ -730,6 +758,9 @@ namespace sal
          shp->_provider_sequence = _mapped_state->_segment_provider._next_alloc_seq.fetch_add(
              1, std::memory_order_relaxed);
          _mapped_state->_segment_data.allocated_by_session(segnum);
+         // Drop any tracker entries from the segment's prior life so a fresh
+         // session starts with a clean accounting.
+         SAL_TRACK_SEG_RESET(shp, segment_size);
          return {segnum, shp};
       }
 
