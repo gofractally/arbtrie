@@ -461,6 +461,10 @@ namespace psitri
       uint64_t data_value_count       = 0;
       uint64_t data_value_bytes       = 0;
       uint64_t max_data_value_size    = 0;
+      uint64_t leaf_clines            = 0;
+      uint64_t max_leaf_clines        = 0;
+      uint64_t cline_saturated_leaves = 0;
+      uint64_t leaf_address_values    = 0;
       uint64_t leaf_alloc_bytes       = 0;
       uint64_t leaf_used_bytes        = 0;
       uint64_t leaf_dead_bytes        = 0;
@@ -499,6 +503,21 @@ namespace psitri
       double average_data_value_size() const noexcept
       {
          return data_value_count ? double(data_value_bytes) / double(data_value_count) : 0.0;
+      }
+
+      double average_clines_per_leaf() const noexcept
+      {
+         return leaf_nodes ? double(leaf_clines) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_address_values_per_leaf() const noexcept
+      {
+         return leaf_nodes ? double(leaf_address_values) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_address_values_per_cline() const noexcept
+      {
+         return leaf_clines ? double(leaf_address_values) / double(leaf_clines) : 0.0;
       }
 
       double leaf_dead_space_percent() const noexcept
@@ -583,6 +602,10 @@ namespace psitri
       uint64_t data_value_count       = 0;
       uint64_t data_value_bytes       = 0;
       uint64_t max_data_value_size    = 0;
+      uint64_t leaf_clines            = 0;
+      uint64_t max_leaf_clines        = 0;
+      uint64_t cline_saturated_leaves = 0;
+      uint64_t leaf_address_values    = 0;
       uint64_t max_depth              = 0;
       uint64_t leaf_depth_sum         = 0;
       uint64_t key_depth_sum          = 0;
@@ -599,6 +622,8 @@ namespace psitri
 
       std::vector<uint64_t> branches_per_inner_node;
       std::vector<uint64_t> keys_per_leaf;
+      std::vector<uint64_t> leaf_clines_histogram;
+      std::vector<uint64_t> address_values_per_leaf;
       std::vector<uint64_t> leaf_depths;
       std::vector<tree_stats_depth_row> depth_stats;
 
@@ -694,6 +719,21 @@ namespace psitri
       double average_data_value_size() const noexcept
       {
          return data_value_count ? double(data_value_bytes) / double(data_value_count) : 0.0;
+      }
+
+      double average_clines_per_leaf() const noexcept
+      {
+         return leaf_nodes ? double(leaf_clines) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_address_values_per_leaf() const noexcept
+      {
+         return leaf_nodes ? double(leaf_address_values) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_address_values_per_cline() const noexcept
+      {
+         return leaf_clines ? double(leaf_address_values) / double(leaf_clines) : 0.0;
       }
 
       double average_branches_per_inner() const noexcept

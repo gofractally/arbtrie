@@ -62,6 +62,17 @@ struct tricorder_depth_stats
    uint64_t leaf_nodes            = 0;
    uint64_t leaf_keys             = 0;
    uint64_t selected_leaf_keys    = 0;
+   uint64_t key_bytes             = 0;
+   uint64_t selected_key_bytes    = 0;
+   uint64_t max_key_size          = 0;
+   uint64_t max_selected_key_size = 0;
+   uint64_t data_value_count      = 0;
+   uint64_t data_value_bytes      = 0;
+   uint64_t max_data_value_size   = 0;
+   uint64_t leaf_clines           = 0;
+   uint64_t max_leaf_clines       = 0;
+   uint64_t cline_saturated_leaves = 0;
+   uint64_t leaf_address_values   = 0;
    uint64_t leaf_alloc_bytes      = 0;
    uint64_t leaf_used_bytes       = 0;
    uint64_t leaf_dead_bytes       = 0;
@@ -109,6 +120,17 @@ struct tricorder_tree_stats_report
    uint64_t low_fanout_inners    = 0;
    uint64_t leaf_keys            = 0;
    uint64_t selected_leaf_keys    = 0;
+   uint64_t key_bytes             = 0;
+   uint64_t selected_key_bytes    = 0;
+   uint64_t max_key_size          = 0;
+   uint64_t max_selected_key_size = 0;
+   uint64_t data_value_count      = 0;
+   uint64_t data_value_bytes      = 0;
+   uint64_t max_data_value_size   = 0;
+   uint64_t leaf_clines           = 0;
+   uint64_t max_leaf_clines       = 0;
+   uint64_t cline_saturated_leaves = 0;
+   uint64_t leaf_address_values   = 0;
    uint64_t max_depth            = 0;
    uint64_t leaf_depth_sum       = 0;
    uint64_t key_depth_sum        = 0;
@@ -125,6 +147,8 @@ struct tricorder_tree_stats_report
 
    std::vector<uint64_t> branches_per_inner_node;
    std::vector<uint64_t> keys_per_leaf;
+   std::vector<uint64_t> leaf_clines_histogram;
+   std::vector<uint64_t> address_values_per_leaf;
    std::vector<uint64_t> leaf_depths;
    std::vector<tricorder_depth_stats> depth_stats;
 };
@@ -185,6 +209,17 @@ PSIO_REFLECT(tricorder_depth_stats,
              leaf_nodes,
              leaf_keys,
              selected_leaf_keys,
+             key_bytes,
+             selected_key_bytes,
+             max_key_size,
+             max_selected_key_size,
+             data_value_count,
+             data_value_bytes,
+             max_data_value_size,
+             leaf_clines,
+             max_leaf_clines,
+             cline_saturated_leaves,
+             leaf_address_values,
              leaf_alloc_bytes,
              leaf_used_bytes,
              leaf_dead_bytes,
@@ -224,6 +259,17 @@ PSIO_REFLECT(tricorder_tree_stats_report,
              low_fanout_inners,
              leaf_keys,
              selected_leaf_keys,
+             key_bytes,
+             selected_key_bytes,
+             max_key_size,
+             max_selected_key_size,
+             data_value_count,
+             data_value_bytes,
+             max_data_value_size,
+             leaf_clines,
+             max_leaf_clines,
+             cline_saturated_leaves,
+             leaf_address_values,
              max_depth,
              leaf_depth_sum,
              key_depth_sum,
@@ -238,6 +284,8 @@ PSIO_REFLECT(tricorder_tree_stats_report,
              total_value_bytes,
              branches_per_inner_node,
              keys_per_leaf,
+             leaf_clines_histogram,
+             address_values_per_leaf,
              leaf_depths,
              depth_stats)
 #endif
@@ -712,6 +760,17 @@ tricorder_depth_stats to_tricorder_depth_stats(const tree_stats_depth_row& row)
    out.leaf_nodes            = row.leaf_nodes;
    out.leaf_keys             = row.leaf_keys;
    out.selected_leaf_keys    = row.selected_leaf_keys;
+   out.key_bytes             = row.key_bytes;
+   out.selected_key_bytes    = row.selected_key_bytes;
+   out.max_key_size          = row.max_key_size;
+   out.max_selected_key_size = row.max_selected_key_size;
+   out.data_value_count      = row.data_value_count;
+   out.data_value_bytes      = row.data_value_bytes;
+   out.max_data_value_size   = row.max_data_value_size;
+   out.leaf_clines           = row.leaf_clines;
+   out.max_leaf_clines       = row.max_leaf_clines;
+   out.cline_saturated_leaves = row.cline_saturated_leaves;
+   out.leaf_address_values   = row.leaf_address_values;
    out.leaf_alloc_bytes      = row.leaf_alloc_bytes;
    out.leaf_used_bytes       = row.leaf_used_bytes;
    out.leaf_dead_bytes       = row.leaf_dead_bytes;
@@ -754,6 +813,17 @@ tricorder_tree_stats_report make_tree_stats_report(const tree_stats_result& s)
    out.low_fanout_inners      = s.low_fanout_inners;
    out.leaf_keys              = s.leaf_keys;
    out.selected_leaf_keys     = s.selected_leaf_keys;
+   out.key_bytes              = s.key_bytes;
+   out.selected_key_bytes     = s.selected_key_bytes;
+   out.max_key_size           = s.max_key_size;
+   out.max_selected_key_size  = s.max_selected_key_size;
+   out.data_value_count       = s.data_value_count;
+   out.data_value_bytes       = s.data_value_bytes;
+   out.max_data_value_size    = s.max_data_value_size;
+   out.leaf_clines            = s.leaf_clines;
+   out.max_leaf_clines        = s.max_leaf_clines;
+   out.cline_saturated_leaves = s.cline_saturated_leaves;
+   out.leaf_address_values    = s.leaf_address_values;
    out.max_depth              = s.max_depth;
    out.leaf_depth_sum         = s.leaf_depth_sum;
    out.key_depth_sum          = s.key_depth_sum;
@@ -768,6 +838,8 @@ tricorder_tree_stats_report make_tree_stats_report(const tree_stats_result& s)
    out.total_value_bytes      = s.total_value_bytes;
    out.branches_per_inner_node = s.branches_per_inner_node;
    out.keys_per_leaf          = s.keys_per_leaf;
+   out.leaf_clines_histogram  = s.leaf_clines_histogram;
+   out.address_values_per_leaf = s.address_values_per_leaf;
    out.leaf_depths            = s.leaf_depths;
 
    out.depth_stats.reserve(s.depth_stats.size());
@@ -870,6 +942,18 @@ void write_json(std::ostream& os, const tricorder_depth_stats& row)
    write_json_uint_field(os, first, "leaf_nodes", row.leaf_nodes);
    write_json_uint_field(os, first, "leaf_keys", row.leaf_keys);
    write_json_uint_field(os, first, "selected_leaf_keys", row.selected_leaf_keys);
+   write_json_uint_field(os, first, "key_bytes", row.key_bytes);
+   write_json_uint_field(os, first, "selected_key_bytes", row.selected_key_bytes);
+   write_json_uint_field(os, first, "max_key_size", row.max_key_size);
+   write_json_uint_field(os, first, "max_selected_key_size", row.max_selected_key_size);
+   write_json_uint_field(os, first, "data_value_count", row.data_value_count);
+   write_json_uint_field(os, first, "data_value_bytes", row.data_value_bytes);
+   write_json_uint_field(os, first, "max_data_value_size", row.max_data_value_size);
+   write_json_uint_field(os, first, "leaf_clines", row.leaf_clines);
+   write_json_uint_field(os, first, "max_leaf_clines", row.max_leaf_clines);
+   write_json_uint_field(os, first, "cline_saturated_leaves",
+                         row.cline_saturated_leaves);
+   write_json_uint_field(os, first, "leaf_address_values", row.leaf_address_values);
    write_json_uint_field(os, first, "leaf_alloc_bytes", row.leaf_alloc_bytes);
    write_json_uint_field(os, first, "leaf_used_bytes", row.leaf_used_bytes);
    write_json_uint_field(os, first, "leaf_dead_bytes", row.leaf_dead_bytes);
@@ -915,6 +999,19 @@ std::string to_json(const tricorder_tree_stats_report& report)
    write_json_uint_field(os, first, "low_fanout_inners", report.low_fanout_inners);
    write_json_uint_field(os, first, "leaf_keys", report.leaf_keys);
    write_json_uint_field(os, first, "selected_leaf_keys", report.selected_leaf_keys);
+   write_json_uint_field(os, first, "key_bytes", report.key_bytes);
+   write_json_uint_field(os, first, "selected_key_bytes", report.selected_key_bytes);
+   write_json_uint_field(os, first, "max_key_size", report.max_key_size);
+   write_json_uint_field(os, first, "max_selected_key_size", report.max_selected_key_size);
+   write_json_uint_field(os, first, "data_value_count", report.data_value_count);
+   write_json_uint_field(os, first, "data_value_bytes", report.data_value_bytes);
+   write_json_uint_field(os, first, "max_data_value_size", report.max_data_value_size);
+   write_json_uint_field(os, first, "leaf_clines", report.leaf_clines);
+   write_json_uint_field(os, first, "max_leaf_clines", report.max_leaf_clines);
+   write_json_uint_field(os, first, "cline_saturated_leaves",
+                         report.cline_saturated_leaves);
+   write_json_uint_field(os, first, "leaf_address_values",
+                         report.leaf_address_values);
    write_json_uint_field(os, first, "max_depth", report.max_depth);
    write_json_uint_field(os, first, "leaf_depth_sum", report.leaf_depth_sum);
    write_json_uint_field(os, first, "key_depth_sum", report.key_depth_sum);
@@ -930,6 +1027,10 @@ std::string to_json(const tricorder_tree_stats_report& report)
    write_json_vector_field(os, first, "branches_per_inner_node",
                            report.branches_per_inner_node);
    write_json_vector_field(os, first, "keys_per_leaf", report.keys_per_leaf);
+   write_json_vector_field(os, first, "leaf_clines_histogram",
+                           report.leaf_clines_histogram);
+   write_json_vector_field(os, first, "address_values_per_leaf",
+                           report.address_values_per_leaf);
    write_json_vector_field(os, first, "leaf_depths", report.leaf_depths);
 
    write_json_key(os, first, "depth_stats");
@@ -1151,6 +1252,44 @@ void print_leaf_density_by_depth(const tree_stats_result& s)
       std::cout << "  (empty)\n";
 }
 
+void print_leaf_clines_by_depth(const tree_stats_result& s)
+{
+   std::cout << "\n-- Leaf Clines By Depth --\n";
+   std::cout << "  " << std::setw(7) << std::left << "Depth"
+             << std::setw(14) << std::left << "Leaves"
+             << std::setw(14) << std::left << "Clines"
+             << std::setw(14) << std::left << "AddrVals"
+             << std::setw(12) << std::left << "C/Leaf"
+             << std::setw(12) << std::left << "A/Leaf"
+             << std::setw(12) << std::left << "A/Cline"
+             << std::setw(8) << std::left << "Max"
+             << "Sat\n";
+
+   bool any = false;
+   for (const auto& row : s.depth_stats)
+   {
+      if (row.leaf_nodes == 0)
+         continue;
+
+      any = true;
+      std::cout << "  " << std::setw(7) << std::left << row.depth
+                << std::setw(14) << std::left << format_number(row.leaf_nodes)
+                << std::setw(14) << std::left << format_number(row.leaf_clines)
+                << std::setw(14) << std::left << format_number(row.leaf_address_values)
+                << std::setw(12) << std::left << std::fixed << std::setprecision(2)
+                << row.average_clines_per_leaf()
+                << std::setw(12) << std::left
+                << row.average_address_values_per_leaf()
+                << std::setw(12) << std::left
+                << row.average_address_values_per_cline()
+                << std::setw(8) << std::left << row.max_leaf_clines
+                << format_number(row.cline_saturated_leaves) << "\n";
+   }
+
+   if (!any)
+      std::cout << "  (empty)\n";
+}
+
 int cmd_tree_stats(database& db, bool json_output, const tree_stats_options& options)
 {
    if (json_output)
@@ -1263,6 +1402,38 @@ int cmd_tree_stats(database& db, bool json_output, const tree_stats_options& opt
              << std::fixed << std::setprecision(2) << s.average_branches_per_inner() << "\n";
    std::cout << "  " << std::setw(30) << std::left << "Avg keys/leaf"
              << std::fixed << std::setprecision(2) << s.average_keys_per_leaf() << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Avg key size"
+             << std::fixed << std::setprecision(2) << s.average_key_size() << " bytes\n";
+   std::cout << "  " << std::setw(30) << std::left << "Avg selected key size"
+             << std::fixed << std::setprecision(2) << s.average_selected_key_size()
+             << " bytes\n";
+   std::cout << "  " << std::setw(30) << std::left << "Max key size"
+             << format_bytes(s.max_key_size) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Max selected key size"
+             << format_bytes(s.max_selected_key_size) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Data values"
+             << format_number(s.data_value_count) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Avg data value size"
+             << format_bytes(uint64_t(s.average_data_value_size())) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Max data value size"
+             << format_bytes(s.max_data_value_size) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Leaf clines"
+             << format_number(s.leaf_clines) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Avg clines/leaf"
+             << std::fixed << std::setprecision(2) << s.average_clines_per_leaf()
+             << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Max clines/leaf"
+             << s.max_leaf_clines << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Cline-saturated leaves"
+             << format_number(s.cline_saturated_leaves) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Leaf address values"
+             << format_number(s.leaf_address_values) << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Addr values/leaf"
+             << std::fixed << std::setprecision(2)
+             << s.average_address_values_per_leaf() << "\n";
+   std::cout << "  " << std::setw(30) << std::left << "Addr values/cline"
+             << std::fixed << std::setprecision(2)
+             << s.average_address_values_per_cline() << "\n";
    std::cout << "  " << std::setw(30) << std::left << "Avg leaf alloc size"
              << format_bytes(uint64_t(s.average_leaf_alloc_size())) << "\n";
    std::cout << "  " << std::setw(30) << std::left << "Avg leaf used size"
@@ -1299,8 +1470,12 @@ int cmd_tree_stats(database& db, bool json_output, const tree_stats_options& opt
 
    print_fanout_by_depth(s);
    print_leaf_density_by_depth(s);
+   print_leaf_clines_by_depth(s);
    print_histogram("Branches Per Inner Node", s.branches_per_inner_node, "Branches");
    print_histogram("Keys Per Leaf", s.keys_per_leaf, "Keys");
+   print_histogram("Leaf Cline Histogram", s.leaf_clines_histogram, "Clines");
+   print_histogram("Address Values Per Leaf", s.address_values_per_leaf,
+                   "AddressValues");
    print_histogram("Leaf Depths", s.leaf_depths, "Depth");
 
    if (db.ref_counts_stale())

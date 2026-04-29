@@ -368,9 +368,19 @@ namespace psitri::detail
          result.total_leaf_dead_bytes += dead_space;
          result.total_leaf_empty_bytes += empty_space;
 
+         const uint64_t leaf_clines = leaf->clines_capacity();
+         result.leaf_clines += leaf_clines;
+         result.max_leaf_clines = std::max(result.max_leaf_clines, leaf_clines);
+         if (leaf_clines >= leaf_node::max_value_clines)
+            ++result.cline_saturated_leaves;
+
          ++row.leaf_nodes;
          row.leaf_keys += leaf->num_branches();
          row.selected_leaf_keys += selected_keys;
+         row.leaf_clines += leaf_clines;
+         row.max_leaf_clines = std::max(row.max_leaf_clines, leaf_clines);
+         if (leaf_clines >= leaf_node::max_value_clines)
+            ++row.cline_saturated_leaves;
          row.leaf_alloc_bytes += leaf->size();
          row.leaf_used_bytes += leaf->alloc_pos();
          row.leaf_dead_bytes += dead_space;
@@ -386,12 +396,18 @@ namespace psitri::detail
             row.full_leaf_empty_bytes += empty_space;
          }
          record_histogram(result.keys_per_leaf, leaf->num_branches());
+         record_histogram(result.leaf_clines_histogram, leaf_clines);
          record_histogram(result.leaf_depths, depth);
 
+         uint64_t leaf_address_values = 0;
          for (uint32_t b = 0; b < leaf->num_branches(); ++b)
          {
             auto bn = branch_number(b);
             auto key = leaf->get_key(bn);
+            auto vt = leaf->get_value_type(bn);
+            if (vt == leaf_node::value_type_flag::value_node)
+               ++leaf_address_values;
+
             const uint64_t full_key_size = key_prefix.size() + key.size();
             bool selected = true;
             if (options.has_key_range())
@@ -405,13 +421,16 @@ namespace psitri::detail
             if (!selected)
                continue;
 
-            auto vt = leaf->get_value_type(bn);
             if (vt == leaf_node::value_type_flag::inline_data)
                record_data_value_stats(result, row, leaf->get_value_view(bn).size());
             else if (vt == leaf_node::value_type_flag::value_node)
                maybe_record_value_node_data_size(alloc, leaf->get_value_address(bn),
                                                  result, row);
          }
+
+         result.leaf_address_values += leaf_address_values;
+         row.leaf_address_values += leaf_address_values;
+         record_histogram(result.address_values_per_leaf, leaf_address_values);
       }
 
       void collect_tree_stats_node(sal::allocator&               alloc,
