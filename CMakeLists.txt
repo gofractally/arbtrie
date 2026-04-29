@@ -463,6 +463,36 @@ target_link_libraries(psitri-tool PUBLIC Boost::program_options psitri)
 target_include_directories(psitri-tool PUBLIC ${Boost_INCLUDE_DIRS})
 set_target_properties(psitri-tool PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(psitricorder programs/psitri_tool.cpp)
+target_link_libraries(psitricorder PUBLIC Boost::program_options psitri)
+target_include_directories(psitricorder PUBLIC ${Boost_INCLUDE_DIRS})
+set_target_properties(psitricorder PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+option(PSITRI_TRICORDER_USE_PSIO_JSON
+       "Use psio reflection for psitricorder JSON output when psio headers are available"
+       ON)
+if(PSITRI_TRICORDER_USE_PSIO_JSON)
+    find_path(PSITRI_PSIO_INCLUDE_DIR psio/to_json.hpp
+        HINTS
+            "${CMAKE_SOURCE_DIR}/../psibase/libraries/psio/include"
+            "${CMAKE_SOURCE_DIR}/../psiserve-agent2/libraries/psio/include"
+            "${CMAKE_SOURCE_DIR}/../gofractally-psio/include")
+    find_path(PSITRI_RAPIDJSON_INCLUDE_DIR rapidjson/encodings.h
+        HINTS
+            "${CMAKE_SOURCE_DIR}/../psibase/external/rapidjson/include")
+    if(PSITRI_PSIO_INCLUDE_DIR AND PSITRI_RAPIDJSON_INCLUDE_DIR)
+        message(STATUS "psitricorder JSON will use psio reflection")
+        foreach(tricorder_target psitri-tool psitricorder)
+            target_compile_definitions(${tricorder_target}
+                PRIVATE PSITRI_TRICORDER_HAS_PSIO_JSON=1)
+            target_include_directories(${tricorder_target}
+                PRIVATE ${PSITRI_PSIO_INCLUDE_DIR} ${PSITRI_RAPIDJSON_INCLUDE_DIR})
+        endforeach()
+    else()
+        message(STATUS "psio headers not found; psitricorder JSON will use the local writer")
+    endif()
+endif()
+
 add_executable(mdbx-probe programs/mdbx_probe.cpp)
 target_link_libraries(mdbx-probe PRIVATE psitrimdbx)
 set_target_properties(mdbx-probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

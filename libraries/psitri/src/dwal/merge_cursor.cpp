@@ -113,20 +113,25 @@ namespace psitri::dwal
       return advance_forward();
    }
 
-   bool merge_cursor::seek(std::string_view key)
-   {
-      if (!lower_bound(key))
-         return false;
+	   bool merge_cursor::seek(std::string_view key)
+	   {
+	      if (!lower_bound(key))
+	         return false;
       if (_current_key != key)
       {
          _at_end = true;
          _source = source::none;
          return false;
       }
-      return true;
-   }
+	      return true;
+	   }
 
-   // ── Navigation ───────────────────────────────────────────────────
+	   bool merge_cursor::find(std::string_view key)
+	   {
+	      return seek(key);
+	   }
+
+	   // ── Navigation ───────────────────────────────────────────────────
 
    bool merge_cursor::next()
    {

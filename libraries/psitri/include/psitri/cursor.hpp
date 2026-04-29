@@ -155,6 +155,9 @@ namespace psitri
 
       /// goes to exactly the given key, @return is_end() if not found
       bool seek(key_view key) noexcept;
+      /// Finds exactly the given key using the point-lookup path.
+      /// On miss, positions the cursor at end.
+      bool find(key_view key) noexcept;
 
       bool first(key_view prefix = {}) noexcept;
       bool last(key_view prefix = {}) noexcept;
@@ -250,6 +253,7 @@ namespace psitri
       bool     next_impl() noexcept;
       bool     prev_impl() noexcept;
       bool     lower_bound_impl(key_view key) noexcept;
+      bool     find_impl(key_view key) noexcept;
 
       auto visit(ptr_address adr, auto&& lambda);
 
@@ -467,10 +471,10 @@ namespace psitri
       return std::nullopt;
    }
 
-   int32_t cursor::get_impl(key_view key, Buffer auto* buffer) noexcept
-   {
-      seek_rend();
-      while (true)
+	   int32_t cursor::get_impl(key_view key, Buffer auto* buffer) noexcept
+	   {
+	      seek_rend();
+	      while (true)
       {
          const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
          switch (n->type())
@@ -520,6 +524,8 @@ namespace psitri
                   {
                      auto ref = _node.session()->get_ref<value_node>(
                          l->get_value_address(_path_back->branch));
+                     if (ref->is_subtree_container())
+                        return value_subtree;
                      auto [offset, idx] = ref->find_version(_version);
                      if (offset == value_node::offset_tombstone ||
                          offset == value_node::offset_null)
@@ -539,12 +545,80 @@ namespace psitri
                [[fallthrough]];
             default:
                std::unreachable();
-         }
-      }
-   }
+	         }
+	      }
+	   }
 
-   inline void cursor::append_key(key_view key) noexcept
-   {
+	   inline bool cursor::find(key_view key) noexcept
+	   {
+	      if (sal::null_ptr_address == _node.address()) [[unlikely]]
+	         return seek_end();
+	      auto read_lock = _node.session()->lock();
+	      return find_impl(key);
+	   }
+
+	   inline bool cursor::find_impl(key_view key) noexcept
+	   {
+	      seek_rend();
+	      while (true)
+	      {
+	         const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+	         switch (n->type())
+	         {
+	            [[likely]] case node_type::inner:
+	            {
+	               const auto*   i      = static_cast<const inner_node*>(n);
+	               branch_number branch = i->lower_bound(key);
+	               _path_back->branch   = branch;
+	               push(i->get_branch(branch));
+	               continue;
+	            }
+	            [[likely]] case node_type::inner_prefix:
+	            {
+	               const auto* ip   = static_cast<const inner_prefix_node*>(n);
+	               auto        cpre = ucc::common_prefix(key, ip->prefix());
+	               if (cpre.size() != ip->prefix().size())
+	                  return seek_end();
+
+	               append_key(ip->prefix());
+	               _path_back->branch = ip->lower_bound(key = key.substr(cpre.size()));
+	               push(ip->get_branch(_path_back->branch));
+	               continue;
+	            }
+	            [[unlikely]] case node_type::leaf:
+	            {
+	               const auto* l      = static_cast<const leaf_node*>(n);
+	               _path_back->branch = l->get(key);
+	               if (_path_back->branch == l->num_branches())
+	                  return seek_end();
+	               if (is_leaf_entry_hidden(l, _path_back->branch))
+	                  return seek_end();
+
+	               append_key(key);
+	               if (l->get_value_type(_path_back->branch) ==
+	                   leaf_node::value_type_flag::value_node)
+	               {
+	                  auto ref = _node.session()->get_ref<value_node>(
+	                      l->get_value_address(_path_back->branch));
+	                  if (ref->is_subtree_container())
+	                     return true;
+	                  auto [offset, idx] = ref->find_version(_version);
+	                  if (offset == value_node::offset_tombstone ||
+	                      offset == value_node::offset_null)
+	                     return seek_end();
+	               }
+	               return true;
+	            }
+	            [[unlikely]] case node_type::value:
+	               [[fallthrough]];
+	            default:
+	               std::unreachable();
+	         }
+	      }
+	   }
+
+	   inline void cursor::append_key(key_view key) noexcept
+	   {
       // TODO: it is always possible to read 7 bytes past the end of the key stored in nodes; therefore,
       // this copy could be done 8 bytes at a time instead of 1 byte at a time, so long as we ensure that
       // it is safe to write 7 bytes past the end of _key_buf
@@ -834,6 +908,8 @@ namespace psitri
          {
             auto ref =
                 _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+               return value_subtree;
             auto [offset, idx] = ref->find_version(_version);
             if (offset == value_node::offset_tombstone || offset == value_node::offset_null)
                return value_not_found;
@@ -869,6 +945,8 @@ namespace psitri
          {
             auto ref =
                 _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+               return value_view();
             return ref->get_value_at_version(_version);
          }
          case leaf_node::value_type_flag::subtree:
@@ -915,6 +993,11 @@ namespace psitri
          {
             auto ref =
                 _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+            {
+               lambda(value_view());
+               return;
+            }
             lambda(ref->get_value_at_version(_version));
             return;
          }
@@ -960,6 +1043,8 @@ namespace psitri
          {
             auto ref =
                 _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+               return std::nullopt;
             auto [offset, idx] = ref->find_version(_version);
             if (offset == value_node::offset_tombstone || offset == value_node::offset_null)
                return std::nullopt;
@@ -989,7 +1074,13 @@ namespace psitri
          return false;
       if (is_leaf_entry_hidden(l, _path_back->branch))
          return false;
-      return l->get_value_type(_path_back->branch) == leaf_node::value_type_flag::subtree;
+      auto vt = l->get_value_type(_path_back->branch);
+      if (vt == leaf_node::value_type_flag::subtree)
+         return true;
+      if (vt != leaf_node::value_type_flag::value_node)
+         return false;
+      auto ref = _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+      return ref->is_subtree_container();
    }
 
    inline sal::smart_ptr<sal::alloc_header> cursor::subtree() const noexcept
@@ -1001,12 +1092,22 @@ namespace psitri
       if (n->type() != node_type::leaf)
          return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
       auto* l = static_cast<const leaf_node*>(n);
-      if (_path_back->branch >= l->num_branches() || is_leaf_entry_hidden(l, _path_back->branch) ||
-          l->get_value_type(_path_back->branch) != leaf_node::value_type_flag::subtree)
+      if (_path_back->branch >= l->num_branches() || is_leaf_entry_hidden(l, _path_back->branch))
          return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
-      auto val = l->get_value(_path_back->branch);
-      // Construct smart_ptr with inc_ref=true — the leaf owns one ref, caller gets another
-      return sal::smart_ptr<sal::alloc_header>(_node.session(), val.subtree_id(), true);
+      auto vt = l->get_value_type(_path_back->branch);
+      if (vt == leaf_node::value_type_flag::subtree)
+      {
+         auto val = l->get_value(_path_back->branch);
+         // Construct smart_ptr with inc_ref=true — the leaf owns one ref, caller gets another.
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), val.subtree_id(), true);
+      }
+      if (vt == leaf_node::value_type_flag::value_node)
+      {
+         auto ref = _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+         if (ref->is_subtree_container())
+            return sal::smart_ptr<sal::alloc_header>(_node.session(), ref->get_tree_id(), true);
+      }
+      return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
    }
 
    inline cursor cursor::subtree_cursor() const noexcept

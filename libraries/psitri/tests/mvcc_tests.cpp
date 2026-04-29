@@ -537,6 +537,49 @@ TEST_CASE("mvcc_immediate: single-thread upsert and read", "[mvcc_immediate]")
    }
 }
 
+TEST_CASE("mvcc_transaction: upsert uses versioned leaf edit instead of root COW",
+          "[mvcc_transaction]")
+{
+   sal::set_current_thread_name("main");
+   immediate_db idb("mvcc_transaction_testdb");
+
+   auto ws = idb.db->start_write_session();
+
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key0", "val0");
+      tx.commit();
+   }
+
+   auto old_snapshot = ws->get_root(0);
+   auto old_addr     = old_snapshot.address();
+   REQUIRE(old_addr != sal::null_ptr_address);
+
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key1", "val1");
+
+      auto in_tx = tx.get<std::string>("key1");
+      REQUIRE(in_tx.has_value());
+      CHECK(*in_tx == "val1");
+
+      cursor old_cursor(old_snapshot);
+      CHECK_FALSE(old_cursor.seek("key1"));
+
+      tx.commit();
+   }
+
+   auto new_root = ws->get_root(0);
+   CHECK(new_root.address() == old_addr);
+
+   cursor latest(new_root);
+   REQUIRE(latest.seek("key1"));
+   CHECK(latest.value<std::string>().value_or("") == "val1");
+
+   cursor old_cursor(old_snapshot);
+   CHECK_FALSE(old_cursor.seek("key1"));
+}
+
 TEST_CASE("mvcc_immediate: remove via tombstone", "[mvcc_immediate]")
 {
    sal::set_current_thread_name("main");

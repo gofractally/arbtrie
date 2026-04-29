@@ -68,7 +68,8 @@ namespace psitri
       void     upsert_subtree(key_view key, tree subtree);
       void     upsert_subtree_sorted(key_view key, tree subtree);
       int      remove(key_view key);
-      uint64_t remove_range(key_view lower, key_view upper);
+      bool     remove_range_any(key_view lower, key_view upper);
+      uint64_t remove_range_counted(key_view lower, key_view upper);
 
       // ── Reads ─────────────────────────────────────────────────────────
       cursor read_cursor() const;
@@ -132,7 +133,8 @@ namespace psitri
       void     upsert_subtree(key_view key, tree subtree);
       void     upsert_subtree_sorted(key_view key, tree subtree);
       int      remove(key_view key);
-      uint64_t remove_range(key_view lower, key_view upper);
+      bool     remove_range_any(key_view lower, key_view upper);
+      uint64_t remove_range_counted(key_view lower, key_view upper);
 
       // ── Read access ───────────────────────────────────────────────────
 
@@ -267,9 +269,14 @@ namespace psitri
          return do_remove(_primary_index, key);
       }
 
-      uint64_t remove_range(key_view lower, key_view upper)
+      bool remove_range_any(key_view lower, key_view upper)
       {
-         return do_remove_range(_primary_index, lower, upper);
+         return do_remove_range_any(_primary_index, lower, upper);
+      }
+
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return do_remove_range_counted(_primary_index, lower, upper);
       }
 
       // ── Primary tree read access (backward-compatible) ────────────────
@@ -554,7 +561,20 @@ namespace psitri
          return result;
       }
 
-      uint64_t do_remove_range(uint32_t idx, key_view lower, key_view upper)
+      bool do_remove_range_any(uint32_t idx, key_view lower, key_view upper)
+      {
+         auto& cs = cs_at(idx);
+         bool removed;
+         if (cs.buffer)
+            removed = micro_remove_range_any(cs, lower, upper);
+         else
+            removed = cs.cursor->remove_range_any(lower, upper);
+         if (removed)
+            cs.dirty = true;
+         return removed;
+      }
+
+      uint64_t do_remove_range_counted(uint32_t idx, key_view lower, key_view upper)
       {
          auto& cs = cs_at(idx);
          if (cs.buffer)
@@ -564,7 +584,7 @@ namespace psitri
                cs.dirty = true;
             return removed;
          }
-         auto removed = cs.cursor->remove_range(lower, upper);
+         auto removed = cs.cursor->remove_range_counted(lower, upper);
          if (removed)
             cs.dirty = true;
          return removed;
@@ -764,6 +784,25 @@ namespace psitri
 
       static constexpr uint64_t tombstone_threshold = 256;
 
+      bool micro_remove_range_any(change_set& cs, key_view lower, key_view upper)
+      {
+         assert(cs.buffer);
+
+         if (!cs.buffer->empty())
+         {
+            merge_buffer_to_persistent(cs);
+         }
+         else
+         {
+            cursor pc(cs.cursor->root());
+            if (!pc.lower_bound(lower) || (!upper.empty() && pc.key() >= upper))
+               return false;
+            materialize_txn_version();
+         }
+
+         return cs.cursor->remove_range_any(lower, upper);
+      }
+
       uint64_t micro_remove_range(change_set& cs, key_view lower, key_view upper)
       {
          assert(cs.buffer);
@@ -823,7 +862,7 @@ namespace psitri
                merge_buffer_to_persistent(cs);
             else
                materialize_txn_version();
-            return cs.cursor->remove_range(lower, upper);
+            return cs.cursor->remove_range_counted(lower, upper);
          }
       }
 
@@ -950,9 +989,14 @@ namespace psitri
       return _tx->do_remove(_cs_index, key);
    }
 
-   inline uint64_t tree_handle::remove_range(key_view lower, key_view upper)
+   inline bool tree_handle::remove_range_any(key_view lower, key_view upper)
    {
-      return _tx->do_remove_range(_cs_index, lower, upper);
+      return _tx->do_remove_range_any(_cs_index, lower, upper);
+   }
+
+   inline uint64_t tree_handle::remove_range_counted(key_view lower, key_view upper)
+   {
+      return _tx->do_remove_range_counted(_cs_index, lower, upper);
    }
 
    inline cursor tree_handle::read_cursor() const
@@ -1054,9 +1098,14 @@ namespace psitri
       _tx->upsert_subtree_sorted(key, std::move(subtree));
    }
    inline int transaction_frame_ref::remove(key_view key) { return _tx->remove(key); }
-   inline uint64_t transaction_frame_ref::remove_range(key_view lower, key_view upper)
+   inline bool transaction_frame_ref::remove_range_any(key_view lower, key_view upper)
    {
-      return _tx->remove_range(lower, upper);
+      return _tx->remove_range_any(lower, upper);
+   }
+
+   inline uint64_t transaction_frame_ref::remove_range_counted(key_view lower, key_view upper)
+   {
+      return _tx->remove_range_counted(lower, upper);
    }
    inline cursor transaction_frame_ref::read_cursor() const { return _tx->read_cursor(); }
 
@@ -1152,9 +1201,14 @@ namespace psitri
          _tx.upsert_subtree_sorted(key, std::move(subtree));
       }
       int remove(key_view key) { return _tx.remove(key); }
-      uint64_t remove_range(key_view lower, key_view upper)
+      bool remove_range_any(key_view lower, key_view upper)
       {
-         return _tx.remove_range(lower, upper);
+         return _tx.remove_range_any(lower, upper);
+      }
+
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return _tx.remove_range_counted(lower, upper);
       }
 
       bool get(key_view key, std::invocable<value_view> auto&& lambda) const

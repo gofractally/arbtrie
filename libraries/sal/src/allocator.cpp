@@ -627,6 +627,44 @@ namespace sal
       return total;
    }
 
+	   allocator::custom_control_block_audit
+	   allocator::audit_custom_control_blocks(uint64_t max_live_value) const noexcept
+   {
+      custom_control_block_audit result;
+      _ptr_alloc.for_each_allocated_control_block(
+          [&](ptr_address, control_block_data data) noexcept
+          {
+             if (!allocator_session::is_custom_cb(data))
+                return;
+
+             ++result.custom_blocks;
+             if (data.ref == 0)
+             {
+                ++result.zero_ref_blocks;
+                return;
+             }
+
+	             auto value = uint64_t(data.cacheline_offset);
+	             if (value > max_live_value)
+	             {
+	                ++result.out_of_range_live_blocks;
+	                return;
+	             }
+	             if (result.live_blocks == 0)
+             {
+                result.min_value = value;
+                result.max_value = value;
+             }
+             else
+             {
+                result.min_value = std::min(result.min_value, value);
+                result.max_value = std::max(result.max_value, value);
+             }
+             ++result.live_blocks;
+          });
+      return result;
+   }
+
    std::pair<const alloc_header*, location> allocator::resolve(ptr_address addr)
    {
       if (addr == null_ptr_address)
@@ -721,7 +759,9 @@ namespace sal
          audit.estimated_freed = seg_data.get_freed_space(i);
 
          const auto* shead = (const mapped_memory::segment*)s;
-         const auto* send  = (const alloc_header*)shead->end();
+         const auto* send  = reinterpret_cast<const alloc_header*>(
+             shead->data +
+             std::min<uint32_t>(shead->end_pos(), shead->get_alloc_pos()));
          const alloc_header* obj = (const alloc_header*)(shead);
 
          while (obj < send)
@@ -1665,7 +1705,9 @@ namespace sal
 
       // collect the range we will be iterating over
       const auto* shead = (const mapped_memory::segment*)s;
-      const auto* send  = (const alloc_header*)shead->end();
+      const auto* send  = reinterpret_cast<const alloc_header*>(
+          shead->data +
+          std::min<uint32_t>(shead->end_pos(), shead->get_alloc_pos()));
 
       // cast the start to first object_header
       const alloc_header* foo = (const alloc_header*)(shead);

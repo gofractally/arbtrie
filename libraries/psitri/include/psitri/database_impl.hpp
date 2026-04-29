@@ -62,21 +62,25 @@ namespace psitri
    // ─── basic_database<LockPolicy> member definitions ──────────────────────
 
    template <class LockPolicy>
-   basic_database<LockPolicy>::~basic_database()
-   {
-      _dbm->clean_shutdown = true;
-      _dbfile.sync(sal::sync_type::full);
-   }
+	   basic_database<LockPolicy>::~basic_database()
+	   {
+	      _dead_versions.flush_pending();
+	      _dead_versions.publish_snapshot();
+	      _dead_versions.sync(_cfg.sync_mode);
+	      _dbm->clean_shutdown = true;
+	      _dbfile.sync(sal::sync_type::full);
+	   }
 
    template <class LockPolicy>
    basic_database<LockPolicy>::basic_database(const std::filesystem::path& dir,
                                               const runtime_config&        cfg,
                                               recovery_mode                mode)
-       : _dir(dir),
-         _cfg(cfg),
-         _object_registry(_dead_versions),
-         _allocator(dir, cfg, false),
-         _dbfile(dir / "dbfile.bin", sal::access_mode::read_write)
+	       : _dir(dir),
+	         _cfg(cfg),
+	         _dead_versions(dir / "dead_versions.bin"),
+	         _object_registry(_dead_versions),
+	         _allocator(dir, cfg, false),
+	         _dbfile(dir / "dbfile.bin", sal::access_mode::read_write)
    {
       _object_registry.install(_allocator);
 
@@ -110,7 +114,10 @@ namespace psitri
          case recovery_mode::none:
             break;
          case recovery_mode::deferred_cleanup:
-            SAL_WARN("database was not shutdown cleanly, deferring leak reclamation");
+            SAL_WARN(
+                "database was not shutdown cleanly; opening without rebuild. "
+                "Reference counts may be stale and leaked disk space may remain "
+                "until a full refcount scan is run.");
             _dbm->flags |= detail::flag_ref_counts_stale;
             break;
          case recovery_mode::app_crash:
@@ -129,10 +136,12 @@ namespace psitri
             _dbm->flags &= ~detail::flag_ref_counts_stale;
             break;
       }
-      recover_global_version_from_roots();
-      _dbm->clean_shutdown = false;
-      _allocator.start_background_threads();
-   }
+	      recover_global_version_from_roots();
+	      if (_dead_versions.created_storage())
+	         bootstrap_dead_versions_from_control_blocks();
+	      _dbm->clean_shutdown = false;
+	      _allocator.start_background_threads();
+	   }
 
    template <class LockPolicy>
    void basic_database<LockPolicy>::recover_global_version_from_roots()
@@ -162,8 +171,44 @@ namespace psitri
                  current, max_version, std::memory_order_relaxed,
                  std::memory_order_relaxed))
       {
-      }
-   }
+	      }
+	   }
+
+	   template <class LockPolicy>
+	   void basic_database<LockPolicy>::bootstrap_dead_versions_from_control_blocks()
+	   {
+	      const uint64_t latest = _dbm->global_version.load(std::memory_order_relaxed);
+	      if (latest == 0)
+	         return;
+
+	      std::vector<uint64_t> live_versions;
+	      live_versions.reserve(1024);
+	      _allocator.for_each_live_custom_cb_value(
+	          latest, [&](uint64_t version)
+	          {
+	             if (version != 0)
+	                live_versions.push_back(version);
+	          });
+
+	      std::sort(live_versions.begin(), live_versions.end());
+	      live_versions.erase(std::unique(live_versions.begin(), live_versions.end()),
+	                          live_versions.end());
+
+	      uint64_t next_dead = 1;
+	      for (auto live : live_versions)
+	      {
+	         if (live < next_dead)
+	            continue;
+	         if (live > next_dead)
+	            _dead_versions.add_dead_range(next_dead, live - 1);
+	         if (live == UINT64_MAX)
+	            return;
+	         next_dead = live + 1;
+	      }
+	      if (next_dead <= latest)
+	         _dead_versions.add_dead_range(next_dead, latest);
+	      _dead_versions.publish_snapshot();
+	   }
 
    template <class LockPolicy>
    std::shared_ptr<basic_database<LockPolicy>>
@@ -212,6 +257,40 @@ namespace psitri
    bool basic_database<LockPolicy>::ref_counts_stale() const
    {
       return _dbm->flags & detail::flag_ref_counts_stale;
+   }
+
+   template <class LockPolicy>
+   version_index_audit_result basic_database<LockPolicy>::audit_version_index()
+   {
+      version_index_audit_result result;
+      result.latest_version            = _dbm->global_version.load(std::memory_order_relaxed);
+      result.dead_versions_from_index  = _dead_versions.count_dead_versions(1, result.latest_version);
+      result.retained_versions_from_index =
+          result.latest_version - result.dead_versions_from_index;
+      result.dead_version_ranges       = _dead_versions.num_ranges();
+      result.pending_dead_versions     = _dead_versions.pending_count();
+
+	      auto cb = _allocator.audit_custom_control_blocks(result.latest_version);
+	      result.version_control_blocks      = cb.custom_blocks;
+	      result.live_version_control_blocks = cb.live_blocks;
+	      result.unknown_live_version_blocks = cb.out_of_range_live_blocks;
+	      result.zero_ref_version_blocks     = cb.zero_ref_blocks;
+	      result.min_live_version            = cb.min_value;
+	      result.max_live_version            = cb.max_value;
+      return result;
+   }
+
+   template <class LockPolicy>
+   tree_stats_result basic_database<LockPolicy>::tree_stats(tree_stats_options options)
+   {
+      auto result                  = detail::collect_tree_stats(_allocator, options);
+      auto versions                = audit_version_index();
+      result.latest_version        = versions.latest_version;
+      result.dead_versions         = versions.dead_versions_from_index;
+      result.retained_versions     = versions.retained_versions_from_index;
+      result.dead_version_ranges   = versions.dead_version_ranges;
+      result.pending_dead_versions = versions.pending_dead_versions;
+      return result;
    }
 
    template <class LockPolicy>

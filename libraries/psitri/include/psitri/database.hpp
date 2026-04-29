@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <psitri/live_range_map.hpp>
 #include <psitri/lock_policy.hpp>
 #include <psitri/node/inner.hpp>
@@ -33,6 +34,12 @@ namespace psitri
    template <class LockPolicy>
    class basic_read_session;
 
+   struct version_audit_options;
+   struct version_audit_result;
+   struct version_index_audit_result;
+   struct tree_stats_options;
+   struct tree_stats_result;
+
    static constexpr uint32_t num_top_roots = 512;
 
    /// Controls how database::open() handles existing vs. new databases.
@@ -58,6 +65,8 @@ namespace psitri
 
       /// Register PsiTri node object operations with this SAL allocator instance.
       void register_node_types(sal::allocator& alloc);
+      tree_stats_result collect_tree_stats(sal::allocator& alloc,
+                                           const tree_stats_options& options);
 
       struct psitri_object_context
       {
@@ -222,6 +231,8 @@ namespace psitri
       /// Non-template so it can live in a .cpp file and keep the tree-walk
       /// logic out of the header.
       sal::verify_result verify_all_roots(sal::allocator& alloc);
+      version_audit_result audit_all_roots(sal::allocator& alloc,
+                                           const version_audit_options& options);
    }  // namespace detail
 
    /**
@@ -300,6 +311,407 @@ namespace psitri
       friend std::ostream& operator<<(std::ostream& os, const database_stats& s)
       {
          return os << s.to_string();
+      }
+   };
+
+   struct version_audit_options
+   {
+      /// Explicit oldest version that must remain readable. When zero, the
+      /// audit uses the minimum valid version among populated top roots.
+      uint64_t prune_floor = 0;
+
+      /// Optional progress callback. The audit calls this after each
+      /// progress_interval_nodes newly visited nodes. A zero interval disables
+      /// progress reporting.
+      uint64_t progress_interval_nodes = 0;
+      void (*progress)(const version_audit_result&, void*) = nullptr;
+      void* progress_user = nullptr;
+   };
+
+   struct version_audit_result
+   {
+      uint64_t requested_prune_floor = 0;
+      uint64_t effective_prune_floor = 0;
+
+      uint32_t roots_checked          = 0;
+      uint32_t roots_with_version     = 0;
+      uint32_t roots_without_version  = 0;
+      uint64_t oldest_root_version    = 0;
+      uint64_t newest_root_version    = 0;
+
+      uint64_t nodes_visited          = 0;
+      uint64_t shared_nodes_skipped   = 0;
+      uint64_t dangling_pointers      = 0;
+      uint64_t inner_nodes            = 0;
+      uint64_t inner_prefix_nodes     = 0;
+      uint64_t leaf_nodes             = 0;
+      uint64_t value_nodes            = 0;
+      uint64_t flat_value_nodes       = 0;
+
+      uint64_t leaf_branches              = 0;
+      uint64_t leaf_version_table_entries = 0;
+      uint64_t leaf_branch_versions       = 0;
+      uint64_t leaf_subtrees              = 0;
+      uint64_t leaf_subtrees_without_ver  = 0;
+
+      uint64_t value_entries              = 0;
+      uint64_t value_nodes_with_history   = 0;
+      uint64_t value_nodes_with_next      = 0;
+      uint64_t value_next_ptrs            = 0;
+      uint64_t subtree_value_nodes        = 0;
+      uint64_t subtree_value_entries      = 0;
+      uint64_t max_value_entries          = 0;
+
+      uint64_t retained_versions          = 0;
+      uint64_t value_versions_seen        = 0;
+      uint64_t leaf_versions_seen         = 0;
+
+      uint64_t prunable_value_entries     = 0;
+      uint64_t prunable_value_nodes       = 0;
+      uint64_t floor_rewrite_entries      = 0;
+      uint64_t prune_floor_unknown_nodes  = 0;
+      uint64_t prune_floor_out_of_range_nodes = 0;
+   };
+
+   struct version_index_audit_result
+   {
+      uint64_t latest_version                 = 0;
+      uint64_t retained_versions_from_index  = 0;
+      uint64_t dead_versions_from_index      = 0;
+      uint64_t dead_version_ranges           = 0;
+      uint64_t pending_dead_versions         = 0;
+
+	      uint64_t version_control_blocks        = 0;
+	      uint64_t live_version_control_blocks   = 0;
+	      uint64_t unknown_live_version_blocks   = 0;
+	      uint64_t zero_ref_version_blocks       = 0;
+	      uint64_t min_live_version              = 0;
+	      uint64_t max_live_version              = 0;
+
+	      bool index_matches_control_blocks() const noexcept
+	      {
+	         return unknown_live_version_blocks == 0 &&
+	                retained_versions_from_index == live_version_control_blocks;
+	      }
+   };
+
+   struct tree_stats_fanout_buckets
+   {
+      uint64_t fanout_1        = 0;
+      uint64_t fanout_2        = 0;
+      uint64_t fanout_3_to_4   = 0;
+      uint64_t fanout_5_to_8   = 0;
+      uint64_t fanout_9_to_16  = 0;
+      uint64_t fanout_17_to_32 = 0;
+      uint64_t fanout_33_to_64 = 0;
+      uint64_t fanout_65_to_128 = 0;
+      uint64_t fanout_129_plus = 0;
+
+      void record(uint64_t branches) noexcept
+      {
+         if (branches <= 1)
+            ++fanout_1;
+         else if (branches == 2)
+            ++fanout_2;
+         else if (branches <= 4)
+            ++fanout_3_to_4;
+         else if (branches <= 8)
+            ++fanout_5_to_8;
+         else if (branches <= 16)
+            ++fanout_9_to_16;
+         else if (branches <= 32)
+            ++fanout_17_to_32;
+         else if (branches <= 64)
+            ++fanout_33_to_64;
+         else if (branches <= 128)
+            ++fanout_65_to_128;
+         else
+            ++fanout_129_plus;
+      }
+
+      uint64_t total() const noexcept
+      {
+         return fanout_1 + fanout_2 + fanout_3_to_4 + fanout_5_to_8 +
+                fanout_9_to_16 + fanout_17_to_32 + fanout_33_to_64 +
+                fanout_65_to_128 + fanout_129_plus;
+      }
+   };
+
+   struct tree_stats_depth_row
+   {
+      uint32_t depth = 0;
+
+      uint64_t inner_nodes        = 0;
+      uint64_t inner_prefix_nodes = 0;
+      uint64_t value_nodes        = 0;
+      uint64_t flat_value_nodes   = 0;
+
+      uint64_t inner_branches       = 0;
+      uint64_t single_branch_inners = 0;
+      uint64_t low_fanout_inners    = 0;
+      tree_stats_fanout_buckets fanout;
+
+      uint64_t leaf_nodes             = 0;
+      uint64_t leaf_keys              = 0;
+      uint64_t selected_leaf_keys     = 0;
+      uint64_t key_bytes              = 0;
+      uint64_t selected_key_bytes     = 0;
+      uint64_t max_key_size           = 0;
+      uint64_t max_selected_key_size  = 0;
+      uint64_t data_value_count       = 0;
+      uint64_t data_value_bytes       = 0;
+      uint64_t max_data_value_size    = 0;
+      uint64_t leaf_alloc_bytes       = 0;
+      uint64_t leaf_used_bytes        = 0;
+      uint64_t leaf_dead_bytes        = 0;
+      uint64_t leaf_empty_bytes       = 0;
+      uint64_t full_leaf_nodes        = 0;
+      uint64_t full_leaf_dead_bytes   = 0;
+      uint64_t full_leaf_empty_bytes  = 0;
+
+      uint64_t total_inner_nodes() const noexcept
+      {
+         return inner_nodes + inner_prefix_nodes;
+      }
+
+      double average_branches_per_inner() const noexcept
+      {
+         auto inners = total_inner_nodes();
+         return inners ? double(inner_branches) / double(inners) : 0.0;
+      }
+
+      double average_keys_per_leaf() const noexcept
+      {
+         return leaf_nodes ? double(leaf_keys) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_key_size() const noexcept
+      {
+         return leaf_keys ? double(key_bytes) / double(leaf_keys) : 0.0;
+      }
+
+      double average_selected_key_size() const noexcept
+      {
+         return selected_leaf_keys ? double(selected_key_bytes) / double(selected_leaf_keys)
+                                   : 0.0;
+      }
+
+      double average_data_value_size() const noexcept
+      {
+         return data_value_count ? double(data_value_bytes) / double(data_value_count) : 0.0;
+      }
+
+      double leaf_dead_space_percent() const noexcept
+      {
+         return leaf_alloc_bytes ? 100.0 * double(leaf_dead_bytes) / double(leaf_alloc_bytes)
+                                 : 0.0;
+      }
+
+      double leaf_empty_space_percent() const noexcept
+      {
+         return leaf_alloc_bytes ? 100.0 * double(leaf_empty_bytes) / double(leaf_alloc_bytes)
+                                 : 0.0;
+      }
+   };
+
+   struct tree_stats_options
+   {
+      /// Optional top-root index to scan. When unset, all populated top roots
+      /// are scanned.
+      std::optional<uint32_t> root_index;
+
+      /// Optional inclusive lower key bound. Empty string is a valid key bound,
+      /// so absence is represented by std::nullopt.
+      std::optional<std::string> key_lower;
+
+      /// Optional exclusive upper key bound.
+      std::optional<std::string> key_upper;
+
+      /// Optional progress callback. Called every progress_interval_nodes
+      /// newly visited nodes. A zero interval disables progress reporting.
+      uint64_t progress_interval_nodes = 0;
+      void (*progress)(const tree_stats_result&, void*) = nullptr;
+      void* progress_user = nullptr;
+
+      /// Optional hard cap on visited nodes. A zero cap means scan until the
+      /// requested roots/ranges are exhausted.
+      uint64_t max_nodes = 0;
+
+      bool has_key_range() const noexcept { return key_lower || key_upper; }
+   };
+
+   struct tree_stats_result
+   {
+      bool     key_range_enabled       = false;
+      bool     root_filter_enabled     = false;
+      uint32_t root_filter_index       = 0;
+      std::string key_range_lower;
+      std::string key_range_upper;
+      bool     scan_truncated          = false;
+      uint64_t max_nodes               = 0;
+
+      uint32_t roots_checked          = 0;
+      uint32_t roots_with_version     = 0;
+      uint32_t roots_without_version  = 0;
+
+      uint64_t latest_version           = 0;
+      uint64_t retained_versions        = 0;
+      uint64_t dead_versions            = 0;
+      uint64_t dead_version_ranges      = 0;
+      uint64_t pending_dead_versions    = 0;
+
+      uint64_t nodes_visited          = 0;
+      uint64_t shared_nodes_skipped   = 0;
+      uint64_t dangling_pointers      = 0;
+      uint64_t reachable_bytes        = 0;
+
+      uint64_t inner_nodes            = 0;
+      uint64_t inner_prefix_nodes     = 0;
+      uint64_t leaf_nodes             = 0;
+      uint64_t value_nodes            = 0;
+      uint64_t flat_value_nodes       = 0;
+
+      uint64_t inner_branches         = 0;
+      uint64_t single_branch_inners   = 0;
+      uint64_t low_fanout_inners      = 0;
+      uint64_t leaf_keys              = 0;
+      uint64_t selected_leaf_keys      = 0;
+      uint64_t key_bytes              = 0;
+      uint64_t selected_key_bytes     = 0;
+      uint64_t max_key_size           = 0;
+      uint64_t max_selected_key_size  = 0;
+      uint64_t data_value_count       = 0;
+      uint64_t data_value_bytes       = 0;
+      uint64_t max_data_value_size    = 0;
+      uint64_t max_depth              = 0;
+      uint64_t leaf_depth_sum         = 0;
+      uint64_t key_depth_sum          = 0;
+
+      uint64_t total_inner_bytes      = 0;
+      uint64_t total_leaf_alloc_bytes = 0;
+      uint64_t total_leaf_used_bytes  = 0;
+      uint64_t total_leaf_dead_bytes  = 0;
+      uint64_t total_leaf_empty_bytes = 0;
+      uint64_t full_leaf_nodes        = 0;
+      uint64_t full_leaf_dead_bytes   = 0;
+      uint64_t full_leaf_empty_bytes  = 0;
+      uint64_t total_value_bytes      = 0;
+
+      std::vector<uint64_t> branches_per_inner_node;
+      std::vector<uint64_t> keys_per_leaf;
+      std::vector<uint64_t> leaf_depths;
+      std::vector<tree_stats_depth_row> depth_stats;
+
+      uint64_t total_inner_nodes() const noexcept
+      {
+         return inner_nodes + inner_prefix_nodes;
+      }
+
+      double average_depth() const noexcept
+      {
+         return leaf_keys ? double(key_depth_sum) / double(leaf_keys) : 0.0;
+      }
+
+      double average_leaf_depth() const noexcept
+      {
+         return leaf_nodes ? double(leaf_depth_sum) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_leaf_alloc_size() const noexcept
+      {
+         return leaf_nodes ? double(total_leaf_alloc_bytes) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_leaf_used_size() const noexcept
+      {
+         return leaf_nodes ? double(total_leaf_used_bytes) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_leaf_dead_space() const noexcept
+      {
+         return leaf_nodes ? double(total_leaf_dead_bytes) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_leaf_empty_space() const noexcept
+      {
+         return leaf_nodes ? double(total_leaf_empty_bytes) / double(leaf_nodes) : 0.0;
+      }
+
+      double leaf_dead_space_percent() const noexcept
+      {
+         return total_leaf_alloc_bytes
+                    ? 100.0 * double(total_leaf_dead_bytes) / double(total_leaf_alloc_bytes)
+                    : 0.0;
+      }
+
+      double leaf_empty_space_percent() const noexcept
+      {
+         return total_leaf_alloc_bytes
+                    ? 100.0 * double(total_leaf_empty_bytes) / double(total_leaf_alloc_bytes)
+                    : 0.0;
+      }
+
+      double average_full_leaf_dead_space() const noexcept
+      {
+         return full_leaf_nodes ? double(full_leaf_dead_bytes) / double(full_leaf_nodes) : 0.0;
+      }
+
+      double average_full_leaf_empty_space() const noexcept
+      {
+         return full_leaf_nodes ? double(full_leaf_empty_bytes) / double(full_leaf_nodes) : 0.0;
+      }
+
+      double full_leaf_dead_space_percent() const noexcept
+      {
+         const uint64_t full_leaf_bytes = full_leaf_nodes * uint64_t(leaf_node::max_leaf_size);
+         return full_leaf_bytes ? 100.0 * double(full_leaf_dead_bytes) / double(full_leaf_bytes)
+                                : 0.0;
+      }
+
+      double full_leaf_empty_space_percent() const noexcept
+      {
+         const uint64_t full_leaf_bytes = full_leaf_nodes * uint64_t(leaf_node::max_leaf_size);
+         return full_leaf_bytes ? 100.0 * double(full_leaf_empty_bytes) / double(full_leaf_bytes)
+                                : 0.0;
+      }
+
+      double average_keys_per_leaf() const noexcept
+      {
+         return leaf_nodes ? double(leaf_keys) / double(leaf_nodes) : 0.0;
+      }
+
+      double average_key_size() const noexcept
+      {
+         return leaf_keys ? double(key_bytes) / double(leaf_keys) : 0.0;
+      }
+
+      double average_selected_key_size() const noexcept
+      {
+         return selected_leaf_keys ? double(selected_key_bytes) / double(selected_leaf_keys)
+                                   : 0.0;
+      }
+
+      double average_data_value_size() const noexcept
+      {
+         return data_value_count ? double(data_value_bytes) / double(data_value_count) : 0.0;
+      }
+
+      double average_branches_per_inner() const noexcept
+      {
+         auto inners = total_inner_nodes();
+         return inners ? double(inner_branches) / double(inners) : 0.0;
+      }
+
+      tree_stats_depth_row& row_for_depth(uint32_t depth)
+      {
+         if (depth_stats.size() <= depth)
+         {
+            auto old_size = depth_stats.size();
+            depth_stats.resize(size_t(depth) + 1);
+            for (size_t i = old_size; i < depth_stats.size(); ++i)
+               depth_stats[i].depth = uint32_t(i);
+         }
+         return depth_stats[depth];
       }
    };
 
@@ -385,11 +797,14 @@ namespace psitri
       /** @name Configuration */
       ///@{
 
-      void sync()
-      {
-         std::lock_guard<mutex_type> lock(_sync_mutex);
-         _allocator.sync(_cfg.sync_mode);
-      }
+	      void sync()
+	      {
+	         std::lock_guard<mutex_type> lock(_sync_mutex);
+	         _dead_versions.flush_pending();
+	         _dead_versions.publish_snapshot();
+	         _dead_versions.sync(_cfg.sync_mode);
+	         _allocator.sync(_cfg.sync_mode);
+	      }
 
       void set_runtime_config(const runtime_config& cfg)
       {
@@ -484,6 +899,15 @@ namespace psitri
 
       sal::verify_result verify() { return detail::verify_all_roots(_allocator); }
 
+      version_audit_result audit_versions(version_audit_options options = {})
+      {
+         return detail::audit_all_roots(_allocator, options);
+      }
+
+      version_index_audit_result audit_version_index();
+
+      tree_stats_result tree_stats(tree_stats_options options = {});
+
       void recover() { _allocator.recover(); }
 
       void reset_reference_counts() { _allocator.reset_reference_counts(); }
@@ -571,9 +995,10 @@ namespace psitri
          _last_dead_publish_epoch = epoch_token;
       }
 
-      void           init_allocator_shared_ownership();
-      void           recover_global_version_from_roots();
-      std::once_flag _alloc_shared_init;
+	      void           init_allocator_shared_ownership();
+	      void           recover_global_version_from_roots();
+	      void           bootstrap_dead_versions_from_control_blocks();
+	      std::once_flag _alloc_shared_init;
       live_range_map _dead_versions;
       mutable mutex_type _dead_publish_mutex;
       uint64_t           _last_dead_publish_epoch = 0;
