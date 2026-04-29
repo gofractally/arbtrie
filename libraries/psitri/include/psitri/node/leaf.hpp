@@ -1,4 +1,5 @@
 #pragma once
+#include <cstring>
 #include <hash/xxhash.h>
 #include <psitri/node/node.hpp>
 #include <psitri/util.hpp>
@@ -99,6 +100,7 @@ namespace psitri
       };
 
       static constexpr uint32_t  max_leaf_size = 4096 / 2;
+      static constexpr uint32_t  max_value_clines = 16;
       static constexpr node_type type_id       = node_type::leaf;
       inline static uint32_t     alloc_size(key_view key, const value_type& value) noexcept;
       /// clone and optimize
@@ -195,6 +197,7 @@ namespace psitri
 
       uint32_t compact_size() const noexcept;
       void     compact_to(alloc_header* compact_dst) const noexcept;
+      void     copy_to(alloc_header* dst) const noexcept;
       uint32_t cow_size() const noexcept { return max_leaf_size; }  // TODO: make this config const
 
       /// Release value_node and subtree addresses held by this leaf.
@@ -204,8 +207,18 @@ namespace psitri
          // (e.g. gather address indices first, then release in a second pass)
          const value_branch* vb = value_offsets();
          for (uint32_t i = 0; i < num_branches(); ++i)
-            if (vb[i].is_address())
+         {
+            if (vb[i].is_value_node())
                session->release(get_address(vb[i]));
+            else if (vb[i].is_subtree())
+            {
+               tree_id tid = get_tree_id(vb[i]);
+               if (tid.root != sal::null_ptr_address)
+                  session->release(tid.root);
+               if (tid.ver != sal::null_ptr_address)
+                  session->release(tid.ver);
+            }
+         }
       }
 
       /// Visit all child addresses (value_nodes and subtrees) held by this leaf.
@@ -214,8 +227,18 @@ namespace psitri
          // TODO: restructure to avoid branch prediction miss per iteration
          const value_branch* vb = value_offsets();
          for (uint32_t i = 0; i < num_branches(); ++i)
-            if (vb[i].is_address())
+         {
+            if (vb[i].is_value_node())
                visitor(get_address(vb[i]));
+            else if (vb[i].is_subtree())
+            {
+               tree_id tid = get_tree_id(vb[i]);
+               if (tid.root != sal::null_ptr_address)
+                  visitor(tid.root);
+               if (tid.ver != sal::null_ptr_address)
+                  visitor(tid.ver);
+            }
+         }
       }
 
       struct split_pos
@@ -237,10 +260,10 @@ namespace psitri
       {
          assert(bn < num_branches());
          value_branch vb = value_offsets()[*bn];
-         switch (vb.type())
+            switch (vb.type())
          {
             case value_type_flag::subtree:
-               return value_type::make_subtree(get_address(vb));
+               return value_type::make_subtree(get_tree_id(vb));
             case value_type_flag::value_node:
                return value_type::make_value_node(get_address(vb));
             case value_type_flag::inline_data:
@@ -441,6 +464,18 @@ namespace psitri
          }
          return branch_number(pos[right_pos]);
       }
+      /// lower_bound with a cheap right-edge check for sorted append workloads.
+      branch_number lower_bound_append_hint(key_view key) const noexcept
+      {
+         const uint32_t branches = num_branches();
+         if (branches == 0)
+            return branch_number(0);
+
+         branch_number last(branches - 1);
+         if (get_key(last) < key)
+            return branch_number(branches);
+         return lower_bound(key);
+      }
       /// uses binary search to find first key > search key
       branch_number upper_bound(key_view key) const noexcept
       {
@@ -458,15 +493,23 @@ namespace psitri
          return branch_number(pos[right_pos]);
       }
 
-      /// visit all branches that are ptr_address (value_node or subtree)
+      /// visit all child pointers held by value_node or subtree values
       void visit_branches(std::invocable<ptr_address> auto&& lam) const noexcept
       {
          const value_branch* cvb = value_offsets();
          const uint32_t      n   = num_branches();
          for (int i = 0; i < n; ++i)
          {
-            if (cvb[i].is_address())
+            if (cvb[i].is_value_node())
                lam(get_address(cvb[i]));
+            else if (cvb[i].is_subtree())
+            {
+               tree_id tid = get_tree_id(cvb[i]);
+               if (tid.root != sal::null_ptr_address)
+                  lam(tid.root);
+               if (tid.ver != sal::null_ptr_address)
+                  lam(tid.ver);
+            }
          }
       }
 
@@ -562,7 +605,14 @@ namespace psitri
          value_branch(value_type_flag t, cline_offset cl, cline_index idx) noexcept
              : _type(t), _offset(*cl << 4 | *idx & 0xF)
          {
-            assert(t == value_type_flag::subtree or t == value_type_flag::value_node);
+            assert(t == value_type_flag::value_node);
+         }
+         static value_branch subtree_value(value_offset offset) noexcept
+         {
+            value_branch result;
+            result._type   = value_type_flag::subtree;
+            result._offset = *offset;
+            return result;
          }
 
          void clear() noexcept
@@ -573,7 +623,9 @@ namespace psitri
 
          bool            is_null() const noexcept { return _type == null; }
          bool            is_inline() const noexcept { return _type == inline_data; }
-         bool            is_address() const noexcept { return _type >= value_node; }
+         bool            is_value_node() const noexcept { return _type == value_node; }
+         bool            is_subtree() const noexcept { return _type == subtree; }
+         bool            is_address() const noexcept { return is_value_node(); }
          value_type_flag type() const noexcept { return (value_type_flag)_type; }
          value_offset    offset() const noexcept
          {
@@ -587,21 +639,26 @@ namespace psitri
          }
          cline_offset cline() const noexcept
          {
-            assert(type() == value_type_flag::subtree || type() == value_type_flag::value_node);
+            assert(type() == value_type_flag::value_node);
             return cline_offset(_offset >> 4);  // Get upper 10 bits
          }
          void set_cline_and_idx(cline_offset    cl,
                                 cline_index     idx,
-                                value_type_flag t = value_type_flag::subtree) noexcept
+                                value_type_flag t = value_type_flag::value_node) noexcept
          {
-            assert(t == value_type_flag::subtree or t == value_type_flag::value_node);
+            assert(t == value_type_flag::value_node);
             _type   = t;
             _offset = (*cl << 4) | (*idx & 0xF);
          }
          cline_index cline_idx() const noexcept
          {
-            assert(type() == value_type_flag::subtree or type() == value_type_flag::value_node);
+            assert(type() == value_type_flag::value_node);
             return cline_index(_offset & 0xF);  // Get lower 4 bits
+         }
+         value_offset subtree_offset() const noexcept
+         {
+            assert(type() == value_type_flag::subtree);
+            return value_offset(_offset);
          }
 
         private:
@@ -640,6 +697,12 @@ namespace psitri
       ptr_address get_address(value_branch vb) const noexcept
       {
          return ptr_address(*(clines()[*vb.cline()]) + *vb.cline_idx());
+      }
+      tree_id get_tree_id(value_branch vb) const noexcept
+      {
+         tree_id tid;
+         std::memcpy(&tid, get_tree_id_ptr(vb.subtree_offset()), sizeof(tid));
+         return tid;
       }
 
       value_branch* value_offsets() noexcept
@@ -777,6 +840,41 @@ namespace psitri
          get_value_ptr(off)->set(value);
          return off;
       }
+      PSITRI_NO_SANITIZE_ALIGNMENT tree_id* get_tree_id_ptr(value_offset off) noexcept
+      {
+         return reinterpret_cast<tree_id*>(((char*)tail()) - *off);
+      }
+      PSITRI_NO_SANITIZE_ALIGNMENT const tree_id* get_tree_id_ptr(value_offset off) const noexcept
+      {
+         return reinterpret_cast<const tree_id*>(((const char*)tail()) - *off);
+      }
+      PSITRI_NO_SANITIZE_ALIGNMENT value_offset alloc_tree_id(tree_id tid) noexcept
+      {
+         _alloc_pos += sizeof(tree_id);
+         value_offset off = value_offset(_alloc_pos);
+         assert((uint8_t*)get_tree_id_ptr(off) >= (uint8_t*)meta_end() &&
+                "Allocation would overlap with leaf metadata");
+         set_tree_id(off, tid);
+         return off;
+      }
+      PSITRI_NO_SANITIZE_ALIGNMENT void set_tree_id(value_offset off, tree_id tid) noexcept
+      {
+         std::memcpy(get_tree_id_ptr(off), &tid, sizeof(tid));
+      }
+      PSITRI_NO_SANITIZE_ALIGNMENT value_branch alloc_stored_value(value_type value) noexcept
+      {
+         if (value.is_view())
+         {
+            if (value.view().empty())
+               return value_branch();
+            return alloc_value(value.view());
+         }
+         if (value.is_subtree())
+            return value_branch::subtree_value(alloc_tree_id(value.subtree_id()));
+         if (value.is_value_node())
+            return add_address_ptr(value_type_flag::value_node, value.value_address());
+         return value_branch();
+      }
       PSITRI_NO_SANITIZE_ALIGNMENT bool can_alloc_key(key_view key) const noexcept
       {
          return (const uint8_t*)get_key_ptr(key_offset(_alloc_pos + key.size() + sizeof(key))) <
@@ -794,6 +892,10 @@ namespace psitri
       PSITRI_NO_SANITIZE_ALIGNMENT void free_value(value_offset off) noexcept
       {
          _dead_space += sizeof(value_data) + get_value_ptr(off)->get().size();
+      }
+      PSITRI_NO_SANITIZE_ALIGNMENT void free_tree_id(value_offset off) noexcept
+      {
+         _dead_space += sizeof(tree_id);
       }
       const char* alloc_head() const noexcept { return (const char*)tail() - _alloc_pos; }
       char*       alloc_head() noexcept { return (char*)tail() - _alloc_pos; }

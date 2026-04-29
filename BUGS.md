@@ -55,7 +55,7 @@
 - **Fix**: When both branches changed, apply `merge_branches` sequentially (start first, then boundary on the resulting node). Same fix applied in both the `remove_lo < remove_hi` and `remove_lo >= remove_hi` code paths.
 
 ### Subtree collapse test too small for debug builds (9feae4c)
-- "tree_ops: subtree collapse with set_collapse_threshold" failed with `1 < 1` because N=12 never created a multi-level tree. Fixed: N=60.
+- "tree_ops: subtree collapse is byte-fit driven" failed with `1 < 1` because N=12 never created a multi-level tree. Fixed: N=60.
 
 ### make_value assertion for value_node type (9feae4c)
 - `make_value()` didn't handle `value_node` type, asserting on re-entry after `insert()` converted a view to value_node.

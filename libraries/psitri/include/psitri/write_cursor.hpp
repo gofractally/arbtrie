@@ -62,8 +62,7 @@ namespace psitri
       /// Takes ownership of the smart_ptr's reference count (the smart_ptr is consumed).
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         auto tid = subtree_root.get_tree_id();
-         subtree_root.take();  // release ownership without decrementing ref
+         auto tid = subtree_root.take_tree_id();  // release ownership without decrementing refs
          _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(tid));
       }
 
@@ -75,8 +74,7 @@ namespace psitri
       /// Sorted variant of subtree upsert.
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         auto tid = subtree_root.get_tree_id();
-         subtree_root.take();  // release ownership without decrementing ref
+         auto tid = subtree_root.take_tree_id();  // release ownership without decrementing refs
          _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type::make_subtree(tid));
       }
 
@@ -88,10 +86,16 @@ namespace psitri
       /// Remove key. Returns size of removed value, or -1 if not found.
       int remove(key_view key) { return _ctx.remove(key); }
 
-      /// Remove all keys in range [lower, upper). Returns number of keys removed.
-      uint64_t remove_range(key_view lower, key_view upper)
+      /// Remove all keys in range [lower, upper). Returns true if anything was removed.
+      bool remove_range_any(key_view lower, key_view upper)
       {
-         return _ctx.remove_range(lower, upper);
+         return _ctx.remove_range_any(lower, upper);
+      }
+
+      /// Remove all keys in range [lower, upper). Returns the exact number of keys removed.
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return _ctx.remove_range_counted(lower, upper);
       }
 
       // -- Read access --

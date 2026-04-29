@@ -743,7 +743,7 @@ namespace
          auto     hi           = _oracle.lower_bound(upper);
          uint64_t oracle_count = std::distance(lo, hi);
 
-         uint64_t psitri_count = _cur->remove_range(to_key_view(lower), to_key_view(upper));
+         uint64_t psitri_count = _cur->remove_range_counted(to_key_view(lower), to_key_view(upper));
 
          // Erase from oracle
          _oracle.erase(_oracle.lower_bound(lower), _oracle.lower_bound(upper));
@@ -1504,7 +1504,7 @@ TEST_CASE("shared mode remove_range ghost key repro", "[fuzz][remove_range][repr
    auto snapshot = tdb.ses->create_write_cursor(cur->root());
 
    // Remove range [k3, k6) — should remove k3, k4, k5
-   uint64_t removed = cur->remove_range(to_key_view(k3), to_key_view(k6));
+   uint64_t removed = cur->remove_range_counted(to_key_view(k3), to_key_view(k6));
    REQUIRE(removed == 3);
 
    // Verify by iteration

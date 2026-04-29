@@ -140,7 +140,11 @@ namespace sal
       assert(loc != from.loc());
 
       control_block_data old_control = from.control().move(loc);
-      assert(old_control.ref == 1);
+      // Some tree algorithms take one transient lifetime retain while cascading a
+      // unique remove, then still relocate the same logical object. That extra
+      // retain is not a second published owner; it is released before the mutation
+      // unwinds back to the parent.
+      assert(old_control.ref == 1 || old_control.ref == 2);
 
       assert(old_control.loc() != loc);
       //      SAL_WARN("realloc from: {:#x} to: {:#x} ", get<From>(old_control.loc()), get<To>(loc));

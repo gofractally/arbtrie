@@ -222,6 +222,9 @@ auto owned = tx.get<std::string>("user:alice");
 // Ordered search. Use this when you need the first key at or after a boundary.
 auto cur = tx.cursor();
 cur.lower_bound("user:alice");
+
+// Exact cursor positioning. Uses the point-lookup path and goes to end on miss.
+cur.find("user:alice");
 ```
 
 The same distinction applies to writes:
@@ -242,6 +245,8 @@ Contract:
 - `lower_bound()` is an ordered-positioning operation. It must find the first
   key at or after the search key, so it uses ordered search semantics even when
   the caller passes an exact key.
+- `cursor::find()` is exact cursor positioning. On success it lands on the
+  requested key; on miss it positions at end.
 - `update(key, value)` is the preferred write when the caller knows the key
   should already exist. It can use the existing-key fast path and reports
   missing keys with `false`.

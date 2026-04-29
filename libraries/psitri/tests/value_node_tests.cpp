@@ -414,6 +414,36 @@ namespace
 
 }
 
+TEST_CASE("value_node copy_to larger allocation preserves tail-relative values",
+          "[value_node][cow]")
+{
+   auto v0 = create_value_node(psitri::value_view("v0", 2));
+   auto v5 = append_version(v0.get(), 5, psitri::value_view("value-five", 10));
+
+   const uint32_t asize = v5->cow_size();
+   REQUIRE(asize > v5->size());
+
+   void* buffer = std::aligned_alloc(64, asize);
+   REQUIRE(buffer != nullptr);
+   std::memset(buffer, 0, asize);
+
+   psitri::ptr_address_seq seq = {psitri::ptr_address(123), 7};
+   auto* header = new (buffer)
+       sal::alloc_header(asize, static_cast<sal::header_type>(psitri::value_node::type_id), seq);
+
+   v5->copy_to(header);
+   ValueNodePtr copy(reinterpret_cast<psitri::value_node*>(header));
+
+   CHECK(copy->size() == asize);
+   CHECK(copy->address_seq().address == seq.address);
+   CHECK(copy->address_seq().sequence == seq.sequence);
+   REQUIRE(copy->num_versions() == 2);
+   CHECK(copy->get_entry_version(0) == 0);
+   CHECK(copy->get_entry_version(1) == 5);
+   CHECK(std::string(copy->get_entry_value(0)) == "v0");
+   CHECK(std::string(copy->get_entry_value(1)) == "value-five");
+}
+
 TEST_CASE("value_node coalesce: append vs replace_last", "[value_node][coalesce]")
 {
    // Build a value_node with version 1 — single entry chain

@@ -181,6 +181,33 @@ TEST_CASE("cursor: iteration over 256-way fan-out at root", "[cursor][structural
    }
 }
 
+TEST_CASE("cursor: find is exact point positioning", "[cursor][find]")
+{
+   cursor_test_db t;
+   auto           cur = start_temp_edit(t);
+
+   cur.upsert(to_key_view("aaa"), to_value_view("one"));
+   cur.upsert(to_key_view("ccc"), to_value_view("three"));
+   cur.upsert(to_key_view("eee"), to_value_view("five"));
+
+   auto rc = cur.snapshot_cursor();
+
+   REQUIRE(rc.find(to_key_view("ccc")));
+   CHECK(rc.key() == to_key_view("ccc"));
+   auto value = rc.value<std::string>();
+   REQUIRE(value.has_value());
+   CHECK(*value == "three");
+
+   CHECK_FALSE(rc.find(to_key_view("bbb")));
+   CHECK(rc.is_end());
+
+   REQUIRE(rc.lower_bound(to_key_view("bbb")));
+   CHECK(rc.key() == to_key_view("ccc"));
+
+   CHECK_FALSE(rc.seek(to_key_view("bbb")));
+   CHECK(rc.key() == to_key_view("ccc"));
+}
+
 // ============================================================
 // Cursor near collapse threshold (24 keys)
 // ============================================================

@@ -6,7 +6,7 @@
 namespace psitri
 {
 
-   inline uint64_t tree_context::remove_range(key_view lower, key_view upper)
+   inline uint64_t tree_context::remove_range_counted(key_view lower, key_view upper)
    {
       if (!_root)
          return 0;
@@ -15,6 +15,7 @@ namespace psitri
 
       sal::read_lock lock = _session.lock();
       _delta_removed_keys = 0;
+      _count_removed_keys = true;
 
       // Map max_key -> empty for internal unbounded representation
       key_range range = {lower, upper == max_key ? key_view() : upper};
@@ -39,6 +40,52 @@ namespace psitri
          _root.give(make_inner(result));
 
       return static_cast<uint64_t>(-_delta_removed_keys);
+   }
+
+   inline bool tree_context::remove_range_any(key_view lower, key_view upper)
+   {
+      if (!_root)
+         return false;
+      if (lower >= upper && upper != max_key)
+         return false;  // empty range
+
+      sal::read_lock lock = _session.lock();
+      _delta_removed_keys = 0;
+      _count_removed_keys = false;
+
+      // Map max_key -> empty for internal unbounded representation
+      key_range range = {lower, upper == max_key ? key_view() : upper};
+
+      auto rref     = *_root;
+      auto old_addr = _root.take();
+      // When ref > 1, range_remove delegates to shared mode, and the shared
+      // dispatch releases the ref. Only release here when uniquely owned.
+      bool uniquely_owned = (rref.ref() == 1);
+
+      branch_set result;
+      try
+      {
+         result = range_remove<upsert_mode::unique>({}, rref, range);
+
+         if (result.count() == 0)
+         {
+            if (uniquely_owned)
+               _session.release(old_addr);
+            // else: shared dispatch already released via delegation
+         }
+         else if (result.count() == 1)
+            _root.give(result.get_first_branch());
+         else
+            _root.give(make_inner(result));
+      }
+      catch (...)
+      {
+         _count_removed_keys = true;
+         throw;
+      }
+
+      _count_removed_keys = true;
+      return _delta_removed_keys < 0;
    }
 
    template <upsert_mode mode>
@@ -69,7 +116,7 @@ namespace psitri
                             (range.upper_bound.empty() || key_view() < range.upper_bound);
             if (in_range)
             {
-               _delta_removed_keys -= 1;
+               note_removed_keys();
                result = {};  // remove this value
             }
             else
@@ -110,11 +157,11 @@ namespace psitri
       if (count == total)
       {
          // All branches removed — release value_nodes in the range via destroy cascade
-         _delta_removed_keys -= count;
+         note_removed_keys(count);
          return {};
       }
 
-      _delta_removed_keys -= count;
+      note_removed_keys(count);
 
       if constexpr (mode.is_unique())
       {
@@ -122,7 +169,7 @@ namespace psitri
          for (uint16_t i = *lo; i < *hi; ++i)
          {
             if (leaf->get_value_type(branch_number(i)) >= leaf_node::value_type_flag::value_node)
-               _session.release(leaf->get_value(branch_number(i)).address());
+               release_value_ref(leaf->get_value(branch_number(i)));
          }
          leaf.modify()->remove_range(lo, hi);
          return leaf.address();
@@ -135,7 +182,7 @@ namespace psitri
          for (uint16_t i = *lo; i < *hi; ++i)
          {
             if (leaf->get_value_type(branch_number(i)) >= leaf_node::value_type_flag::value_node)
-               _session.release(leaf->get_value(branch_number(i)).address());
+               release_value_ref(leaf->get_value(branch_number(i)));
          }
 
          auto                  rewrite_plan = make_leaf_rewrite_plan_skipping(*leaf.obj(), lo, hi);
@@ -221,7 +268,7 @@ namespace psitri
       if (range.is_unbounded())
       {
          for (uint16_t i = 0; i < node->num_branches(); ++i)
-            _delta_removed_keys -= psitri::count_child_keys(_session, node->get_branch(branch_number(i)));
+            note_removed_child(node->get_branch(branch_number(i)));
          return {};  // remove entire subtree
       }
 
@@ -284,20 +331,38 @@ namespace psitri
                // UNLESS the shared dispatch already released it (child had ref > 1).
                if (!badr_shared)
                   _session.release(badr);
-	               node.modify(
-	                   [&](auto* n)
-	                   {
-	                      n->remove_branch(start);
-	                      n->set_last_unique_version(_root_version);
-	                   });
-	               return node.address();
-            }
-            else
-            {
-	               op::inner_remove_branch rm{start};
-	               if constexpr (is_inner_node<NodeT>)
-	               {
-	                  auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
+		               node.modify(
+		                   [&](auto* n)
+		                   {
+		                      n->remove_branch(start);
+		                      n->set_last_unique_version(_root_version);
+		                   });
+		               if (node->num_branches() == 1)
+		               {
+		                  auto surviving = node->get_branch(branch_number(0));
+		                  if (auto collapsed = try_collapse_single_child_node<mode>(
+		                          parent_hint, node, surviving);
+		                      collapsed != sal::null_ptr_address)
+		                     return collapsed;
+		               }
+		               return node.address();
+	            }
+	            else
+	            {
+		               if (node->num_branches() == 2)
+		               {
+		                  branch_number remaining =
+		                      (*start == 0) ? branch_number(1) : branch_number(0);
+		                  auto surviving = node->get_branch(remaining);
+		                  if (auto collapsed = try_collapse_single_child_node<mode>(
+		                          parent_hint, node, surviving);
+		                      collapsed != sal::null_ptr_address)
+		                     return collapsed;
+		               }
+		               op::inner_remove_branch rm{start};
+		               if constexpr (is_inner_node<NodeT>)
+		               {
+		                  auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
 	                  auto ref = _session.get_ref<NodeT>(result);
 	                  ref.modify()->set_last_unique_version(_root_version);
 	                  return result;
@@ -338,10 +403,10 @@ namespace psitri
 
       int64_t saved_delta = _delta_removed_keys;
 
-      // Count keys in middle branches (fully contained — will be removed entirely)
-      int64_t middle_keys = 0;
+      // Track middle branches (fully contained — will be removed entirely).
+      int64_t middle_delta = 0;
       for (uint16_t i = *start + 1; i < *end; ++i)
-         middle_keys += psitri::count_child_keys(_session, node->get_branch(branch_number(i)));
+         middle_delta += removed_child_delta(node->get_branch(branch_number(i)));
 
       // Recurse into start branch
       ptr_address start_addr     = node->get_branch(start);
@@ -377,7 +442,7 @@ namespace psitri
       {
          // lower is unbounded, so start branch is fully contained
          _delta_removed_keys = 0;
-         _delta_removed_keys -= psitri::count_child_keys(_session, start_addr);
+         note_removed_child(start_addr);
          start_empty = true;
       }
       int64_t start_delta = _delta_removed_keys;
@@ -415,7 +480,7 @@ namespace psitri
       }
 
       // Compute total delta
-      int64_t total_delta = saved_delta + start_delta + boundary_delta - middle_keys;
+      int64_t total_delta = saved_delta + start_delta + boundary_delta + middle_delta;
       _delta_removed_keys  = total_delta;
 
       // Count surviving branches
@@ -487,14 +552,32 @@ namespace psitri
          // - Middle branches [start+1, end) are always removed
          // - If boundary is empty, it's part of the removal
 
-         uint16_t remove_lo = start_empty ? *start : *start + 1;
-         uint16_t remove_hi = (boundary_empty || !has_boundary) ? (has_boundary ? *boundary + 1 : *end)
-                                                                 : *end;
+	         uint16_t remove_lo = start_empty ? *start : *start + 1;
+	         uint16_t remove_hi = (boundary_empty || !has_boundary) ? (has_boundary ? *boundary + 1 : *end)
+	                                                                 : *end;
 
-         if (remove_lo < remove_hi && remove_hi <= node->num_branches())
-         {
-            if (remove_hi - remove_lo == node->num_branches())
-               return {};  // remove all — already handled above
+	         if (survivors == 1)
+	         {
+	            ptr_address surviving;
+	            if (!start_empty)
+	               surviving = new_start_addr;
+	            else if (!boundary_empty && has_boundary)
+	               surviving = new_boundary_addr;
+	            else if (before_count > 0)
+	               surviving = node->get_branch(branch_number(0));
+	            else
+	               surviving = node->get_branch(branch_number(after_start));
+
+	            if (auto collapsed = try_collapse_single_child_node<mode>(
+	                    parent_hint, node, surviving);
+	                collapsed != sal::null_ptr_address)
+	               return collapsed;
+	         }
+
+	         if (remove_lo < remove_hi && remove_hi <= node->num_branches())
+	         {
+	            if (remove_hi - remove_lo == node->num_branches())
+	               return {};  // remove all — already handled above
 
             // If start survived but changed address, update it first
             if (!start_empty && start_changed)
@@ -651,11 +734,11 @@ namespace psitri
          else
          {
             // Branches need to be removed. Build a new node.
-            if (survivors == 1)
-            {
-               // Collapse to single branch
-               ptr_address surviving;
-               if (!start_empty)
+	            if (survivors == 1)
+	            {
+	               // Collapse to single branch
+	               ptr_address surviving;
+	               if (!start_empty)
                   surviving = new_start_addr;
                else if (!boundary_empty && has_boundary)
                   surviving = new_boundary_addr;
@@ -664,20 +747,21 @@ namespace psitri
                   // Must be before or after range
                   if (before_count > 0)
                      surviving = node->get_branch(branch_number(0));
-                  else
-                     surviving = node->get_branch(branch_number(after_start));
-               }
-               if constexpr (is_inner_node<NodeT>)
-                  return surviving;
-               else
-               {
-                  // For inner_prefix_node, we can't just return the child—
-                  // we need to prepend the prefix. But that's collapse logic.
-                  // For simplicity, wrap in a new inner_prefix_node with 1 branch.
-                  branch_set bs(surviving);
-                  return make_inner_prefix(parent_hint, node->prefix(), bs);
-               }
-            }
+	                  else
+	                     surviving = node->get_branch(branch_number(after_start));
+	               }
+	               if (auto collapsed = try_collapse_single_child_node<mode>(
+	                       parent_hint, node, surviving);
+	                   collapsed != sal::null_ptr_address)
+	                  return collapsed;
+	               if constexpr (is_inner_node<NodeT>)
+	                  return surviving;
+	               else
+	               {
+	                  branch_set bs(surviving);
+	                  return make_inner_prefix(parent_hint, node->prefix(), bs);
+	               }
+	            }
 
             // Need to handle the case where start/boundary addresses changed.
             // The simplest correct approach: build using op::inner_remove_range for

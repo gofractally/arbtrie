@@ -823,7 +823,7 @@ TEST_CASE("subtree: range_remove over subtree keys - no leaks", "[subtree][range
       }
 
       // Remove a range that includes subtree keys
-      txn.remove_range(to_key("key_02"), to_key("key_08"));
+      txn.remove_range_counted(to_key("key_02"), to_key("key_08"));
 
       // Verify surviving keys
       auto rc = txn.snapshot_cursor();

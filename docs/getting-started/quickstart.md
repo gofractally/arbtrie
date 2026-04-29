@@ -157,8 +157,11 @@ auto tx = session->start_transaction(0);
 // Single key removal
 tx.remove("user:bob");
 
-// Range removal -- O(log n), not O(k)
-tx.remove_range("log:2024-01", "log:2024-06");
+// Range removal when only success/not-found matters.
+tx.remove_range_any("log:2024-01", "log:2024-06");
+
+// Ask for an exact count only when the count is needed.
+uint64_t removed = tx.remove_range_counted("tmp:", "tmp:\xFF");
 
 tx.commit();
 ```

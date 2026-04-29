@@ -43,9 +43,14 @@ namespace
       void insert(key_view key, value_view value) { tx.insert(key, value); }
       void upsert(key_view key, value_view value) { tx.upsert(key, value); }
       int  remove(key_view key) { return tx.remove(key); }
-      uint64_t remove_range(key_view lower, key_view upper)
+      bool remove_range_any(key_view lower, key_view upper)
       {
-         return tx.remove_range(lower, upper);
+         return tx.remove_range_any(lower, upper);
+      }
+
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return tx.remove_range_counted(lower, upper);
       }
 
       template <ConstructibleBuffer T>
@@ -112,8 +117,8 @@ TEST_CASE("range_remove empty tree", "[range_remove]")
 {
    test_db t;
    auto    cur = start_temp_edit(t);
-   REQUIRE(cur.remove_range("a", "z") == 0);
-   REQUIRE(cur.remove_range("", max_key) == 0);
+   REQUIRE(cur.remove_range_counted("a", "z") == 0);
+   REQUIRE(cur.remove_range_counted("", max_key) == 0);
 }
 
 TEST_CASE("range_remove single leaf remove all", "[range_remove]")
@@ -126,7 +131,7 @@ TEST_CASE("range_remove single leaf remove all", "[range_remove]")
    cur.insert(to_key("cherry"), to_value("3"));
 
    REQUIRE(cur.count_keys() == 3);
-   uint64_t removed = cur.remove_range("", max_key);
+   uint64_t removed = cur.remove_range_counted("", max_key);
    REQUIRE(removed == 3);
    REQUIRE(cur.count_keys() == 0);
 }
@@ -144,7 +149,7 @@ TEST_CASE("range_remove single leaf remove subset", "[range_remove]")
 
    SECTION("remove middle range")
    {
-      uint64_t removed = cur.remove_range("banana", "elderberry");
+      uint64_t removed = cur.remove_range_counted("banana", "elderberry");
       REQUIRE(removed == 3);  // banana, cherry, date
       REQUIRE(cur.count_keys() == 2);
 
@@ -157,14 +162,14 @@ TEST_CASE("range_remove single leaf remove subset", "[range_remove]")
 
    SECTION("remove from beginning")
    {
-      uint64_t removed = cur.remove_range("", "cherry");
+      uint64_t removed = cur.remove_range_counted("", "cherry");
       REQUIRE(removed == 2);  // apple, banana
       REQUIRE(cur.count_keys() == 3);
    }
 
    SECTION("remove from end")
    {
-      uint64_t removed = cur.remove_range("date", max_key);
+      uint64_t removed = cur.remove_range_counted("date", max_key);
       REQUIRE(removed == 2);  // date, elderberry
       REQUIRE(cur.count_keys() == 3);
    }
@@ -180,7 +185,7 @@ TEST_CASE("range_remove single key via range", "[range_remove]")
    cur.insert(to_key("cherry"), to_value("3"));
 
    // Remove just "banana" by using [banana, cherry) range
-   uint64_t removed = cur.remove_range("banana", "cherry");
+   uint64_t removed = cur.remove_range_counted("banana", "cherry");
    REQUIRE(removed == 1);
    REQUIRE(cur.count_keys() == 2);
 
@@ -198,7 +203,7 @@ TEST_CASE("range_remove empty range", "[range_remove]")
    cur.insert(to_key("apple"), to_value("1"));
    cur.insert(to_key("banana"), to_value("2"));
 
-   REQUIRE(cur.remove_range("z", "a") == 0);
+   REQUIRE(cur.remove_range_counted("z", "a") == 0);
    REQUIRE(cur.count_keys() == 2);
 }
 
@@ -237,7 +242,7 @@ TEST_CASE("range_remove multi-level tree", "[range_remove]")
       uint64_t before_count = cur.count_keys(lo, hi);
       REQUIRE(before_count == expected);
 
-      uint64_t removed = cur.remove_range(lo, hi);
+      uint64_t removed = cur.remove_range_counted(lo, hi);
       REQUIRE(removed == expected);
       REQUIRE(cur.count_keys() == N - expected);
 
@@ -259,7 +264,7 @@ TEST_CASE("range_remove multi-level tree", "[range_remove]")
 
    SECTION("remove all via range")
    {
-      uint64_t removed = cur.remove_range("", max_key);
+      uint64_t removed = cur.remove_range_counted("", max_key);
       REQUIRE(removed == N);
       REQUIRE(cur.count_keys() == 0);
    }
@@ -288,7 +293,7 @@ TEST_CASE("range_remove prefix coverage", "[range_remove]")
 
    SECTION("remove one prefix group")
    {
-      uint64_t removed = cur.remove_range("beta_", "beta_~");
+      uint64_t removed = cur.remove_range_counted("beta_", "beta_~");
       REQUIRE(removed == per_group);
       REQUIRE(cur.count_keys() == 2 * per_group);
       cur.validate();
@@ -296,7 +301,7 @@ TEST_CASE("range_remove prefix coverage", "[range_remove]")
 
    SECTION("remove spanning groups")
    {
-      uint64_t removed = cur.remove_range("alpha_", "gamma_");
+      uint64_t removed = cur.remove_range_counted("alpha_", "gamma_");
       REQUIRE(removed == 2 * per_group);
       REQUIRE(cur.count_keys() == per_group);
       cur.validate();
@@ -304,7 +309,7 @@ TEST_CASE("range_remove prefix coverage", "[range_remove]")
 
    SECTION("remove nothing")
    {
-      REQUIRE(cur.remove_range("z", "zz") == 0);
+      REQUIRE(cur.remove_range_counted("z", "zz") == 0);
       REQUIRE(cur.count_keys() == 3 * per_group);
    }
 }
@@ -342,7 +347,7 @@ TEST_CASE("range_remove count_keys consistency", "[range_remove]")
    key_view upper = keys[b];
 
    uint64_t counted = cur.count_keys(lower, upper);
-   uint64_t removed = cur.remove_range(lower, upper);
+   uint64_t removed = cur.remove_range_counted(lower, upper);
    REQUIRE(counted == removed);
    cur.validate();
 }
@@ -369,7 +374,7 @@ TEST_CASE("range_remove interleaved insert/remove", "[range_remove]")
    snprintf(lo_buf, sizeof(lo_buf), "key_%05d", lo_idx);
    snprintf(hi_buf, sizeof(hi_buf), "key_%05d", hi_idx);
 
-   uint64_t removed1 = cur.remove_range(lo_buf, hi_buf);
+   uint64_t removed1 = cur.remove_range_counted(lo_buf, hi_buf);
    REQUIRE(removed1 == uint64_t(hi_idx - lo_idx));
    cur.validate();
 
@@ -387,7 +392,7 @@ TEST_CASE("range_remove interleaved insert/remove", "[range_remove]")
    char mid_buf[32];
    snprintf(mid_buf, sizeof(mid_buf), "key_%05d", mid_idx);
 
-   uint64_t removed2 = cur.remove_range(mid_buf, max_key);
+   uint64_t removed2 = cur.remove_range_counted(mid_buf, max_key);
    REQUIRE(removed2 > 0);
    cur.validate();
 
@@ -463,7 +468,7 @@ TEST_CASE("range_remove brute-force validation", "[range_remove]")
             ++it;
       }
 
-      uint64_t removed = cur.remove_range(lower_str, upper_str);
+      uint64_t removed = cur.remove_range_counted(lower_str, upper_str);
       INFO("trial=" << trial << " lower=" << lower_str << " upper=" << upper_str);
       REQUIRE(removed == expected);
       REQUIRE(cur.count_keys() == remaining_keys.size());
@@ -534,7 +539,7 @@ TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
       uint64_t expected = cur.count_keys(lo, hi);
       REQUIRE(expected > 500 / SCALE);  // sanity: should be a big range
 
-      uint64_t removed = cur.remove_range(lo, hi);
+      uint64_t removed = cur.remove_range_counted(lo, hi);
       REQUIRE(removed == expected);
       REQUIRE(cur.count_keys() == total - expected);
 
@@ -571,7 +576,7 @@ TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
          std::string hi = remaining[hi_idx];
 
          uint64_t counted = cur.count_keys(lo, hi);
-         uint64_t removed = cur.remove_range(lo, hi);
+         uint64_t removed = cur.remove_range_counted(lo, hi);
          INFO("trial=" << trial << " lo=" << lo << " hi=" << hi);
          REQUIRE(removed == counted);
 
@@ -600,7 +605,7 @@ TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
    {
       // Remove all keys starting with "user_"
       uint64_t counted = cur.count_keys("user_", "user_~");
-      uint64_t removed = cur.remove_range("user_", "user_~");
+      uint64_t removed = cur.remove_range_counted("user_", "user_~");
       REQUIRE(removed == counted);
       REQUIRE(removed > 0);
 
@@ -618,7 +623,7 @@ TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
 
    SECTION("remove everything")
    {
-      uint64_t removed = cur.remove_range("", max_key);
+      uint64_t removed = cur.remove_range_counted("", max_key);
       REQUIRE(removed == total);
       REQUIRE(cur.count_keys() == 0);
    }
@@ -628,7 +633,7 @@ TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
       // Remove first ~30% of keys
       int      hi_idx  = total * 3 / 10;
       auto     hi      = keys[hi_idx];
-      uint64_t removed = cur.remove_range("", hi);
+      uint64_t removed = cur.remove_range_counted("", hi);
       REQUIRE(removed == (uint64_t)hi_idx);
       REQUIRE(cur.count_keys() == total - hi_idx);
       cur.validate();
@@ -639,7 +644,7 @@ TEST_CASE("range_remove large dataset with big ranges", "[range_remove]")
       // Remove last ~30% of keys
       int      lo_idx  = total * 7 / 10;
       auto     lo      = keys[lo_idx];
-      uint64_t removed = cur.remove_range(lo, max_key);
+      uint64_t removed = cur.remove_range_counted(lo, max_key);
       REQUIRE(removed == (uint64_t)(total - lo_idx));
       REQUIRE(cur.count_keys() == lo_idx);
       cur.validate();
@@ -697,7 +702,7 @@ TEST_CASE("coverage: prefix edge cases in range_remove", "[range_remove][coverag
       // prefix="bbb_", lower="bbc" → common_prefix="bb", prefix[2]='b' < lower[2]='c'
       // All "bbb_*" keys are < "bbc", so nothing in bbb group is removed by [bbc, z)
       // But aaa and ccc groups: "ccc_*" > "bbc" and < "z" so ccc is removed
-      uint64_t removed = cur.remove_range("bbc", "z");
+      uint64_t removed = cur.remove_range_counted("bbc", "z");
       REQUIRE(removed == 20);  // only ccc group
       REQUIRE(cur.count_keys() == 40);
       cur.validate();
@@ -707,7 +712,7 @@ TEST_CASE("coverage: prefix edge cases in range_remove", "[range_remove][coverag
    {
       // prefix="bbb_", lower="bb" → lower is prefix of prefix → all keys > lower
       // So bbb group is fully in range [bb, z)
-      uint64_t removed = cur.remove_range("bb", "z");
+      uint64_t removed = cur.remove_range_counted("bb", "z");
       REQUIRE(removed == 40);  // bbb + ccc groups
       REQUIRE(cur.count_keys() == 20);
       cur.validate();
@@ -716,7 +721,7 @@ TEST_CASE("coverage: prefix edge cases in range_remove", "[range_remove][coverag
    SECTION("upper equals prefix exactly — exclusive (line 183)")
    {
       // prefix="bbb_", upper="bbb_" → since upper is exclusive, no bbb keys qualify
-      uint64_t removed = cur.remove_range("a", "bbb_");
+      uint64_t removed = cur.remove_range_counted("a", "bbb_");
       REQUIRE(removed == 20);  // only aaa group
       REQUIRE(cur.count_keys() == 40);
       cur.validate();
@@ -726,7 +731,7 @@ TEST_CASE("coverage: prefix edge cases in range_remove", "[range_remove][coverag
    {
       // prefix="bbb_", upper="bbb" → upper is prefix of prefix
       // All bbb keys start with "bbb_..." >= "bbb", so none are < upper
-      uint64_t removed = cur.remove_range("a", "bbb");
+      uint64_t removed = cur.remove_range_counted("a", "bbb");
       REQUIRE(removed == 20);  // only aaa group
       REQUIRE(cur.count_keys() == 40);
       cur.validate();
@@ -736,7 +741,7 @@ TEST_CASE("coverage: prefix edge cases in range_remove", "[range_remove][coverag
    {
       // prefix="bbb_", upper="bba" → common_prefix="bb", prefix[2]='b' >= upper[2]='a'
       // All bbb keys >= "bba", so none are removed from bbb group
-      uint64_t removed = cur.remove_range("a", "bba");
+      uint64_t removed = cur.remove_range_counted("a", "bba");
       REQUIRE(removed == 20);  // only aaa group
       REQUIRE(cur.count_keys() == 40);
       cur.validate();
@@ -752,39 +757,69 @@ TEST_CASE("coverage: single-key tree range_remove", "[range_remove][coverage]")
 
    SECTION("remove all via unbounded range")
    {
-      REQUIRE(cur.remove_range("", max_key) == 1);
+      REQUIRE(cur.remove_range_counted("", max_key) == 1);
       REQUIRE(cur.count_keys() == 0);
    }
 
    SECTION("range before key — no removal")
    {
-      REQUIRE(cur.remove_range("a", "b") == 0);
+      REQUIRE(cur.remove_range_counted("a", "b") == 0);
       REQUIRE(cur.count_keys() == 1);
    }
 
    SECTION("range after key — no removal")
    {
-      REQUIRE(cur.remove_range("t", "z") == 0);
+      REQUIRE(cur.remove_range_counted("t", "z") == 0);
       REQUIRE(cur.count_keys() == 1);
    }
 
    SECTION("range includes key")
    {
-      REQUIRE(cur.remove_range("s", "t") == 1);
+      REQUIRE(cur.remove_range_counted("s", "t") == 1);
       REQUIRE(cur.count_keys() == 0);
    }
 
    SECTION("range lower equals key exactly")
    {
-      REQUIRE(cur.remove_range("solo", "z") == 1);
+      REQUIRE(cur.remove_range_counted("solo", "z") == 1);
       REQUIRE(cur.count_keys() == 0);
    }
 
    SECTION("range upper equals key exactly — exclusive, no removal")
    {
-      REQUIRE(cur.remove_range("a", "solo") == 0);
+      REQUIRE(cur.remove_range_counted("a", "solo") == 0);
       REQUIRE(cur.count_keys() == 1);
    }
+}
+
+TEST_CASE("range_remove: unique inner_prefix single survivor collapses when leaf fits",
+          "[range_remove][prefix][collapse]")
+{
+   test_db t("range_unique_prefix_single_child");
+   auto    cur = start_temp_edit(t);
+
+   insert_prefix_group(cur, "data_alpha_padding_padding_padding_", 20);
+   insert_prefix_group(cur, "data_beta_padding_padding_padding_", 20);
+   insert_prefix_group(cur, "data_gamma_padding_padding_padding_", 20);
+   cur.validate();
+
+   tree_context before(cur.tx.get_tree().copy_root());
+   auto         before_stats = before.get_stats();
+   REQUIRE(before_stats.inner_prefix_nodes >= 1);
+
+   REQUIRE(cur.remove_range_counted("data_a", "data_g") == 40);
+   REQUIRE(cur.count_keys() == 20);
+   cur.validate();
+
+   tree_context after(cur.tx.get_tree().copy_root());
+   auto         after_stats = after.get_stats();
+   CHECK(after_stats.single_branch_inners == 0);
+
+   auto rc   = cur.snapshot_cursor();
+   auto keys = collect_keys(rc);
+   REQUIRE(keys.size() == 20);
+   for (auto& key : keys)
+      CHECK(key.rfind("data_gamma_", 0) == 0);
 }
 
 TEST_CASE("coverage: shared-mode survivors==1 collapse on inner_prefix_node",
@@ -806,7 +841,7 @@ TEST_CASE("coverage: shared-mode survivors==1 collapse on inner_prefix_node",
    // Phase 2: via transaction (shared mode), remove 2 of 3 groups → survivors==1
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("data_a", "data_g");
+      uint64_t removed = tx.remove_range_counted("data_a", "data_g");
       REQUIRE(removed == 30);  // alpha + beta
       tx.commit();
    }
@@ -820,6 +855,12 @@ TEST_CASE("coverage: shared-mode survivors==1 collapse on inner_prefix_node",
       auto keys = collect_keys(rc);
       REQUIRE(keys.front().substr(0, 11) == "data_gamma_");
    }
+
+   auto root = t.ses->get_root(0);
+   REQUIRE(root);
+   write_cursor wc(root);
+   auto         stats = wc.get_stats();
+   CHECK(stats.single_branch_inners == 0);
 }
 
 TEST_CASE("coverage: shared-mode partial overlap across branch boundaries",
@@ -842,7 +883,7 @@ TEST_CASE("coverage: shared-mode partial overlap across branch boundaries",
    SECTION("range spans full middle group")
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("bb_", "cc_");
+      uint64_t removed = tx.remove_range_counted("bb_", "cc_");
       REQUIRE(removed == N);
       auto rc = tx.snapshot_cursor();
       REQUIRE(rc.count_keys() == 3 * N);
@@ -856,7 +897,7 @@ TEST_CASE("coverage: shared-mode partial overlap across branch boundaries",
       snprintf(hi, sizeof(hi), "cc_%03d", N / 2);
 
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range(lo, hi);
+      uint64_t removed = tx.remove_range_counted(lo, hi);
       REQUIRE(removed > 0);
       auto rc = tx.snapshot_cursor();
       REQUIRE(rc.count_keys() == 4 * N - removed);
@@ -866,7 +907,7 @@ TEST_CASE("coverage: shared-mode partial overlap across branch boundaries",
    SECTION("range removes all but last group")
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("", "dd_");
+      uint64_t removed = tx.remove_range_counted("", "dd_");
       REQUIRE(removed == 3 * N);
       auto rc = tx.snapshot_cursor();
       REQUIRE(rc.count_keys() == N);
@@ -901,7 +942,7 @@ TEST_CASE("coverage: shared-mode address changes with branch removal",
       snprintf(hi, sizeof(hi), "grp_e_%03d", N / 2);
 
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range(lo, hi);
+      uint64_t removed = tx.remove_range_counted(lo, hi);
       REQUIRE(removed > 0);
       tx.commit();
    }
@@ -937,7 +978,7 @@ TEST_CASE("coverage: value_node handling in range_remove", "[range_remove][cover
    SECTION("range includes value_node key")
    {
       // "x" is stored as a value_node; range [x, xa) should remove just "x"
-      uint64_t removed = cur.remove_range("x", "xa");
+      uint64_t removed = cur.remove_range_counted("x", "xa");
       REQUIRE(removed == 1);
       REQUIRE(cur.count_keys() == 3);
       cur.validate();
@@ -946,7 +987,7 @@ TEST_CASE("coverage: value_node handling in range_remove", "[range_remove][cover
    SECTION("range excludes value_node key")
    {
       // Range [xa, xz) should NOT remove "x" (value_node is at empty key after prefix)
-      uint64_t removed = cur.remove_range("xa", "xz");
+      uint64_t removed = cur.remove_range_counted("xa", "xz");
       REQUIRE(removed == 3);  // xa, xab, xb
       REQUIRE(cur.count_keys() == 1);
       // Remaining key should be "x"
@@ -959,7 +1000,7 @@ TEST_CASE("coverage: value_node handling in range_remove", "[range_remove][cover
 
    SECTION("remove all including value_node")
    {
-      uint64_t removed = cur.remove_range("", max_key);
+      uint64_t removed = cur.remove_range_counted("", max_key);
       REQUIRE(removed == 4);
       REQUIRE(cur.count_keys() == 0);
    }
@@ -981,7 +1022,7 @@ TEST_CASE("coverage: shared-mode no-change path with retain undo",
    // Remove a range that doesn't exist — no keys match
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("zzz_000", "zzz_999");
+      uint64_t removed = tx.remove_range_counted("zzz_000", "zzz_999");
       REQUIRE(removed == 0);
       tx.commit();
    }
@@ -989,7 +1030,7 @@ TEST_CASE("coverage: shared-mode no-change path with retain undo",
    // Remove a range where lower > upper (should be caught early)
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("z", "a");
+      uint64_t removed = tx.remove_range_counted("z", "a");
       REQUIRE(removed == 0);
       tx.commit();
    }
@@ -1019,7 +1060,7 @@ TEST_CASE("coverage: shared-mode same-branch case empties single-branch node",
 
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("longprefix_", "longprefix`");
+      uint64_t removed = tx.remove_range_counted("longprefix_", "longprefix`");
       // "longprefix`" > "longprefix_" since '`' (0x60) > '_' (0x5F)
       REQUIRE(removed == 30 / SCALE);
       tx.commit();
@@ -1051,7 +1092,7 @@ TEST_CASE("coverage: unique same-branch empties and removes branch from inner no
    REQUIRE(wc.count_keys() == 30);
 
    // Remove all keys in the bbb group via range that stays within that branch.
-   uint64_t removed = wc.remove_range("bbb_", "bbb`");
+   uint64_t removed = wc.remove_range_counted("bbb_", "bbb`");
    REQUIRE(removed == 10);
    REQUIRE(wc.count_keys() == 20);
    wc.validate();
@@ -1074,7 +1115,7 @@ TEST_CASE("coverage: shared same-branch empties and removes branch from inner no
 
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("bbb_", "bbb`");
+      uint64_t removed = tx.remove_range_counted("bbb_", "bbb`");
       REQUIRE(removed == 10);
       tx.commit();
    }
@@ -1102,7 +1143,7 @@ TEST_CASE("coverage: unique multi-branch range with address changes",
    REQUIRE(wc.count_keys() == 120);
 
    // Range partially overlaps start (c) and boundary (f) branches.
-   uint64_t removed = wc.remove_range("c_007", "f_007");
+   uint64_t removed = wc.remove_range_counted("c_007", "f_007");
    REQUIRE(removed > 0);
    REQUIRE(wc.count_keys() == 120 - removed);
    wc.validate();
@@ -1131,7 +1172,7 @@ TEST_CASE("coverage: unique range removes all middle but start/boundary survive 
    REQUIRE(wc.count_keys() == 40);
 
    // Range that partially overlaps both groups but nothing in between.
-   uint64_t removed = wc.remove_range("mmm_010", "nnn_010");
+   uint64_t removed = wc.remove_range_counted("mmm_010", "nnn_010");
    REQUIRE(removed == 20);  // 10 from each group
    REQUIRE(wc.count_keys() == 20);
    wc.validate();
@@ -1154,7 +1195,7 @@ TEST_CASE("coverage: shared range on inner_prefix with no actual changes",
    // Range that's entirely outside the prefix range.
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("zzz", "zzzz");
+      uint64_t removed = tx.remove_range_counted("zzz", "zzzz");
       REQUIRE(removed == 0);
       tx.commit();
    }
@@ -1181,7 +1222,7 @@ TEST_CASE("coverage: shared partial overlap on start and boundary with no middle
 
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("pp_010", "qq_010");
+      uint64_t removed = tx.remove_range_counted("pp_010", "qq_010");
       REQUIRE(removed == 20);
       tx.commit();
    }
@@ -1209,7 +1250,7 @@ TEST_CASE("coverage: shared survivors==1 from before-range branches",
    // Remove bbb and ccc entirely — only aaa survives (before the range).
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("bbb_", max_key);
+      uint64_t removed = tx.remove_range_counted("bbb_", max_key);
       REQUIRE(removed == 20);
       tx.commit();
    }
@@ -1240,7 +1281,7 @@ TEST_CASE("coverage: shared survivors==1 from after-range branches",
    // Remove aaa and bbb entirely — only ccc survives (after the range).
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("", "ccc_");
+      uint64_t removed = tx.remove_range_counted("", "ccc_");
       REQUIRE(removed == 20);
       tx.commit();
    }
@@ -1273,7 +1314,7 @@ TEST_CASE("coverage: shared multi-branch removal with address changes",
 
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("b_007", "e_007");
+      uint64_t removed = tx.remove_range_counted("b_007", "e_007");
       REQUIRE(removed > 0);
       tx.commit();
    }
@@ -1315,7 +1356,7 @@ TEST_CASE("coverage: shared simple remove range no address changes",
    // Remove exactly bb and cc — full branches, no partial overlap.
    {
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("bb_", "dd_");
+      uint64_t removed = tx.remove_range_counted("bb_", "dd_");
       REQUIRE(removed == 20);
       tx.commit();
    }
@@ -1384,7 +1425,7 @@ TEST_CASE("range_remove snapshot oracle: shared-mode correctness", "[range_remov
       }
 
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range(lo, hi);
+      uint64_t removed = tx.remove_range_counted(lo, hi);
       INFO("trial=" << trial << " lo=" << lo << " hi=" << hi);
       REQUIRE(removed == expected_removed);
       tx.commit();
@@ -1437,7 +1478,7 @@ TEST_CASE("range_remove prefix keys: keys that are prefixes of other keys", "[ra
    SECTION("remove range spanning prefix chain")
    {
       // Remove [ab, abd) — "ab","abc","abcd","abcde" are all in range (all < "abd")
-      uint64_t removed = wc.remove_range("ab", "abd");
+      uint64_t removed = wc.remove_range_counted("ab", "abd");
       CHECK(removed == 4);
       REQUIRE(wc.count_keys() == keys.size() - 4);
       wc.validate();
@@ -1454,7 +1495,7 @@ TEST_CASE("range_remove prefix keys: keys that are prefixes of other keys", "[ra
    SECTION("remove range including root prefix key")
    {
       // Remove [a, ab) — should remove only "a"
-      uint64_t removed = wc.remove_range("a", "ab");
+      uint64_t removed = wc.remove_range_counted("a", "ab");
       CHECK(removed == 1);
       wc.validate();
 
@@ -1466,7 +1507,7 @@ TEST_CASE("range_remove prefix keys: keys that are prefixes of other keys", "[ra
 
    SECTION("remove all keys via full range")
    {
-      uint64_t removed = wc.remove_range("", max_key);
+      uint64_t removed = wc.remove_range_counted("", max_key);
       CHECK(removed == keys.size());
       CHECK(wc.count_keys() == 0);
    }
@@ -1497,7 +1538,7 @@ TEST_CASE("range_remove interleaved snapshots stress test", "[range_remove][stre
    // Remove [key_0020, key_0040)
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("key_0020", "key_0040");
+      tx.remove_range_counted("key_0020", "key_0040");
       tx.commit();
    }
 
@@ -1507,7 +1548,7 @@ TEST_CASE("range_remove interleaved snapshots stress test", "[range_remove][stre
    // Remove [key_0060, key_0080)
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("key_0060", "key_0080");
+      tx.remove_range_counted("key_0060", "key_0080");
       tx.commit();
    }
 
@@ -1517,7 +1558,7 @@ TEST_CASE("range_remove interleaved snapshots stress test", "[range_remove][stre
    // Remove [key_0000, key_0010)
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("key_0000", "key_0010");
+      tx.remove_range_counted("key_0000", "key_0010");
       tx.commit();
    }
 
@@ -1614,7 +1655,7 @@ TEST_CASE("range_remove shared brute-force: random ranges with oracle", "[range_
 
       // Database
       auto     tx      = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range(lo, hi);
+      uint64_t removed = tx.remove_range_counted(lo, hi);
       INFO("round=" << round << " lo=" << lo << " hi=" << hi
            << " expected=" << expected << " removed=" << removed);
       REQUIRE(removed == expected);
@@ -1659,7 +1700,7 @@ TEST_CASE("range_remove with value_nodes: large value ref counting", "[range_rem
    // Remove a range from the middle
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("vn_0010", "vn_0030");
+      tx.remove_range_counted("vn_0010", "vn_0030");
       tx.commit();
    }
 
@@ -1694,7 +1735,7 @@ TEST_CASE("range_remove with value_nodes: large value ref counting", "[range_rem
    // Second range remove — exercises ref counting on already-shared nodes
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("vn_0035", "vn_0050");
+      tx.remove_range_counted("vn_0035", "vn_0050");
       tx.commit();
    }
 
@@ -1733,7 +1774,7 @@ TEST_CASE("range_remove: boundary conditions on key space edges", "[range_remove
    SECTION("remove low byte range")
    {
       // [\x00, \x80) includes \x01, \x7F, "normal_key" (n=0x6E), and long 'x' key (0x78)
-      uint64_t removed = wc.remove_range(std::string(1, '\x00'), std::string(1, '\x80'));
+      uint64_t removed = wc.remove_range_counted(std::string(1, '\x00'), std::string(1, '\x80'));
       CHECK(removed == 4);
       wc.validate();
       // \x80 and \xFE should survive
@@ -1743,7 +1784,7 @@ TEST_CASE("range_remove: boundary conditions on key space edges", "[range_remove
    SECTION("remove high byte range")
    {
       // [\x80, max_key) includes \x80 and \xFE
-      uint64_t removed = wc.remove_range(std::string(1, '\x80'), max_key);
+      uint64_t removed = wc.remove_range_counted(std::string(1, '\x80'), max_key);
       CHECK(removed == 2);
       wc.validate();
       REQUIRE(wc.count_keys() == 4);
@@ -1751,7 +1792,7 @@ TEST_CASE("range_remove: boundary conditions on key space edges", "[range_remove
 
    SECTION("remove everything")
    {
-      uint64_t removed = wc.remove_range("", max_key);
+      uint64_t removed = wc.remove_range_counted("", max_key);
       CHECK(removed == 6);
       CHECK(wc.count_keys() == 0);
    }

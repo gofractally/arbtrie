@@ -462,6 +462,37 @@ namespace psitri
          return get_stored_value(offset);
       }
 
+      /// Returns true and writes the latest data payload size when this value_node
+      /// represents byte data. Subtree containers and tombstone/null entries are
+      /// not counted as data values.
+      bool latest_data_size(uint64_t& out) const noexcept
+      {
+         if (_is_subtree)
+            return false;
+         if (_is_flat)
+         {
+            auto* p = reinterpret_cast<const uint8_t*>(this) + sizeof(value_node);
+            uint32_t sz;
+            std::memcpy(&sz, p, sizeof(uint32_t));
+            out = sz;
+            return true;
+         }
+         if (_num_versions == 0)
+            return false;
+
+         const int16_t offset = entry_offset(entries()[_num_versions - 1]);
+         if (offset == offset_zero_length)
+         {
+            out = 0;
+            return true;
+         }
+         if (offset < offset_data_start)
+            return false;
+
+         out = get_stored_value_ptr(offset)->size;
+         return true;
+      }
+
       /// Get the tree_id from the latest entry.
       tree_id get_tree_id() const
       {
@@ -733,7 +764,7 @@ namespace psitri
 
       // ── COW / compaction support ────────────────────────────────
 
-      uint32_t cow_size() const noexcept { return max_node_size; }
+      uint32_t cow_size() const noexcept { return std::max<uint32_t>(size(), max_node_size); }
 
       uint32_t compact_size() const noexcept { return size(); }
 
@@ -741,6 +772,28 @@ namespace psitri
       {
          assert(dst->size() == size());
          ucc::memcpy_aligned_64byte(dst, this, size());
+      }
+
+      void copy_to(alloc_header* dst) const noexcept
+      {
+         assert(dst->size() >= size());
+
+         auto saved_header = *dst;
+         if (_is_flat)
+         {
+            std::memcpy(dst, this, size());
+            std::memcpy(dst, &saved_header, sizeof(alloc_header));
+            return;
+         }
+
+         const uint32_t meta_bytes =
+             sizeof(value_node) + _num_next * sizeof(value_next_ptr) +
+             _num_versions * sizeof(uint64_t);
+         std::memcpy(dst, this, meta_bytes);
+         std::memcpy(dst, &saved_header, sizeof(alloc_header));
+
+         auto* out = static_cast<value_node*>(dst);
+         std::memcpy(out->tail() - _alloc_pos, tail() - _alloc_pos, _alloc_pos);
       }
 
       // ── Branch visitation (for retain/release) ──────────────────

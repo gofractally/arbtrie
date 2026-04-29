@@ -439,6 +439,7 @@ public:
    bool lower_bound(std::string_view key);    // first key >= key
    bool upper_bound(std::string_view key);    // first key > key
    bool seek(std::string_view key);           // exact match
+   bool find(std::string_view key);           // exact match, end on miss
 
    // -- Navigation --
    bool next();

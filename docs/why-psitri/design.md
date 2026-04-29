@@ -213,9 +213,12 @@ Every inner node maintains a `_descendents` field: the total number of keys in i
 
 `count_keys(lower, upper)` counts keys in a range without touching any leaves. The algorithm sums `_descendents` for fully-contained subtrees (O(1) per subtree) and only recurses into boundary branches.
 
-### Range Deletion in O(log n)
+### Range Deletion
 
-`remove_range(lower, upper)` releases fully-contained subtrees in O(1) -- just decrement the root's reference count. The compactor handles cascading destruction asynchronously.
+`remove_range_any(lower, upper)` removes a half-open range and reports only
+whether anything was removed. `remove_range_counted(lower, upper)` performs the
+same deletion but also computes the exact number of removed keys; ask for the
+count only when the application needs it.
 
 | Operation                  | B-tree            | LSM-tree               | PsiTri                  |
 |----------------------------|-------------------|------------------------|--------------------------|

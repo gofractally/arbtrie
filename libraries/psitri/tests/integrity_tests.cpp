@@ -43,9 +43,14 @@ namespace
 
       void upsert(key_view key, value_view value) { tx.upsert(key, value); }
       int  remove(key_view key) { return tx.remove(key); }
-      uint64_t remove_range(key_view lower, key_view upper)
+      bool remove_range_any(key_view lower, key_view upper)
       {
-         return tx.remove_range(lower, upper);
+         return tx.remove_range_any(lower, upper);
+      }
+
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return tx.remove_range_counted(lower, upper);
       }
 
       template <ConstructibleBuffer T>
@@ -165,7 +170,7 @@ TEST_CASE("integrity: random ops oracle comparison forcing structural changes", 
          snprintf(lo_buf, sizeof(lo_buf), "%03d", i);
          snprintf(hi_buf, sizeof(hi_buf), "%03d", j);
          std::string lo(lo_buf), hi(hi_buf);
-         cur.remove_range(to_key_view(lo), to_key_view(hi));
+         cur.remove_range_counted(to_key_view(lo), to_key_view(hi));
          auto it = oracle.lower_bound(lo);
          while (it != oracle.end() && it->first < hi)
             it = oracle.erase(it);
@@ -518,7 +523,7 @@ TEST_CASE("integrity: range_remove across leaf/inner boundaries with oracle", "[
 
       auto lower = ikey(lo);
       auto upper = ikey(hi);
-      cur.remove_range(to_key_view(lower), to_key_view(upper));
+      cur.remove_range_counted(to_key_view(lower), to_key_view(upper));
 
       auto it = oracle.lower_bound(lower);
       while (it != oracle.end() && it->first < upper)

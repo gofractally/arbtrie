@@ -627,7 +627,7 @@ TEST_CASE("C API: cursor_copy clones current position", "[mdbx][c-api][cursor][s
    REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
 }
 
-TEST_CASE("C API: returned cursor slices survive cursor close until transaction end",
+TEST_CASE("C API: returned cursor slices are valid until cursor movement",
           "[mdbx][c-api][cursor][lifetime][silkworm]")
 {
    auto dir = make_temp_dir("c_cursor_slice_lifetime");
@@ -671,13 +671,12 @@ TEST_CASE("C API: returned cursor slices survive cursor close until transaction 
       MDBX_val k{const_cast<char*>(key.data()), key.size()};
       MDBX_val v{const_cast<char*>(value_b.data()), 1};
       REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_GET_BOTH_RANGE) == MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(v) == value_b);
 
-      MDBX_val captured = v;
       mdbx_cursor_close(cur);
-      return captured;
    };
 
-   MDBX_val captured = lookup_then_close_cursor();
+   lookup_then_close_cursor();
 
    for (int i = 0; i < 100; ++i)
    {
@@ -688,8 +687,6 @@ TEST_CASE("C API: returned cursor slices survive cursor close until transaction 
       REQUIRE(mdbx_cursor_get(cur, &k, &v, MDBX_FIRST) == MDBX_SUCCESS);
       mdbx_cursor_close(cur);
    }
-
-   REQUIRE(mdbx_bytes(captured) == value_b);
 
    REQUIRE(mdbx_txn_abort(txn) == MDBX_SUCCESS);
    mdbx_env_close(env);
@@ -1226,6 +1223,81 @@ TEST_CASE("C API: DUPSORT basic put/get/del", "[mdbx][dupsort]")
    mdbx_env_close(env);
 }
 
+TEST_CASE("C API: DUPSORT hidden marker preserves empty duplicate values",
+          "[mdbx][dupsort]")
+{
+   auto dir = make_temp_dir("c_dupsort_empty_dup");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 16) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+
+   MDBX_txn* txn = nullptr;
+   REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+
+   MDBX_dbi dbi = 0;
+   REQUIRE(mdbx_dbi_open(txn, "dupsort_empty",
+                         static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT),
+                         &dbi) == MDBX_SUCCESS);
+
+   std::string key = "k";
+   std::string empty;
+   std::string value = "a";
+   MDBX_val k{key.data(), key.size()};
+   MDBX_val empty_val{empty.data(), empty.size()};
+   MDBX_val value_val{value.data(), value.size()};
+
+   REQUIRE(mdbx_put(txn, dbi, &k, &value_val, MDBX_UPSERT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_put(txn, dbi, &k, &empty_val, MDBX_UPSERT) == MDBX_SUCCESS);
+
+   MDBX_val got{};
+   REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+   REQUIRE(got.iov_len == 0);
+
+   MDBX_cursor* cur = nullptr;
+   REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+
+   MDBX_val ck{key.data(), key.size()};
+   MDBX_val cv{};
+   REQUIRE(mdbx_cursor_get(cur, &ck, &cv, MDBX_SET_KEY) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(ck) == key);
+   REQUIRE(cv.iov_len == 0);
+
+   size_t count = 0;
+   REQUIRE(mdbx_cursor_count(cur, &count) == MDBX_SUCCESS);
+   REQUIRE(count == 2);
+
+   REQUIRE(mdbx_cursor_get(cur, &ck, &cv, MDBX_NEXT_DUP) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(cv) == value);
+   REQUIRE(mdbx_cursor_get(cur, &ck, &cv, MDBX_PREV_DUP) == MDBX_SUCCESS);
+   REQUIRE(cv.iov_len == 0);
+
+   MDBX_val range_key{key.data(), key.size()};
+   MDBX_val range_value{empty.data(), empty.size()};
+   REQUIRE(mdbx_cursor_get(cur, &range_key, &range_value, MDBX_GET_BOTH_RANGE) ==
+           MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(range_key) == key);
+   REQUIRE(range_value.iov_len == 0);
+
+   mdbx_cursor_close(cur);
+
+   REQUIRE(mdbx_del(txn, dbi, &k, &empty_val) == MDBX_SUCCESS);
+   REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(got) == value);
+
+   REQUIRE(mdbx_del(txn, dbi, &k, &value_val) == MDBX_SUCCESS);
+   REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_NOTFOUND);
+
+   std::string replacement = "z";
+   MDBX_val replacement_val{replacement.data(), replacement.size()};
+   REQUIRE(mdbx_put(txn, dbi, &k, &replacement_val, MDBX_NOOVERWRITE) ==
+           MDBX_SUCCESS);
+
+   REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
 TEST_CASE("C API: DUPSORT uses one encoded PsiTri key budget",
           "[mdbx][dupsort][limits]")
 {
@@ -1245,8 +1317,8 @@ TEST_CASE("C API: DUPSORT uses one encoded PsiTri key budget",
                          &dbi) == MDBX_SUCCESS);
 
    std::string key(512, 'k');
-   std::string first(510, 'a');
-   std::string second(510, 'b');
+   std::string first(509, 'a');
+   std::string second(509, 'b');
 
    MDBX_val k{key.data(), key.size()};
    MDBX_val v2{second.data(), second.size()};

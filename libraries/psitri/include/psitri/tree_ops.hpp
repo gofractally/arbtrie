@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <vector>
 #include <psitri/count_keys.hpp>
 #include <psitri/node/inner.hpp>
@@ -22,8 +23,9 @@ namespace psitri
       sal::allocator_session&      _session;
       sal::smart_ptr<alloc_header> _root;
       int                          _old_value_size = -1;
-      int64_t  _delta_removed_keys = 0;  // used only by range_remove to count removed keys
-      uint32_t _collapse_threshold = 24;
+      int64_t  _delta_removed_keys = 0;  // negative count, or negative presence marker
+      bool     _count_removed_keys = true;
+      bool     _collapse_enabled   = true;
       const live_range_map::snapshot* _dead_snap     = nullptr;
       uint64_t                        _epoch_base   = 0;
       uint64_t                        _root_version = 0;
@@ -38,7 +40,7 @@ namespace psitri
       }
 
      public:
-      void set_collapse_threshold(uint32_t t) { _collapse_threshold = t; }
+      void set_collapse_enabled(bool enabled) { _collapse_enabled = enabled; }
       void set_dead_versions(const live_range_map::snapshot* s) { _dead_snap = s; }
       void set_epoch_base(uint64_t e)
       {
@@ -87,7 +89,7 @@ namespace psitri
       value_type make_value(value_type value, sal::alloc_hint hint) noexcept
       {
          if (value.is_subtree() || value.is_value_node())
-            return value;  // already converted or is a subtree address
+            return value;  // already converted
          if (value.is_view())
          {
             auto v = value.view();
@@ -134,6 +136,45 @@ namespace psitri
          for (int i = 0; i < addrs.size(); ++i)
             total += count_child_keys(addrs[i]);
          return total;
+      }
+
+      void note_removed_keys(uint64_t count = 1) noexcept
+      {
+         if (count == 0)
+            return;
+         if (_count_removed_keys)
+            _delta_removed_keys -= static_cast<int64_t>(count);
+         else
+            _delta_removed_keys = -1;
+      }
+
+      int64_t removed_child_delta(ptr_address addr)
+      {
+         if (_count_removed_keys)
+            return -static_cast<int64_t>(psitri::count_child_keys(_session, addr));
+         return -1;
+      }
+
+      void note_removed_child(ptr_address addr)
+      {
+         if (_count_removed_keys)
+            note_removed_keys(psitri::count_child_keys(_session, addr));
+         else
+            note_removed_keys();
+      }
+
+      void release_value_ref(value_type value) noexcept
+      {
+         if (value.is_value_node())
+            _session.release(value.value_address());
+         else if (value.is_subtree())
+         {
+            auto tid = value.subtree_id();
+            if (tid.root != sal::null_ptr_address)
+               _session.release(tid.root);
+            if (tid.ver != sal::null_ptr_address)
+               _session.release(tid.ver);
+         }
       }
 
       ptr_address make_inner(const branch_set& branches) noexcept
@@ -261,8 +302,12 @@ namespace psitri
       }
 
       /// Remove all keys in range [lower, upper).
-      /// @return the number of keys removed.
-      uint64_t remove_range(key_view lower, key_view upper);
+      /// @return true if at least one key was removed.
+      bool remove_range_any(key_view lower, key_view upper);
+
+      /// Remove all keys in range [lower, upper).
+      /// @return the exact number of keys removed.
+      uint64_t remove_range_counted(key_view lower, key_view upper);
 
       template <upsert_mode mode>
       branch_set range_remove(const sal::alloc_hint&   parent_hint,
@@ -427,20 +472,70 @@ namespace psitri
          uint16_t count           = 0;
          uint32_t key_data_size   = 0;
          uint32_t value_data_size = 0;
-         uint16_t addr_values     = 0;
+         uint16_t addr_clines     = 0;
          bool     overflow        = false;
          uint32_t max_entries;
+         ptr_address clines[leaf_node::max_value_clines];
 
-         subtree_sizer(uint32_t max) : max_entries(max) {}
+         subtree_sizer(uint32_t max) : max_entries(max)
+         {
+            for (auto& cline : clines)
+               cline = sal::null_ptr_address;
+         }
+
+         void add_value_node(ptr_address value_addr)
+         {
+            ptr_address base_cline(*value_addr & ~0x0ful);
+            for (uint16_t i = 0; i < addr_clines; ++i)
+               if (clines[i] == base_cline)
+                  return;
+
+            if (addr_clines >= leaf_node::max_value_clines)
+            {
+               overflow = true;
+               return;
+            }
+            clines[addr_clines++] = base_cline;
+         }
+
+         bool exceeds_leaf() const
+         {
+            uint32_t meta = sizeof(leaf_node) + 5u * count;
+            if (meta >= leaf_node::max_leaf_size)
+               return true;
+            uint32_t data = key_data_size + count * 2u  // sizeof(leaf_node::key) == 2
+                            + value_data_size + addr_clines * sizeof(ptr_address);
+            return data > leaf_node::max_leaf_size - meta;
+         }
+
+         void add_leaf_entry(uint32_t key_size, value_type val)
+         {
+            if (count >= max_entries)
+            {
+               overflow = true;
+               return;
+            }
+
+            key_data_size += key_size;
+            if (val.is_view() && !val.view().empty())
+               value_data_size += 2u + val.view().size();  // sizeof(value_data) == 2
+            else if (val.is_subtree())
+               value_data_size += sizeof(tree_id);
+            else if (val.is_value_node())
+               add_value_node(val.value_address());
+
+            if (overflow)
+               return;
+            ++count;
+            if (exceeds_leaf())
+               overflow = true;
+         }
 
          bool fits_in_leaf() const
          {
             if (overflow || count == 0)
                return false;
-            uint32_t data  = key_data_size + count * 2u  // sizeof(leaf_node::key) == 2
-                             + value_data_size + addr_values * sizeof(ptr_address);
-            uint32_t avail = leaf_node::max_leaf_size - sizeof(leaf_node) - 5u * count;
-            return data <= avail;
+            return !exceeds_leaf();
          }
       };
 
@@ -455,21 +550,13 @@ namespace psitri
             {
                auto     leaf = ref.template as<leaf_node>();
                uint16_t nb   = leaf->num_branches();
-               if (out.count + nb > out.max_entries)
-               {
-                  out.overflow = true;
-                  return;
-               }
                for (uint16_t i = 0; i < nb; ++i)
                {
-                  out.key_data_size += prefix_len + leaf->get_key(branch_number(i)).size();
-                  auto val = leaf->get_value(branch_number(i));
-                  if (val.is_view() && !val.view().empty())
-                     out.value_data_size += 2u + val.view().size();  // sizeof(value_data) == 2
-                  else if (val.is_subtree() || val.is_value_node())
-                     ++out.addr_values;
+                  out.add_leaf_entry(prefix_len + leaf->get_key(branch_number(i)).size(),
+                                     leaf->get_value(branch_number(i)));
+                  if (out.overflow)
+                     return;
                }
-               out.count += nb;
                break;
             }
             case node_type::inner:
@@ -802,6 +889,27 @@ namespace psitri
                                 smart_ref<InnerNodeType>& in,
                                 branch_number             br,
                                 const branch_set&         sub_branches);
+
+      template <upsert_mode mode, any_inner_node_type InnerNodeType>
+      ptr_address try_merge_adjacent_siblings_after_remove(const sal::alloc_hint&    parent_hint,
+                                                           smart_ref<InnerNodeType>& in,
+                                                           branch_number             br,
+                                                           ptr_address child_addr);
+
+      template <upsert_mode mode, any_inner_node_type InnerNodeType>
+      ptr_address try_collapse_current_node_to_leaf(const sal::alloc_hint&    parent_hint,
+                                                    smart_ref<InnerNodeType>& in);
+
+      template <any_inner_node_type InnerNodeType>
+      ptr_address try_collapse_shared_branch_list_to_leaf(const sal::alloc_hint&    parent_hint,
+                                                          smart_ref<InnerNodeType>& in,
+                                                          const ptr_address*        branches,
+                                                          uint16_t                  branch_count);
+
+      template <upsert_mode mode, any_inner_node_type InnerNodeType>
+      ptr_address try_collapse_single_child_node(const sal::alloc_hint&    parent_hint,
+                                                 smart_ref<InnerNodeType>& in,
+                                                 ptr_address               child_addr);
 
       template <upsert_mode mode, any_inner_node_type InnerNodeType>
       branch_set upsert(const sal::alloc_hint&    parent_hint,
@@ -1210,52 +1318,435 @@ namespace psitri
          /// this is the likely path because realloc grows by cachelines and
          /// most updates don't force a node to grow.
          ptr_address result_addr;
-	         if (in->can_apply(update)) [[likely]]
-	         {
-	            auto guard = in.modify();
-	            guard->apply(update);
-	            guard->set_last_unique_version(_root_version);
-	            result_addr = in.address();
-	         }
-	         else
-	         {
-	            if constexpr (is_inner_node<InnerNodeType>)
-	            {
-	               auto result = _session.realloc<InnerNodeType>(in, in.obj(), update);
-	               result.modify()->set_last_unique_version(_root_version);
-	               result_addr = result.address();
-	            }
-	            else if constexpr (is_inner_prefix_node<InnerNodeType>)
-	            {
-	               auto result = _session.realloc<InnerNodeType>(in, in->prefix(), in.obj(), update);
-	               result.modify()->set_last_unique_version(_root_version);
-	               result_addr = result.address();
-	            }
-	         }
+         if (in->can_apply(update)) [[likely]]
+         {
+            auto guard = in.modify();
+            guard->apply(update);
+            guard->set_last_unique_version(_root_version);
+            result_addr = in.address();
+         }
+         else
+         {
+            if constexpr (is_inner_node<InnerNodeType>)
+            {
+               auto result = _session.realloc<InnerNodeType>(in, in.obj(), update);
+               result.modify()->set_last_unique_version(_root_version);
+               result_addr = result.address();
+            }
+            else if constexpr (is_inner_prefix_node<InnerNodeType>)
+            {
+               auto result = _session.realloc<InnerNodeType>(in, in->prefix(), in.obj(), update);
+               result.modify()->set_last_unique_version(_root_version);
+               result_addr = result.address();
+            }
+         }
 
          return result_addr;
       }
       else if constexpr (mode.is_shared())
       {
-	         if constexpr (is_inner_node<InnerNodeType>)
-	         {
-	            auto result = _session.alloc<InnerNodeType>(
-	                parent_hint, in.obj(),
-	                op::replace_branch{br, sub_branches, needed_clines, cline_indices});
-	            auto ref = _session.get_ref<InnerNodeType>(result);
-	            ref.modify()->set_last_unique_version(_root_version);
-	            return result;
-	         }
-	         else if constexpr (is_inner_prefix_node<InnerNodeType>)
-	         {
-	            auto result = _session.alloc<InnerNodeType>(
-	                parent_hint, in->prefix(), in.obj(),
-	                op::replace_branch{br, sub_branches, needed_clines, cline_indices});
-	            auto ref = _session.get_ref<InnerNodeType>(result);
-	            ref.modify()->set_last_unique_version(_root_version);
-	            return result;
-	         }
+         if constexpr (is_inner_node<InnerNodeType>)
+         {
+            auto result = _session.alloc<InnerNodeType>(
+                parent_hint, in.obj(),
+                op::replace_branch{br, sub_branches, needed_clines, cline_indices});
+            auto ref = _session.get_ref<InnerNodeType>(result);
+            ref.modify()->set_last_unique_version(_root_version);
+            return result;
+         }
+         else if constexpr (is_inner_prefix_node<InnerNodeType>)
+         {
+            auto result = _session.alloc<InnerNodeType>(
+                parent_hint, in->prefix(), in.obj(),
+                op::replace_branch{br, sub_branches, needed_clines, cline_indices});
+            auto ref = _session.get_ref<InnerNodeType>(result);
+            ref.modify()->set_last_unique_version(_root_version);
+            return result;
+         }
       }
+   }
+
+   template <upsert_mode mode, any_inner_node_type InnerNodeType>
+   ptr_address tree_context::try_collapse_current_node_to_leaf(const sal::alloc_hint& parent_hint,
+                                                               smart_ref<InnerNodeType>& in)
+   {
+      static_assert(mode.is_remove());
+      if (!_collapse_enabled || in->num_branches() <= 1)
+         return sal::null_ptr_address;
+
+      const uint16_t               nb = in->num_branches();
+      std::array<ptr_address, 256> branches;
+      uint16_t                     pfx_len = 0;
+      if constexpr (is_inner_prefix_node<InnerNodeType>)
+         pfx_len = in->prefix().size();
+
+      subtree_sizer sizer(max_leaf_rewrite_entries);
+      for (uint16_t i = 0; i < nb; ++i)
+      {
+         branches[i] = in->get_branch(branch_number(i));
+         size_subtree(branches[i], pfx_len, sizer);
+      }
+
+      if (!sizer.fits_in_leaf())
+         return sal::null_ptr_address;
+
+      char     prefix_save[2048];
+      key_view root_prefix;
+      if constexpr (is_inner_prefix_node<InnerNodeType>)
+      {
+         auto pfx = in->prefix();
+         assert(pfx.size() <= sizeof(prefix_save));
+         memcpy(prefix_save, pfx.data(), pfx.size());
+         root_prefix = key_view(prefix_save, pfx.size());
+      }
+
+      retain_subtree_leaf_values(in);
+      collapse_context cctx{_session, branches.data(), nb, root_prefix};
+
+      if constexpr (mode.is_unique())
+      {
+         auto result = _session.realloc<leaf_node>(
+             in, op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+         for (uint16_t i = 0; i < nb; ++i)
+            _session.release(branches[i]);
+         return result.address();
+      }
+      else if constexpr (mode.is_shared())
+      {
+         auto result = _session.alloc<leaf_node>(
+             parent_hint, op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+         for (uint16_t i = 0; i < nb; ++i)
+            _session.release(branches[i]);
+         return result;
+      }
+   }
+
+   template <any_inner_node_type InnerNodeType>
+   ptr_address tree_context::try_collapse_shared_branch_list_to_leaf(
+       const sal::alloc_hint&    parent_hint,
+       smart_ref<InnerNodeType>& in,
+       const ptr_address*        branches,
+       uint16_t                  branch_count)
+   {
+      if (!_collapse_enabled || branch_count <= 1)
+         return sal::null_ptr_address;
+
+      uint16_t pfx_len = 0;
+      if constexpr (is_inner_prefix_node<InnerNodeType>)
+         pfx_len = in->prefix().size();
+
+      subtree_sizer sizer(max_leaf_rewrite_entries);
+      for (uint16_t i = 0; i < branch_count; ++i)
+         size_subtree(branches[i], pfx_len, sizer);
+
+      if (!sizer.fits_in_leaf())
+         return sal::null_ptr_address;
+
+      for (uint16_t i = 0; i < branch_count; ++i)
+         retain_subtree_leaf_values_by_addr(branches[i]);
+
+      key_view root_prefix;
+      if constexpr (is_inner_prefix_node<InnerNodeType>)
+         root_prefix = in->prefix();  // safe: in remains alive while allocating the leaf
+
+      collapse_context cctx{_session, branches, branch_count, root_prefix};
+      auto             result = _session.alloc<leaf_node>(
+          parent_hint, op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+
+      for (uint16_t i = 0; i < branch_count; ++i)
+         _session.release(branches[i]);
+
+      return result;
+   }
+
+   template <upsert_mode mode, any_inner_node_type InnerNodeType>
+   ptr_address tree_context::try_collapse_single_child_node(const sal::alloc_hint&    parent_hint,
+                                                            smart_ref<InnerNodeType>& in,
+                                                            ptr_address               child_addr)
+   {
+      auto child_ref = _session.get_ref(child_addr);
+      switch (node_type(child_ref->type()))
+      {
+         case node_type::leaf:
+         {
+            auto leaf_ref = child_ref.template as<leaf_node>();
+            if constexpr (is_inner_node<InnerNodeType>)
+            {
+               if constexpr (mode.is_unique())
+               {
+                  retain_children(leaf_ref);
+                  auto        rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
+                  auto        rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+                  ptr_address result_addr;
+                  if (leaf_ref->rebuilt_size_fits(key_view(), branch_zero,
+                                                  branch_number(leaf_ref->num_branches()),
+                                                  &rewrite_policy))
+                  {
+                     auto result = _session.realloc<leaf_node>(in, leaf_ref.obj(), &rewrite_policy);
+                     result_addr = result.address();
+                     release_leaf_rewrite_sources(rewrite_plan);
+                  }
+                  else
+                  {
+                     release_leaf_rewrite_replacements(rewrite_plan);
+                     auto result = _session.realloc<leaf_node>(
+                         in, leaf_ref.obj(), static_cast<const op::leaf_value_rewrite*>(nullptr));
+                     result_addr = result.address();
+                  }
+                  _session.release(child_addr);
+                  return result_addr;
+               }
+               else
+               {
+                  // retain_children(in) transferred this child ref to the caller.
+                  return child_addr;
+               }
+            }
+            else
+            {
+               char prefix_buf[2048];
+               auto pfx = in->prefix();
+               assert(pfx.size() <= sizeof(prefix_buf));
+               memcpy(prefix_buf, pfx.data(), pfx.size());
+
+               auto                    rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
+               auto                    rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+               op::leaf_prepend_prefix pp{*leaf_ref.obj(), key_view(prefix_buf, pfx.size()),
+                                          &rewrite_policy};
+               if (!leaf_ref->rebuilt_size_fits(pp))
+               {
+                  release_leaf_rewrite_replacements(rewrite_plan);
+                  pp.rewrite = nullptr;
+               }
+               if (!leaf_ref->rebuilt_size_fits(pp))
+                  return sal::null_ptr_address;
+
+               retain_children(leaf_ref);
+               ptr_address result_addr;
+               if constexpr (mode.is_unique())
+               {
+                  auto result = _session.realloc<leaf_node>(in, pp);
+                  result_addr = result.address();
+               }
+               else
+               {
+                  result_addr = _session.alloc<leaf_node>(parent_hint, pp);
+               }
+               if (pp.rewrite)
+                  release_leaf_rewrite_sources(rewrite_plan);
+               _session.release(child_addr);
+               return result_addr;
+            }
+         }
+         case node_type::inner:
+         {
+            auto inner_ref = child_ref.template as<inner_node>();
+            retain_children(inner_ref);
+            const auto*   child_ptr = inner_ref.obj();
+            const branch* brs       = child_ptr->const_branches();
+            auto          freq      = create_cline_freq_table(brs, brs + child_ptr->num_branches());
+            auto range = subrange(branch_number(0), branch_number(child_ptr->num_branches()));
+
+            ptr_address result_addr;
+            if constexpr (is_inner_node<InnerNodeType>)
+            {
+               if constexpr (mode.is_unique())
+               {
+                  auto result =
+                      _session.realloc<inner_node>(in, child_ptr, range, freq, _root_version);
+                  result_addr = result.address();
+               }
+               else
+               {
+                  result_addr = _session.alloc<inner_node>(parent_hint, child_ptr, range, freq,
+                                                           _root_version);
+               }
+            }
+            else
+            {
+               char prefix_buf[2048];
+               auto pfx = in->prefix();
+               assert(pfx.size() <= sizeof(prefix_buf));
+               memcpy(prefix_buf, pfx.data(), pfx.size());
+               if constexpr (mode.is_unique())
+               {
+                  auto result = _session.realloc<inner_prefix_node>(
+                      in, child_ptr, key_view(prefix_buf, pfx.size()), range, freq, _root_version);
+                  result_addr = result.address();
+               }
+               else
+               {
+                  result_addr = _session.alloc<inner_prefix_node>(parent_hint, child_ptr,
+                                                                  key_view(prefix_buf, pfx.size()),
+                                                                  range, freq, _root_version);
+               }
+            }
+            _session.release(child_addr);
+            return result_addr;
+         }
+         case node_type::inner_prefix:
+         {
+            auto ipn_ref = child_ref.template as<inner_prefix_node>();
+            retain_children(ipn_ref);
+            ptr_address result_addr;
+            if constexpr (is_inner_node<InnerNodeType>)
+            {
+               if constexpr (mode.is_unique())
+               {
+                  auto result =
+                      _session.realloc<inner_prefix_node>(in, ipn_ref.obj(), ipn_ref->prefix());
+                  result.modify()->set_last_unique_version(_root_version);
+                  result_addr = result.address();
+               }
+               else
+               {
+                  result_addr     = _session.alloc<inner_prefix_node>(parent_hint, ipn_ref.obj(),
+                                                                      ipn_ref->prefix());
+                  auto result_ref = _session.get_ref<inner_prefix_node>(result_addr);
+                  result_ref.modify()->set_last_unique_version(_root_version);
+               }
+            }
+            else
+            {
+               char prefix_buf[2048];
+               auto p = in->prefix();
+               auto q = ipn_ref->prefix();
+               assert(p.size() + q.size() <= sizeof(prefix_buf));
+               memcpy(prefix_buf, p.data(), p.size());
+               memcpy(prefix_buf + p.size(), q.data(), q.size());
+               auto merged_prefix = key_view(prefix_buf, p.size() + q.size());
+               if constexpr (mode.is_unique())
+               {
+                  auto result =
+                      _session.realloc<inner_prefix_node>(in, ipn_ref.obj(), merged_prefix);
+                  result.modify()->set_last_unique_version(_root_version);
+                  result_addr = result.address();
+               }
+               else
+               {
+                  result_addr =
+                      _session.alloc<inner_prefix_node>(parent_hint, ipn_ref.obj(), merged_prefix);
+                  auto ref = _session.get_ref<inner_prefix_node>(result_addr);
+                  ref.modify()->set_last_unique_version(_root_version);
+               }
+            }
+            _session.release(child_addr);
+            return result_addr;
+         }
+         default:
+            std::unreachable();
+      }
+   }
+
+   template <upsert_mode mode, any_inner_node_type InnerNodeType>
+   ptr_address tree_context::try_merge_adjacent_siblings_after_remove(
+       const sal::alloc_hint&    parent_hint,
+       smart_ref<InnerNodeType>& in,
+       branch_number             br,
+       ptr_address               child_addr)
+   {
+      static_assert(mode.is_remove());
+      if (!_collapse_enabled || in->num_branches() < 2)
+         return sal::null_ptr_address;
+
+      auto try_pair = [&](branch_number left, bool current_is_left) -> ptr_address
+      {
+         branch_number right(uint32_t(*left) + 1);
+         ptr_address   old_left_addr  = in->get_branch(left);
+         ptr_address   old_right_addr = in->get_branch(right);
+         ptr_address   left_addr      = current_is_left ? child_addr : old_left_addr;
+         ptr_address   right_addr     = current_is_left ? old_right_addr : child_addr;
+
+         subtree_sizer sizer(max_leaf_rewrite_entries);
+         size_subtree(left_addr, 0, sizer);
+         size_subtree(right_addr, 0, sizer);
+         if (!sizer.fits_in_leaf())
+            return sal::null_ptr_address;
+
+         retain_subtree_leaf_values_by_addr(left_addr);
+         retain_subtree_leaf_values_by_addr(right_addr);
+
+         ptr_address      branches[2] = {left_addr, right_addr};
+         collapse_context cctx{_session, branches, 2, key_view()};
+         ptr_address      merged_leaf = _session.alloc<leaf_node>(
+             in->get_branch_clines(), op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+
+         branch_set             merged_branch(merged_leaf);
+         std::array<uint8_t, 8> cline_indices;
+         auto needed_clines = psitri::find_clines(in->get_branch_clines(), old_left_addr,
+                                                  merged_branch.addresses(), cline_indices);
+
+         if (needed_clines == insufficient_clines)
+         {
+            _session.release(merged_leaf);
+            return sal::null_ptr_address;
+         }
+
+         op::replace_branch update = {left, merged_branch, needed_clines, cline_indices};
+
+         if constexpr (mode.is_unique())
+         {
+            if (!in->can_apply(update))
+            {
+               _session.release(merged_leaf);
+               return sal::null_ptr_address;
+            }
+
+            {
+               auto guard = in.modify();
+               guard->apply(update);
+               guard->remove_branch(right);
+               guard->set_last_unique_version(_root_version);
+            }
+
+            _session.release(left_addr);
+            _session.release(right_addr);
+            if (in->num_branches() == 1)
+            {
+               auto only_child = in->get_branch(branch_number(0));
+               if (auto collapsed =
+                       try_collapse_single_child_node<mode>(parent_hint, in, only_child);
+                   collapsed != sal::null_ptr_address)
+                  return collapsed;
+            }
+            return in.address();
+         }
+         else if constexpr (mode.is_shared())
+         {
+            ptr_address result_addr;
+            if constexpr (is_inner_node<InnerNodeType>)
+               result_addr = _session.alloc<InnerNodeType>(parent_hint, in.obj(), update);
+            else if constexpr (is_inner_prefix_node<InnerNodeType>)
+               result_addr =
+                   _session.alloc<InnerNodeType>(parent_hint, in->prefix(), in.obj(), update);
+
+            auto result_ref = _session.get_ref<InnerNodeType>(result_addr);
+            {
+               auto guard = result_ref.modify();
+               guard->remove_branch(right);
+               guard->set_last_unique_version(_root_version);
+            }
+
+            _session.release(left_addr);
+            _session.release(right_addr);
+            return result_addr;
+         }
+      };
+
+      if (*br > 0)
+      {
+         if (auto merged = try_pair(branch_number(uint32_t(*br) - 1), false);
+             merged != sal::null_ptr_address)
+            return merged;
+      }
+
+      if (uint32_t(*br) + 1 < in->num_branches())
+      {
+         if (auto merged = try_pair(br, true); merged != sal::null_ptr_address)
+            return merged;
+      }
+
+      return sal::null_ptr_address;
    }
 
    template <upsert_mode mode, any_inner_node_type InnerNodeType>
@@ -1418,158 +1909,22 @@ namespace psitri
             {
                in.modify([&](auto* n) { n->remove_branch(br); });
 
-               // Phase 2: Collapse single-branch inner node
-               if (in->num_branches() == 1)
-               {
-                  auto child_addr = in->get_branch(branch_number(0));
-                  auto child_ref  = _session.get_ref(child_addr);
+	               // Phase 2: Collapse single-branch inner node
+	               if (in->num_branches() == 1)
+	               {
+	                  auto child_addr = in->get_branch(branch_number(0));
+	                  if (auto collapsed =
+	                          try_collapse_single_child_node<mode>(parent_hint, in, child_addr);
+	                      collapsed != sal::null_ptr_address)
+	                     return collapsed;
+	               }
 
-                  switch (node_type(child_ref->type()))
-                  {
-                     case node_type::leaf:
-                     {
-                        auto leaf_ref = child_ref.template as<leaf_node>();
-                        if constexpr (is_inner_node<InnerNodeType>)
-                        {
-                           retain_children(leaf_ref);
-                           auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
-                           auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
-                           if (leaf_ref->rebuilt_size_fits(key_view(),
-                                                           branch_zero,
-                                                           branch_number(leaf_ref->num_branches()),
-                                                           &rewrite_policy))
-                           {
-                              (void)_session.realloc<leaf_node>(
-                                  in, leaf_ref.obj(), &rewrite_policy);
-                              release_leaf_rewrite_sources(rewrite_plan);
-                           }
-                           else
-                           {
-                              release_leaf_rewrite_replacements(rewrite_plan);
-                              (void)_session.realloc<leaf_node>(
-                                  in, leaf_ref.obj(), static_cast<const op::leaf_value_rewrite*>(nullptr));
-                           }
-                           _session.release(child_addr);
-                        }
-                        else if constexpr (is_inner_prefix_node<InnerNodeType>)
-                        {
-                           auto pfx = in->prefix();
-                           char prefix_buf[2048];
-                           memcpy(prefix_buf, pfx.data(), pfx.size());
-                           auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
-                           auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
-                           op::leaf_prepend_prefix pp{
-                               *leaf_ref.obj(), key_view(prefix_buf, pfx.size()), &rewrite_policy};
-                           if (!leaf_ref->rebuilt_size_fits(pp))
-                           {
-                              release_leaf_rewrite_replacements(rewrite_plan);
-                              pp.rewrite = nullptr;
-                           }
-                           if (leaf_ref->rebuilt_size_fits(pp))
-                           {
-                              retain_children(leaf_ref);
-                              (void)_session.realloc<leaf_node>(in, pp);
-                              if (pp.rewrite)
-                                 release_leaf_rewrite_sources(rewrite_plan);
-                              _session.release(child_addr);
-                           }
-                           // else: skip collapse, inner_prefix_node stays with 1 branch
-                        }
-                        break;
-                     }
-                     case node_type::inner:
-                     {
-                        auto inner_ref = child_ref.template as<inner_node>();
-                        retain_children(inner_ref);
-                        const auto*   child_ptr = inner_ref.obj();
-                        const branch* brs       = child_ptr->const_branches();
-                        auto freq = create_cline_freq_table(brs, brs + child_ptr->num_branches());
-                        auto range =
-                            subrange(branch_number(0), branch_number(child_ptr->num_branches()));
-                        if constexpr (is_inner_node<InnerNodeType>)
-                        {
-                           (void)_session.realloc<inner_node>(in, child_ptr, range, freq,
-                                                              _root_version);
-                        }
-                        else if constexpr (is_inner_prefix_node<InnerNodeType>)
-                        {
-                           char prefix_buf[2048];
-                           auto pfx = in->prefix();
-                           memcpy(prefix_buf, pfx.data(), pfx.size());
-                           (void)_session.realloc<inner_prefix_node>(
-                               in, child_ptr, key_view(prefix_buf, pfx.size()), range, freq,
-	                               _root_version);
-                        }
-                        _session.release(child_addr);
-                        break;
-                     }
-                     case node_type::inner_prefix:
-                     {
-                        auto ipn_ref = child_ref.template as<inner_prefix_node>();
-                        retain_children(ipn_ref);
-                        if constexpr (is_inner_node<InnerNodeType>)
-                        {
-                           auto result = _session.realloc<inner_prefix_node>(
-                               in, ipn_ref.obj(), ipn_ref->prefix());
-                           result.modify()->set_last_unique_version(_root_version);
-                        }
-                        else if constexpr (is_inner_prefix_node<InnerNodeType>)
-                        {
-                           char prefix_buf[2048];
-                           auto p = in->prefix();
-                           auto q = ipn_ref->prefix();
-                           memcpy(prefix_buf, p.data(), p.size());
-                           memcpy(prefix_buf + p.size(), q.data(), q.size());
-                           auto result = _session.realloc<inner_prefix_node>(
-                               in, ipn_ref.obj(), key_view(prefix_buf, p.size() + q.size()));
-                           result.modify()->set_last_unique_version(_root_version);
-                        }
-                        _session.release(child_addr);
-                        break;
-                     }
-                     default:
-                        std::unreachable();
-                  }
-               }
-
-               // Phase 3: Collapse sparse multi-branch subtree into a single leaf
-               // (size_subtree has an early-exit at _collapse_threshold, bounding cost)
-               if (_collapse_threshold > 0 && in->num_branches() > 1)
-               {
-                  subtree_sizer sizer(_collapse_threshold);
-                  uint16_t      pfx_len = 0;
-                  if constexpr (is_inner_prefix_node<InnerNodeType>)
-                     pfx_len = in->prefix().size();
-                  for (uint16_t i = 0; i < in->num_branches(); ++i)
-                     size_subtree(in->get_branch(branch_number(i)), pfx_len, sizer);
-
-                  if (sizer.fits_in_leaf())
-                  {
-                     retain_subtree_leaf_values(in);
-
-                     // Save state before realloc invalidates the node
-                     ptr_address branches[256];
-                     uint16_t    nb = in->num_branches();
-                     for (uint16_t i = 0; i < nb; ++i)
-                        branches[i] = in->get_branch(branch_number(i));
-
-                     char     prefix_save[2048];
-                     key_view root_prefix;
-                     if constexpr (is_inner_prefix_node<InnerNodeType>)
-                     {
-                        auto pfx = in->prefix();
-                        memcpy(prefix_save, pfx.data(), pfx.size());
-                        root_prefix = key_view(prefix_save, pfx.size());
-                     }
-
-                     collapse_context cctx{_session, branches, nb, root_prefix};
-                     (void)_session.realloc<leaf_node>(
-                         in, op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
-
-                     for (uint16_t i = 0; i < nb; ++i)
-                        _session.release(branches[i]);
-                  }
-               }
+               // Phase 3: collapse any byte-small subtree into one leaf. The
+               // scratch entry cap only bounds CPU; fit is decided by the leaf
+               // byte/cline budget.
+               if (auto collapsed = try_collapse_current_node_to_leaf<mode>(parent_hint, in);
+                   collapsed != sal::null_ptr_address)
+                  return collapsed;
                return in.address();
             }
             else if constexpr (mode.is_shared())
@@ -1577,163 +1932,30 @@ namespace psitri
                // Phase 2: Collapse single-branch result in shared mode
                if (in->num_branches() == 2) [[unlikely]]
                {
-                  branch_number remaining_br   = (*br == 0) ? branch_number(1) : branch_number(0);
-                  auto          remaining_addr = in->get_branch(remaining_br);
+	                  branch_number remaining_br   = (*br == 0) ? branch_number(1) : branch_number(0);
+	                  auto          remaining_addr = in->get_branch(remaining_br);
+	                  if (auto collapsed = try_collapse_single_child_node<mode>(
+	                          parent_hint, in, remaining_addr);
+	                      collapsed != sal::null_ptr_address)
+	                     return collapsed;
+	               }
 
-                  if constexpr (is_inner_node<InnerNodeType>)
-                  {
-                     auto child_ref = _session.get_ref(remaining_addr);
-                     switch (node_type(child_ref->type()))
-                     {
-                        case node_type::leaf:
-                           // retain_children(in) already gave +1 to remaining_addr.
-                           // in's destroy will give -1, transferring ownership to caller.
-                           return remaining_addr;
-                        case node_type::inner:
-                        {
-                           auto inner_ref = child_ref.template as<inner_node>();
-                           retain_children(inner_ref);
-                           const auto*   child_ptr = inner_ref.obj();
-                           const branch* brs       = child_ptr->const_branches();
-                           auto          freq =
-                               create_cline_freq_table(brs, brs + child_ptr->num_branches());
-                           auto range =
-                               subrange(branch_number(0), branch_number(child_ptr->num_branches()));
-                           auto result =
-                               _session.alloc<inner_node>(parent_hint, child_ptr, range, freq,
-                                                          _root_version);
-                           _session.release(remaining_addr);
-                           return result;
-                        }
-                        case node_type::inner_prefix:
-                        {
-                           auto ipn_ref = child_ref.template as<inner_prefix_node>();
-                           retain_children(ipn_ref);
-                           auto result = _session.alloc<inner_prefix_node>(
-                               parent_hint, ipn_ref.obj(), ipn_ref->prefix());
-                           auto result_ref = _session.get_ref<inner_prefix_node>(result);
-                           result_ref.modify()->set_last_unique_version(_root_version);
-                           _session.release(remaining_addr);
-                           return result;
-                        }
-                        default:
-                           std::unreachable();
-                     }
-                  }
-                  else if constexpr (is_inner_prefix_node<InnerNodeType>)
-                  {
-                     auto child_ref = _session.get_ref(remaining_addr);
-                     switch (node_type(child_ref->type()))
-                     {
-                        case node_type::leaf:
-                        {
-                           auto leaf_ref = child_ref.template as<leaf_node>();
-                           auto pfx      = in->prefix();
-                           auto rewrite_plan   = make_leaf_rewrite_plan(*leaf_ref.obj());
-                           auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
-                           op::leaf_prepend_prefix pp{*leaf_ref.obj(), pfx, &rewrite_policy};
-                           if (!leaf_ref->rebuilt_size_fits(pp))
-                           {
-                              release_leaf_rewrite_replacements(rewrite_plan);
-                              pp.rewrite = nullptr;
-                           }
-                           if (leaf_ref->rebuilt_size_fits(pp))
-                           {
-                              retain_children(leaf_ref);
-                              auto result = _session.alloc<leaf_node>(
-                                  parent_hint, pp);
-                              if (pp.rewrite)
-                                 release_leaf_rewrite_sources(rewrite_plan);
-                              _session.release(remaining_addr);
-                              return result;
-                           }
-                           break;  // fall through to inner_remove_branch
-                        }
-                        case node_type::inner:
-                        {
-                           auto inner_ref = child_ref.template as<inner_node>();
-                           retain_children(inner_ref);
-                           const auto*   child_ptr = inner_ref.obj();
-                           const branch* brs       = child_ptr->const_branches();
-                           auto          freq =
-                               create_cline_freq_table(brs, brs + child_ptr->num_branches());
-                           auto range =
-                               subrange(branch_number(0), branch_number(child_ptr->num_branches()));
-                           auto result = _session.alloc<inner_prefix_node>(
-                               parent_hint, child_ptr, in->prefix(), range, freq, _root_version);
-                           _session.release(remaining_addr);
-                           return result;
-                        }
-                        case node_type::inner_prefix:
-                        {
-                           auto ipn_ref = child_ref.template as<inner_prefix_node>();
-                           retain_children(ipn_ref);
-                           char prefix_buf[2048];
-                           auto p = in->prefix();
-                           auto q = ipn_ref->prefix();
-                           memcpy(prefix_buf, p.data(), p.size());
-                           memcpy(prefix_buf + p.size(), q.data(), q.size());
-                           auto result = _session.alloc<inner_prefix_node>(
-                               parent_hint, ipn_ref.obj(),
-                               key_view(prefix_buf, p.size() + q.size()));
-                           auto ref = _session.get_ref<inner_prefix_node>(result);
-                           ref.modify()->set_last_unique_version(_root_version);
-                           _session.release(remaining_addr);
-                           return result;
-                        }
-                        default:
-                           std::unreachable();
-                     }
-                  }
-               }
-
-               // Phase 3: Collapse sparse subtree in shared mode
+               // Phase 3: collapse remaining branches in shared mode when their
+               // complete rewritten content fits in one leaf.
+               if (in->num_branches() > 2)
                {
-                  if (_collapse_threshold > 0 && in->num_branches() > 2)
+                  ptr_address remaining[256];
+                  uint16_t    rb_count = 0;
+                  for (uint16_t i = 0; i < in->num_branches(); ++i)
                   {
-                     ptr_address remaining[256];
-                     uint16_t    rb_count = 0;
-                     uint16_t    pfx_len  = 0;
-                     if constexpr (is_inner_prefix_node<InnerNodeType>)
-                        pfx_len = in->prefix().size();
-
-                     for (uint16_t i = 0; i < in->num_branches(); ++i)
-                     {
-                        if (branch_number(i) == br)
-                           continue;
-                        remaining[rb_count++] = in->get_branch(branch_number(i));
-                     }
-
-                     subtree_sizer sizer(_collapse_threshold);
-                     for (uint16_t i = 0; i < rb_count; ++i)
-                        size_subtree(remaining[i], pfx_len, sizer);
-
-                     if (sizer.fits_in_leaf())
-                     {
-                        for (uint16_t i = 0; i < rb_count; ++i)
-                           retain_subtree_leaf_values_by_addr(remaining[i]);
-
-                        key_view root_prefix;
-                        if constexpr (is_inner_prefix_node<InnerNodeType>)
-                           root_prefix = in->prefix();  // safe: in still alive in shared mode
-
-                        collapse_context cctx{_session, remaining, rb_count, root_prefix};
-                        auto             result = _session.alloc<leaf_node>(
-                            parent_hint,
-                            op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
-
-                        // Release the remaining subtree nodes: retain_children(in) at
-                        // the top of this function gave +1 to all of in's children.
-                        // The collapsed leaf doesn't reference the subtree nodes
-                        // (only their leaf values, which were separately retained above).
-                        // Without this release, the subtree nodes end up with ref=1
-                        // and no parent after the old snapshot is freed.
-                        for (uint16_t i = 0; i < rb_count; ++i)
-                           _session.release(remaining[i]);
-
-                        return result;
-                     }
+                     if (branch_number(i) == br)
+                        continue;
+                     remaining[rb_count++] = in->get_branch(branch_number(i));
                   }
+                  if (auto collapsed =
+                          try_collapse_shared_branch_list_to_leaf(parent_hint, in, remaining, rb_count);
+                      collapsed != sal::null_ptr_address)
+                     return collapsed;
                }
 
                // retain_children gave +1 to all remaining children; the removed
@@ -1763,11 +1985,41 @@ namespace psitri
       if (pre_retained_last_branch)
          _session.release(badr);
 
+	      if constexpr (mode.is_remove())
+	      {
+	         if (_old_value_size >= 0 && sub_branches.count() == 1)
+	         {
+	            ptr_address child_addr = sub_branches.get_first_branch();
+	            if (auto merged = try_merge_adjacent_siblings_after_remove<mode>(
+	                    parent_hint, in, br, child_addr);
+	                merged != sal::null_ptr_address)
+	               return merged;
+	            if (child_addr == badr)
+	            {
+	               if (auto collapsed =
+	                       try_collapse_current_node_to_leaf<mode>(parent_hint, in);
+	                   collapsed != sal::null_ptr_address)
+	                  return collapsed;
+	            }
+	         }
+	      }
+
       // the happy path where there is nothing to do: the child returned itself
       // unchanged (e.g. key not found during remove/update, or key already exists
       // during insert).
 	      if (sub_branches.count() == 1 && bref->address() == sub_branches.get_first_branch())
 	      {
+	         if constexpr (mode.is_unique() && mode.is_remove())
+	         {
+	            if (in->num_branches() == 1)
+	            {
+	               auto only_child = in->get_branch(branch_number(0));
+	               if (auto collapsed =
+	                       try_collapse_single_child_node<mode>(parent_hint, in, only_child);
+	                   collapsed != sal::null_ptr_address)
+	                  return collapsed;
+	            }
+	         }
 	         if constexpr (mode.is_shared())
 	         {
 	            if (refresh_this_node)
@@ -1875,7 +2127,7 @@ namespace psitri
          {
             case leaf_node::can_apply_mode::modify:
                if (old_has_address)
-                  _session.release(leaf->get_value(br).address());
+                  release_value_ref(leaf->get_value(br));
                leaf.modify()->update_value(br, new_val);
                return leaf.address();
             case leaf_node::can_apply_mode::defrag:
@@ -1890,7 +2142,7 @@ namespace psitri
                   update_op.rewrite = nullptr;
                }
                if (old_has_address)
-                  _session.release(leaf->get_value(br).address());
+                  release_value_ref(leaf->get_value(br));
                auto result = _session.realloc<leaf_node>(leaf, update_op).address();
                if (update_op.rewrite)
                   release_leaf_rewrite_sources(plan);
@@ -1907,7 +2159,7 @@ namespace psitri
                // the updated key, placing the updated entry in whichever half has room.
                // That mirrors what insert() does for new keys but avoids the extra copy.
                if (old_has_address)
-                  _session.release(leaf->get_value(br).address());
+                  release_value_ref(leaf->get_value(br));
                // Release the value_node allocated by make_value above — insert()
                // will allocate its own from _new_value.
                if (new_val.is_value_node())
@@ -1947,7 +2199,7 @@ namespace psitri
 
             // Release old external value (retained above, so release brings it back to original)
             if (old_has_address)
-               _session.release(leaf->get_value(br).address());
+               release_value_ref(leaf->get_value(br));
 
             auto plan = make_leaf_rewrite_plan_skipping(
                 *leaf.obj(), br, branch_number(uint32_t(*br) + 1));
@@ -1980,7 +2232,7 @@ namespace psitri
          retain_children(leaf);
          // Un-retain the old value: it's only in the snapshot leaf, not the result.
          if (old_has_address)
-            _session.release(leaf->get_value(br).address());
+            release_value_ref(leaf->get_value(br));
 
          // Release the value_node allocated by make_value — insert() will create its own.
          if (new_val.is_value_node())
@@ -2047,7 +2299,7 @@ namespace psitri
 
          if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
          {
-            _session.release(leaf->get_value(lb).address());
+            release_value_ref(leaf->get_value(lb));
          }
 
          leaf.modify()->remove(lb);
@@ -2079,7 +2331,7 @@ namespace psitri
          // if bn is an address, we need to release the address (value_node or subtree)
          if (leaf->get_value_type(lb) >= leaf_node::value_type_flag::value_node)
          {
-            _session.release(leaf->get_value(lb).address());
+            release_value_ref(leaf->get_value(lb));
          }
 
          // if bn is the last branch, return null
@@ -2101,19 +2353,13 @@ namespace psitri
       }
       uint8_t cline_idx = 0xff;
 
-      if (_new_value.is_view())
-      {
-         auto v = _new_value.view();
-         if (v.size() > 64)
-            _new_value =
-                value_type::make_value_node(_session.alloc<value_node>(leaf->clines(), _new_value));
-      }
+      _new_value = make_value(_new_value, leaf->clines());
       // this check is redundant in the case we just made value node above...
-      if (_new_value.is_address())
+      if (_new_value.is_value_node())
       {
          //       SAL_ERROR("insert: new_value is an address");
-         cline_idx = leaf->find_cline_index(_new_value.address());
-         if (cline_idx >= 16)
+         cline_idx = leaf->find_cline_index(_new_value.value_address());
+         if (cline_idx >= leaf_node::max_value_clines)
          {
             //         SAL_ERROR("insert: split");
             // split index will have to re-assign the ptr_address of the
@@ -2453,7 +2699,12 @@ namespace psitri
       }
       else
       {
-         branch_number lb = leaf->lower_bound(key);
+         branch_number lb = [&] {
+            if constexpr (mode.is_sorted())
+               return leaf->lower_bound_append_hint(key);
+            else
+               return leaf->lower_bound(key);
+         }();
          if constexpr (mode.is_upsert())
          {
             if (lb != leaf->num_branches() and leaf->get_key(lb) == key)
@@ -2622,8 +2873,8 @@ namespace psitri
                auto new_val = make_value(value, leaf->clines());
 
                uint8_t cline_idx = 0xff;
-               if (new_val.is_address())
-                  cline_idx = leaf->find_cline_index(new_val.address());
+               if (new_val.is_value_node())
+                  cline_idx = leaf->find_cline_index(new_val.value_address());
 
                op::leaf_insert insert_op{.src        = *leaf.obj(),
                                          .lb         = lb,
@@ -2632,7 +2883,7 @@ namespace psitri
                                          .cline_idx  = cline_idx,
                                          .created_at = version};
 
-               if ((!new_val.is_address() || cline_idx < 16) &&
+               if ((!new_val.is_value_node() || cline_idx < leaf_node::max_value_clines) &&
                    leaf->can_apply(insert_op) != leaf_node::can_apply_mode::none)
                {
                   (void)_session.mvcc_realloc<leaf_node>(leaf, leaf.obj(), insert_op);
@@ -2807,8 +3058,8 @@ namespace psitri
       auto new_val = make_value(value, leaf->clines());
 
       uint8_t cline_idx = 0xff;
-      if (new_val.is_address())
-         cline_idx = leaf->find_cline_index(new_val.address());
+      if (new_val.is_value_node())
+         cline_idx = leaf->find_cline_index(new_val.value_address());
 
       op::leaf_insert insert_op{.src        = *leaf.obj(),
                                 .lb         = lb,
@@ -2817,7 +3068,7 @@ namespace psitri
                                 .cline_idx  = cline_idx,
                                 .created_at = version};
 
-      if ((!new_val.is_address() || cline_idx < 16) &&
+      if ((!new_val.is_value_node() || cline_idx < leaf_node::max_value_clines) &&
           leaf->can_apply(insert_op) != leaf_node::can_apply_mode::none)
       {
          (void)_session.mvcc_realloc<leaf_node>(leaf, leaf.obj(), insert_op);

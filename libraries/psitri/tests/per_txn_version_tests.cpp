@@ -846,7 +846,7 @@ TEST_CASE("Phase C: expect_failure aborted after forced flush releases version",
    // then aborts. Should still release the lazily-allocated ver.
    {
       auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
-      tx.remove_range(to_kv("k00000"), to_kv("k99999"));
+      tx.remove_range_counted(to_kv("k00000"), to_kv("k99999"));
       tx.abort();
    }
 

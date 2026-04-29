@@ -167,7 +167,8 @@ public:
     void upsert(key_view key, value_view value);
     void upsert_subtree(key_view key, tree subtree);
     int  remove(key_view key);
-    uint64_t remove_range(key_view lower, key_view upper);
+    bool remove_range_any(key_view lower, key_view upper);
+    uint64_t remove_range_counted(key_view lower, key_view upper);
 
     // Reads
     bool get(key_view key, std::invocable<value_view> auto&& lambda) const;
@@ -196,7 +197,8 @@ public:
 | `update(key, value)` | `bool` | Fast path when the key is expected to exist; returns `false` if missing |
 | `upsert(key, value)` | `void` | General insert-or-update path; uses ordered search semantics |
 | `remove(key)` | `int` | Remove key, returns bytes freed or -1 |
-| `remove_range(lower, upper)` | `uint64_t` | Remove keys in [lower, upper), returns count |
+| `remove_range_any(lower, upper)` | `bool` | Remove keys in [lower, upper), returns whether anything was removed |
+| `remove_range_counted(lower, upper)` | `uint64_t` | Remove keys in [lower, upper), returns the exact count |
 | `get(key, lambda)` | `bool` | Zero-copy read. Calls the lambda for normal values; the `value_view` is valid only for that call |
 | `get<T>(key)` | `optional<T>` | Copy value into an owned object such as `std::string` |
 | `get(key, buffer*)` | `int32_t` | Copy value into a caller-owned reusable buffer |
@@ -248,7 +250,8 @@ public:
     void upsert(key_view key, value_view value);
     void upsert_subtree(key_view key, tree subtree);
     int  remove(key_view key);
-    uint64_t remove_range(key_view lower, key_view upper);
+    bool remove_range_any(key_view lower, key_view upper);
+    uint64_t remove_range_counted(key_view lower, key_view upper);
 
     bool get(key_view key, std::invocable<value_view> auto&& lambda) const;
     template<ConstructibleBuffer T>
@@ -265,6 +268,11 @@ public:
 `get_tree()` returns a copyable `tree` smart pointer for the current write
 state. Passing that tree to `upsert_subtree()` or `set_root()` is what publishes
 the edited tree somewhere.
+
+Use `remove_range_any()` when the caller only needs success vs not-found. Use
+`remove_range_counted()` only when the exact number of removed keys is part of
+the application contract; counted removal may traverse fully-covered child
+subtrees to compute that count.
 
 !!! warning "Tree handles can create cycles"
     Do not store a tree inside itself, inside one of its descendants, or in any
@@ -308,6 +316,7 @@ When the application knows the exact key, prefer a point read:
 `get(key, buffer*)` for a reusable copy buffer. These APIs can use PsiTri's
 hash lookup fast path. `lower_bound()` is for ordered positioning and range
 iteration; it must perform ordered search even if the boundary is an exact key.
+For exact cursor positioning, use `cursor::find(key)`.
 
 Likewise, prefer `update(key, value)` when the key should already exist.
 `upsert(key, value)` is the right API when the key may be missing, but it pays
@@ -332,6 +341,7 @@ public:
     bool seek_rend() noexcept;       // before first key
     bool lower_bound(key_view key) noexcept;
     bool upper_bound(key_view key) noexcept;
+    bool find(key_view key) noexcept;
     bool seek(key_view key) noexcept;
     bool first(key_view prefix = {}) noexcept;
     bool last(key_view prefix = {}) noexcept;

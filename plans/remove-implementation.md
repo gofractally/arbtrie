@@ -115,7 +115,7 @@ Cline affinity is determined by **ptr_address** (control block location), NOT da
 
 ## Level 3: Subtree Collapse to Leaf (Phase 3, complete)
 
-When `descendants() <= collapse_threshold` (default 24, configurable), collect entries from the sparse subtree into a single leaf via two-pass callback-based construction. Pass 1 (`size_subtree`) counts entries and sizes without copying. Pass 2 (`walk_subtree_insert`) writes directly into the new leaf via `entry_inserter`. Implemented for both unique (realloc) and shared (alloc) paths.
+When the remaining subtree can be represented by one rewritten leaf, collect its entries into that leaf via two-pass callback-based construction. Pass 1 (`size_subtree`) counts entries, key bytes, inline value bytes, and distinct value-node cachelines without copying. Pass 2 (`walk_subtree_insert`) writes directly into the new leaf via `entry_inserter`. Implemented for both unique (realloc) and shared (alloc) paths. Collapse is byte-fit driven and can be disabled with `set_collapse_enabled(false)`.
 
 ## Restructure Queue + Compactor (Phase 4, deferred)
 
@@ -267,7 +267,7 @@ Unified: `merged_prefix = my_prefix + div_byte + child.prefix` (child.prefix may
 
 ### Phase 3: Subtree collapse to leaf (complete)
 
-Implemented. Two-pass collapse (size check + direct construction via `entry_inserter` callback) for both unique and shared paths. Configurable `_collapse_threshold` (default 24, 0 = disabled). Also fixed pre-existing cursor key_len assert bug.
+Implemented. Two-pass byte-fit collapse (size check + direct construction via `entry_inserter` callback) for both unique and shared paths. Collapse can be disabled with `set_collapse_enabled(false)`. Also fixed pre-existing cursor key_len assert bug.
 
 ### Phase 4-5 (deferred)
 

@@ -39,6 +39,24 @@ concept has_public_session_remove =
     };
 
 template <typename T>
+concept has_remove_range_any =
+    requires(T& t, key_view lower, key_view upper) {
+       { t.remove_range_any(lower, upper) } -> std::same_as<bool>;
+    };
+
+template <typename T>
+concept has_remove_range_counted =
+    requires(T& t, key_view lower, key_view upper) {
+       { t.remove_range_counted(lower, upper) } -> std::same_as<uint64_t>;
+    };
+
+template <typename T>
+concept exposes_legacy_remove_range =
+    requires(T& t, key_view lower, key_view upper) {
+       t.remove_range(lower, upper);
+    };
+
+template <typename T>
 concept exposes_upsert_at_version =
     requires(T& s, key_view key, value_view value) {
        s.upsert_at_version(0, key, value);
@@ -52,6 +70,15 @@ concept exposes_remove_at_version =
 
 static_assert(has_public_session_upsert<write_session>);
 static_assert(has_public_session_remove<write_session>);
+static_assert(has_remove_range_any<transaction>);
+static_assert(has_remove_range_any<tree_handle>);
+static_assert(has_remove_range_any<write_transaction>);
+static_assert(has_remove_range_counted<transaction>);
+static_assert(has_remove_range_counted<tree_handle>);
+static_assert(has_remove_range_counted<write_transaction>);
+static_assert(!exposes_legacy_remove_range<transaction>);
+static_assert(!exposes_legacy_remove_range<tree_handle>);
+static_assert(!exposes_legacy_remove_range<write_transaction>);
 static_assert(!exposes_upsert_at_version<write_session>);
 static_assert(!exposes_remove_at_version<write_session>);
 
@@ -1795,7 +1822,7 @@ TEST_CASE("leak: range_remove all keys leaves zero allocated",
 
    {
       auto tx = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range("", max_key);
+      uint64_t removed = tx.remove_range_counted("", max_key);
       REQUIRE(removed == N);
       tx.commit();
    }
@@ -1818,7 +1845,7 @@ TEST_CASE("leak: range_remove subset leaves no orphans",
 
    {
       auto tx = t.ses->start_transaction(0);
-      uint64_t removed = tx.remove_range(lo_buf, hi_buf);
+      uint64_t removed = tx.remove_range_counted(lo_buf, hi_buf);
       REQUIRE(removed > 0);
       tx.commit();
    }
@@ -1827,7 +1854,7 @@ TEST_CASE("leak: range_remove subset leaves no orphans",
    // Remove the rest
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("", max_key);
+      tx.remove_range_counted("", max_key);
       tx.commit();
    }
    require_empty_no_leaks(t, "after range_remove everything remaining");
@@ -1854,7 +1881,7 @@ TEST_CASE("leak: range_remove subset scaling diagnosis",
 
       {
          auto tx = t.ses->start_transaction(0);
-         uint64_t removed = tx.remove_range(lo_buf, hi_buf);
+         uint64_t removed = tx.remove_range_counted(lo_buf, hi_buf);
          WARN("N=" << N << " removed=" << removed);
          tx.commit();
       }
@@ -1895,7 +1922,7 @@ TEST_CASE("leak: range_remove with large values leaves no orphans",
 
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("", hi_buf);
+      tx.remove_range_counted("", hi_buf);
       tx.commit();
    }
    require_no_orphans(t, "after range_remove half with large values");
@@ -1903,7 +1930,7 @@ TEST_CASE("leak: range_remove with large values leaves no orphans",
    // Remove the rest
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("", max_key);
+      tx.remove_range_counted("", max_key);
       tx.commit();
    }
    require_empty_no_leaks(t, "after range_remove all with large values");
@@ -1924,7 +1951,7 @@ TEST_CASE("leak: repeated range_remove cycles leave zero allocated",
       // Remove everything via range
       {
          auto tx = t.ses->start_transaction(0);
-         tx.remove_range("", max_key);
+         tx.remove_range_counted("", max_key);
          tx.commit();
       }
       require_empty_no_leaks(t, "after range_remove all");
@@ -1945,7 +1972,7 @@ TEST_CASE("leak: interleaved insert and range_remove - no orphans",
    snprintf(mid_buf, sizeof(mid_buf), "key%06d", N / 2);
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("", mid_buf);
+      tx.remove_range_counted("", mid_buf);
       tx.commit();
    }
    require_no_orphans(t, "after range_remove first half");
@@ -1967,7 +1994,7 @@ TEST_CASE("leak: interleaved insert and range_remove - no orphans",
    // Remove everything
    {
       auto tx = t.ses->start_transaction(0);
-      tx.remove_range("", max_key);
+      tx.remove_range_counted("", max_key);
       tx.commit();
    }
    require_empty_no_leaks(t, "after final range_remove all");
@@ -2528,7 +2555,7 @@ TEST_CASE("micro remove_range small uses tombstones", "[public-api][transaction]
       auto tx = t.ses->start_transaction(0, tx_mode::expect_failure);
       tx.upsert(to_key("new1"), to_value("added"));
 
-      uint64_t removed = tx.remove_range(to_key("e"), to_key("u"));
+      uint64_t removed = tx.remove_range_counted(to_key("e"), to_key("u"));
       REQUIRE(removed == 17);  // e,f,g,...,t (16 persistent) + "new1" (1 buffer insert)
 
       // Removed keys not visible
@@ -2560,6 +2587,66 @@ TEST_CASE("micro remove_range small uses tombstones", "[public-api][transaction]
    REQUIRE(c.get(to_key("new1"), &buf) < 0);  // was in range [e,u)
 }
 
+TEST_CASE("remove_range_any removes without promising an exact count",
+          "[public-api][range_remove]")
+{
+   test_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < 512; ++i)
+      {
+         char key[16];
+         snprintf(key, sizeof(key), "key_%04d", i);
+         tx.upsert(to_key_view(std::string(key)), to_value("value"));
+      }
+      tx.commit();
+   }
+
+   {
+      auto tx = t.ses->start_transaction(0);
+
+      CHECK(tx.remove_range_any(to_key("key_0100"), to_key("key_0400")));
+      CHECK_FALSE(tx.remove_range_any(to_key("absent_a"), to_key("absent_z")));
+
+      CHECK_FALSE(tx.get<std::string>(to_key("key_0100")).has_value());
+      CHECK_FALSE(tx.get<std::string>(to_key("key_0399")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("key_0099")).has_value());
+      REQUIRE(tx.get<std::string>(to_key("key_0400")).has_value());
+
+      tx.commit();
+   }
+}
+
+TEST_CASE("tree_handle and write_transaction expose counted range removal",
+          "[public-api][range_remove]")
+{
+   test_db t;
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      auto h  = tx.primary();
+      h.upsert(to_key("a"), to_value("1"));
+      h.upsert(to_key("b"), to_value("2"));
+      h.upsert(to_key("c"), to_value("3"));
+
+      CHECK(h.remove_range_counted(to_key("a"), to_key("c")) == 2);
+      CHECK_FALSE(h.remove_range_any(to_key("a"), to_key("c")));
+      tx.commit();
+   }
+
+   {
+      auto wt = t.ses->start_write_transaction(t.ses->create_temporary_tree());
+      wt.upsert(to_key("x"), to_value("1"));
+      wt.upsert(to_key("y"), to_value("2"));
+      wt.upsert(to_key("z"), to_value("3"));
+
+      CHECK(wt.remove_range_counted(to_key("x"), to_key("z")) == 2);
+      CHECK(wt.remove_range_any(to_key("z"), max_key));
+      CHECK_FALSE(wt.remove_range_any(to_key("x"), max_key));
+   }
+}
+
 TEST_CASE("micro remove_range also removes buffer inserts in range",
           "[public-api][transaction][micro]")
 {
@@ -2576,7 +2663,7 @@ TEST_CASE("micro remove_range also removes buffer inserts in range",
       }
 
       // Remove range of buffer-only inserts
-      uint64_t removed = tx.remove_range(to_key("f"), to_key("n"));
+      uint64_t removed = tx.remove_range_counted(to_key("f"), to_key("n"));
       REQUIRE(removed == 8);  // f,g,h,i,j,k,l,m
 
       REQUIRE_FALSE(tx.get<std::string>(to_key("f")).has_value());
@@ -2630,7 +2717,7 @@ TEST_CASE("micro remove_range large triggers merge-then-delegate",
 
       // Remove a large range — over tombstone_threshold (256)
       // word_0300 .. word_0899 = 600 words
-      uint64_t removed = tx.remove_range(to_key("word_0300"), to_key("word_0900"));
+      uint64_t removed = tx.remove_range_counted(to_key("word_0300"), to_key("word_0900"));
 
       // Should have triggered merge-then-delegate
       REQUIRE(removed >= 599);  // 600 persistent keys minus 1 that was updated to buffer
@@ -2703,7 +2790,7 @@ TEST_CASE("micro sub_transaction with large range remove then abort",
          sub.upsert(to_key("sub_key"), to_value("sub_val"));
 
          // Large range remove triggers merge-then-delegate within sub-tx
-         uint64_t removed = sub.remove_range(to_key("k_0100"), to_key("k_0400"));
+         uint64_t removed = sub.remove_range_counted(to_key("k_0100"), to_key("k_0400"));
          REQUIRE(removed >= 299);
 
          // Sub-tx sees the removal
@@ -2765,7 +2852,7 @@ TEST_CASE("micro nested sub_transaction: inner merge, outer abort",
             sub2.upsert(to_key("L2_key"), to_value("L2_val"));
 
             // Large range remove inside L2 triggers merge
-            sub2.remove_range(to_key("n_0100"), to_key("n_0400"));
+            sub2.remove_range_counted(to_key("n_0100"), to_key("n_0400"));
 
             sub2.commit();  // L2 commits into L1
          }

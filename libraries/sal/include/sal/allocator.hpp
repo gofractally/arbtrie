@@ -242,7 +242,36 @@ namespace sal
       /// Mirrors `allocator_session::get_total_allocated_objects()` but at
       /// the database level so callers without a session can read it.
       uint64_t total_allocated_objects() const noexcept { return _ptr_alloc.used(); }
-      /**
+
+	      struct custom_control_block_audit
+	      {
+	         uint64_t custom_blocks = 0;
+	         uint64_t live_blocks   = 0;
+	         uint64_t out_of_range_live_blocks = 0;
+	         uint64_t zero_ref_blocks = 0;
+	         uint64_t min_value     = 0;
+	         uint64_t max_value     = 0;
+	      };
+
+	      custom_control_block_audit audit_custom_control_blocks(
+	          uint64_t max_live_value = control_block::max_cacheline_offset) const noexcept;
+
+	      template <typename Visitor>
+	      void for_each_live_custom_cb_value(uint64_t max_live_value, Visitor&& visitor) const
+	         noexcept(noexcept(visitor(uint64_t{})))
+	      {
+	         _ptr_alloc.for_each_allocated_control_block(
+	             [&](ptr_address, control_block_data data) noexcept(noexcept(visitor(uint64_t{})))
+	             {
+	                if (data.active || !data.pending_cache || data.ref == 0)
+	                   return;
+	                auto value = uint64_t(data.cacheline_offset);
+	                if (value <= max_live_value)
+	                   visitor(value);
+	             });
+	      }
+
+	      /**
        * Syncs the root object to disk.
        * 
        * @param st The sync type to use.

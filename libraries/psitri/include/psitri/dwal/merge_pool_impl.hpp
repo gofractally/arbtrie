@@ -198,7 +198,7 @@ namespace psitri::dwal
 
       // Apply range tombstones.
       for (const auto& range : ro->tombstones.ranges())
-         tx.remove_range(range.low, range.high);
+         tx.remove_range_any(range.low, range.high);
 
       auto            wall_pre_commit = std::chrono::steady_clock::now();
       struct timespec cpu_pre_commit_ts;

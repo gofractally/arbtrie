@@ -40,9 +40,14 @@ namespace
 
       void upsert(key_view key, value_view value) { tx.upsert(key, value); }
       int  remove(key_view key) { return tx.remove(key); }
-      uint64_t remove_range(key_view lower, key_view upper)
+      bool remove_range_any(key_view lower, key_view upper)
       {
-         return tx.remove_range(lower, upper);
+         return tx.remove_range_any(lower, upper);
+      }
+
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return tx.remove_range_counted(lower, upper);
       }
 
       template <ConstructibleBuffer T>
@@ -262,7 +267,7 @@ TEST_CASE("range_remove with large values (value_node path)", "[range_remove][va
       auto lo_key = gkey(lo);
       auto hi_key = gkey(hi);
 
-      uint64_t removed = cur.remove_range(lo_key, hi_key);
+      uint64_t removed = cur.remove_range_counted(lo_key, hi_key);
       REQUIRE(removed > 0);
 
       // Update oracle
@@ -285,7 +290,7 @@ TEST_CASE("range_remove with large values (value_node path)", "[range_remove][va
 
    SECTION("remove all via range")
    {
-      uint64_t removed = cur.remove_range("", max_key);
+      uint64_t removed = cur.remove_range_counted("", max_key);
       REQUIRE(removed == oracle.size());
       REQUIRE(cur.count_keys() == 0);
    }
@@ -325,7 +330,7 @@ TEST_CASE("range_remove across inner boundaries with value_nodes", "[range_remov
    std::string lo = "aaa/00010";
    std::string hi = "eee/00010";
 
-   uint64_t removed = cur.remove_range(lo, hi);
+   uint64_t removed = cur.remove_range_counted(lo, hi);
    REQUIRE(removed > 0);
 
    auto it = oracle.lower_bound(lo);
@@ -383,7 +388,7 @@ TEST_CASE("range_remove on shared root (snapshot + modify)", "[range_remove][sha
       // Range remove in the middle
       auto lo = gkey(50 / GAP_SCALE);
       auto hi = gkey(150 / GAP_SCALE);
-      tx.remove_range(lo, hi);
+      tx.remove_range_counted(lo, hi);
       tx.commit();
    }
 
@@ -433,7 +438,7 @@ TEST_CASE("range_remove releases value_nodes correctly", "[range_remove][value_n
    auto lo = gkey(20 / GAP_SCALE);
    auto hi = gkey(80 / GAP_SCALE);
 
-   uint64_t removed = cur.remove_range(lo, hi);
+   uint64_t removed = cur.remove_range_counted(lo, hi);
    REQUIRE(removed > 0);
 
    auto it = oracle.lower_bound(lo);

@@ -553,7 +553,7 @@ TEST_CASE("tree_handle: remove_range works in batch mode", "[tree_handle]")
    h.upsert("c", "3");
    h.upsert("d", "4");
 
-   uint64_t removed = h.remove_range("b", "d");
+   uint64_t removed = h.remove_range_counted("b", "d");
    CHECK(removed == 2);  // removes b, c
 
    auto rc = h.snapshot_cursor();

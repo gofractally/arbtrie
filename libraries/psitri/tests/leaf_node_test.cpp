@@ -81,7 +81,11 @@ namespace
       {  // Use is_view() instead of is_inline()
          dead_increase += value_data_header_size + value.view().size();
       }
-      // No increase for address types as only the metadata entry is removed
+      else if (value.is_subtree())
+      {
+         dead_increase += sizeof(psitri::tree_id);
+      }
+      // No increase for value_node values as only the metadata entry is removed.
       return dead_increase;
    }
 
@@ -280,12 +284,12 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       // Make sure original key is still present
       REQUIRE(node.get(initial_key) < branch_number(node.num_branches()));
 
-      // Verify cline count after initial address insertions
-      // (Assuming 12345 and 67890 have different upper bits / cacheline bases)
-      REQUIRE(node.clines_capacity() == 2);
+      // Subtrees store their tree_id inline in the leaf; only value_node values
+      // consume cline slots.
+      REQUIRE(node.clines_capacity() == 1);
 
-      // --- Test cline sharing ---
-      INFO("Testing cline sharing");
+      // --- Test direct subtree address-base independence ---
+      INFO("Testing direct subtree address-base independence");
       ptr_address sub_addr_base =
           ptr_address(*subtree_addr & ~0x0f);  // Get the base address (upper bits)
 
@@ -305,8 +309,9 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
 
       branch_number branches_before_sharing = branch_number(node.num_branches());
 
-      // Insert first shared cline address
-      INFO("Inserting key with shared cline base: " << key_sub_2);
+      // Insert another subtree with the same address base. Direct subtree
+      // storage should not consume or share cline slots.
+      INFO("Inserting subtree key with shared address base: " << key_sub_2);
       branch_number   expected_bn_sub_2 = node.lower_bound(key_sub_2);
       op::leaf_insert ins_sub_2{
           .src = node, .lb = expected_bn_sub_2, .key = key_sub_2, .value = val_sub_2};
@@ -314,10 +319,10 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       branch_number actual_bn_sub_2 = node.apply(ins_sub_2);
       REQUIRE(actual_bn_sub_2 == expected_bn_sub_2);
       REQUIRE(node.num_branches() == *branches_before_sharing + 1);
-      REQUIRE(node.clines_capacity() == 2);  // Cline count should NOT increase
+      REQUIRE(node.clines_capacity() == 1);  // Subtrees do not affect clines.
 
-      // Insert second shared cline address
-      INFO("Inserting second key with shared cline base: " << key_sub_3);
+      // Insert a second subtree with the same address base.
+      INFO("Inserting second subtree key with shared address base: " << key_sub_3);
       branch_number   expected_bn_sub_3 = node.lower_bound(key_sub_3);
       op::leaf_insert ins_sub_3{
           .src = node, .lb = expected_bn_sub_3, .key = key_sub_3, .value = val_sub_3};
@@ -325,9 +330,9 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       branch_number actual_bn_sub_3 = node.apply(ins_sub_3);
       REQUIRE(actual_bn_sub_3 == expected_bn_sub_3);
       REQUIRE(node.num_branches() == *branches_before_sharing + 2);
-      REQUIRE(node.clines_capacity() == 2);  // Cline count should STILL not increase
+      REQUIRE(node.clines_capacity() == 1);  // Cline count should still not increase.
 
-      // Verify retrieval of shared cline addresses
+      // Verify retrieval of direct subtree addresses
       INFO("Verifying retrieval of key " << key_sub_2);
       value_type retrieved_sub_2 = node.get_value(actual_bn_sub_2);
       REQUIRE(node.get(key_sub_2) == actual_bn_sub_2);
@@ -345,7 +350,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       REQUIRE(retrieved_sub_3.subtree_address() == sub_addr_3);
 
       // Also verify the original shared-base address is still correct
-      INFO("Re-verifying original key " << subtree_key << " that shares cline base");
+      INFO("Re-verifying original key " << subtree_key << " that shares address base");
       value_type retrieved_orig_sub = node.get_value(actual_bn_sub);
       REQUIRE(retrieved_orig_sub == subtree_val);
       REQUIRE(retrieved_orig_sub.is_subtree());
@@ -542,19 +547,19 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
    {
       INFO("Testing remove method");
 
-      // 1. Setup a node with mixed data types and shared/unique clines
+      // 1. Setup a node with mixed data types and shared/unique value_node clines.
       ptr_address addr_u1(1000), addr_u2(2000);                         // Unique cline bases
       ptr_address addr_s1(3000), addr_s2(3000 | 1), addr_s3(3000 | 2);  // Shared cline base
 
       std::map<std::string, value_type> initial_data = {
           {"key_aa", value_type("view_aa")},
-          {"key_bb", value_type::make_subtree(addr_u1)},  // Unique cline 1
+          {"key_bb", value_type::make_subtree(addr_u1)},  // Direct subtree tree_id
           {"key_cc", value_type("view_cc")},
           {"key_dd", value_type::make_value_node(addr_s1)},  // Shared cline base 3000, idx 0
           {"key_ee", value_type("view_ee")},
-          {"key_ff", value_type::make_subtree(addr_s2)},     // Shared cline base 3000, idx 1
+          {"key_ff", value_type::make_subtree(addr_s2)},     // Direct subtree tree_id
           {"key_gg", value_type::make_value_node(addr_u2)},  // Unique cline 2
-          {"key_hh", value_type::make_subtree(addr_s3)},     // Shared cline base 3000, idx 2
+          {"key_hh", value_type::make_subtree(addr_s3)},     // Direct subtree tree_id
           {"key_ii", value_type("view_ii")}};
 
       LeafNodePtr node_ptr = create_leaf_node("placeholder", value_type("temp"));
@@ -574,7 +579,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
          node.apply(ins);
       }
       REQUIRE(node.num_branches() == initial_data.size());
-      uint32_t expected_initial_clines = 3;  // u1(1k), u2(2k), s1(3k)
+      uint32_t expected_initial_clines = 2;  // u2(2k), s1(3k); subtrees are inline tree_id data.
       REQUIRE(node.clines_capacity() == expected_initial_clines);
 
       // Verify helper
@@ -625,8 +630,8 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       REQUIRE(node.clines_capacity() == initial_clines);  // Removing view shouldn't affect clines
       verify_remaining_data(node, expected_after_remove);
 
-      // 3. Remove Address Data (Shared Cline - key_ff)
-      INFO("Removing address data from shared cline (key_ff)");
+      // 3. Remove Direct Subtree Data (key_ff)
+      INFO("Removing direct subtree data (key_ff)");
       initial_branches                = node.num_branches();     // Define before use
       initial_clines                  = node.clines_capacity();  // Define before use
       key_view   key_to_remove_shared = "key_ff";
@@ -644,7 +649,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       REQUIRE(node.dead_space() == dead_space_before_remove_shared + expected_dead_increase_shared);
       REQUIRE(!node.is_optimal_layout());
       REQUIRE(node.clines_capacity() ==
-              initial_clines);  // Cline count shouldn't change yet (key_dd and key_hh share it)
+              initial_clines);  // Direct subtree removal should not affect clines.
       verify_remaining_data(node, expected_after_remove);
 
       // 4. Remove Address Data (Last on Unique Cline - key_gg) - Check Non-Last Cline Freeing
@@ -714,9 +719,9 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       INFO("Testing update_value method comprehensively");
 
       // --- Initial Node Setup ---
-      ptr_address addr_u1(1000), addr_u2(2000);            // Initial Unique Clines
-      ptr_address addr_s1a(3000 | 1), addr_s1b(3000 | 2);  // Initial Shared Cline (Base 3k)
-      ptr_address addr_s2(4000 | 1);                       // Initial Shared Cline (Base 4k)
+      ptr_address addr_u1(1000), addr_u2(2000);
+      ptr_address addr_s1a(3000 | 1), addr_s1b(3000 | 2);
+      ptr_address addr_s2(4000 | 1);
 
       // Keys for each starting state --- RE-ADDED ---
       key_view key_start_null       = "start_null";
@@ -730,11 +735,11 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
           {std::string(key_start_null), value_type("")},                  // State 1: Null
           {std::string(key_start_inline), value_type("initial_inline")},  // State 2: Inline
           {std::string(key_start_subtree),
-           value_type::make_subtree(addr_u1)},  // State 3: Subtree (Unique Cline 1k)
+           value_type::make_subtree(addr_u1)},  // State 3: Subtree (direct tree_id)
           {std::string(key_start_valnode),
            value_type::make_value_node(addr_u2)},  // State 4: ValueNode (Unique Cline 2k)
           {std::string(key_start_shared_sub),
-           value_type::make_subtree(addr_s1a)},  // State 3: Subtree (Shared Cline 3k)
+           value_type::make_subtree(addr_s1a)},  // State 3: Subtree (direct tree_id)
           // Add another entry for shared cline 3k to test shared -> X transitions
           {"shared_valnode_3k",
            value_type::make_value_node(addr_s1b)}  // State 4: ValueNode (Shared Cline 3k)
@@ -757,7 +762,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
          node.apply(ins);
       }
       REQUIRE(node.num_branches() == initial_data.size());
-      uint32_t expected_initial_clines = 3;  // u1(1k), u2(2k), s1(3k)
+      uint32_t expected_initial_clines = 2;  // u2(2k), s1(3k); subtrees are inline tree_id data.
       REQUIRE(node.clines_capacity() == expected_initial_clines);
 
       // --- Force optimal layout for testing the flag ---
@@ -816,7 +821,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
          }
          SECTION("To Subtree")
          {
-            INFO("Null -> Subtree (New Unique Cline)");
+            INFO("Null -> Subtree (direct tree_id)");
             value_type new_val           = value_type::make_subtree(addr_new_u3);
             size_t     expected_old_size = 0;
             uint16_t   dead_space_before = optimal_node.dead_space();
@@ -825,8 +830,8 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
             REQUIRE(returned_size == expected_old_size);
             REQUIRE(optimal_node.get_value(bn) == new_val);
             REQUIRE(optimal_node.dead_space() == dead_space_before);
-            REQUIRE(optimal_node.clines_capacity() == clines_before + 1);
-            REQUIRE(!optimal_node.is_optimal_layout());  // Adding cline breaks optimal
+            REQUIRE(optimal_node.clines_capacity() == clines_before);
+            REQUIRE(!optimal_node.is_optimal_layout());  // New tree_id allocation breaks optimal
          }
          SECTION("To ValueNode")
          {
@@ -917,7 +922,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
          }
          SECTION("To Subtree")
          {
-            INFO("Inline -> Subtree (New Unique Cline)");
+            INFO("Inline -> Subtree (direct tree_id)");
             value_type new_val = value_type::make_subtree(addr_new_u3);
             value_type initial_val =
                 optimal_node.get_value(bn);  // Get initial value to get its size
@@ -930,8 +935,8 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
             // Old inline value (data + header) becomes dead space
             size_t expected_dead_increase = expected_old_size + 2 /*value_data header*/;
             REQUIRE(optimal_node.dead_space() == dead_space_before + expected_dead_increase);
-            REQUIRE(optimal_node.clines_capacity() == clines_before + 1);
-            REQUIRE(!optimal_node.is_optimal_layout());  // Dead space + cline change breaks optimal
+            REQUIRE(optimal_node.clines_capacity() == clines_before);
+            REQUIRE(!optimal_node.is_optimal_layout());  // Dead space + tree_id allocation breaks optimal
          }
          SECTION("To ValueNode")
          {
@@ -956,7 +961,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
       SECTION("Update From Subtree")
       {
          ptr_address addr_existing_vn_u2   = addr_u2;   // Existing unique ValueNode cline 2k
-         ptr_address addr_existing_sub_s1a = addr_s1a;  // Existing shared Subtree cline 3k
+         ptr_address addr_existing_sub_s1a = addr_s1a;  // Existing direct subtree address near 3k
 
          SECTION("From Unique Cline (1k)")
          {
@@ -968,40 +973,36 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
             {
                INFO("Subtree(Unique) -> Null");
                value_type new_val           = value_type("");
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
                size_t     returned_size     = optimal_node.update_value(bn, new_val);
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
-               REQUIRE(optimal_node.dead_space() == dead_space_before);
-               // Unique cline 1k should be freed, but it wasn't the last, so capacity doesn't change
-               REQUIRE(optimal_node.clines_capacity() ==
-                       clines_before);                      // Changed from clines_before - 1
-               REQUIRE(!optimal_node.is_optimal_layout());  // Freeing cline breaks optimal
+               REQUIRE(optimal_node.dead_space() == dead_space_before + sizeof(tree_id));
+               REQUIRE(optimal_node.clines_capacity() == clines_before);
+               REQUIRE(!optimal_node.is_optimal_layout());  // Freeing tree_id storage breaks optimal
             }
             SECTION("To Inline")
             {
                INFO("Subtree(Unique) -> Inline");
                value_type new_val           = value_type("sub_to_inline");
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
                size_t     returned_size     = optimal_node.update_value(bn, new_val);
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
-               REQUIRE(optimal_node.dead_space() == dead_space_before);
-               // Unique cline 1k should be freed, but it wasn't the last, so capacity doesn't change
-               REQUIRE(optimal_node.clines_capacity() ==
-                       clines_before);  // Changed from clines_before - 1
+               REQUIRE(optimal_node.dead_space() == dead_space_before + sizeof(tree_id));
+               REQUIRE(optimal_node.clines_capacity() == clines_before);
                REQUIRE(
-                   !optimal_node.is_optimal_layout());  // New alloc + freeing cline breaks optimal
+                   !optimal_node.is_optimal_layout());  // New alloc + freeing tree_id breaks optimal
             }
             SECTION("To Subtree (New Unique)")
             {
-               INFO("Subtree(Shared Cline) -> Subtree (New Unique)");
+               INFO("Subtree -> Subtree (direct tree_id overwrite)");
                value_type new_val           = value_type::make_subtree(addr_new_u3);
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
 
@@ -1016,30 +1017,26 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
                REQUIRE(optimal_node.dead_space() == dead_space_before);
-               // Cline 1k freed, existing cline u2 reused. Capacity may or may not grow depending on node size.
-               REQUIRE(optimal_node.clines_capacity() <= clines_before + 1);
-               REQUIRE(optimal_node.clines_capacity() >= clines_before);
-               // REQUIRE(optimal_node.is_optimal_layout()); // Implementation currently breaks this
-               REQUIRE(!optimal_node.is_optimal_layout());
+               REQUIRE(optimal_node.clines_capacity() == clines_before);
+               REQUIRE(optimal_node.is_optimal_layout());
             }
             SECTION("To ValueNode (Existing Unique)")
             {
                INFO("Subtree(Unique) -> ValueNode (Existing Unique)");
                value_type new_val           = value_type::make_value_node(addr_existing_vn_u2);
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
                size_t     returned_size     = optimal_node.update_value(bn, new_val);
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
-               REQUIRE(optimal_node.dead_space() == dead_space_before);
-               // Cline 1k freed, cline 2k (existing) reused. Capacity doesn't change as cline 1 wasn't the last one.
+               REQUIRE(optimal_node.dead_space() == dead_space_before + sizeof(tree_id));
                REQUIRE(optimal_node.clines_capacity() == clines_before);
                // REQUIRE(optimal_node.is_optimal_layout()); // Implementation currently breaks this
                REQUIRE(!optimal_node.is_optimal_layout());
             }
          }
-         SECTION("From Shared Cline (3k)")
+         SECTION("From Direct Subtree With Address Near Shared ValueNode Cline (3k)")
          {
             branch_number bn = optimal_node.get(key_start_shared_sub);
             REQUIRE(optimal_node.get_value(bn).is_subtree());
@@ -1054,58 +1051,55 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
             {
                INFO("Subtree(Shared) -> Null");
                value_type new_val           = value_type("");
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
                size_t     returned_size     = optimal_node.update_value(bn, new_val);
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
-               REQUIRE(optimal_node.dead_space() == dead_space_before);
-               REQUIRE(optimal_node.clines_capacity() <= clines_before);
-               REQUIRE(optimal_node.clines_capacity() >= clines_before - 1);
+               REQUIRE(optimal_node.dead_space() == dead_space_before + sizeof(tree_id));
+               REQUIRE(optimal_node.clines_capacity() == clines_before);
                REQUIRE(!optimal_node.is_optimal_layout());  // Changing value breaks optimal
             }
             SECTION("To Inline")
             {
                INFO("Subtree(Shared) -> Inline");
                value_type new_val           = value_type("shared_sub_to_inline");
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
                size_t     returned_size     = optimal_node.update_value(bn, new_val);
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
-               REQUIRE(optimal_node.dead_space() == dead_space_before);
-               REQUIRE(optimal_node.clines_capacity() <= clines_before);
-               REQUIRE(optimal_node.clines_capacity() >= clines_before - 1);
+               REQUIRE(optimal_node.dead_space() == dead_space_before + sizeof(tree_id));
+               REQUIRE(optimal_node.clines_capacity() == clines_before);
                REQUIRE(!optimal_node.is_optimal_layout());  // New alloc breaks optimal
             }
             SECTION("To Subtree (New Unique)")
             {
                INFO("Subtree(Shared) -> Subtree (New Unique)");
                value_type new_val           = value_type::make_subtree(addr_new_u3);
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
                size_t     returned_size     = optimal_node.update_value(bn, new_val);
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
                REQUIRE(optimal_node.dead_space() == dead_space_before);
-               REQUIRE(optimal_node.clines_capacity() <= clines_before + 1);
-               REQUIRE(optimal_node.clines_capacity() >= clines_before);
-               REQUIRE(!optimal_node.is_optimal_layout());  // Adding cline breaks optimal
+               REQUIRE(optimal_node.clines_capacity() == clines_before);
+               REQUIRE(optimal_node.is_optimal_layout());
             }
             SECTION("To ValueNode (Existing Shared 3k - Different Index)")
             {
                INFO("Subtree(Shared) -> ValueNode (Existing Shared 3k)");
                value_type new_val = value_type::make_value_node(local_addr_s1b);  // Use local copy
-               size_t     expected_old_size = sizeof(ptr_address);
+               size_t     expected_old_size = sizeof(tree_id);
                uint16_t   dead_space_before = optimal_node.dead_space();
                uint32_t   clines_before     = optimal_node.clines_capacity();
                size_t     returned_size     = optimal_node.update_value(bn, new_val);
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
-               REQUIRE(optimal_node.dead_space() == dead_space_before);
+               REQUIRE(optimal_node.dead_space() == dead_space_before + sizeof(tree_id));
                REQUIRE(optimal_node.clines_capacity() == clines_before);
                REQUIRE(
                    optimal_node.get_value(optimal_node.get("shared_valnode_3k")).value_address() ==
@@ -1118,8 +1112,8 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
 
       SECTION("Update From ValueNode")
       {
-         ptr_address addr_existing_sub_u1  = addr_u1;   // Existing unique Subtree cline 1k
-         ptr_address addr_existing_sub_s1a = addr_s1a;  // Existing shared Subtree cline 3k
+         ptr_address addr_existing_sub_u1  = addr_u1;   // Existing direct subtree address near 1k
+         ptr_address addr_existing_sub_s1a = addr_s1a;  // Existing direct subtree address near 3k
 
          SECTION("From Unique Cline (2k)")
          {
@@ -1169,7 +1163,7 @@ TEST_CASE("leaf_node basic insert and lookup", "[psitri][leaf_node]")
                REQUIRE(returned_size == expected_old_size);
                REQUIRE(optimal_node.get_value(bn) == new_val);
                REQUIRE(optimal_node.dead_space() == dead_space_before);
-               REQUIRE(optimal_node.clines_capacity() == clines_before);
+               REQUIRE(optimal_node.clines_capacity() == clines_before - 1);
                // REQUIRE(optimal_node.is_optimal_layout()); // Implementation currently breaks this
                REQUIRE(!optimal_node.is_optimal_layout());
             }
@@ -1333,6 +1327,49 @@ TEST_CASE("leaf_node compact_to same size", "[psitri][leaf_node]")
    REQUIRE(cs >= 64);
 }
 
+TEST_CASE("leaf_node copy_to larger allocation preserves compacted tail data",
+          "[psitri][leaf_node][cow]")
+{
+   using namespace psitri;
+
+   LeafNodePtr node_ptr = create_leaf_node("test_key", value_type("test_val"));
+   leaf_node&  node     = *node_ptr;
+
+   const uint32_t compact_size = node.compact_size();
+   REQUIRE(compact_size < node.size());
+
+   void* compact_buffer = std::aligned_alloc(64, compact_size);
+   REQUIRE(compact_buffer != nullptr);
+   std::memset(compact_buffer, 0, compact_size);
+
+   ptr_address_seq compact_seq = {ptr_address(111), 1};
+   auto* compact_header = new (compact_buffer)
+       sal::alloc_header(compact_size, static_cast<sal::header_type>(leaf_node::type_id), compact_seq);
+   node.compact_to(compact_header);
+   LeafNodePtr compacted(reinterpret_cast<leaf_node*>(compact_header));
+
+   void* copy_buffer = std::aligned_alloc(64, leaf_node::max_leaf_size);
+   REQUIRE(copy_buffer != nullptr);
+   std::memset(copy_buffer, 0, leaf_node::max_leaf_size);
+
+   ptr_address_seq copy_seq = {ptr_address(222), 2};
+   auto* copy_header = new (copy_buffer)
+       sal::alloc_header(leaf_node::max_leaf_size,
+                         static_cast<sal::header_type>(leaf_node::type_id),
+                         copy_seq);
+   compacted->copy_to(copy_header);
+   LeafNodePtr copy(reinterpret_cast<leaf_node*>(copy_header));
+
+   REQUIRE(copy->validate_invariants());
+   CHECK(copy->size() == leaf_node::max_leaf_size);
+   CHECK(copy->address_seq().address == copy_seq.address);
+   CHECK(copy->address_seq().sequence == copy_seq.sequence);
+   REQUIRE(copy->num_branches() == 1);
+   CHECK(copy->get_key(branch_number(0)) == "test_key");
+   REQUIRE(copy->get_value(branch_number(0)).is_view());
+   CHECK(copy->get_value(branch_number(0)).view() == "test_val");
+}
+
 TEST_CASE("leaf_node can_insert_address cline sharing and capacity", "[psitri][leaf_node]")
 {
    using namespace psitri;
@@ -1367,20 +1404,20 @@ TEST_CASE("leaf_node can_insert_address cline sharing and capacity", "[psitri][l
    (void)result;
 }
 
-TEST_CASE("leaf_node cline sharing with same base address", "[psitri][leaf_node]")
+TEST_CASE("leaf_node value_node cline sharing with same base address", "[psitri][leaf_node]")
 {
    using namespace psitri;
 
    LeafNodePtr node_ptr = create_leaf_node("k1", value_type("v1"));
    leaf_node&  node     = *node_ptr;
 
-   // Insert two subtrees sharing the same cacheline base
+   // Insert two value_nodes sharing the same cacheline base.
    ptr_address base_addr(256);  // base cacheline
    ptr_address addr1(*base_addr | 1);
    ptr_address addr2(*base_addr | 2);
 
-   value_type sv1 = value_type::make_subtree(addr1);
-   value_type sv2 = value_type::make_subtree(addr2);
+   value_type sv1 = value_type::make_value_node(addr1);
+   value_type sv2 = value_type::make_value_node(addr2);
 
    op::leaf_insert ins1{.src = node, .lb = node.lower_bound("sub_a"), .key = "sub_a", .value = sv1};
    REQUIRE(node.can_apply(ins1) != leaf_node::can_apply_mode::none);
@@ -1394,10 +1431,10 @@ TEST_CASE("leaf_node cline sharing with same base address", "[psitri][leaf_node]
    REQUIRE(node.clines_capacity() == 1);
 
    // Values should be correct
-   REQUIRE(node.get_value(node.get("sub_a")).is_subtree());
-   REQUIRE(node.get_value(node.get("sub_b")).is_subtree());
-   REQUIRE(node.get_value(node.get("sub_a")).subtree_address() == addr1);
-   REQUIRE(node.get_value(node.get("sub_b")).subtree_address() == addr2);
+   REQUIRE(node.get_value(node.get("sub_a")).is_value_node());
+   REQUIRE(node.get_value(node.get("sub_b")).is_value_node());
+   REQUIRE(node.get_value(node.get("sub_a")).value_address() == addr1);
+   REQUIRE(node.get_value(node.get("sub_b")).value_address() == addr2);
 }
 
 TEST_CASE("leaf_node validate_invariants on valid node", "[psitri][leaf_node]")
@@ -1632,20 +1669,20 @@ TEST_CASE("leaf_node remove_address_ptr frees cline slot", "[psitri][leaf_node]"
    LeafNodePtr node_ptr = create_leaf_node("data", value_type("val"));
    leaf_node&  node     = *node_ptr;
 
-   // Insert two subtrees on different cachelines
+   // Insert two value_nodes on different cachelines.
    ptr_address     addr1(256);
    op::leaf_insert ins1{.src = node, .lb = node.lower_bound("sub1"), .key = "sub1",
-                        .value = value_type::make_subtree(addr1)};
+                        .value = value_type::make_value_node(addr1)};
    node.apply(ins1);
 
    ptr_address     addr2(512);
    op::leaf_insert ins2{.src = node, .lb = node.lower_bound("sub2"), .key = "sub2",
-                        .value = value_type::make_subtree(addr2)};
+                        .value = value_type::make_value_node(addr2)};
    node.apply(ins2);
 
    REQUIRE(node.clines_capacity() == 2);
 
-   // Remove the second subtree's key — update its value to inline, then remove_address_ptr
+   // Remove the second value_node's key — update its value to inline, then remove_address_ptr
    // Actually, remove the entire branch which triggers internal cleanup
    branch_number sub2_bn = node.get("sub2");
    REQUIRE(sub2_bn < branch_number(node.num_branches()));
@@ -1657,8 +1694,8 @@ TEST_CASE("leaf_node remove_address_ptr frees cline slot", "[psitri][leaf_node]"
 
    // Verify sub1 still works
    branch_number sub1_bn = node.get("sub1");
-   REQUIRE(node.get_value(sub1_bn).is_subtree());
-   REQUIRE(node.get_value(sub1_bn).subtree_address() == addr1);
+   REQUIRE(node.get_value(sub1_bn).is_value_node());
+   REQUIRE(node.get_value(sub1_bn).value_address() == addr1);
 }
 
 TEST_CASE("leaf_node fill until can_apply returns none", "[psitri][leaf_node]")

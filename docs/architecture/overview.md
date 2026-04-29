@@ -61,7 +61,8 @@ database
                                      |        |-- insert(key, value)
                                      |        |-- upsert(key, value)
                                      |        |-- remove(key)
-                                     |        |-- remove_range(lower, upper)
+                                     |        |-- remove_range_any(lower, upper)
+                                     |        |-- remove_range_counted(lower, upper)
                                      |        |-- get(key)
                                      |        |-- commit()
                                      |        +-- ~transaction() --> auto-abort

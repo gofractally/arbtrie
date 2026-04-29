@@ -1719,6 +1719,54 @@ TEST_CASE("audit_versions reports retained value history", "[mvcc_lifecycle][aud
    std::filesystem::remove_all(db_path);
 }
 
+TEST_CASE("version index persists across clean reopen", "[mvcc_lifecycle][audit]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("version_index_persist_testdb");
+   std::filesystem::remove_all(db_path);
+
+   uint64_t latest = 0;
+   {
+      auto db = database::open(db_path, open_mode::create_only);
+      auto ws = db->start_write_session();
+
+      ws->upsert(0, "hot", "A");
+      ws->upsert(0, "hot", "B");
+      latest = ws->upsert(0, "hot", "C");
+
+      auto audit = db->audit_version_index();
+      CHECK(audit.latest_version == latest);
+      CHECK(audit.dead_versions_from_index == 2);
+      CHECK(audit.retained_versions_from_index == 1);
+      CHECK(audit.live_version_control_blocks == 1);
+      CHECK(audit.index_matches_control_blocks());
+   }
+
+   {
+      auto db = database::open(db_path, open_mode::open_existing);
+      auto audit = db->audit_version_index();
+      CHECK(audit.latest_version == latest);
+      CHECK(audit.dead_versions_from_index == 2);
+      CHECK(audit.retained_versions_from_index == 1);
+      CHECK(audit.live_version_control_blocks == 1);
+      CHECK(audit.index_matches_control_blocks());
+   }
+
+   std::filesystem::remove(db_path / "dead_versions.bin");
+
+   {
+      auto db = database::open(db_path, open_mode::open_existing);
+      auto audit = db->audit_version_index();
+      CHECK(audit.latest_version == latest);
+      CHECK(audit.dead_versions_from_index == 2);
+      CHECK(audit.retained_versions_from_index == 1);
+      CHECK(audit.live_version_control_blocks == 1);
+      CHECK(audit.index_matches_control_blocks());
+   }
+
+   std::filesystem::remove_all(db_path);
+}
+
 TEST_CASE("held snapshot prevents version cleanup", "[mvcc_lifecycle]")
 {
    sal::set_current_thread_name("main");

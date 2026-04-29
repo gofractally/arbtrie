@@ -210,7 +210,7 @@ namespace psitri::dwal
                       tx.remove(op.key);
                       break;
                    case wal_op_type::remove_range:
-                      tx.remove_range(op.range_low, op.range_high);
+                      tx.remove_range_any(op.range_low, op.range_high);
                       break;
                 }
              }
@@ -313,7 +313,7 @@ namespace psitri::dwal
                            tx.upsert(it.key(), val.data);
                      }
                      for (const auto& range : layer.tombstones.ranges())
-                        tx.remove_range(range.low, range.high);
+                        tx.remove_range_any(range.low, range.high);
                      tx.commit();
                   };
 

@@ -37,6 +37,7 @@ namespace psitri::dwal
       bool lower_bound(std::string_view key);
       bool upper_bound(std::string_view key);
       bool seek(std::string_view key);
+      bool find(std::string_view key);
 
       // ── Navigation ─────────────────────────────────────────────────
 

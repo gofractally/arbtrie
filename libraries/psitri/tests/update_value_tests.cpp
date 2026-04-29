@@ -41,9 +41,14 @@ namespace
 
       void upsert(key_view key, value_view value) { tx.upsert(key, value); }
       int  remove(key_view key) { return tx.remove(key); }
-      uint64_t remove_range(key_view lower, key_view upper)
+      bool remove_range_any(key_view lower, key_view upper)
       {
-         return tx.remove_range(lower, upper);
+         return tx.remove_range_any(lower, upper);
+      }
+
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return tx.remove_range_counted(lower, upper);
       }
       int32_t get(key_view key, Buffer auto* buffer) const { return tx.get(key, buffer); }
 
@@ -97,7 +102,7 @@ TEST_CASE("update_value: inline to value_node on full leaf triggers split",
          char lo_buf[4], hi_buf[4];
          snprintf(lo_buf, sizeof(lo_buf), "%03d", i);
          snprintf(hi_buf, sizeof(hi_buf), "%03d", j);
-         cur.remove_range(to_key_view(std::string(lo_buf)),
+         cur.remove_range_counted(to_key_view(std::string(lo_buf)),
                           to_key_view(std::string(hi_buf)));
          for (int k = i; k < j; ++k)
          {

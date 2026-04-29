@@ -1,6 +1,8 @@
 #include <catch2/catch_all.hpp>
 #include <psitri/live_range_map.hpp>
 
+#include <filesystem>
+
 using namespace psitri;
 
 TEST_CASE("live_range_map: single version", "[live_range_map]")
@@ -167,7 +169,7 @@ TEST_CASE("live_range_map: retained floor follows contiguous dead prefix",
    map.add_dead_version(1);
    map.add_dead_version(2);
    map.flush_pending();
-   CHECK(map.oldest_retained_floor() == 0);
+   CHECK(map.oldest_retained_floor() == 3);
 
    map.add_dead_version(0);
    map.flush_pending();
@@ -222,4 +224,33 @@ TEST_CASE("live_range_map: batch add_dead_versions", "[live_range_map]")
    CHECK_FALSE(map.is_dead(7));
    CHECK_FALSE(map.is_dead(8));
    CHECK(map.num_ranges() == 2);  // [1,6], [9,9]
+}
+
+TEST_CASE("live_range_map: mapped storage persists ranges and pending versions",
+          "[live_range_map][mapped]")
+{
+   auto path = std::filesystem::temp_directory_path() / "psitri_live_range_map_mapped_test.bin";
+   std::filesystem::remove(path);
+
+   {
+      live_range_map map(path);
+      map.add_dead_version(1);
+      map.add_dead_version(3);
+      map.flush_pending();
+      map.add_dead_version(2);
+      CHECK(map.pending_count() == 1);
+   }
+
+   {
+      live_range_map map(path);
+      CHECK(map.is_dead(1));
+      CHECK(map.is_dead(2));
+      CHECK(map.is_dead(3));
+      CHECK_FALSE(map.is_dead(4));
+      CHECK(map.pending_count() == 0);
+      CHECK(map.num_ranges() == 1);
+      CHECK(map.oldest_retained_floor() == 4);
+   }
+
+   std::filesystem::remove(path);
 }

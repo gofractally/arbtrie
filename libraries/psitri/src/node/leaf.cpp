@@ -34,7 +34,7 @@ namespace psitri
          uint32_t    alloc_pos     = 0;
          uint8_t     cline_count   = 0;
          uint8_t     version_count = 0;
-         ptr_address clines[16];
+         ptr_address clines[leaf_node::max_value_clines];
          uint64_t    versions[31];
 
          leaf_rebuild_meter(uint16_t dst_branches,
@@ -79,15 +79,21 @@ namespace psitri
                return fits();
             }
 
-            if (!val.is_address())
+            if (val.is_subtree())
+            {
+               alloc_pos += sizeof(tree_id);
+               return fits();
+            }
+
+            if (!val.is_value_node())
                return fits();
 
-            ptr_address base_cline(*val.address() & ~0x0ful);
+            ptr_address base_cline(*val.value_address() & ~0x0ful);
             for (uint8_t i = 0; i < cline_count; ++i)
                if (clines[i] == base_cline)
                   return fits();
 
-            if (cline_count >= 16)
+            if (cline_count >= leaf_node::max_value_clines)
                return false;
             clines[cline_count++] = base_cline;
             return fits();
@@ -229,6 +235,25 @@ namespace psitri
       memcpy((char*)dst->tail() - _alloc_pos, (const char*)tail() - _alloc_pos, _alloc_pos);
    }
 
+   void leaf_node::copy_to(alloc_header* copy_dst) const noexcept
+   {
+      assert(copy_dst->size() >= size());
+      if (copy_dst->size() == size())
+      {
+         ucc::memcpy_aligned_64byte(copy_dst, this, size());
+         return;
+      }
+
+      auto saved_header = *copy_dst;
+
+      uint32_t head_bytes = meta_end() - (const char*)this;
+      memcpy(copy_dst, this, head_bytes);
+      memcpy(copy_dst, &saved_header, sizeof(alloc_header));
+
+      auto* dst = reinterpret_cast<leaf_node*>(copy_dst);
+      memcpy((char*)dst->tail() - _alloc_pos, (const char*)tail() - _alloc_pos, _alloc_pos);
+   }
+
    void leaf_node::clone_from(const leaf_node* clone)
    {
       //    SAL_ERROR("cloning from {} {} to {} {}", clone->address(), clone, address(), this);
@@ -237,7 +262,7 @@ namespace psitri
       // Rebuild from scratch when there is dead space to reclaim, or when the
       // cline table is full — rebuilding compacts clines by only keeping those
       // actually referenced, which frees slots for subsequent update_value().
-      if (clone->dead_space() || clone->_cline_cap >= 16)
+      if (clone->dead_space() || clone->_cline_cap >= max_value_clines)
       {
          // let the compactor do this work, it has a major slowdown of updates/inserts when
          // put in the critical path.
@@ -281,7 +306,7 @@ namespace psitri
                      vos[x] = alloc_value(val.view());
                }
                else if (val.is_subtree())
-                  vos[x] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+                  vos[x] = value_branch::subtree_value(alloc_tree_id(val.subtree_id()));
                else if (val.is_value_node())
                   vos[x] = add_address_ptr(value_type_flag::value_node, val.value_address());
                else
@@ -375,7 +400,7 @@ namespace psitri
                   vos[dst_idx] = alloc_value(val.view());
             }
             else if (val.is_subtree())
-               vos[dst_idx] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+               vos[dst_idx] = value_branch::subtree_value(alloc_tree_id(val.subtree_id()));
             else if (val.is_value_node())
                vos[dst_idx] = add_address_ptr(value_type_flag::value_node, val.value_address());
             else
@@ -439,7 +464,7 @@ namespace psitri
                vos[x] = alloc_value(val.view());
          }
          else if (val.is_subtree())
-            vos[x] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+            vos[x] = value_branch::subtree_value(alloc_tree_id(val.subtree_id()));
          else if (val.is_value_node())
             vos[x] = add_address_ptr(value_type_flag::value_node, val.value_address());
          else
@@ -494,7 +519,7 @@ namespace psitri
                   vos[dst_idx] = alloc_value(val.view());
             }
             else if (val.is_subtree())
-               vos[dst_idx] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+               vos[dst_idx] = value_branch::subtree_value(alloc_tree_id(val.subtree_id()));
             else if (val.is_value_node())
                vos[dst_idx] = add_address_ptr(value_type_flag::value_node, val.value_address());
             else
@@ -555,7 +580,7 @@ namespace psitri
                   vos[dst_idx] = alloc_value(val.view());
             }
             else if (val.is_subtree())
-               vos[dst_idx] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+               vos[dst_idx] = value_branch::subtree_value(alloc_tree_id(val.subtree_id()));
             else if (val.is_value_node())
                vos[dst_idx] = add_address_ptr(value_type_flag::value_node, val.value_address());
             else
@@ -619,7 +644,7 @@ namespace psitri
                vos[x] = alloc_value(val.view());
          }
          else if (val.is_subtree())
-            vos[x] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+            vos[x] = value_branch::subtree_value(alloc_tree_id(val.subtree_id()));
          else if (val.is_value_node())
             vos[x] = add_address_ptr(value_type_flag::value_node, val.value_address());
          else
@@ -716,7 +741,7 @@ namespace psitri
                vos[x - *start] = alloc_value(val.view());
          }
          else if (val.is_subtree())
-            vos[x - *start] = add_address_ptr(value_type_flag::subtree, val.subtree_address());
+            vos[x - *start] = value_branch::subtree_value(alloc_tree_id(val.subtree_id()));
          else if (val.is_value_node())
             vos[x - *start] = add_address_ptr(value_type_flag::value_node, val.value_address());
          else
@@ -765,7 +790,7 @@ namespace psitri
             vos[_idx] = _leaf.alloc_value(val.view());
       }
       else if (val.is_subtree())
-         vos[_idx] = _leaf.add_address_ptr(value_type_flag::subtree, val.subtree_address());
+         vos[_idx] = value_branch::subtree_value(_leaf.alloc_tree_id(val.subtree_id()));
       else if (val.is_value_node())
          vos[_idx] = _leaf.add_address_ptr(value_type_flag::value_node, val.value_address());
       else
@@ -805,11 +830,15 @@ namespace psitri
          value_view data = ins.value.view();
          size_required += data.size() + sizeof(value_data);
       }
+      else if (ins.value.is_subtree())
+      {
+         size_required += sizeof(tree_id);
+      }
       size_required += ins.key.size() + 2;
       /// this over-estimates assuming worst case we must add a cline, but
       /// the calculating whether address() is on an existing cline requires
       /// scanning all clines to see if we can re-use one or have to add a new one.
-      size_required += 4 * ins.value.is_address();
+      size_required += 4 * ins.value.is_value_node();
       if (_num_versions || ins.created_at)
       {
          size_required += 1;  // one ver_indices entry for the inserted branch
@@ -855,13 +884,18 @@ namespace psitri
          if (v.size() > 0 && !(old_inline && v.size() <= old_size))
             extra += v.size() + sizeof(value_data);
       }
-      else if (upd.value.is_address())
+      else if (upd.value.is_subtree())
+      {
+         if (!old_vb.is_subtree())
+            extra += sizeof(tree_id);
+      }
+      else if (upd.value.is_value_node())
       {
          // Conservative: assume a new cline slot is needed. We cannot use
          // can_insert_address() here because update_value() may remove the old
          // address's cline entry before calling add_address_ptr() for the new one,
          // invalidating any match can_insert_address() found in the pre-mutation state.
-         if (_cline_cap >= 16)
+         if (_cline_cap >= max_value_clines)
             return can_apply_mode::none;  // force split; defrag rebuild can still overflow
          extra += sizeof(ptr_address);
       }
@@ -1155,8 +1189,8 @@ namespace psitri
       }
       else if (ins.value.is_subtree())
       {
-         value_offsets()[bn] =
-             add_address_ptr(value_type_flag::subtree, ins.value.subtree_address());
+            value_offsets()[bn] =
+             value_branch::subtree_value(alloc_tree_id(ins.value.subtree_id()));
       }
       else  //if (ins.value.is_value_node())
       {
@@ -1194,6 +1228,10 @@ namespace psitri
          value_offset vo = vb.offset();
          //SAL_ERROR("    value size: {}", get_value_ptr(vo)->get().size());
          _dead_space += sizeof(value_data) + get_value_ptr(vo)->get().size();
+      }
+      else if (vb.is_subtree())
+      {
+         free_tree_id(vb.subtree_offset());
       }
       else if (vb.is_address())
       {
@@ -1256,6 +1294,10 @@ namespace psitri
          {
             value_offset vo = vb.offset();
             _dead_space += sizeof(value_data) + get_value_ptr(vo)->get().size();
+         }
+         else if (vb.is_subtree())
+         {
+            free_tree_id(vb.subtree_offset());
          }
          else if (vb.is_address())
          {
@@ -1349,7 +1391,7 @@ namespace psitri
          }
          else if (value.is_subtree())
          {
-            vb = add_address_ptr(value_type_flag::subtree, value.subtree_address());
+            vb = value_branch::subtree_value(alloc_tree_id(value.subtree_id()));
             _dead_space += old_size + sizeof(value_data);
             _optimal_layout = false;
          }
@@ -1368,6 +1410,18 @@ namespace psitri
          assert(old_vb.cline() == vb.cline());
          vb = value_branch();
          remove_address_ptr(old_vb.cline());
+         _optimal_layout = false;
+      }
+      else if (vb.is_subtree())
+      {
+         old_size = sizeof(tree_id);
+         if (value.is_subtree())
+         {
+            set_tree_id(vb.subtree_offset(), value.subtree_id());
+            return old_size;
+         }
+         free_tree_id(vb.subtree_offset());
+         vb = value_branch();
          _optimal_layout = false;
       }
       else  // vb.is_null()
@@ -1391,7 +1445,7 @@ namespace psitri
       }
       else if (value.is_subtree())
       {
-         vb = add_address_ptr(value_type_flag::subtree, value.subtree_address());
+         vb = value_branch::subtree_value(alloc_tree_id(value.subtree_id()));
       }
       else if (value.is_value_node())
       {
@@ -1417,7 +1471,7 @@ namespace psitri
          return true;
       // No matching or empty slot — must grow _cline_cap.
       // Enforce both the 16-cline capacity limit and available free_space.
-      return cls.size() < 16 && free_space() >= int(sizeof(ptr_address));
+      return cls.size() < max_value_clines && free_space() >= int(sizeof(ptr_address));
    }
 
    /**
@@ -1425,6 +1479,7 @@ namespace psitri
     */
    leaf_node::value_branch leaf_node::add_address_ptr(value_type_flag t, ptr_address addr) noexcept
    {
+      assert(t == value_type_flag::value_node);
       ptr_address            base_cline(*addr & ~0x0f);
       std::span<ptr_address> cls         = clines();
       int                    found_empty = -1;
@@ -1444,6 +1499,7 @@ namespace psitri
          cls[found_empty] = base_cline;
          return value_branch(t, cline_offset(found_empty), cline_index(*addr & 0x0f));
       }
+      assert(_cline_cap < max_value_clines);
       assert(free_space() >= 4);
       ++_cline_cap;
       /// cls[] will assert in debug if we address beyond its old size
@@ -1537,9 +1593,10 @@ namespace psitri
       }
 
       // 2. Cline count should be reasonable (max 16 unique cachelines per leaf)
-      if (_cline_cap > 16)
+      if (_cline_cap > max_value_clines)
       {
-         SAL_ERROR("leaf validate: _cline_cap {} > 16  nb:{}", _cline_cap, nb);
+         SAL_ERROR("leaf validate: _cline_cap {} > max_value_clines {}  nb:{}",
+                   _cline_cap, max_value_clines, nb);
          return false;
       }
 
@@ -1580,6 +1637,22 @@ namespace psitri
             {
                SAL_ERROR("leaf validate: branch[{}] value_offset {} > alloc_pos {}", i, *off,
                          _alloc_pos);
+               return false;
+            }
+         }
+         else if (vb.is_subtree())
+         {
+            auto off = vb.subtree_offset();
+            if (*off > _alloc_pos && _alloc_pos > 0)
+            {
+               SAL_ERROR("leaf validate: branch[{}] subtree_offset {} > alloc_pos {}", i, *off,
+                         _alloc_pos);
+               return false;
+            }
+            if (*off < sizeof(tree_id))
+            {
+               SAL_ERROR("leaf validate: branch[{}] subtree_offset {} too small for tree_id", i,
+                         *off);
                return false;
             }
          }

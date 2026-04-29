@@ -15,6 +15,7 @@
 #include <psitri/write_session_impl.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <condition_variable>
@@ -192,15 +193,36 @@ struct MDBX_env
 //
 // A DUPSORT DBI stores each duplicate as one physical PsiTri key:
 //
-//    escaped(mdbx_key) + "\0\0" + escaped(sort_value)
+//    escaped(mdbx_key) + "\0\0" + "\1" + escaped(sort_value)
 //
-// The stored value is empty. This keeps duplicate writes in the top-level tree
-// instead of editing a per-key subtree, so repeated inserts can use PsiTri's
-// unique-root fast path. NUL bytes are escaped as "\0\xff"; "\0\0" is reserved
-// as the field separator, which preserves bytewise sort order and prefix order.
+// The shim also stores one hidden marker per outer key:
+//
+//    escaped(mdbx_key) + "\0\0" + "\0"
+//
+// That marker makes cursor::find(key) an exact seek followed by next(), while
+// the value tag leaves an empty duplicate value unambiguous. Stored values are
+// empty. This keeps duplicate writes in the top-level tree instead of editing a
+// per-key subtree, so repeated inserts can use PsiTri's unique-root fast path.
+// NUL bytes are escaped as "\0\xff"; "\0\0" is reserved as the field separator,
+// which preserves bytewise sort order and prefix order.
 
-static void append_dupsort_escaped(std::string& out, std::string_view bytes,
-                                   bool reverse_bytes = false)
+static constexpr char dupsort_outer_tag = '\0';
+static constexpr char dupsort_value_tag = '\1';
+
+struct dupsort_key_buffer
+{
+   std::array<char, max_psitri_key_size> bytes{};
+   size_t                                size = 0;
+
+   std::string_view view() const noexcept
+   {
+      return {bytes.data(), size};
+   }
+};
+
+static bool append_dupsort_escaped_into(char* out, size_t capacity, size_t& pos,
+                                        std::string_view bytes,
+                                        bool reverse_bytes = false)
 {
    for (char ch : bytes)
    {
@@ -210,41 +232,71 @@ static void append_dupsort_escaped(std::string& out, std::string_view bytes,
 
       if (byte == 0)
       {
-         out.push_back('\0');
-         out.push_back(static_cast<char>(0xff));
+         if (pos + 2 > capacity)
+            return false;
+         out[pos++] = '\0';
+         out[pos++] = static_cast<char>(0xff);
       }
       else
       {
-         out.push_back(static_cast<char>(byte));
+         if (pos + 1 > capacity)
+            return false;
+         out[pos++] = static_cast<char>(byte);
       }
    }
+   return true;
 }
 
-static std::optional<std::string> dupsort_prefix(std::string_view key)
+static std::optional<std::string_view>
+dupsort_prefix_into(std::string_view key, dupsort_key_buffer& out)
 {
-   std::string out;
-   out.reserve(std::min(max_psitri_key_size + 1, key.size() * 2 + 2));
-   append_dupsort_escaped(out, key);
-   out.push_back('\0');
-   out.push_back('\0');
-
-   if (out.size() > max_psitri_key_size)
+   size_t pos = 0;
+   if (!append_dupsort_escaped_into(out.bytes.data(), out.bytes.size(), pos, key))
       return std::nullopt;
-   return out;
+
+   if (pos + 2 > out.bytes.size())
+      return std::nullopt;
+   out.bytes[pos++] = '\0';
+   out.bytes[pos++] = '\0';
+
+   out.size = pos;
+   return out.view();
 }
 
-static std::optional<std::string>
-dupsort_composite_key(std::string_view key, std::string_view value,
-                      bool reverse_dup = false)
+static std::optional<std::string_view>
+dupsort_tagged_key_into(std::string_view key, char tag, dupsort_key_buffer& out)
 {
-   auto out = dupsort_prefix(key);
-   if (!out)
+   auto prefix = dupsort_prefix_into(key, out);
+   if (!prefix || out.size + 1 > out.bytes.size())
       return std::nullopt;
 
-   append_dupsort_escaped(*out, value, reverse_dup);
-   if (out->size() > max_psitri_key_size)
+   out.bytes[out.size++] = tag;
+   return out.view();
+}
+
+static std::optional<std::string_view>
+dupsort_composite_key_into(std::string_view key, std::string_view value,
+                           bool reverse_dup, dupsort_key_buffer& out)
+{
+   if (!dupsort_tagged_key_into(key, dupsort_value_tag, out))
       return std::nullopt;
-   return out;
+
+   if (!append_dupsort_escaped_into(out.bytes.data(), out.bytes.size(), out.size,
+                                    value, reverse_dup))
+      return std::nullopt;
+   return out.view();
+}
+
+static std::optional<std::string_view>
+dupsort_outer_marker_key_into(std::string_view key, dupsort_key_buffer& out)
+{
+   return dupsort_tagged_key_into(key, dupsort_outer_tag, out);
+}
+
+static std::optional<std::string_view>
+dupsort_first_value_key_into(std::string_view key, dupsort_key_buffer& out)
+{
+   return dupsort_tagged_key_into(key, dupsort_value_tag, out);
 }
 
 static bool dupsort_key_matches_prefix(std::string_view composite,
@@ -254,17 +306,37 @@ static bool dupsort_key_matches_prefix(std::string_view composite,
           && composite.compare(0, prefix.size(), prefix) == 0;
 }
 
-static std::optional<std::string> prefix_successor(std::string_view prefix)
+static bool dupsort_key_is_outer_marker(std::string_view composite,
+                                        std::string_view prefix)
 {
-   std::string upper(prefix);
-   for (size_t i = upper.size(); i > 0; --i)
+   return composite.size() == prefix.size() + 1
+          && dupsort_key_matches_prefix(composite, prefix)
+          && composite[prefix.size()] == dupsort_outer_tag;
+}
+
+static bool dupsort_key_is_value_for_prefix(std::string_view composite,
+                                            std::string_view prefix)
+{
+   return composite.size() >= prefix.size() + 1
+          && dupsort_key_matches_prefix(composite, prefix)
+          && composite[prefix.size()] == dupsort_value_tag;
+}
+
+static std::optional<std::string_view>
+prefix_successor_into(std::string_view prefix, dupsort_key_buffer& out)
+{
+   if (prefix.size() > out.bytes.size())
+      return std::nullopt;
+
+   std::memcpy(out.bytes.data(), prefix.data(), prefix.size());
+   for (size_t i = prefix.size(); i > 0; --i)
    {
-      unsigned char byte = static_cast<unsigned char>(upper[i - 1]);
+      unsigned char byte = static_cast<unsigned char>(out.bytes[i - 1]);
       if (byte != 0xff)
       {
-         upper[i - 1] = static_cast<char>(byte + 1);
-         upper.resize(i);
-         return upper;
+         out.bytes[i - 1] = static_cast<char>(byte + 1);
+         out.size = i;
+         return out.view();
       }
    }
    return std::nullopt;
@@ -273,10 +345,13 @@ static std::optional<std::string> prefix_successor(std::string_view prefix)
 static bool decode_dupsort_composite(std::string_view composite,
                                      bool             reverse_dup,
                                      std::string&     key_out,
-                                     std::string&     value_out)
+                                     std::string&     value_out,
+                                     bool*            outer_marker_out = nullptr)
 {
    key_out.clear();
    value_out.clear();
+   if (outer_marker_out)
+      *outer_marker_out = false;
 
    size_t pos = 0;
    bool   saw_separator = false;
@@ -308,6 +383,23 @@ static bool decode_dupsort_composite(std::string_view composite,
    if (!saw_separator)
       return false;
 
+   if (pos >= composite.size())
+      return false;
+
+   unsigned char tag = static_cast<unsigned char>(composite[pos++]);
+   if (tag == static_cast<unsigned char>(dupsort_outer_tag))
+   {
+      if (pos != composite.size())
+         return false;
+      if (!outer_marker_out)
+         return false;
+      *outer_marker_out = true;
+      return true;
+   }
+
+   if (tag != static_cast<unsigned char>(dupsort_value_tag))
+      return false;
+
    while (pos < composite.size())
    {
       unsigned char byte = static_cast<unsigned char>(composite[pos++]);
@@ -330,12 +422,12 @@ static bool decode_dupsort_composite(std::string_view composite,
    return true;
 }
 
-/// Transaction-owned storage for slices returned through the MDBX API.
+/// Transaction-owned storage for non-cursor slices returned through the MDBX API.
 ///
 /// Native MDBX usually returns pointers into mmap'd pages, so callers commonly
-/// keep returned MDBX_val slices after closing a short-lived cursor. PsiTri
-/// cursors materialize values, so the compatibility layer must keep those bytes
-/// alive for the transaction rather than tying them to a cursor object.
+/// keep MDBX_val slices from mdbx_get() for the transaction lifetime. Cursor
+/// results are borrowed from cursor_state instead and are valid until the next
+/// cursor movement.
 class returned_slice_arena
 {
  public:
@@ -408,12 +500,16 @@ class mdbx_view_cursor
    {
       return direct_ ? direct_->upper_bound(key) : (*dwal_)->upper_bound(key);
    }
-   bool seek(std::string_view key)
-   {
-      return direct_ ? direct_->seek(key) : (*dwal_)->seek(key);
-   }
-   bool next() { return direct_ ? direct_->next() : (*dwal_)->next(); }
-   bool prev() { return direct_ ? direct_->prev() : (*dwal_)->prev(); }
+	   bool seek(std::string_view key)
+	   {
+	      return direct_ ? direct_->seek(key) : (*dwal_)->seek(key);
+	   }
+	   bool find(std::string_view key)
+	   {
+	      return direct_ ? direct_->find(key) : (*dwal_)->find(key);
+	   }
+	   bool next() { return direct_ ? direct_->next() : (*dwal_)->next(); }
+	   bool prev() { return direct_ ? direct_->prev() : (*dwal_)->prev(); }
 
    bool is_end() const { return direct_ ? direct_->is_end() : (*dwal_)->is_end(); }
    bool is_rend() const { return direct_ ? direct_->is_rend() : (*dwal_)->is_rend(); }
@@ -488,7 +584,10 @@ struct cursor_state
       }
 
       raw_key.assign(mc->key().data(), mc->key().size());
-      if (!decode_dupsort_composite(raw_key, reverse_dup, key_buf, val_buf))
+      bool is_outer_marker = false;
+      if (!decode_dupsort_composite(raw_key, reverse_dup, key_buf, val_buf,
+                                    &is_outer_marker)
+          || is_outer_marker)
       {
          valid = false;
          return false;
@@ -497,6 +596,78 @@ struct cursor_state
       valid = true;
       touched = true;
       return true;
+   }
+
+   bool sync_forward_dup()
+   {
+      while (outer_positioned())
+      {
+         bool is_outer_marker = false;
+         raw_key.assign(mc->key().data(), mc->key().size());
+         if (decode_dupsort_composite(raw_key, reverse_dup, key_buf, val_buf,
+                                      &is_outer_marker)
+             && !is_outer_marker)
+         {
+            valid = true;
+            touched = true;
+            return true;
+         }
+         if (!is_outer_marker || !mc->next())
+            break;
+      }
+
+      valid = false;
+      return false;
+   }
+
+   bool sync_backward_dup()
+   {
+      while (outer_positioned())
+      {
+         bool is_outer_marker = false;
+         raw_key.assign(mc->key().data(), mc->key().size());
+         if (decode_dupsort_composite(raw_key, reverse_dup, key_buf, val_buf,
+                                      &is_outer_marker)
+             && !is_outer_marker)
+         {
+            valid = true;
+            touched = true;
+            return true;
+         }
+         if (!is_outer_marker || !mc->prev())
+            break;
+      }
+
+      valid = false;
+      return false;
+   }
+
+   bool sync_forward_dup_for_prefix(std::string_view prefix)
+   {
+      while (outer_positioned() && dupsort_key_matches_prefix(mc->key(), prefix))
+      {
+         if (dupsort_key_is_value_for_prefix(mc->key(), prefix))
+            return sync_dup_key_val();
+         if (!dupsort_key_is_outer_marker(mc->key(), prefix) || !mc->next())
+            break;
+      }
+
+      valid = false;
+      return false;
+   }
+
+   bool sync_backward_dup_for_prefix(std::string_view prefix)
+   {
+      while (outer_positioned() && dupsort_key_matches_prefix(mc->key(), prefix))
+      {
+         if (dupsort_key_is_value_for_prefix(mc->key(), prefix))
+            return sync_dup_key_val();
+         if (!dupsort_key_is_outer_marker(mc->key(), prefix) || !mc->prev())
+            break;
+      }
+
+      valid = false;
+      return false;
    }
 
    void sync_key_val()
@@ -525,14 +696,14 @@ struct cursor_state
       if (!valid && !sync_dup_key_val())
          return false;
 
-      auto prefix = dupsort_prefix(key_buf);
-      if (!prefix || !mc->lower_bound(*prefix)
-          || !dupsort_key_matches_prefix(mc->key(), *prefix))
+      dupsort_key_buffer prefix_buf;
+      auto prefix = dupsort_prefix_into(key_buf, prefix_buf);
+      if (!prefix || !mc->lower_bound(*prefix))
       {
          valid = false;
          return false;
       }
-      return sync_dup_key_val();
+      return sync_forward_dup_for_prefix(*prefix);
    }
 
    bool open_last_dup_current()
@@ -540,8 +711,10 @@ struct cursor_state
       if (!valid && !sync_dup_key_val())
          return false;
 
-      auto prefix = dupsort_prefix(key_buf);
-      auto upper  = prefix ? prefix_successor(*prefix) : std::nullopt;
+      dupsort_key_buffer prefix_buf;
+      dupsort_key_buffer upper_buf;
+      auto prefix = dupsort_prefix_into(key_buf, prefix_buf);
+      auto upper  = prefix ? prefix_successor_into(*prefix, upper_buf) : std::nullopt;
       if (!prefix || !upper)
       {
          valid = false;
@@ -554,13 +727,13 @@ struct cursor_state
       else
          positioned = mc->seek_last();
 
-      if (!positioned || !dupsort_key_matches_prefix(mc->key(), *prefix))
+      if (!positioned)
       {
          valid = false;
          return false;
       }
 
-      return sync_dup_key_val();
+      return sync_backward_dup_for_prefix(*prefix);
    }
 
    bool seek_first_dup()
@@ -570,7 +743,7 @@ struct cursor_state
          valid = false;
          return false;
       }
-      return sync_dup_key_val();
+      return sync_forward_dup();
    }
 
    bool seek_last_dup()
@@ -580,42 +753,65 @@ struct cursor_state
          valid = false;
          return false;
       }
-      return sync_dup_key_val();
+      return sync_backward_dup();
    }
 
    bool seek_outer_first_dup(std::string_view key)
    {
-      auto prefix = dupsort_prefix(key);
-      if (!prefix || !mc->lower_bound(*prefix)
-          || !dupsort_key_matches_prefix(mc->key(), *prefix))
+      dupsort_key_buffer marker_buf;
+      auto prefix = dupsort_prefix_into(key, marker_buf);
+      if (!prefix || marker_buf.size + 1 > marker_buf.bytes.size())
       {
          valid = false;
          return false;
       }
-      return sync_dup_key_val();
+
+      marker_buf.bytes[marker_buf.size++] = dupsort_outer_tag;
+      std::string_view marker(marker_buf.bytes.data(), prefix->size() + 1);
+	      if (mc->find(marker))
+	      {
+	         if (!mc->next())
+	         {
+            valid = false;
+            return false;
+         }
+         return sync_forward_dup_for_prefix(*prefix);
+      }
+
+      marker_buf.bytes[prefix->size()] = dupsort_value_tag;
+      std::string_view first_value(marker_buf.bytes.data(), prefix->size() + 1);
+      if (!mc->lower_bound(first_value))
+      {
+         valid = false;
+         return false;
+      }
+      return sync_forward_dup_for_prefix(*prefix);
    }
 
    bool lower_outer_first_dup(std::string_view key)
    {
-      auto prefix = dupsort_prefix(key);
+      dupsort_key_buffer prefix_buf;
+      auto prefix = dupsort_prefix_into(key, prefix_buf);
       if (!prefix || !mc->lower_bound(*prefix))
       {
          valid = false;
          return false;
       }
-      return sync_dup_key_val();
+      return sync_forward_dup();
    }
 
    bool upper_outer_first_dup(std::string_view key)
    {
-      auto prefix = dupsort_prefix(key);
-      auto upper  = prefix ? prefix_successor(*prefix) : std::nullopt;
+      dupsort_key_buffer prefix_buf;
+      dupsort_key_buffer upper_buf;
+      auto prefix = dupsort_prefix_into(key, prefix_buf);
+      auto upper  = prefix ? prefix_successor_into(*prefix, upper_buf) : std::nullopt;
       if (!prefix || !upper || !mc->lower_bound(*upper))
       {
          valid = false;
          return false;
       }
-      return sync_dup_key_val();
+      return sync_forward_dup();
    }
 
    bool next_outer_first_dup()
@@ -623,14 +819,16 @@ struct cursor_state
       if (!valid)
          return seek_first_dup();
 
-      auto prefix = dupsort_prefix(key_buf);
-      auto upper  = prefix ? prefix_successor(*prefix) : std::nullopt;
+      dupsort_key_buffer prefix_buf;
+      dupsort_key_buffer upper_buf;
+      auto prefix = dupsort_prefix_into(key_buf, prefix_buf);
+      auto upper  = prefix ? prefix_successor_into(*prefix, upper_buf) : std::nullopt;
       if (!prefix || !upper || !mc->lower_bound(*upper))
       {
          valid = false;
          return false;
       }
-      return sync_dup_key_val();
+      return sync_forward_dup();
    }
 
    bool prev_outer_last_dup()
@@ -638,8 +836,9 @@ struct cursor_state
       if (!valid)
          return seek_last_dup();
 
-      auto saved  = raw_key;
-      auto prefix = dupsort_prefix(key_buf);
+      auto saved = raw_key;
+      dupsort_key_buffer prefix_buf;
+      auto prefix = dupsort_prefix_into(key_buf, prefix_buf);
       if (!prefix || !mc->lower_bound(*prefix) || !mc->prev())
       {
          mc->seek(saved);
@@ -647,7 +846,7 @@ struct cursor_state
          return false;
       }
 
-      if (!sync_dup_key_val())
+      if (!sync_backward_dup())
       {
          mc->seek(saved);
          sync_dup_key_val();
@@ -658,8 +857,10 @@ struct cursor_state
 
    bool seek_dup_exact(std::string_view key, std::string_view value)
    {
-      auto composite = dupsort_composite_key(key, value, reverse_dup);
-      if (!composite || !mc->seek(*composite))
+      dupsort_key_buffer composite_buf;
+      auto composite = dupsort_composite_key_into(key, value, reverse_dup,
+                                                  composite_buf);
+	      if (!composite || !mc->find(*composite))
       {
          valid = false;
          return false;
@@ -669,10 +870,13 @@ struct cursor_state
 
    bool seek_dup_lower(std::string_view key, std::string_view value)
    {
-      auto prefix    = dupsort_prefix(key);
-      auto composite = dupsort_composite_key(key, value, reverse_dup);
+      dupsort_key_buffer prefix_buf;
+      dupsort_key_buffer composite_buf;
+      auto prefix    = dupsort_prefix_into(key, prefix_buf);
+      auto composite = dupsort_composite_key_into(key, value, reverse_dup,
+                                                  composite_buf);
       if (!prefix || !composite || !mc->lower_bound(*composite)
-          || !dupsort_key_matches_prefix(mc->key(), *prefix))
+          || !dupsort_key_is_value_for_prefix(mc->key(), *prefix))
       {
          valid = false;
          return false;
@@ -686,11 +890,12 @@ struct cursor_state
          return false;
 
       auto saved = raw_key;
-      auto prefix = dupsort_prefix(key_buf);
+      dupsort_key_buffer prefix_buf;
+      auto prefix = dupsort_prefix_into(key_buf, prefix_buf);
       if (!prefix)
          return false;
 
-      if (mc->next() && dupsort_key_matches_prefix(mc->key(), *prefix))
+      if (mc->next() && dupsort_key_is_value_for_prefix(mc->key(), *prefix))
          return sync_dup_key_val();
 
       mc->seek(saved);
@@ -704,11 +909,12 @@ struct cursor_state
          return false;
 
       auto saved = raw_key;
-      auto prefix = dupsort_prefix(key_buf);
+      dupsort_key_buffer prefix_buf;
+      auto prefix = dupsort_prefix_into(key_buf, prefix_buf);
       if (!prefix)
          return false;
 
-      if (mc->prev() && dupsort_key_matches_prefix(mc->key(), *prefix))
+      if (mc->prev() && dupsort_key_is_value_for_prefix(mc->key(), *prefix))
          return sync_dup_key_val();
 
       mc->seek(saved);
@@ -820,14 +1026,20 @@ static MDBX_val hold_txn_slice(const MDBX_txn* txn, std::string_view bytes)
    return const_cast<MDBX_txn*>(txn)->returned_slices.hold(bytes);
 }
 
+static MDBX_val borrow_cursor_slice(std::string_view bytes)
+{
+   static char empty = '\0';
+   return {const_cast<char*>(bytes.empty() ? &empty : bytes.data()), bytes.size()};
+}
+
 static void assign_cursor_result(MDBX_cursor* cursor, MDBX_val* key,
                                  MDBX_val* data)
 {
    auto& st = *cursor->state;
    if (key)
-      *key = hold_txn_slice(cursor->txn, st.key_buf);
+      *key = borrow_cursor_slice(st.key_buf);
    if (data)
-      *data = hold_txn_slice(cursor->txn, st.val_buf);
+      *data = borrow_cursor_slice(st.val_buf);
 }
 
 static dbi_meta dbi_metadata(MDBX_env* env, MDBX_dbi dbi)
@@ -1106,11 +1318,16 @@ static bool txn_get_value(const MDBX_txn* txn, uint32_t root_idx,
 }
 
 static void txn_upsert_value(MDBX_txn* txn, uint32_t root_idx,
-                             std::string_view key, std::string_view value)
+                             std::string_view key, std::string_view value,
+                             bool sorted_append_hint = false)
 {
    if (!txn->use_dwal && txn->direct_tx)
    {
-      direct_root_handle(txn, root_idx)->upsert(key, value);
+      auto* root = direct_root_handle(txn, root_idx);
+      if (sorted_append_hint)
+         root->upsert_sorted(key, value);
+      else
+         root->upsert(key, value);
       return;
    }
    txn->write_tx->upsert(root_idx, key, value);
@@ -1124,33 +1341,36 @@ static bool txn_remove_key(MDBX_txn* txn, uint32_t root_idx,
    return static_cast<bool>(txn->write_tx->remove(root_idx, key));
 }
 
-static uint64_t txn_remove_range(MDBX_txn* txn, uint32_t root_idx,
+static bool txn_remove_range_any(MDBX_txn* txn, uint32_t root_idx,
                                  std::string_view low, std::string_view high)
 {
    if (!txn->use_dwal && txn->direct_tx)
    {
-      return direct_root_handle(txn, root_idx)->remove_range(low, high);
+      return direct_root_handle(txn, root_idx)->remove_range_any(low, high);
    }
    auto mc = make_txn_cursor(txn, root_idx);
    bool had_key = mc->lower_bound(low) && (high.empty() || mc->key() < high);
    txn->write_tx->remove_range(root_idx, low, high);
-   return had_key ? 1 : 0;
+   return had_key;
 }
 
 static uint64_t count_dups_for_key(const MDBX_txn* txn, uint32_t root_idx,
                                    std::string_view key)
 {
-   auto prefix = dupsort_prefix(key);
-   if (!prefix)
+   dupsort_key_buffer prefix_buf;
+   dupsort_key_buffer first_value_buf;
+   auto prefix      = dupsort_prefix_into(key, prefix_buf);
+   auto first_value = dupsort_first_value_key_into(key, first_value_buf);
+   if (!prefix || !first_value)
       return 0;
 
    auto     mc = make_txn_cursor(txn, root_idx);
    uint64_t n  = 0;
-   if (mc->lower_bound(*prefix))
+   if (mc->lower_bound(*first_value))
    {
       do
       {
-         if (!dupsort_key_matches_prefix(mc->key(), *prefix))
+         if (!dupsort_key_is_value_for_prefix(mc->key(), *prefix))
             break;
          ++n;
       } while (mc->next());
@@ -1161,13 +1381,41 @@ static uint64_t count_dups_for_key(const MDBX_txn* txn, uint32_t root_idx,
 static bool dupsort_key_exists(const MDBX_txn* txn, uint32_t root_idx,
                                std::string_view key)
 {
-   auto prefix = dupsort_prefix(key);
-   if (!prefix)
+   dupsort_key_buffer prefix_buf;
+   dupsort_key_buffer marker_buf;
+   dupsort_key_buffer first_value_buf;
+   auto prefix      = dupsort_prefix_into(key, prefix_buf);
+   auto marker      = dupsort_outer_marker_key_into(key, marker_buf);
+   auto first_value = dupsort_first_value_key_into(key, first_value_buf);
+   if (!prefix || !first_value)
       return false;
 
    auto mc = make_txn_cursor(txn, root_idx);
-   return mc->lower_bound(*prefix)
-          && dupsort_key_matches_prefix(mc->key(), *prefix);
+	   if (marker && mc->find(*marker))
+   {
+      return mc->next() && dupsort_key_is_value_for_prefix(mc->key(), *prefix);
+   }
+
+   return mc->lower_bound(*first_value)
+          && dupsort_key_is_value_for_prefix(mc->key(), *prefix);
+}
+
+static bool ensure_dupsort_outer_marker(MDBX_txn* txn, uint32_t root_idx,
+                                        std::string_view key,
+                                        bool sorted_append_hint)
+{
+   dupsort_key_buffer marker_buf;
+   auto marker = dupsort_outer_marker_key_into(key, marker_buf);
+   if (!marker)
+      return false;
+
+   std::string existing;
+   if (!txn_get_value(txn, root_idx, *marker, existing))
+   {
+      txn_upsert_value(txn, root_idx, *marker, std::string_view{},
+                       sorted_append_hint);
+   }
+   return true;
 }
 
 static MDBX_cursor* acquire_cursor(MDBX_txn* txn)
@@ -1245,7 +1493,8 @@ static bool move_from_deleted_current(cursor_state& st, MDBX_cursor_op op,
 {
    if (st.dupsort)
    {
-      auto prefix = dupsort_prefix(saved_key);
+      dupsort_key_buffer prefix_buf;
+      auto prefix = dupsort_prefix_into(saved_key, prefix_buf);
       if (!prefix)
          return false;
 
@@ -1254,49 +1503,46 @@ static bool move_from_deleted_current(cursor_state& st, MDBX_cursor_op op,
       {
          case MDBX_NEXT:
             positioned = !saved_raw.empty() && st.mc->lower_bound(saved_raw);
-            break;
+            return positioned && st.sync_forward_dup();
          case MDBX_PREV:
             positioned = !saved_raw.empty() && st.mc->lower_bound(saved_raw);
             positioned = positioned ? st.mc->prev() : st.mc->seek_last();
-            break;
+            return positioned && st.sync_backward_dup();
          case MDBX_NEXT_DUP:
-            positioned = !saved_raw.empty() && st.mc->lower_bound(saved_raw) &&
-                         dupsort_key_matches_prefix(st.mc->key(), *prefix);
-            break;
+            positioned = !saved_raw.empty() && st.mc->lower_bound(saved_raw);
+            return positioned && st.sync_forward_dup_for_prefix(*prefix);
          case MDBX_PREV_DUP:
             positioned = !saved_raw.empty() && st.mc->lower_bound(saved_raw);
             positioned = positioned ? st.mc->prev() : st.mc->seek_last();
-            positioned = positioned &&
-                         dupsort_key_matches_prefix(st.mc->key(), *prefix);
-            break;
+            return positioned
+                   && dupsort_key_is_value_for_prefix(st.mc->key(), *prefix)
+                   && st.sync_dup_key_val();
          case MDBX_NEXT_NODUP:
          {
-            auto upper = prefix_successor(*prefix);
+            dupsort_key_buffer upper_buf;
+            auto upper = prefix_successor_into(*prefix, upper_buf);
             positioned = upper && st.mc->lower_bound(*upper);
-            break;
+            return positioned && st.sync_forward_dup();
          }
          case MDBX_PREV_NODUP:
             positioned = st.mc->lower_bound(*prefix) && st.mc->prev();
-            break;
+            return positioned && st.sync_backward_dup();
          case MDBX_FIRST_DUP:
             positioned = st.seek_outer_first_dup(saved_key);
             return positioned;
          case MDBX_LAST_DUP:
          {
-            auto upper = prefix_successor(*prefix);
+            dupsort_key_buffer upper_buf;
+            auto upper = prefix_successor_into(*prefix, upper_buf);
             if (!upper)
                return false;
             positioned = st.mc->lower_bound(*upper);
             positioned = positioned ? st.mc->prev() : st.mc->seek_last();
-            positioned = positioned &&
-                         dupsort_key_matches_prefix(st.mc->key(), *prefix);
-            break;
+            return positioned && st.sync_backward_dup_for_prefix(*prefix);
          }
          default:
             return false;
       }
-
-      return positioned && sync_after_position(st);
    }
 
    bool positioned = false;
@@ -2409,14 +2655,16 @@ static int mdbx_put_impl(MDBX_txn* txn, uint32_t root_idx, bool is_ds,
    {
       if (is_ds)
       {
-         auto composite = dupsort_composite_key(key_sv, val_sv, rev_ds);
+         dupsort_key_buffer composite_buf;
+         auto composite = dupsort_composite_key_into(key_sv, val_sv, rev_ds,
+                                                     composite_buf);
          if (!composite)
             return MDBX_BAD_VALSIZE;
 
          if (flags & MDBX_NODUPDATA)
          {
             auto mc = make_txn_cursor(txn, root_idx);
-            if (mc->seek(*composite))
+	            if (mc->find(*composite))
                return MDBX_KEYEXIST;
          }
          if (flags & MDBX_NOOVERWRITE)
@@ -2425,7 +2673,12 @@ static int mdbx_put_impl(MDBX_txn* txn, uint32_t root_idx, bool is_ds,
                return MDBX_KEYEXIST;
          }
 
-         txn_upsert_value(txn, root_idx, *composite, std::string_view{});
+         bool append_hint = (flags & (MDBX_APPEND | MDBX_APPENDDUP)) != 0;
+         if (!ensure_dupsort_outer_marker(txn, root_idx, key_sv, append_hint))
+            return MDBX_BAD_VALSIZE;
+
+         txn_upsert_value(txn, root_idx, *composite, std::string_view{},
+                          append_hint);
          mark_txn_cursors_stale_after_write(txn, root_idx);
          return MDBX_SUCCESS;
       }
@@ -2441,7 +2694,8 @@ static int mdbx_put_impl(MDBX_txn* txn, uint32_t root_idx, bool is_ds,
          }
       }
 
-      txn_upsert_value(txn, root_idx, key_sv, val_sv);
+      txn_upsert_value(txn, root_idx, key_sv, val_sv,
+                       (flags & (MDBX_APPEND | MDBX_APPENDDUP)) != 0);
       mark_txn_cursors_stale_after_write(txn, root_idx);
       return MDBX_SUCCESS;
    }
@@ -2492,24 +2746,40 @@ int mdbx_del(MDBX_txn* txn, MDBX_dbi dbi,
          if (data)
          {
             auto val_sv = to_sv(data);
-            auto composite = dupsort_composite_key(key_sv, val_sv, rev_ds);
+            dupsort_key_buffer composite_buf;
+            auto composite = dupsort_composite_key_into(key_sv, val_sv, rev_ds,
+                                                        composite_buf);
             if (!composite)
                return MDBX_BAD_VALSIZE;
 
             bool removed = txn_remove_key(txn, root_idx, *composite);
             if (removed)
+            {
+               if (!dupsort_key_exists(txn, root_idx, key_sv))
+               {
+                  dupsort_key_buffer marker_buf;
+                  if (auto marker = dupsort_outer_marker_key_into(key_sv,
+                                                                  marker_buf))
+                     txn_remove_key(txn, root_idx, *marker);
+               }
                mark_txn_cursors_stale_after_write(txn, root_idx);
+            }
             return removed ? MDBX_SUCCESS : MDBX_NOTFOUND;
          }
          else
          {
             // Delete ALL duplicate values for this key.
-            auto prefix = dupsort_prefix(key_sv);
-            auto upper  = prefix ? prefix_successor(*prefix) : std::nullopt;
-            uint64_t removed = 0;
+            dupsort_key_buffer prefix_buf;
+            dupsort_key_buffer upper_buf;
+            auto prefix = dupsort_prefix_into(key_sv, prefix_buf);
+            auto upper  = prefix ? prefix_successor_into(*prefix, upper_buf)
+                                 : std::nullopt;
+            bool removed = false;
             if (prefix && upper)
             {
-               removed = txn_remove_range(txn, root_idx, *prefix, *upper);
+               if (!dupsort_key_exists(txn, root_idx, key_sv))
+                  return MDBX_NOTFOUND;
+               removed = txn_remove_range_any(txn, root_idx, *prefix, *upper);
                if (removed)
                   mark_txn_cursors_stale_after_write(txn, root_idx);
             }
@@ -2804,7 +3074,7 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
             if (key_too_large(key_sv))
                return MDBX_NOTFOUND;
             st.touched = true;
-            ok = mc->seek(key_sv);
+	            ok = mc->find(key_sv);
             break;
          }
          case MDBX_SET_RANGE:

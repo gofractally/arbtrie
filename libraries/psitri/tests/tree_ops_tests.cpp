@@ -52,6 +52,38 @@ namespace
       snprintf(buf, sizeof(buf), "val-%08d", i);
       return buf;
    }
+
+   std::string merge_key(char group, int index)
+   {
+      std::string key;
+      key.push_back(group);
+      key.push_back('-');
+      key.append(260, static_cast<char>('a' + index));
+      key.push_back(static_cast<char>('0' + index));
+      return key;
+   }
+
+   std::string prefixed_merge_key(char group, int index)
+   {
+      std::string key = "shared-parent-prefix/";
+      key.push_back(group);
+      key.push_back('/');
+      key.append(80, static_cast<char>('a' + index));
+      key.push_back(static_cast<char>('0' + index));
+      return key;
+   }
+
+   std::string cousin_merge_key(char group, int index)
+   {
+      std::string key;
+      key.push_back(group);
+      key.push_back('/');
+      key.append(180, static_cast<char>('a' + (index % 26)));
+      char suffix[16];
+      snprintf(suffix, sizeof(suffix), "%03d", index);
+      key.append(suffix);
+      return key;
+   }
 }  // namespace
 
 TEST_CASE("tree_ops: get_stats on diverse tree", "[tree_ops][stats]")
@@ -189,7 +221,7 @@ TEST_CASE("tree_ops: validate_unique_refs with value_nodes", "[tree_ops][validat
    REQUIRE_NOTHROW(ctx.validate_unique_refs(ref));
 }
 
-TEST_CASE("tree_ops: subtree collapse via low threshold", "[tree_ops][collapse]")
+TEST_CASE("tree_ops: subtree collapse after byte-fit pruning", "[tree_ops][collapse]")
 {
    test_db env("tree_ops_collapse_db");
 
@@ -202,8 +234,9 @@ TEST_CASE("tree_ops: subtree collapse via low threshold", "[tree_ops][collapse]"
       trx.commit();
    }
 
-   // Now remove most keys to trigger collapse path
-   // The collapse happens during shared-mode remove when descendents <= threshold
+   // Now remove most keys to trigger the byte-fit collapse path.
+   // The collapse happens during shared-mode remove when the remaining subtree
+   // can be represented by one rewritten leaf.
    // We use a snapshot to force shared mode, then remove
    auto snapshot_root = env.ses->get_root(0);  // holds a ref, making tree shared
 
@@ -226,9 +259,9 @@ TEST_CASE("tree_ops: subtree collapse via low threshold", "[tree_ops][collapse]"
    }
 }
 
-TEST_CASE("tree_ops: subtree collapse with set_collapse_threshold", "[tree_ops][collapse]")
+TEST_CASE("tree_ops: subtree collapse is byte-fit driven", "[tree_ops][collapse]")
 {
-   test_db env("tree_ops_threshold_db");
+   test_db env("tree_ops_byte_fit_db");
    // N must be large enough to force a multi-level tree structure;
    // a single leaf holds ~50-60 small entries, so don't scale this down.
    const int N = 60;
@@ -281,6 +314,234 @@ TEST_CASE("tree_ops: subtree collapse with set_collapse_threshold", "[tree_ops][
       auto gone = trx.get<std::string>(tkey(5));
       CHECK_FALSE(gone.has_value());
    }
+}
+
+TEST_CASE("tree_ops: remove merges adjacent sparse siblings", "[tree_ops][remove][merge]")
+{
+   test_db env("tree_ops_sibling_merge_db");
+
+   constexpr int groups    = 8;
+   constexpr int per_group = 3;
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int g = 0; g < groups; ++g)
+         for (int i = 0; i < per_group; ++i)
+            trx.upsert(merge_key(static_cast<char>('A' + g), i), small_val(g * 10 + i));
+      trx.commit();
+   }
+
+   auto root_before = env.ses->get_root(0);
+   REQUIRE(root_before);
+   write_cursor wc_before(root_before);
+   auto         stats_before = wc_before.get_stats();
+   REQUIRE(stats_before.branches > 1);
+   REQUIRE(stats_before.total_keys == groups * per_group);
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      CHECK(trx.remove(merge_key('D', 1)) >= 0);
+      trx.commit();
+   }
+
+   auto root_after = env.ses->get_root(0);
+   REQUIRE(root_after);
+   write_cursor wc_after(root_after);
+   auto         stats_after = wc_after.get_stats();
+
+   CHECK(stats_after.total_keys == stats_before.total_keys - 1);
+   CHECK(stats_after.branches == stats_before.branches - 1);
+   CHECK(stats_after.leaf_nodes < stats_before.leaf_nodes);
+
+   auto verify = env.ses->start_transaction(0);
+   for (int g = 0; g < groups; ++g)
+      for (int i = 0; i < per_group; ++i)
+      {
+         auto key = merge_key(static_cast<char>('A' + g), i);
+         auto val = verify.get<std::string>(key);
+         if (key == merge_key('D', 1))
+            CHECK_FALSE(val.has_value());
+         else
+         {
+            REQUIRE(val.has_value());
+            CHECK(*val == small_val(g * 10 + i));
+         }
+      }
+}
+
+TEST_CASE("tree_ops: shared remove merges adjacent sparse siblings", "[tree_ops][shared][remove][merge]")
+{
+   test_db env("tree_ops_shared_sibling_merge_db");
+
+   constexpr int groups    = 8;
+   constexpr int per_group = 3;
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int g = 0; g < groups; ++g)
+         for (int i = 0; i < per_group; ++i)
+            trx.upsert(merge_key(static_cast<char>('A' + g), i), small_val(g * 10 + i));
+      trx.commit();
+   }
+
+   auto snapshot = env.ses->get_root(0);
+
+   auto root_before = env.ses->get_root(0);
+   REQUIRE(root_before);
+   write_cursor wc_before(root_before);
+   auto         stats_before = wc_before.get_stats();
+   REQUIRE(stats_before.branches > 1);
+
+   {
+      auto root = env.ses->get_root(0);
+      tree_context ctx(std::move(root));
+      CHECK(ctx.remove(merge_key('D', 1)) >= 0);
+      env.ses->set_root(0, ctx.get_root());
+   }
+
+   auto root_after = env.ses->get_root(0);
+   REQUIRE(root_after);
+   write_cursor wc_after(root_after);
+   auto         stats_after = wc_after.get_stats();
+
+   CHECK(stats_after.total_keys == stats_before.total_keys - 1);
+   CHECK(stats_after.branches == stats_before.branches - 1);
+   CHECK(stats_after.leaf_nodes < stats_before.leaf_nodes);
+
+   auto current = env.ses->start_transaction(0);
+   CHECK_FALSE(current.get<std::string>(merge_key('D', 1)).has_value());
+   CHECK(current.get<std::string>(merge_key('D', 0)).has_value());
+   CHECK(current.get<std::string>(merge_key('C', 2)).has_value());
+
+   cursor snap_cur(snapshot);
+   CHECK(snap_cur.get<std::string>(merge_key('D', 1)).has_value());
+}
+
+TEST_CASE("tree_ops: remove merges siblings under inner_prefix parent",
+          "[tree_ops][remove][merge][prefix]")
+{
+   test_db env("tree_ops_prefix_sibling_merge_db");
+
+   constexpr int groups    = 16;
+   constexpr int per_group = 2;
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int g = 0; g < groups; ++g)
+         for (int i = 0; i < per_group; ++i)
+            trx.upsert(prefixed_merge_key(static_cast<char>('A' + g), i),
+                       small_val(g * 10 + i));
+      trx.commit();
+   }
+
+   auto root_before = env.ses->get_root(0);
+   REQUIRE(root_before);
+   write_cursor wc_before(root_before);
+   auto         stats_before = wc_before.get_stats();
+   REQUIRE(stats_before.inner_prefix_nodes >= 1);
+   REQUIRE(stats_before.total_keys == groups * per_group);
+   REQUIRE(stats_before.total_keys - 1 > 24);
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      CHECK(trx.remove(prefixed_merge_key('H', 1)) >= 0);
+      trx.commit();
+   }
+
+   auto root_after = env.ses->get_root(0);
+   REQUIRE(root_after);
+   write_cursor wc_after(root_after);
+   auto         stats_after = wc_after.get_stats();
+
+   CHECK(stats_after.total_keys == stats_before.total_keys - 1);
+   CHECK(stats_after.branches == stats_before.branches - 1);
+   CHECK(stats_after.leaf_nodes < stats_before.leaf_nodes);
+   wc_after.validate();
+
+   auto verify = env.ses->start_transaction(0);
+   for (int g = 0; g < groups; ++g)
+      for (int i = 0; i < per_group; ++i)
+      {
+         auto key = prefixed_merge_key(static_cast<char>('A' + g), i);
+         auto val = verify.get<std::string>(key);
+         if (key == prefixed_merge_key('H', 1))
+            CHECK_FALSE(val.has_value());
+         else
+         {
+            REQUIRE(val.has_value());
+            CHECK(*val == small_val(g * 10 + i));
+         }
+      }
+}
+
+TEST_CASE("tree_ops: collapse switch gates sparse sibling merge",
+          "[tree_ops][remove][merge]")
+{
+   test_db env("tree_ops_collapse_gate_merge_db");
+
+   constexpr int groups    = 3;
+   constexpr int per_group = 18;
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      for (int g = 0; g < groups; ++g)
+         for (int i = 0; i < per_group; ++i)
+            trx.upsert(cousin_merge_key(static_cast<char>('A' + g), i),
+                       small_val(g * 100 + i));
+      trx.commit();
+   }
+
+   // Prune with collapse disabled so the opportunistic sibling merge path
+   // cannot flatten the sparse groups while preparing the shape.
+   {
+      auto root = env.ses->get_root(0);
+      tree_context ctx(std::move(root));
+      ctx.set_collapse_enabled(false);
+
+      for (int g = 0; g < groups; ++g)
+         for (int i = 3; i < per_group; ++i)
+            CHECK(ctx.remove(cousin_merge_key(static_cast<char>('A' + g), i)) >= 0);
+
+      env.ses->set_root(0, ctx.get_root());
+   }
+
+   auto root_before = env.ses->get_root(0);
+   REQUIRE(root_before);
+   write_cursor wc_before(root_before);
+   auto         stats_before = wc_before.get_stats();
+   REQUIRE(stats_before.total_keys == groups * 3);
+   REQUIRE(stats_before.leaf_nodes == groups);
+
+   {
+      auto trx = env.ses->start_transaction(0);
+      CHECK(trx.remove(cousin_merge_key('B', 1)) >= 0);
+      trx.commit();
+   }
+
+   auto root_after = env.ses->get_root(0);
+   REQUIRE(root_after);
+   write_cursor wc_after(root_after);
+   auto         stats_after = wc_after.get_stats();
+
+   CHECK(stats_after.total_keys == stats_before.total_keys - 1);
+   CHECK(stats_after.branches < stats_before.branches);
+   CHECK(stats_after.leaf_nodes < stats_before.leaf_nodes);
+   wc_after.validate();
+
+   auto verify = env.ses->start_transaction(0);
+   for (int g = 0; g < groups; ++g)
+      for (int i = 0; i < 3; ++i)
+      {
+         auto key = cousin_merge_key(static_cast<char>('A' + g), i);
+         auto val = verify.get<std::string>(key);
+         if (key == cousin_merge_key('B', 1))
+            CHECK_FALSE(val.has_value());
+         else
+         {
+            REQUIRE(val.has_value());
+            CHECK(*val == small_val(g * 100 + i));
+         }
+      }
 }
 
 TEST_CASE("tree_ops: shared-mode upsert forces COW on inner nodes", "[tree_ops][shared]")
@@ -579,7 +840,7 @@ TEST_CASE("tree_ops: shared-mode range_remove", "[tree_ops][shared][range_remove
    {
       auto trx = env.ses->start_transaction(0);
       // Remove a range in the middle
-      auto removed = trx.remove_range(tkey(N / 4), tkey(3 * N / 4));
+      auto removed = trx.remove_range_counted(tkey(N / 4), tkey(3 * N / 4));
       CHECK(removed > 0);
       trx.commit();
    }
@@ -627,7 +888,7 @@ TEST_CASE("tree_ops: shared-mode collapse with value_nodes", "[tree_ops][shared]
    // Snapshot forces shared mode
    auto snapshot = env.ses->get_root(0);
 
-   // Remove most keys to trigger collapse path (descendents <= threshold)
+   // Remove most keys to trigger the byte-fit collapse path.
    {
       auto trx = env.ses->start_transaction(0);
       for (int i = 3; i < 40 / OPS_SCALE; ++i)
@@ -681,8 +942,8 @@ TEST_CASE("tree_ops: stats counts sparse_subtree_inners and single_branch_inners
 
    // Should have some structure
    CHECK(stats.total_keys == 10);
-   // With 10 keys each under different first bytes, inner node descendents are small
-   // so sparse_subtree_inners should be counted
+   // With 10 keys each under different first bytes, the inner node is sparse
+   // enough that sparse_subtree_inners should be counted.
    CHECK(stats.total_nodes() > 0);
 }
 
@@ -691,11 +952,12 @@ TEST_CASE("tree_ops: shared-mode phase 3 multi-branch collapse", "[tree_ops][col
    test_db env("tree_ops_shared_phase3_db");
 
    // Strategy:
-   // 1. Build a tree, then remove keys in unique mode (threshold=0 to prevent
-   //    collapse) until we have an inner_node with 4 branches and 25 descendants.
+   // 1. Build a tree, then remove keys in unique mode with collapse disabled
+   //    until we have an inner_node with several sparse branches.
    // 2. Snapshot the root (makes it shared).
    // 3. Remove 1 key that empties a branch, using a new tree_context with
-   //    threshold=25. Phase 3 fires: num_branches>2, new_desc=24<=25.
+   //    byte-fit collapse enabled. Phase 3 fires when the remaining subtree
+   //    can be represented by one rewritten leaf.
    //
    // Use 10 groups × 60 keys = 600 keys to force a multi-branch root inner_node.
    const int groups    = 10;
@@ -712,13 +974,13 @@ TEST_CASE("tree_ops: shared-mode phase 3 multi-branch collapse", "[tree_ops][col
       trx.commit();
    }
 
-   // Step 2: Remove keys in unique mode with collapse disabled (threshold=0).
+   // Step 2: Remove keys in unique mode with collapse disabled.
    // Remove all groups except A, B, C, D. Then trim A,B,C to 8 keys each
    // and D to 1 key. Final state: inner_node with 4+ branches, 25 descendants.
    {
       auto root = env.ses->get_root(0);
       tree_context ctx(std::move(root));
-      ctx.set_collapse_threshold(0);  // disable collapse during pruning
+      ctx.set_collapse_enabled(false);  // keep the multi-branch shape during pruning
 
       // Remove groups E-J entirely
       for (int g = 4; g < groups; ++g)
@@ -751,12 +1013,12 @@ TEST_CASE("tree_ops: shared-mode phase 3 multi-branch collapse", "[tree_ops][col
    // Step 3: Snapshot to force shared mode
    auto snapshot = env.ses->get_root(0);
 
-   // Step 4: Remove D_item_000 in shared mode with collapse_threshold=25.
-   // The inner_node has 4+ branches (>2), and new_desc = 25-1 = 24 <= 25.
+   // Step 4: Remove D_item_000 in shared mode with byte-fit collapse enabled.
+   // The remaining subtree fits in one leaf, so the multi-branch node collapses.
    {
       auto root = env.ses->get_root(0);
       tree_context ctx(std::move(root));
-      ctx.set_collapse_threshold(25);
+      ctx.set_collapse_enabled(true);
       ctx.remove("D_item_000");
       env.ses->set_root(0, ctx.get_root());
    }
@@ -808,8 +1070,8 @@ TEST_CASE("tree_ops: validate on empty tree", "[tree_ops][validate]")
 // node whose children include inner_nodes. This happens when:
 // 1. An inner_prefix_node accumulates enough branches to split, producing two
 //    inner_node children (see split() at line 877-884)
-// 2. Removing keys causes the parent's descendents to drop below the collapse
-//    threshold, triggering size_subtree on all children
+// 2. Removing keys leaves a parent whose remaining contents fit in one leaf,
+//    triggering size_subtree on all children
 // 3. Sibling inner_nodes NOT on the remove path remain as inner_nodes
 //
 // Strategy: insert many keys under a shared prefix (byte 0 = 0x00) to force
@@ -827,16 +1089,18 @@ TEST_CASE("tree_ops: size_subtree through inner_node children", "[tree_ops][coll
    //
    // 1. Children are inner_prefix_nodes (created by leaf overflow)
    // 2. Untouched children remain as inner_prefix_nodes during removal
-   // 3. Parent descendents ≤ collapse_threshold (24)
+   // 3. Parent subtree contents fit in one rewritten leaf
    //
    // The key challenge: normal keys (~10 bytes) allow ~100 entries per leaf,
-   // so inner_prefix is only created with >100 keys per group — far exceeding
-   // the collapse threshold. Solution: use VERY LARGE keys (~1000 bytes) so
+   // so inner_prefix is only created with >100 keys per group. Solution: use
+   // VERY LARGE keys (~1000 bytes) so
    // only 2 entries fit per leaf. Then 3 keys per group overflows a leaf and
-   // creates an inner_prefix_node. 8 groups × 3 keys = 24 = threshold.
+   // creates an inner_prefix_node. 8 groups × 3 keys keeps the final subtree
+   // small enough for one rewritten leaf.
    //
-   // After removing 1 key from one group, root has 23 descendents. Root's
-   // collapse fires, and untouched sibling groups are still inner_prefix_nodes.
+   // After removing 1 key from one group, the remaining root subtree fits in
+   // one rewritten leaf. Root collapse fires, and untouched sibling groups are
+   // still inner_prefix_nodes.
    const int NUM_GROUPS = 8;
    const int KEYS_PER_GROUP = 3;
 
@@ -882,7 +1146,7 @@ TEST_CASE("tree_ops: size_subtree through inner_node children", "[tree_ops][coll
    // Phase 2: Remove ALL keys from group 0 so its branch returns empty.
    // In unique_remove mode, Phase 3 (collapse) only fires when
    // sub_branches.count()==0 (branch completely emptied). After the branch
-   // is removed, the root has 7 branches, 21 descendents ≤ 24.
+   // is removed, the root has 7 sparse branches whose contents fit in one leaf.
    // Phase 3 fires and size_subtree encounters groups 1-7 as inner_prefix_nodes.
    {
       auto trx = env.ses->start_transaction(0);
@@ -1280,11 +1544,11 @@ TEST_CASE("tree_ops: shared-mode Phase 3 collapse with inner_prefix branches", "
    // Snapshot → shared mode.
    auto snapshot = env.ses->get_root(0);
 
-   // Remove D_target with collapse threshold = 10.
+   // Remove D_target with byte-fit collapse enabled.
    {
       auto root = env.ses->get_root(0);
       tree_context ctx(std::move(root));
-      ctx.set_collapse_threshold(10);
+      ctx.set_collapse_enabled(true);
       ctx.remove("D_target");
       env.ses->set_root(0, ctx.get_root());
    }
@@ -1448,7 +1712,7 @@ TEST_CASE("tree_ops: unique Phase 3 collapse through inner_prefix subtree", "[tr
       wc->upsert(key, small_val(20 + i));
    }
 
-   // Remove enough to bring descendant count below threshold.
+   // Remove enough to make the remaining subtree fit in one rewritten leaf.
    // Remove all of group B and C.
    for (int i = 0; i < 4; ++i)
    {
