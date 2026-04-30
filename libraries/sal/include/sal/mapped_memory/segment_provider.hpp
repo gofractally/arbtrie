@@ -52,8 +52,14 @@ namespace sal
           * 
           * 0 means segment is not mlocked
           * 1 means segment is mlocked
-          */
+         */
          ucc::hierarchical_bitmap<max_segment_count> mlock_segments;
+
+         /// Cumulative mlock/munlock syscall outcomes for pinned cache diagnostics.
+         std::atomic<uint64_t> successful_mlock_regions{0};
+         std::atomic<uint64_t> failed_mlock_regions{0};
+         std::atomic<uint64_t> successful_munlock_regions{0};
+         std::atomic<uint64_t> failed_munlock_regions{0};
 
          /**
           * The next sequence number for the segment provider to allocate

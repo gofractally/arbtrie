@@ -798,17 +798,21 @@ TEST_CASE("range_remove: unique inner_prefix single survivor collapses when leaf
    test_db t("range_unique_prefix_single_child");
    auto    cur = start_temp_edit(t);
 
-   insert_prefix_group(cur, "data_alpha_padding_padding_padding_", 20);
-   insert_prefix_group(cur, "data_beta_padding_padding_padding_", 20);
-   insert_prefix_group(cur, "data_gamma_padding_padding_padding_", 20);
+   // With 4K leaves, 20/20/20 no longer forces an inner_prefix_node.  Keep
+   // each group small enough to remain a direct leaf child, but make the
+   // combined tree large enough that removing two groups exercises foreground
+   // collapse without recursive subtree sizing.
+   insert_prefix_group(cur, "data_alpha_padding_padding_padding_", 40);
+   insert_prefix_group(cur, "data_beta_padding_padding_padding_", 40);
+   insert_prefix_group(cur, "data_gamma_padding_padding_padding_", 40);
    cur.validate();
 
    tree_context before(cur.tx.get_tree().copy_root());
    auto         before_stats = before.get_stats();
    REQUIRE(before_stats.inner_prefix_nodes >= 1);
 
-   REQUIRE(cur.remove_range_counted("data_a", "data_g") == 40);
-   REQUIRE(cur.count_keys() == 20);
+   REQUIRE(cur.remove_range_counted("data_a", "data_g") == 80);
+   REQUIRE(cur.count_keys() == 40);
    cur.validate();
 
    tree_context after(cur.tx.get_tree().copy_root());
@@ -817,7 +821,7 @@ TEST_CASE("range_remove: unique inner_prefix single survivor collapses when leaf
 
    auto rc   = cur.snapshot_cursor();
    auto keys = collect_keys(rc);
-   REQUIRE(keys.size() == 20);
+   REQUIRE(keys.size() == 40);
    for (auto& key : keys)
       CHECK(key.rfind("data_gamma_", 0) == 0);
 }

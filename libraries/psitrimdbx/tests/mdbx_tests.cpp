@@ -1317,8 +1317,11 @@ TEST_CASE("C API: DUPSORT uses one encoded PsiTri key budget",
                          &dbi) == MDBX_SUCCESS);
 
    std::string key(512, 'k');
-   std::string first(509, 'a');
-   std::string second(509, 'b');
+   // Physical key budget is 1024 bytes. The single-root layout reserves one
+   // byte for the DBI namespace, then DUPSORT adds escaped(key) + "\0\0" +
+   // tag + escaped(value).
+   std::string first(508, 'a');
+   std::string second(508, 'b');
 
    MDBX_val k{key.data(), key.size()};
    MDBX_val v2{second.data(), second.size()};
@@ -1353,7 +1356,7 @@ TEST_CASE("C API: DUPSORT uses one encoded PsiTri key budget",
    REQUIRE(std::string_view(static_cast<char*>(bgot.iov_base), bgot.iov_len) ==
            binary_first);
 
-   std::string too_large_value(511, 'x');
+   std::string too_large_value(509, 'x');
    MDBX_val bad_v{too_large_value.data(), too_large_value.size()};
    REQUIRE(mdbx_put(txn, dbi, &k, &bad_v, MDBX_UPSERT) == MDBX_BAD_VALSIZE);
 
@@ -2786,6 +2789,65 @@ TEST_CASE("C API: invalid read mode rejected", "[mdbx][c-api][read-mode]")
    mdbx_env_close(env);
 }
 
+TEST_CASE("C API: DWAL write mode reads own writes and committed latest",
+          "[mdbx][c-api][dwal]")
+{
+   auto dir = make_temp_dir("c_dwal_write_mode");
+
+   MDBX_env* env = nullptr;
+   REQUIRE(mdbx_env_create(&env) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_maxdbs(env, 8) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_write_mode(env, PSITRI_WRITE_MODE_DWAL) == MDBX_SUCCESS);
+   uint64_t mode = 0;
+   REQUIRE(mdbx_env_get_option(env, MDBX_opt_psitri_write_mode, &mode) == MDBX_SUCCESS);
+   REQUIRE(mode == PSITRI_WRITE_MODE_DWAL);
+   REQUIRE(mdbx_env_open(env, dir.c_str(), MDBX_ENV_DEFAULTS, 0644) == MDBX_SUCCESS);
+   REQUIRE(mdbx_env_set_write_mode(env, PSITRI_WRITE_MODE_DIRECT) == MDBX_EINVAL);
+
+   MDBX_dbi dbi = 0;
+   {
+      MDBX_txn* txn = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
+
+      std::string key = "hot-key";
+      std::string val = "hot-value";
+      MDBX_val k{key.data(), key.size()};
+      MDBX_val v{val.data(), val.size()};
+      REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+
+      MDBX_val got{};
+      REQUIRE(mdbx_get(txn, dbi, &k, &got) == MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(got) == val);
+
+      MDBX_cursor* cur = nullptr;
+      REQUIRE(mdbx_cursor_open(txn, dbi, &cur) == MDBX_SUCCESS);
+      MDBX_val ck{key.data(), key.size()};
+      MDBX_val cv{};
+      REQUIRE(mdbx_cursor_get(cur, &ck, &cv, MDBX_SET_KEY) == MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(cv) == val);
+      mdbx_cursor_close(cur);
+
+      REQUIRE(mdbx_txn_commit(txn) == MDBX_SUCCESS);
+   }
+
+   REQUIRE(mdbx_env_set_read_mode(env, PSITRI_READ_MODE_LATEST) == MDBX_SUCCESS);
+   {
+      MDBX_txn* ro = nullptr;
+      REQUIRE(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro) == MDBX_SUCCESS);
+      REQUIRE(mdbx_dbi_open(ro, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
+
+      std::string key = "hot-key";
+      MDBX_val k{key.data(), key.size()};
+      MDBX_val v{};
+      REQUIRE(mdbx_get(ro, dbi, &k, &v) == MDBX_SUCCESS);
+      REQUIRE(mdbx_bytes(v) == "hot-value");
+      REQUIRE(mdbx_txn_abort(ro) == MDBX_SUCCESS);
+   }
+
+   REQUIRE(mdbx_env_close(env) == MDBX_SUCCESS);
+}
+
 // ════════════════════════════════════════════════════════════════════
 // Concurrent reader + writer tests
 // ════════════════════════════════════════════════════════════════════
@@ -2910,11 +2972,17 @@ TEST_CASE("C API: many named DBIs", "[mdbx][c-api]")
             MDBX_val v{val.data(), val.size()};
             mdbx_put(txn, dbis[d], &k, &v, MDBX_UPSERT);
          }
+
+         auto shared_val = "shared_" + std::to_string(d);
+         MDBX_val shared_k{const_cast<char*>("shared"), 6};
+         MDBX_val shared_v{shared_val.data(), shared_val.size()};
+         REQUIRE(mdbx_put(txn, dbis[d], &shared_k, &shared_v, MDBX_UPSERT) ==
+                 MDBX_SUCCESS);
       }
       mdbx_txn_commit(txn);
    }
 
-   // Verify each DBI has exactly 10 entries and correct data
+   // Verify each DBI has exactly 11 entries and its namespace is isolated.
    {
       MDBX_txn* ro = nullptr;
       mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &ro);
@@ -2923,7 +2991,7 @@ TEST_CASE("C API: many named DBIs", "[mdbx][c-api]")
       {
          MDBX_stat stat{};
          REQUIRE(mdbx_dbi_stat(ro, dbis[d], &stat, sizeof(stat)) == MDBX_SUCCESS);
-         REQUIRE(stat.ms_entries == 10);
+         REQUIRE(stat.ms_entries == 11);
 
          // Check a specific key
          auto key = "k" + std::to_string(d) + "_5";
@@ -2938,6 +3006,13 @@ TEST_CASE("C API: many named DBIs", "[mdbx][c-api]")
          MDBX_val wk{wrong_key.data(), wrong_key.size()};
          MDBX_val wv{};
          REQUIRE(mdbx_get(ro, dbis[d], &wk, &wv) == MDBX_NOTFOUND);
+
+         auto shared_expected = "shared_" + std::to_string(d);
+         MDBX_val shared_k{const_cast<char*>("shared"), 6};
+         MDBX_val shared_v{};
+         REQUIRE(mdbx_get(ro, dbis[d], &shared_k, &shared_v) == MDBX_SUCCESS);
+         REQUIRE(std::string(static_cast<char*>(shared_v.iov_base),
+                             shared_v.iov_len) == shared_expected);
       }
 
       mdbx_txn_abort(ro);

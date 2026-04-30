@@ -261,7 +261,8 @@ namespace sal
                               std::min<int64_t>(cfg.max_database_size, sal::max_database_size)) /
                           segment_size)),
          _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
-         _root_object_file(dir / "roots", access_mode::read_write, true)
+         _root_object_file(dir / "roots", access_mode::read_write, true),
+         _session_op_stats_file(dir / "session_ops.bin", access_mode::read_write, false)
    {
       _type_ops.fill(&default_object_type_ops<alloc_header>());
 
@@ -296,6 +297,21 @@ namespace sal
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
       _root_objects = reinterpret_cast<root_object_array*>(_root_object_file.data());
+      if (_session_op_stats_file.size() < sizeof(mapped_memory::session_operation_stats))
+      {
+         _session_op_stats_file.resize(
+             system_config::round_to_page(sizeof(mapped_memory::session_operation_stats)));
+         _session_op_stats =
+             new (_session_op_stats_file.data()) mapped_memory::session_operation_stats();
+      }
+      else
+      {
+         _session_op_stats = reinterpret_cast<mapped_memory::session_operation_stats*>(
+             _session_op_stats_file.data());
+      }
+      if (!_session_op_stats->compatible())
+         SAL_WARN("resetting incompatible session_ops.bin");
+      _session_op_stats->reset();
       assert(_root_objects);
       // Bind global free-range tracker base to the contiguous-block mmap
       // base. Available before any segment is allocated; the address-space
@@ -343,11 +359,17 @@ namespace sal
       }
 
       _mapped_state->_config = cfg;
+      _mapped_state->_cache_difficulty_state.configure_cache(
+          cfg.max_pinned_cache_size_mb * 1024ULL * 1024ULL, cfg.read_cache_window_sec);
 
-      // Reset all session read locks — no sessions are active at construction
-      // time.  Stale locks from a previous crash would otherwise block the
-      // segment provider from draining the recycled-segments queue, eventually
-      // causing a circular_buffer overflow in the compactor.
+      // Reset process-local session state — no sessions are active at construction
+      // time. Stale slots/queues from a previous crash must never make a fresh
+      // opener believe dead sessions are still alive.
+      _mapped_state->_session_data.reset_process_state();
+
+      // Reset all session read locks. Stale locks from a previous crash would
+      // otherwise block the segment provider from draining the recycled-segments
+      // queue, eventually causing a circular_buffer overflow in the compactor.
       _mapped_state->_read_lock_queue.reset_all_session_locks();
 
       mlock_pinned_segments();
@@ -363,18 +385,21 @@ namespace sal
     */
    void allocator::mlock_pinned_segments()
    {
+      auto& provider_state = _mapped_state->_segment_provider;
       for (auto seg : _mapped_state->_segment_provider.mlock_segments)
       {
          segment_number seg_num(seg);
          auto*          segment_ptr = get_segment(seg_num);
          if (mlock(segment_ptr, segment_size) != 0)
          {
+            provider_state.failed_mlock_regions.fetch_add(1, std::memory_order_relaxed);
             SAL_WARN("mlock failed for segment: ", seg, " error: ", strerror(errno));
 
             // Clear both the bitmap and the meta bit using the helper
             update_segment_pinned_state(seg_num, false);
             return;
          }
+         provider_state.successful_mlock_regions.fetch_add(1, std::memory_order_relaxed);
          _mapped_state->_segment_data.set_pinned(seg_num, true);
       }
    }
@@ -1471,6 +1496,8 @@ namespace sal
    {
       bool        more_work = false;
       ptr_address read_ids[1024];
+      uint64_t    oldest_hot_vage = uint64_t(-1);
+      uint64_t    newest_hot_vage = 0;
       std::vector<ptr_address> pending_storage;
       try
       {
@@ -1480,6 +1507,36 @@ namespace sal
       {
          return false;
       }
+
+      for (auto seg : _mapped_state->_segment_provider.mlock_segments)
+      {
+         const auto vage = _mapped_state->_segment_data.get_vage(segment_number(seg));
+         if (vage == 0)
+            continue;
+         oldest_hot_vage = std::min(oldest_hot_vage, vage);
+         newest_hot_vage = std::max(newest_hot_vage, vage);
+      }
+
+      auto demote_pressure_ppm = [&](segment_number seg) -> uint32_t {
+         if (oldest_hot_vage == uint64_t(-1) || newest_hot_vage <= oldest_hot_vage)
+            return 0;
+         const auto source_vage = _mapped_state->_segment_data.get_vage(seg);
+         if (source_vage <= oldest_hot_vage)
+            return 1'000'000;
+         if (source_vage >= newest_hot_vage)
+            return 0;
+         return uint32_t((__uint128_t(newest_hot_vage - source_vage) * 1'000'000ull) /
+                         (newest_hot_vage - oldest_hot_vage));
+      };
+
+      auto accept_hot_refresh = [](uint64_t random, uint32_t pressure_ppm) -> bool {
+         if (pressure_ppm >= 1'000'000)
+            return true;
+         if (pressure_ppm == 0)
+            return false;
+         const auto sample = uint32_t((__uint128_t(random) * 1'000'000ull) >> 64);
+         return sample < pressure_ppm;
+      };
 
       // iterate over all sessions and not just the allocated ones
       // to avoid the race condition where a session is deallocated
@@ -1501,6 +1558,8 @@ namespace sal
             auto obj_ref = ses.get_ref<alloc_header>(addr);
             // reads the relaxed cached load of the location
             auto start_loc = obj_ref.loc();
+            const bool source_was_pinned =
+                _mapped_state->_segment_data.is_pinned(start_loc.segment());
 
             // when the object is freed and reallocated, the pending cache
             // bit is cleared, so we need to make sure the bit is set before
@@ -1514,6 +1573,16 @@ namespace sal
                continue;
 
             assert(obj_ref->address() == addr);
+            const uint32_t source_demote_pressure =
+                source_was_pinned ? demote_pressure_ppm(start_loc.segment()) : 0;
+            if (source_was_pinned &&
+                not accept_hot_refresh(ses.get_random() ^ uint64_t(*addr),
+                                       source_demote_pressure))
+            {
+               _mapped_state->_cache_difficulty_state.compactor_skip_young_hot_bytes(
+                   obj_ref->size(), source_demote_pressure);
+               continue;
+            }
 
             const auto& ops = type_ops(obj_ref.obj());
             auto        compact_size = ops.compact_size(obj_ref.obj());
@@ -1541,7 +1610,11 @@ namespace sal
             ///     - and the objeect is still valid ref count
             if (obj_ref.control().cas_move(start_loc, new_loc))
             {
-               _mapped_state->_cache_difficulty_state.compactor_promote_bytes(obj_ref->size());
+               const bool destination_is_pinned =
+                   _mapped_state->_segment_data.is_pinned(new_loc.segment());
+               _mapped_state->_cache_difficulty_state.compactor_promote_bytes(
+                   obj_ref->size(), source_was_pinned, destination_is_pinned,
+                   source_demote_pressure);
                ses.record_freed_space(obj_ref.obj(), "compactor_promote_move");
                release_pending_relocation_refs(ses, pending_releases);
             }
@@ -1837,12 +1910,65 @@ namespace sal
 
       // Get count of segments in the mlock_segments bitmap
       result.mlocked_segments_count = _mapped_state->_segment_provider.mlock_segments.count();
+      result.successful_mlock_regions =
+          _mapped_state->_segment_provider.successful_mlock_regions.load(
+              std::memory_order_relaxed);
+      result.failed_mlock_regions =
+          _mapped_state->_segment_provider.failed_mlock_regions.load(
+              std::memory_order_relaxed);
+      result.successful_munlock_regions =
+          _mapped_state->_segment_provider.successful_munlock_regions.load(
+              std::memory_order_relaxed);
+      result.failed_munlock_regions =
+          _mapped_state->_segment_provider.failed_munlock_regions.load(
+              std::memory_order_relaxed);
 
       // Get cache difficulty and total promoted bytes
       result.cache_difficulty = _mapped_state->_cache_difficulty_state.get_cache_difficulty();
+      result.cache_policy_satisfied_bytes =
+          _mapped_state->_cache_difficulty_state.total_cache_policy_satisfied_bytes.load(
+              std::memory_order_relaxed);
       result.total_promoted_bytes =
           _mapped_state->_cache_difficulty_state.total_promoted_bytes.load(
               std::memory_order_relaxed);
+      result.cache_hot_to_hot_promotions =
+          _mapped_state->_cache_difficulty_state.total_hot_to_hot_promotions.load(
+              std::memory_order_relaxed);
+      result.cache_hot_to_hot_promoted_bytes =
+          _mapped_state->_cache_difficulty_state.total_hot_to_hot_promoted_bytes.load(
+              std::memory_order_relaxed);
+      result.cache_hot_to_hot_demote_pressure_ppm =
+          _mapped_state->_cache_difficulty_state.total_hot_to_hot_demote_pressure_ppm.load(
+              std::memory_order_relaxed);
+      result.cache_hot_to_hot_byte_demote_pressure_ppm =
+          _mapped_state->_cache_difficulty_state.total_hot_to_hot_byte_demote_pressure_ppm.load(
+              std::memory_order_relaxed);
+      result.cache_young_hot_skips =
+          _mapped_state->_cache_difficulty_state.total_young_hot_skips.load(
+              std::memory_order_relaxed);
+      result.cache_young_hot_skipped_bytes =
+          _mapped_state->_cache_difficulty_state.total_young_hot_skipped_bytes.load(
+              std::memory_order_relaxed);
+      result.cache_young_hot_skip_demote_pressure_ppm =
+          _mapped_state->_cache_difficulty_state.total_young_hot_skip_demote_pressure_ppm.load(
+              std::memory_order_relaxed);
+      result.cache_young_hot_skip_byte_demote_pressure_ppm =
+          _mapped_state->_cache_difficulty_state
+              .total_young_hot_skip_byte_demote_pressure_ppm.load(std::memory_order_relaxed);
+      result.cache_cold_to_hot_promotions =
+          _mapped_state->_cache_difficulty_state.total_cold_to_hot_promotions.load(
+              std::memory_order_relaxed);
+      result.cache_cold_to_hot_promoted_bytes =
+          _mapped_state->_cache_difficulty_state.total_cold_to_hot_promoted_bytes.load(
+              std::memory_order_relaxed);
+      result.cache_promoted_to_cold_promotions =
+          _mapped_state->_cache_difficulty_state.total_promoted_to_cold_promotions.load(
+              std::memory_order_relaxed);
+      result.cache_promoted_to_cold_bytes =
+          _mapped_state->_cache_difficulty_state.total_promoted_to_cold_bytes.load(
+              std::memory_order_relaxed);
+      result.cache_target_promoted_bytes_per_s =
+          _mapped_state->_cache_difficulty_state.target_promoted_bytes_per_sec();
 
       // Initialize total non-value nodes counter
       result.total_non_value_nodes = 0;
@@ -1924,6 +2050,25 @@ namespace sal
       // Control block stats
       result.control_block_zones    = _ptr_alloc.num_allocated_zones();
       result.control_block_capacity = _ptr_alloc.current_max_address_count();
+      {
+         auto cb_mlock = _ptr_alloc.get_mlock_stats();
+         result.control_block_header_pinned = cb_mlock.header_pinned;
+         result.control_block_zone_mlock_success_regions = cb_mlock.zones.successful_regions;
+         result.control_block_zone_mlock_failed_regions  = cb_mlock.zones.failed_regions;
+         result.control_block_zone_mlock_skipped_regions = cb_mlock.zones.skipped_regions;
+         result.control_block_zone_mlock_success_bytes   = cb_mlock.zones.successful_bytes;
+         result.control_block_zone_mlock_failed_bytes    = cb_mlock.zones.failed_bytes;
+         result.control_block_zone_mlock_skipped_bytes   = cb_mlock.zones.skipped_bytes;
+         result.control_block_freelist_mlock_success_regions =
+             cb_mlock.free_list.successful_regions;
+         result.control_block_freelist_mlock_failed_regions =
+             cb_mlock.free_list.failed_regions;
+         result.control_block_freelist_mlock_skipped_regions =
+             cb_mlock.free_list.skipped_regions;
+         result.control_block_freelist_mlock_success_bytes = cb_mlock.free_list.successful_bytes;
+         result.control_block_freelist_mlock_failed_bytes  = cb_mlock.free_list.failed_bytes;
+         result.control_block_freelist_mlock_skipped_bytes = cb_mlock.free_list.skipped_bytes;
+      }
 
       // Recycled-segments queue state
       result.recycled_queue_depth    = _mapped_state->_read_lock_queue.recycled_queue_depth();
@@ -2064,11 +2209,13 @@ namespace sal
          {
             if (mlock(sp, segment_size) != 0) [[unlikely]]
             {
+               provider_state.failed_mlock_regions.fetch_add(1, std::memory_order_relaxed);
                SAL_ERROR("mlock error({}) {}", errno, strerror(errno));
                update_segment_pinned_state(seg_num, false);
             }
             else
             {
+               provider_state.successful_mlock_regions.fetch_add(1, std::memory_order_relaxed);
                update_segment_pinned_state(seg_num, true);
                // munlock the oldest mlocked segment(s) if needed
                provider_munlock_excess_segments();
@@ -2081,7 +2228,12 @@ namespace sal
          {
             if (munlock(sp, segment_size) != 0) [[unlikely]]
             {
+               provider_state.failed_munlock_regions.fetch_add(1, std::memory_order_relaxed);
                SAL_ERROR("munlock error(", errno, ") ", strerror(errno));
+            }
+            else
+            {
+               provider_state.successful_munlock_regions.fetch_add(1, std::memory_order_relaxed);
             }
             update_segment_pinned_state(seg_num, false);
          }
@@ -2142,10 +2294,12 @@ namespace sal
       void* seg_ptr = get_segment(segment_number(oldest_seg));
       if (munlock(seg_ptr, segment_size) != 0) [[unlikely]]
       {
+         provider_state.failed_munlock_regions.fetch_add(1, std::memory_order_relaxed);
          SAL_ERROR("munlock error(", errno, ") ", strerror(errno));
       }
       else
       {
+         provider_state.successful_munlock_regions.fetch_add(1, std::memory_order_relaxed);
          // Clear both the bitmap and the meta bit using the helper
          update_segment_pinned_state(segment_number(oldest_seg), false);
       }
@@ -2218,6 +2372,8 @@ namespace sal
    void allocator::set_runtime_config(const runtime_config& cfg)
    {
       _mapped_state->_config = cfg;
+      _mapped_state->_cache_difficulty_state.configure_cache(
+          cfg.max_pinned_cache_size_mb * 1024ULL * 1024ULL, cfg.read_cache_window_sec);
    }
 
    /**

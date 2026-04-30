@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdlib>
 #include <cstring>
 #include <hash/xxhash.h>
 #include <psitri/node/node.hpp>
@@ -99,7 +100,8 @@ namespace psitri
          friend class leaf_node;
       };
 
-      static constexpr uint32_t  max_leaf_size = 4096 / 2;
+      static constexpr uint32_t  max_leaf_size = 4096;
+      static constexpr uint16_t  max_leaf_branches = 511;
       static constexpr uint32_t  max_value_clines = 16;
       static constexpr node_type type_id       = node_type::leaf;
       inline static uint32_t     alloc_size(key_view key, const value_type& value) noexcept;
@@ -538,7 +540,13 @@ namespace psitri
       }
 
      private:
-      void set_num_branches(uint16_t n) noexcept { _num_branches = n; }
+      void set_num_branches(uint16_t n) noexcept
+      {
+         assert(n <= max_leaf_branches);
+         if (n > max_leaf_branches)
+            std::abort();
+         _num_branches = n;
+      }
       void clone_from(const leaf_node* clone);
       void set_branch_version(branch_number bn, uint64_t version) noexcept;
       void copy_branch_version_from(const leaf_node& src,

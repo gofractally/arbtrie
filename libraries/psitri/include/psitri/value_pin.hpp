@@ -19,7 +19,7 @@ namespace psitri
 
       value_pin(const value_pin&)            = delete;
       value_pin& operator=(const value_pin&) = delete;
-      value_pin(value_pin&&)                 = delete;
+      value_pin(value_pin&& other) : _lock(other._lock) {}
       value_pin& operator=(value_pin&&)      = delete;
 
      private:

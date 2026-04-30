@@ -10,8 +10,7 @@ namespace sal
    {
       std::filesystem::create_directories(dir);
       _dir    = dir;
-      _header = std::make_unique<mapping>(dir / "header.bin", sal::access_mode::read_write,
-                                          sizeof(detail::ptr_alloc_header));
+      _header = std::make_unique<mapping>(dir / "header.bin", sal::access_mode::read_write, true);
       if (_header->size() != sizeof(detail::ptr_alloc_header))
       {
          if (_header->size() != 0)
@@ -26,16 +25,50 @@ namespace sal
                                                           detail::max_allocated_zones);
       _zone_free_list = std::make_unique<block_allocator>(
           dir / "free_list.bin", detail::ptrs_per_zone / 8, detail::max_allocated_zones);
+      _zone_allocator->mlock_mapped_blocks();
+      _zone_free_list->mlock_mapped_blocks();
 
       SAL_ERROR("free_list.bit blocksize: {}", detail::ptrs_per_zone / 8);
       //   _zone_free_list->reserve(1, true);
       //   _zone_allocator->reserve(1, true);
       ensure_capacity(1);
+      publish_mlock_stats();
       _ptr_base       = _zone_allocator->get<control_block>(offset_ptr(0));
       _free_list_base = _zone_free_list->get<std::atomic<uint64_t>>(offset_ptr(0));
    }
 
    control_block_alloc::~control_block_alloc() {}
+
+   void control_block_alloc::publish_mlock_stats() noexcept
+   {
+      auto stats = get_mlock_stats();
+      _header_ptr->control_block_header_mlock_pinned.store(stats.header_pinned ? 1 : 0,
+                                                           std::memory_order_relaxed);
+      _header_ptr->control_block_zone_mlock_success_regions.store(
+          stats.zones.successful_regions, std::memory_order_relaxed);
+      _header_ptr->control_block_zone_mlock_failed_regions.store(
+          stats.zones.failed_regions, std::memory_order_relaxed);
+      _header_ptr->control_block_zone_mlock_skipped_regions.store(
+          stats.zones.skipped_regions, std::memory_order_relaxed);
+      _header_ptr->control_block_zone_mlock_success_bytes.store(
+          stats.zones.successful_bytes, std::memory_order_relaxed);
+      _header_ptr->control_block_zone_mlock_failed_bytes.store(stats.zones.failed_bytes,
+                                                               std::memory_order_relaxed);
+      _header_ptr->control_block_zone_mlock_skipped_bytes.store(
+          stats.zones.skipped_bytes, std::memory_order_relaxed);
+      _header_ptr->control_block_freelist_mlock_success_regions.store(
+          stats.free_list.successful_regions, std::memory_order_relaxed);
+      _header_ptr->control_block_freelist_mlock_failed_regions.store(
+          stats.free_list.failed_regions, std::memory_order_relaxed);
+      _header_ptr->control_block_freelist_mlock_skipped_regions.store(
+          stats.free_list.skipped_regions, std::memory_order_relaxed);
+      _header_ptr->control_block_freelist_mlock_success_bytes.store(
+          stats.free_list.successful_bytes, std::memory_order_relaxed);
+      _header_ptr->control_block_freelist_mlock_failed_bytes.store(
+          stats.free_list.failed_bytes, std::memory_order_relaxed);
+      _header_ptr->control_block_freelist_mlock_skipped_bytes.store(
+          stats.free_list.skipped_bytes, std::memory_order_relaxed);
+   }
 
    void control_block_alloc::ensure_capacity(uint32_t req_zones)
    {
@@ -94,6 +127,7 @@ namespace sal
          _header_ptr->allocated_zones.compare_exchange_strong(azone, num_zones,
                                                               std::memory_order_release);
       _header_ptr->min_alloc_zone.store(azone - 1, std::memory_order_relaxed);
+      publish_mlock_stats();
    }
 
    void control_block_alloc::clear_all()

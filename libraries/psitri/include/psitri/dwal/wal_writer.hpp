@@ -1,5 +1,6 @@
 #pragma once
 #include <psitri/dwal/wal_format.hpp>
+#include <psitri/dwal/wal_status.hpp>
 #include <sal/config.hpp>
 #include <sal/numbers.hpp>
 
@@ -27,7 +28,8 @@ namespace psitri::dwal
       /// valid entry. Otherwise creates a fresh file.
       explicit wal_writer(const std::filesystem::path& path,
                           uint16_t                     root_index,
-                          uint64_t                     sequence_base = 0);
+                          uint64_t                     sequence_base = 0,
+                          wal_root_status*             status = nullptr);
 
       ~wal_writer();
 
@@ -77,6 +79,8 @@ namespace psitri::dwal
 
       /// Current write position (file size).
       uint64_t file_size() const noexcept { return _file_pos; }
+      uint64_t buffered_bytes() const noexcept { return _write_buf.size(); }
+      uint64_t logical_size() const noexcept { return _file_pos + _write_buf.size(); }
 
       /// Next sequence number that will be assigned.
       uint64_t next_sequence() const noexcept { return _next_seq; }
@@ -95,13 +99,21 @@ namespace psitri::dwal
       void write_u64(uint64_t v);
       void write_string(std::string_view sv);
       void flush_write_buffer();
+      void publish_status() noexcept;
 
       int                    _fd        = -1;
       uint64_t               _file_pos  = 0;
       uint64_t               _next_seq  = 0;
       uint16_t               _op_count  = 0;
+      uint64_t               _entry_upsert_data = 0;
+      uint64_t               _entry_upsert_subtree = 0;
+      uint64_t               _entry_remove = 0;
+      uint64_t               _entry_remove_range = 0;
+      uint64_t               _entry_key_bytes = 0;
+      uint64_t               _entry_value_bytes = 0;
       bool                   _entry_active = false;
       std::filesystem::path  _path;
+      wal_root_status*       _status = nullptr;
 
       /// Per-entry buffer: accumulates a single transaction's operations.
       std::vector<char>      _entry_buf;

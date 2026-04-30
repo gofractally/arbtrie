@@ -242,6 +242,8 @@ namespace psitri
       template <upsert_mode mode = upsert_mode::unique_upsert>
       int upsert(key_view key, value_type value)
       {
+         auto op_scope =
+             _session.record_operation(sal::mapped_memory::session_operation::tree_upsert);
          _old_value_size     = -1;
          sal::read_lock lock = _session.lock();
          _new_value          = std::move(value);
@@ -283,6 +285,8 @@ namespace psitri
       /// @return the size of the prior value, or -1 if the value was not found.
       int remove(key_view key)
       {
+         auto op_scope =
+             _session.record_operation(sal::mapped_memory::session_operation::tree_remove);
          if (not _root)
             return -1;
          _old_value_size         = -1;
@@ -539,6 +543,9 @@ namespace psitri
          }
       };
 
+      // Recursive subtree sizing is for explicit maintenance-style rewrites.
+      // Foreground remove must use size_direct_leaf_child so deletes do not
+      // walk arbitrarily deep sibling subtrees.
       void size_subtree(ptr_address addr, uint16_t prefix_len, subtree_sizer& out)
       {
          if (out.overflow)
@@ -579,7 +586,44 @@ namespace psitri
          }
       }
 
-      // --- Phase 3: Subtree collapse helpers ---
+      bool size_direct_leaf_child(ptr_address addr, uint16_t prefix_len, subtree_sizer& out)
+      {
+         if (out.overflow)
+            return true;
+
+         auto ref = _session.get_ref(addr);
+         if (node_type(ref->type()) != node_type::leaf)
+            return false;
+
+         auto     leaf = ref.template as<leaf_node>();
+         uint16_t nb   = leaf->num_branches();
+         for (uint16_t i = 0; i < nb; ++i)
+         {
+            out.add_leaf_entry(prefix_len + leaf->get_key(branch_number(i)).size(),
+                               leaf->get_value(branch_number(i)));
+            if (out.overflow)
+               return true;
+         }
+         return true;
+      }
+
+      bool size_direct_leaf_children(const ptr_address* branches,
+                                     uint16_t           branch_count,
+                                     uint16_t           prefix_len,
+                                     subtree_sizer&     out)
+      {
+         for (uint16_t i = 0; i < branch_count; ++i)
+            if (!size_direct_leaf_child(branches[i], prefix_len, out))
+               return false;
+         return true;
+      }
+
+      // --- Phase 3: Foreground collapse helpers ---
+      //
+      // Remove is a hot path.  Foreground collapse is intentionally limited to
+      // direct leaf children so the cost is bounded by the leaf rewrite budget.
+      // Deeper subtree/cousin rewrites belong in maintenance where a recursive
+      // scan is explicit and can be scheduled away from transaction latency.
 
       struct collapse_context
       {
@@ -681,6 +725,20 @@ namespace psitri
             retain_subtree_leaf_values_by_addr(node_ref->get_branch(branch_number(i)));
       }
 
+      void retain_direct_leaf_values_by_addr(ptr_address addr)
+      {
+         auto ref = _session.get_ref(addr);
+         assert(node_type(ref->type()) == node_type::leaf);
+         auto leaf = ref.template as<leaf_node>();
+         retain_children(leaf);
+      }
+
+      void retain_direct_leaf_values(const ptr_address* branches, uint16_t branch_count)
+      {
+         for (uint16_t i = 0; i < branch_count; ++i)
+            retain_direct_leaf_values_by_addr(branches[i]);
+      }
+
       // --- End Phase 3 helpers ---
 
       template <typename NodeType>
@@ -733,7 +791,8 @@ namespace psitri
          return floor_idx != 0 || vref.get_entry_version(floor_idx) != floor_token;
       }
 
-      static constexpr uint16_t max_leaf_rewrite_entries = 512;
+      static constexpr uint16_t max_leaf_rewrite_entries = leaf_node::max_leaf_branches;
+      static_assert(max_leaf_rewrite_entries <= leaf_node::max_leaf_branches);
       struct leaf_rewrite_entry
       {
          branch_number bn;
@@ -1384,7 +1443,8 @@ namespace psitri
       for (uint16_t i = 0; i < nb; ++i)
       {
          branches[i] = in->get_branch(branch_number(i));
-         size_subtree(branches[i], pfx_len, sizer);
+         if (!size_direct_leaf_child(branches[i], pfx_len, sizer))
+            return sal::null_ptr_address;
       }
 
       if (!sizer.fits_in_leaf())
@@ -1400,7 +1460,7 @@ namespace psitri
          root_prefix = key_view(prefix_save, pfx.size());
       }
 
-      retain_subtree_leaf_values(in);
+      retain_direct_leaf_values(branches.data(), nb);
       collapse_context cctx{_session, branches.data(), nb, root_prefix};
 
       if constexpr (mode.is_unique())
@@ -1436,14 +1496,13 @@ namespace psitri
          pfx_len = in->prefix().size();
 
       subtree_sizer sizer(max_leaf_rewrite_entries);
-      for (uint16_t i = 0; i < branch_count; ++i)
-         size_subtree(branches[i], pfx_len, sizer);
+      if (!size_direct_leaf_children(branches, branch_count, pfx_len, sizer))
+         return sal::null_ptr_address;
 
       if (!sizer.fits_in_leaf())
          return sal::null_ptr_address;
 
-      for (uint16_t i = 0; i < branch_count; ++i)
-         retain_subtree_leaf_values_by_addr(branches[i]);
+      retain_direct_leaf_values(branches, branch_count);
 
       key_view root_prefix;
       if constexpr (is_inner_prefix_node<InnerNodeType>)
@@ -1658,13 +1717,14 @@ namespace psitri
          ptr_address   right_addr     = current_is_left ? old_right_addr : child_addr;
 
          subtree_sizer sizer(max_leaf_rewrite_entries);
-         size_subtree(left_addr, 0, sizer);
-         size_subtree(right_addr, 0, sizer);
+         if (!size_direct_leaf_child(left_addr, 0, sizer) ||
+             !size_direct_leaf_child(right_addr, 0, sizer))
+            return sal::null_ptr_address;
          if (!sizer.fits_in_leaf())
             return sal::null_ptr_address;
 
-         retain_subtree_leaf_values_by_addr(left_addr);
-         retain_subtree_leaf_values_by_addr(right_addr);
+         retain_direct_leaf_values_by_addr(left_addr);
+         retain_direct_leaf_values_by_addr(right_addr);
 
          ptr_address      branches[2] = {left_addr, right_addr};
          collapse_context cctx{_session, branches, 2, key_view()};

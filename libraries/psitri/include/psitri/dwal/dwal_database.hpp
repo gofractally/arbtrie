@@ -191,6 +191,7 @@ namespace psitri::dwal
       std::shared_ptr<database_type> _db;
       std::filesystem::path          _wal_dir;
       dwal_config                    _cfg;
+      std::unique_ptr<wal_status_mapping> _wal_status;
 
       static constexpr uint32_t       max_roots = 512;
       std::unique_ptr<dwal_root_type> _roots[max_roots];

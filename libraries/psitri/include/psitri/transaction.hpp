@@ -8,6 +8,7 @@
 #include <psitri/tx_mode.hpp>
 #include <psitri/value_pin.hpp>
 #include <psitri/write_cursor.hpp>
+#include <sal/mapped_memory/session_op_stats.hpp>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -537,6 +538,14 @@ namespace psitri
 
       void do_write(uint32_t idx, key_view key, value_view value, cursor_write_fn op)
       {
+         auto op_counter = sal::mapped_memory::session_operation::txn_upsert;
+         if (op == static_cast<cursor_write_fn>(&write_cursor::insert))
+            op_counter = sal::mapped_memory::session_operation::txn_insert;
+         else if (op == static_cast<cursor_write_fn>(&write_cursor::update))
+            op_counter = sal::mapped_memory::session_operation::txn_update;
+         else if (op == static_cast<cursor_write_fn>(&write_cursor::upsert_sorted))
+            op_counter = sal::mapped_memory::session_operation::txn_upsert_sorted;
+         auto op_scope = _session->record_operation(op_counter);
          auto& cs = cs_at(idx);
          if (cs.buffer)
             micro_put(cs, key, value);
@@ -547,6 +556,8 @@ namespace psitri
 
       int do_remove(uint32_t idx, key_view key)
       {
+         auto op_scope =
+             _session->record_operation(sal::mapped_memory::session_operation::txn_remove);
          auto& cs = cs_at(idx);
          if (cs.buffer)
          {
@@ -563,6 +574,8 @@ namespace psitri
 
       bool do_remove_range_any(uint32_t idx, key_view lower, key_view upper)
       {
+         auto op_scope = _session->record_operation(
+             sal::mapped_memory::session_operation::txn_remove_range_any);
          auto& cs = cs_at(idx);
          bool removed;
          if (cs.buffer)
@@ -576,6 +589,8 @@ namespace psitri
 
       uint64_t do_remove_range_counted(uint32_t idx, key_view lower, key_view upper)
       {
+         auto op_scope = _session->record_operation(
+             sal::mapped_memory::session_operation::txn_remove_range_counted);
          auto& cs = cs_at(idx);
          if (cs.buffer)
          {
@@ -595,6 +610,8 @@ namespace psitri
       template <ConstructibleBuffer T>
       std::optional<T> do_get(uint32_t idx, key_view key) const
       {
+         auto op_scope =
+             _session->record_operation(sal::mapped_memory::session_operation::txn_get);
          auto& cs = cs_at(idx);
          if (cs.buffer)
          {
@@ -616,6 +633,8 @@ namespace psitri
 
       int32_t do_get(uint32_t idx, key_view key, Buffer auto* buffer) const
       {
+         auto op_scope =
+             _session->record_operation(sal::mapped_memory::session_operation::txn_get);
          auto& cs = cs_at(idx);
          if (cs.buffer)
          {
@@ -636,6 +655,8 @@ namespace psitri
 
       bool do_get(uint32_t idx, key_view key, std::invocable<value_view> auto&& lambda) const
       {
+         auto op_scope =
+             _session->record_operation(sal::mapped_memory::session_operation::txn_get);
          auto& cs = cs_at(idx);
          if (cs.buffer)
          {
@@ -654,6 +675,10 @@ namespace psitri
 
       cursor do_bound(uint32_t idx, key_view key, bool is_upper) const
       {
+         auto op_scope =
+             _session->record_operation(is_upper
+                                            ? sal::mapped_memory::session_operation::txn_upper_bound
+                                            : sal::mapped_memory::session_operation::txn_lower_bound);
          auto& cs = cs_at(idx);
          cursor c(cs.cursor->root());
          if (is_upper)

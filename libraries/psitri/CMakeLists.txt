@@ -3,6 +3,7 @@ add_library( psitri
              src/node/leaf.cpp
              src/node/inner.cpp
              src/dwal/wal_writer.cpp
+             src/dwal/wal_status.cpp
              src/dwal/wal_reader.cpp
              src/dwal/dwal_transaction.cpp
              src/dwal/dwal_database.cpp

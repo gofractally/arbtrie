@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <filesystem>
 #include <mutex>
 #include <utility>
@@ -29,6 +30,16 @@ namespace sal
       using offset_ptr                        = ucc::typed_int<uint64_t, struct offset_ptr_tag>;
       using block_number                      = ucc::typed_int<uint64_t, struct block_num_tag>;
       static constexpr offset_ptr null_offset = offset_ptr(-1);
+
+      struct mlock_stats
+      {
+         uint64_t successful_regions = 0;
+         uint64_t failed_regions     = 0;
+         uint64_t skipped_regions    = 0;
+         uint64_t successful_bytes   = 0;
+         uint64_t failed_bytes       = 0;
+         uint64_t skipped_bytes      = 0;
+      };
 
       /**
        * Constructor for block_allocator.
@@ -149,6 +160,28 @@ namespace sal
       uint32_t reserve(uint32_t desired_num_blocks, bool mlock = false);
 
       /**
+       * Pins the already-mapped prefix of this file. This is intentionally
+       * separate from reserve() so callers that reopen pre-existing metadata
+       * files can mlock the mapped pages even when no growth is required.
+       *
+       * @param desired_num_blocks Number of blocks to pin. 0 means all mapped blocks.
+       * @return true when every newly-attempted block was pinned.
+       */
+      bool mlock_mapped_blocks(uint32_t desired_num_blocks = 0) noexcept;
+
+      mlock_stats get_mlock_stats() const noexcept
+      {
+         return {
+             _successful_mlock_regions.load(std::memory_order_relaxed),
+             _failed_mlock_regions.load(std::memory_order_relaxed),
+             _skipped_mlock_regions.load(std::memory_order_relaxed),
+             _successful_mlock_bytes.load(std::memory_order_relaxed),
+             _failed_mlock_bytes.load(std::memory_order_relaxed),
+             _skipped_mlock_bytes.load(std::memory_order_relaxed),
+         };
+      }
+
+      /**
        * Allocate a new block and return both the block number and offset pointer to it
        * 
        * @return A pair containing the block number and offset pointer to the newly allocated block
@@ -224,6 +257,8 @@ namespace sal
       }
 
      private:
+      bool mlock_mapped_blocks_locked(uint32_t desired_num_blocks) noexcept;
+
       std::filesystem::path _filename;
       uint64_t              _block_size;
       uint8_t               _log2_block_size;  // log2 of block_size for fast bit shifting
@@ -241,6 +276,17 @@ namespace sal
       // Cached RLIMIT_MEMLOCK value (bytes). Set once in constructor.
       // RLIM_INFINITY (~0ULL) means no limit.
       uint64_t _mlock_limit_bytes;
+
+      // mlock diagnostics for metadata files that opt into pinning.
+      std::atomic<uint32_t> _mlock_attempted_blocks{0};
+      std::atomic<uint64_t> _successful_mlock_regions{0};
+      std::atomic<uint64_t> _failed_mlock_regions{0};
+      std::atomic<uint64_t> _skipped_mlock_regions{0};
+      std::atomic<uint64_t> _successful_mlock_bytes{0};
+      std::atomic<uint64_t> _failed_mlock_bytes{0};
+      std::atomic<uint64_t> _skipped_mlock_bytes{0};
+      bool                  _mlock_limit_warned = false;
+      bool                  _mlock_error_warned = false;
    };
 
 }  // namespace sal

@@ -269,11 +269,20 @@ typedef enum MDBX_option_t {
    MDBX_opt_merge_threshold_16dot16_percent,
    MDBX_opt_writethrough_threshold,
    MDBX_opt_prefault_write_enable,
+   MDBX_opt_psitri_cache_size_mb,
+   MDBX_opt_psitri_cache_window_sec,
+   MDBX_opt_psitri_write_mode,
 } MDBX_option_t;
 
 int   mdbx_env_set_option(MDBX_env* env, MDBX_option_t option, uint64_t value);
 int   mdbx_env_get_option(const MDBX_env* env, MDBX_option_t option, uint64_t* value);
 int   mdbx_env_copy(MDBX_env* env, const char* dest, unsigned flags);
+
+/* ── PsiTri extension: MDBX shim write backend ───────────────────── */
+/* 0=direct PsiTri transaction path, 1=DWAL buffered write path        */
+#define PSITRI_WRITE_MODE_DIRECT   0
+#define PSITRI_WRITE_MODE_DWAL     1
+int   mdbx_env_set_write_mode(MDBX_env* env, int mode);
 
 /* ── PsiTri extension: DWAL read mode for RO transactions ────────── */
 /* 0=buffered (RO snapshot+Tri, no locks)                             */

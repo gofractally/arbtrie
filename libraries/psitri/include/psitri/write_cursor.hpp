@@ -134,7 +134,7 @@ namespace psitri
       bool is_subtree(key_view key) const
       {
          cursor c(_ctx.get_root());
-         return c.seek(key) && c.is_subtree();
+         return c.find(key) && c.is_subtree();
       }
 
       /// Get a subtree root as a smart_ptr.
@@ -142,7 +142,7 @@ namespace psitri
       sal::smart_ptr<sal::alloc_header> get_subtree(key_view key) const
       {
          cursor c(_ctx.get_root());
-         if (c.seek(key) && c.is_subtree())
+         if (c.find(key) && c.is_subtree())
             return c.subtree();
          return sal::smart_ptr<sal::alloc_header>(c.get_root().session(), sal::null_ptr_address);
       }

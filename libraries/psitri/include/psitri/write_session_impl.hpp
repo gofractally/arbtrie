@@ -194,6 +194,8 @@ namespace psitri
                                                            key_view   key,
                                                            value_view value)
    {
+      auto op_scope = this->_allocator_session->record_operation(
+          sal::mapped_memory::session_operation::txn_upsert);
       auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
       this->_db->maybe_publish_dead_versions_for_epoch(this->_db->_dbm->current_epoch_base());
 
@@ -248,6 +250,8 @@ namespace psitri
    template <class LockPolicy>
    inline uint64_t basic_write_session<LockPolicy>::remove(uint32_t root_index, key_view key)
    {
+      auto op_scope = this->_allocator_session->record_operation(
+          sal::mapped_memory::session_operation::txn_remove);
       auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
       this->_db->maybe_publish_dead_versions_for_epoch(this->_db->_dbm->current_epoch_base());
 

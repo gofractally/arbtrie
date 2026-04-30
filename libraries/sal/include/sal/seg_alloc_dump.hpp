@@ -59,14 +59,32 @@ namespace sal
       uint64_t total_read_bytes       = 0;  // Total bytes of valid objects across all segments
       uint32_t total_read_nodes       = 0;  // Total count of valid objects across all segments
       uint32_t mlocked_segments_count = 0;  // Count of segments in the mlock_segments bitmap
+      uint64_t successful_mlock_regions = 0;  // Cumulative successful mlock() regions
+      uint64_t failed_mlock_regions     = 0;  // Cumulative failed mlock() regions
+      uint64_t successful_munlock_regions = 0;  // Cumulative successful munlock() regions
+      uint64_t failed_munlock_regions     = 0;  // Cumulative failed munlock() regions
       uint32_t total_non_value_nodes = 0;  // Total count of non-value nodes for average calculation
       uint32_t index_cline_counts[257] = {0};  // Histogram of cacheline hits [0-256+]
       uint32_t cline_delta_counts[257] = {
           0};  // Histogram of delta between actual and ideal cachelines
 
       // Cache related stats
-      uint32_t cache_difficulty     = 0;  // Current cache difficulty setting
-      uint64_t total_promoted_bytes = 0;  // Total bytes promoted through the cache
+      uint64_t cache_difficulty                  = 0;  // Current cache difficulty setting
+      uint64_t cache_policy_satisfied_bytes      = 0;  // Promotion bytes plus useful skips
+      uint64_t total_promoted_bytes              = 0;  // Total bytes promoted through the cache
+      uint64_t cache_target_promoted_bytes_per_s = 0;  // Controller target promotion rate
+      uint64_t cache_hot_to_hot_promotions       = 0;  // Successful HOT -> HOT refreshes
+      uint64_t cache_hot_to_hot_promoted_bytes   = 0;
+      uint64_t cache_hot_to_hot_demote_pressure_ppm = 0;
+      uint64_t cache_hot_to_hot_byte_demote_pressure_ppm = 0;
+      uint64_t cache_young_hot_skips             = 0;  // HOT advisories ignored while still young
+      uint64_t cache_young_hot_skipped_bytes     = 0;
+      uint64_t cache_young_hot_skip_demote_pressure_ppm = 0;
+      uint64_t cache_young_hot_skip_byte_demote_pressure_ppm = 0;
+      uint64_t cache_cold_to_hot_promotions      = 0;  // Successful COLD -> HOT promotions
+      uint64_t cache_cold_to_hot_promoted_bytes  = 0;
+      uint64_t cache_promoted_to_cold_promotions = 0;  // Should stay near zero
+      uint64_t cache_promoted_to_cold_bytes      = 0;
 
       // Segment queue state
       uint64_t alloc_ptr       = 0;
@@ -83,6 +101,19 @@ namespace sal
       // Control block stats
       uint32_t control_block_zones    = 0;  // Number of allocated control block zones
       uint64_t control_block_capacity = 0;  // Max number of control blocks that can be allocated
+      bool     control_block_header_pinned = false;
+      uint64_t control_block_zone_mlock_success_regions = 0;
+      uint64_t control_block_zone_mlock_failed_regions  = 0;
+      uint64_t control_block_zone_mlock_skipped_regions = 0;
+      uint64_t control_block_zone_mlock_success_bytes   = 0;
+      uint64_t control_block_zone_mlock_failed_bytes    = 0;
+      uint64_t control_block_zone_mlock_skipped_bytes   = 0;
+      uint64_t control_block_freelist_mlock_success_regions = 0;
+      uint64_t control_block_freelist_mlock_failed_regions  = 0;
+      uint64_t control_block_freelist_mlock_skipped_regions = 0;
+      uint64_t control_block_freelist_mlock_success_bytes   = 0;
+      uint64_t control_block_freelist_mlock_failed_bytes    = 0;
+      uint64_t control_block_freelist_mlock_skipped_bytes   = 0;
 
       // Detailed info per component
       std::vector<segment_info>    segments;
@@ -814,10 +845,12 @@ namespace sal
          if (cache_difficulty > 0)
          {
             // Calculate cache probability as "1 in N attempts"
-            uint64_t max_uint32  = 0xFFFFFFFFULL;
-            double   probability = 1.0 - (static_cast<double>(cache_difficulty) / max_uint32);
+            uint64_t    max_uint64  = ~uint64_t{0};
+            long double probability = 1.0L -
+                                      (static_cast<long double>(cache_difficulty) /
+                                       static_cast<long double>(max_uint64));
             uint64_t attempts_per_hit =
-                probability > 0 ? std::round(1.0 / probability) : max_uint32;
+                probability > 0 ? std::round(1.0 / probability) : max_uint64;
 
             os << "\n"
                << std::left << std::setw(label_width) << "Cache difficulty:" << std::right
@@ -827,6 +860,69 @@ namespace sal
             os << std::left << std::setw(label_width) << "Promoted bytes:" << std::right
                << std::setw(value_width) << total_promoted_bytes / 1024 / 1024.
                << " MB (total since startup)\n";
+            os << std::left << std::setw(label_width) << "COLD->HOT:" << std::right
+               << std::setw(value_width) << cache_cold_to_hot_promotions
+               << " objects, " << format_bytes(cache_cold_to_hot_promoted_bytes) << "\n";
+            os << std::left << std::setw(label_width) << "HOT refresh:" << std::right
+               << std::setw(value_width) << cache_hot_to_hot_promotions
+               << " objects, " << format_bytes(cache_hot_to_hot_promoted_bytes) << "\n";
+            os << std::left << std::setw(label_width) << "Young HOT skip:" << std::right
+               << std::setw(value_width) << cache_young_hot_skips
+               << " objects, " << format_bytes(cache_young_hot_skipped_bytes) << "\n";
+            if (cache_hot_to_hot_promotions != 0)
+            {
+               const double avg_pressure =
+                   double(cache_hot_to_hot_demote_pressure_ppm) /
+                   double(cache_hot_to_hot_promotions) / 10000.0;
+               const double byte_avg_pressure =
+                   cache_hot_to_hot_promoted_bytes == 0
+                       ? 0.0
+                       : double(cache_hot_to_hot_byte_demote_pressure_ppm) /
+                             double(cache_hot_to_hot_promoted_bytes) / 10000.0;
+               os << std::left << std::setw(label_width) << "Refresh pressure:" << std::right
+                  << std::setw(value_width) << std::fixed << std::setprecision(1)
+                  << avg_pressure << "% avg, " << byte_avg_pressure << "% byte-avg\n";
+            }
+            if (cache_young_hot_skips != 0)
+            {
+               const double avg_pressure =
+                   double(cache_young_hot_skip_demote_pressure_ppm) /
+                   double(cache_young_hot_skips) / 10000.0;
+               const double byte_avg_pressure =
+                   cache_young_hot_skipped_bytes == 0
+                       ? 0.0
+                       : double(cache_young_hot_skip_byte_demote_pressure_ppm) /
+                             double(cache_young_hot_skipped_bytes) / 10000.0;
+               os << std::left << std::setw(label_width) << "Skip pressure:" << std::right
+                  << std::setw(value_width) << std::fixed << std::setprecision(1)
+                  << avg_pressure << "% avg, " << byte_avg_pressure << "% byte-avg\n";
+            }
+            if (cache_promoted_to_cold_promotions != 0)
+               os << std::left << std::setw(label_width) << "Promoted to cold:" << std::right
+                  << std::setw(value_width) << cache_promoted_to_cold_promotions
+                  << " objects, " << format_bytes(cache_promoted_to_cold_bytes) << "\n";
+            os << std::left << std::setw(label_width) << "Target promote rate:" << std::right
+               << std::setw(value_width) << format_bytes(cache_target_promoted_bytes_per_s)
+               << "/s\n";
+            os << std::left << std::setw(label_width) << "mlock success:" << std::right
+               << std::setw(value_width) << successful_mlock_regions
+               << " regions, " << format_bytes(successful_mlock_regions * segment_size) << "\n";
+            if (failed_mlock_regions != 0)
+               os << std::left << std::setw(label_width) << "mlock failed:" << std::right
+                  << std::setw(value_width) << failed_mlock_regions << " regions\n";
+            os << std::left << std::setw(label_width) << "CB zone mlock:" << std::right
+               << std::setw(value_width) << control_block_zone_mlock_success_regions
+               << " ok, " << control_block_zone_mlock_failed_regions << " failed, "
+               << control_block_zone_mlock_skipped_regions << " skipped, "
+               << format_bytes(control_block_zone_mlock_success_bytes) << "\n";
+            os << std::left << std::setw(label_width) << "CB header mlock:" << std::right
+               << std::setw(value_width) << (control_block_header_pinned ? "yes" : "no")
+               << "\n";
+            os << std::left << std::setw(label_width) << "CB free mlock:" << std::right
+               << std::setw(value_width) << control_block_freelist_mlock_success_regions
+               << " ok, " << control_block_freelist_mlock_failed_regions << " failed, "
+               << control_block_freelist_mlock_skipped_regions << " skipped, "
+               << format_bytes(control_block_freelist_mlock_success_bytes) << "\n";
          }
 
          os << "----------------------------------------------------------------\n\n";

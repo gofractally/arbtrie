@@ -37,6 +37,7 @@ namespace sal
          {
             return _used == 0 ? segment_number(-1) : _segments[--_used];
          }
+         void reset() noexcept { _used = 0; }
 
         private:
          std::array<segment_number, 4096> _segments;
@@ -56,6 +57,7 @@ namespace sal
 
          allocator_session_number alloc_session_num();
          void                     release_session_num(allocator_session_number num) noexcept;
+         void                     reset_process_state() noexcept;
          rcache_queue_type&       rcache_queue(allocator_session_number session_num);
          release_queue_type&      release_queue(allocator_session_number session_num);
          uint32_t                 max_session_num() const;
@@ -117,6 +119,19 @@ namespace sal
 
       inline session_data::session_data() {}
 
+      inline void session_data::reset_process_state() noexcept
+      {
+         free_sessions.store(~uint64_t{0}, std::memory_order_relaxed);
+         for (uint32_t i = 0; i < session_cap; ++i)
+         {
+            _rcache_queue[i].reset();
+            _release_queue[i].reset();
+            _dirty_segments[i].reset();
+            _session_seg_seq[i] = 0;
+            _total_bytes_written[i] = 0;
+         }
+      }
+
       inline rcache_queue_type& session_data::rcache_queue(allocator_session_number session_num)
       {
          return _rcache_queue[*session_num];
@@ -138,7 +153,7 @@ namespace sal
 
       inline uint32_t session_data::active_session_count() const
       {
-         return std::popcount(free_sessions.load(std::memory_order_relaxed));
+         return session_capacity() - std::popcount(free_sessions.load(std::memory_order_relaxed));
       }
 
       inline uint64_t session_data::free_session_bitmap() const
@@ -180,7 +195,7 @@ namespace sal
          assert(!(free_sessions.load(std::memory_order_relaxed) & (1ULL << *num)));
 
          // Set the bit to 1 to mark it as free
-         free_sessions.fetch_add(uint64_t(1) << *num, std::memory_order_relaxed);
+         free_sessions.fetch_or(uint64_t(1) << *num, std::memory_order_relaxed);
       }
 
    }  // namespace mapped_memory

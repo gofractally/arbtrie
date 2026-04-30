@@ -11,6 +11,7 @@
 #include <sal/control_block_alloc.hpp>
 #include <sal/debug/free_range_tracker.hpp>
 #include <sal/mapped_memory/allocator_state.hpp>
+#include <sal/mapped_memory/session_op_stats.hpp>
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/segment_thread.hpp>
 #include <sal/verify.hpp>
@@ -532,7 +533,9 @@ namespace sal
       uint32_t                        _allocator_index;
       mapping                         _seg_alloc_state_file;
       mapping                         _root_object_file;
+      mapping                         _session_op_stats_file;
       root_object_array*              _root_objects;
+      mapped_memory::session_operation_stats* _session_op_stats = nullptr;
       std::array<const object_type_ops*, 128> _type_ops;
       std::mutex                      _sync_mutex;
       /// used by readers/writers to grab/update a root object
@@ -704,6 +707,14 @@ namespace sal
                                        uint64_t                 bytes) noexcept
       {
          _mapped_state->_session_data.add_bytes_written(session_num, bytes);
+      }
+
+      inline void record_session_operation(allocator_session_number        session_num,
+                                           mapped_memory::session_operation op,
+                                           uint64_t                         count = 1) noexcept
+      {
+         if (_session_op_stats)
+            _session_op_stats->add(session_num, op, count);
       }
 
       /**

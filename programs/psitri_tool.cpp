@@ -2,9 +2,15 @@
 #include <iomanip>
 #include <iostream>
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cerrno>
+#include <chrono>
 #include <cctype>
+#include <cstring>
+#include <deque>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -20,10 +26,20 @@
 #include <boost/program_options/variables_map.hpp>
 
 #include <psitri/database.hpp>
+#include <psitri/database_impl.hpp>
+#include <psitri/dwal/wal_status.hpp>
 #include <psitri/read_session_impl.hpp>
 #include <psitri/write_cursor.hpp>
 #include <sal/block_allocator.hpp>
 #include <sal/config.hpp>
+#include <sal/control_block_alloc.hpp>
+#include <sal/mapped_memory/allocator_state.hpp>
+#include <sal/mapped_memory/session_op_stats.hpp>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef PSITRI_TRICORDER_HAS_PSIO_JSON
 #include <psio/to_json.hpp>
@@ -320,6 +336,1726 @@ std::string format_bytes(uint64_t bytes)
    return sal::seg_alloc_dump::format_bytes(bytes);
 }
 
+std::string format_number(uint64_t n);
+
+std::string format_rate(double bytes_per_sec)
+{
+   if (bytes_per_sec <= 0)
+      return "0 B/s";
+   return format_bytes(static_cast<uint64_t>(bytes_per_sec)) + "/s";
+}
+
+std::string format_signed_rate(double bytes_per_sec)
+{
+   if (bytes_per_sec < 0)
+      return "-" + format_rate(-bytes_per_sec);
+   return format_rate(bytes_per_sec);
+}
+
+std::string format_ratio(double numerator, double denominator)
+{
+   if (denominator <= 0)
+      return "0.0%";
+   std::ostringstream out;
+   out << std::fixed << std::setprecision(1) << (100.0 * numerator / denominator) << "%";
+   return out.str();
+}
+
+uint64_t difficulty_attempts(uint64_t difficulty)
+{
+   const uint64_t max_difficulty = ~uint64_t{0};
+   const uint64_t gap            = max_difficulty - difficulty;
+   if (gap == 0)
+      return max_difficulty;
+   return max_difficulty / gap;
+}
+
+struct passive_header_mapping
+{
+   int    fd   = -1;
+   void*  data = MAP_FAILED;
+   size_t size = 0;
+
+   explicit passive_header_mapping(const fs::path& header_path)
+   {
+      fd = ::open(header_path.native().c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0)
+         throw std::runtime_error("open(" + header_path.string() + "): " +
+                                  std::strerror(errno));
+
+      struct stat st;
+      if (::fstat(fd, &st) != 0)
+         throw std::runtime_error("fstat(" + header_path.string() + "): " +
+                                  std::strerror(errno));
+      if (st.st_size < static_cast<off_t>(sizeof(sal::mapped_memory::allocator_state)))
+         throw std::runtime_error("header is smaller than allocator_state");
+
+      size = static_cast<size_t>(st.st_size);
+      data = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED)
+         throw std::runtime_error("mmap(" + header_path.string() + "): " +
+                                  std::strerror(errno));
+   }
+
+   passive_header_mapping(const passive_header_mapping&)            = delete;
+   passive_header_mapping& operator=(const passive_header_mapping&) = delete;
+
+   ~passive_header_mapping()
+   {
+      if (data != MAP_FAILED)
+         ::munmap(data, size);
+      if (fd >= 0)
+         ::close(fd);
+   }
+
+   const sal::mapped_memory::allocator_state* state() const
+   {
+      return static_cast<const sal::mapped_memory::allocator_state*>(data);
+   }
+};
+
+struct passive_ptr_header_mapping
+{
+   int    fd   = -1;
+   void*  data = MAP_FAILED;
+   size_t size = 0;
+
+   explicit passive_ptr_header_mapping(const fs::path& header_path)
+   {
+      fd = ::open(header_path.native().c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0)
+         throw std::runtime_error("open(" + header_path.string() + "): " +
+                                  std::strerror(errno));
+
+      struct stat st;
+      if (::fstat(fd, &st) != 0)
+         throw std::runtime_error("fstat(" + header_path.string() + "): " +
+                                  std::strerror(errno));
+      if (st.st_size < static_cast<off_t>(sizeof(sal::detail::ptr_alloc_header)))
+         throw std::runtime_error("ptrs/header.bin is smaller than ptr_alloc_header");
+
+      size = static_cast<size_t>(st.st_size);
+      data = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED)
+         throw std::runtime_error("mmap(" + header_path.string() + "): " +
+                                  std::strerror(errno));
+   }
+
+   passive_ptr_header_mapping(const passive_ptr_header_mapping&)            = delete;
+   passive_ptr_header_mapping& operator=(const passive_ptr_header_mapping&) = delete;
+
+   ~passive_ptr_header_mapping()
+   {
+      if (data != MAP_FAILED)
+         ::munmap(data, size);
+      if (fd >= 0)
+         ::close(fd);
+   }
+
+   const sal::detail::ptr_alloc_header* header() const
+   {
+      return static_cast<const sal::detail::ptr_alloc_header*>(data);
+   }
+};
+
+struct passive_session_ops_mapping
+{
+   int    fd   = -1;
+   void*  data = MAP_FAILED;
+   size_t size = 0;
+
+   explicit passive_session_ops_mapping(const fs::path& path)
+   {
+      fd = ::open(path.native().c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0)
+         throw std::runtime_error("open(" + path.string() + "): " + std::strerror(errno));
+
+      struct stat st;
+      if (::fstat(fd, &st) != 0)
+         throw std::runtime_error("fstat(" + path.string() + "): " + std::strerror(errno));
+      if (st.st_size < static_cast<off_t>(sizeof(sal::mapped_memory::session_operation_stats)))
+         throw std::runtime_error("session_ops.bin is smaller than session_operation_stats");
+
+      size = static_cast<size_t>(st.st_size);
+      data = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED)
+         throw std::runtime_error("mmap(" + path.string() + "): " + std::strerror(errno));
+   }
+
+   passive_session_ops_mapping(const passive_session_ops_mapping&)            = delete;
+   passive_session_ops_mapping& operator=(const passive_session_ops_mapping&) = delete;
+
+   ~passive_session_ops_mapping()
+   {
+      if (data != MAP_FAILED)
+         ::munmap(data, size);
+      if (fd >= 0)
+         ::close(fd);
+   }
+
+   const sal::mapped_memory::session_operation_stats* stats() const
+   {
+      return static_cast<const sal::mapped_memory::session_operation_stats*>(data);
+   }
+};
+
+struct passive_database_mapping
+{
+   int    fd   = -1;
+   void*  data = MAP_FAILED;
+   size_t size = 0;
+
+   explicit passive_database_mapping(const fs::path& dbfile_path)
+   {
+      fd = ::open(dbfile_path.native().c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0)
+         throw std::runtime_error("open(" + dbfile_path.string() + "): " +
+                                  std::strerror(errno));
+
+      struct stat st;
+      if (::fstat(fd, &st) != 0)
+         throw std::runtime_error("fstat(" + dbfile_path.string() + "): " +
+                                  std::strerror(errno));
+      if (st.st_size < static_cast<off_t>(sizeof(psitri::detail::database_state)))
+         throw std::runtime_error("dbfile.bin is smaller than database_state");
+
+      size = static_cast<size_t>(st.st_size);
+      data = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED)
+         throw std::runtime_error("mmap(" + dbfile_path.string() + "): " +
+                                  std::strerror(errno));
+   }
+
+   passive_database_mapping(const passive_database_mapping&)            = delete;
+   passive_database_mapping& operator=(const passive_database_mapping&) = delete;
+
+   ~passive_database_mapping()
+   {
+      if (data != MAP_FAILED)
+         ::munmap(data, size);
+      if (fd >= 0)
+         ::close(fd);
+   }
+
+   const psitri::detail::database_state* state() const
+   {
+      return static_cast<const psitri::detail::database_state*>(data);
+   }
+};
+
+struct passive_wal_status_mapping
+{
+   int    fd   = -1;
+   void*  data = MAP_FAILED;
+   size_t size = 0;
+
+   explicit passive_wal_status_mapping(const fs::path& path)
+   {
+      fd = ::open(path.native().c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0)
+         throw std::runtime_error("open(" + path.string() + "): " + std::strerror(errno));
+
+      struct stat st;
+      if (::fstat(fd, &st) != 0)
+         throw std::runtime_error("fstat(" + path.string() + "): " + std::strerror(errno));
+      if (st.st_size < static_cast<off_t>(sizeof(psitri::dwal::wal_status_file)))
+         throw std::runtime_error("wal/status.bin is smaller than wal_status_file");
+
+      size = static_cast<size_t>(st.st_size);
+      data = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED)
+         throw std::runtime_error("mmap(" + path.string() + "): " + std::strerror(errno));
+
+      const auto* mapped_file = static_cast<const psitri::dwal::wal_status_file*>(data);
+      const auto* hdr = &mapped_file->roots_header;
+      if (hdr->magic != psitri::dwal::wal_status_magic ||
+          hdr->version != psitri::dwal::wal_status_version)
+         throw std::runtime_error("wal/status.bin has incompatible header");
+   }
+
+   passive_wal_status_mapping(const passive_wal_status_mapping&)            = delete;
+   passive_wal_status_mapping& operator=(const passive_wal_status_mapping&) = delete;
+
+   ~passive_wal_status_mapping()
+   {
+      if (data != MAP_FAILED)
+         ::munmap(data, size);
+      if (fd >= 0)
+         ::close(fd);
+   }
+
+   const psitri::dwal::wal_status_file* file() const
+   {
+      return static_cast<const psitri::dwal::wal_status_file*>(data);
+   }
+};
+
+struct passive_root_object_record
+{
+   std::atomic<uint64_t> tree;
+   std::atomic<uint64_t> version;
+   std::atomic<uint64_t> check;
+};
+
+static_assert(sizeof(passive_root_object_record) == 24);
+
+struct passive_roots_mapping
+{
+   int    fd   = -1;
+   void*  data = MAP_FAILED;
+   size_t size = 0;
+
+   explicit passive_roots_mapping(const fs::path& roots_path)
+   {
+      fd = ::open(roots_path.native().c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0)
+         throw std::runtime_error("open(" + roots_path.string() + "): " +
+                                  std::strerror(errno));
+
+      struct stat st;
+      if (::fstat(fd, &st) != 0)
+         throw std::runtime_error("fstat(" + roots_path.string() + "): " +
+                                  std::strerror(errno));
+      const size_t min_size = sizeof(passive_root_object_record) * num_top_roots;
+      if (st.st_size < static_cast<off_t>(min_size))
+         throw std::runtime_error("roots is smaller than top-root records");
+
+      size = static_cast<size_t>(st.st_size);
+      data = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+      if (data == MAP_FAILED)
+         throw std::runtime_error("mmap(" + roots_path.string() + "): " +
+                                  std::strerror(errno));
+   }
+
+   passive_roots_mapping(const passive_roots_mapping&)            = delete;
+   passive_roots_mapping& operator=(const passive_roots_mapping&) = delete;
+
+   ~passive_roots_mapping()
+   {
+      if (data != MAP_FAILED)
+         ::munmap(data, size);
+      if (fd >= 0)
+         ::close(fd);
+   }
+
+   const passive_root_object_record* records() const
+   {
+      return static_cast<const passive_root_object_record*>(data);
+   }
+};
+
+uint64_t passive_root_object_check(uint64_t packed_tree, uint64_t root_version) noexcept
+{
+   uint64_t x = packed_tree ^ (root_version + 0x9e3779b97f4a7c15ull +
+                               (packed_tree << 6) + (packed_tree >> 2));
+   x ^= x >> 30;
+   x *= 0xbf58476d1ce4e5b9ull;
+   x ^= x >> 27;
+   x *= 0x94d049bb133111ebull;
+   x ^= x >> 31;
+   return x ? x : 1;
+}
+
+struct mfu_snapshot
+{
+   std::chrono::steady_clock::time_point t;
+   uint64_t difficulty              = 0;
+   uint64_t policy_satisfied        = 0;
+   uint64_t promoted                = 0;
+   uint64_t cold_to_hot_promotions  = 0;
+   uint64_t cold_to_hot_bytes       = 0;
+   uint64_t hot_to_hot_promotions   = 0;
+   uint64_t hot_to_hot_bytes        = 0;
+   uint64_t hot_to_hot_pressure_ppm = 0;
+   uint64_t hot_to_hot_byte_pressure_ppm = 0;
+   uint64_t young_hot_skips         = 0;
+   uint64_t young_hot_skipped_bytes = 0;
+   uint64_t young_hot_skip_pressure_ppm = 0;
+   uint64_t young_hot_skip_byte_pressure_ppm = 0;
+   uint64_t promoted_to_cold_count  = 0;
+   uint64_t promoted_to_cold_bytes  = 0;
+   uint64_t target_bps              = 0;
+   uint64_t cache_bytes             = 0;
+   uint64_t window_sec              = 0;
+   uint64_t mlocked_regions         = 0;
+   uint64_t successful_mlock_regions = 0;
+   uint64_t failed_mlock_regions     = 0;
+   uint64_t successful_munlock_regions = 0;
+   uint64_t failed_munlock_regions     = 0;
+   uint64_t cb_header_pinned          = 0;
+   uint64_t cb_mlock_success_regions  = 0;
+   uint64_t cb_mlock_failed_regions   = 0;
+   uint64_t cb_mlock_skipped_regions  = 0;
+   uint64_t cb_mlock_success_bytes    = 0;
+};
+
+mfu_snapshot read_mfu_snapshot(const sal::mapped_memory::allocator_state& state,
+                               const sal::detail::ptr_alloc_header*      ptr_header)
+{
+   mfu_snapshot s;
+   s.t          = std::chrono::steady_clock::now();
+   s.difficulty =
+       state._cache_difficulty_state.get_cache_difficulty();
+   s.policy_satisfied =
+       state._cache_difficulty_state.total_cache_policy_satisfied_bytes.load(
+           std::memory_order_relaxed);
+   s.promoted =
+       state._cache_difficulty_state.total_promoted_bytes.load(std::memory_order_relaxed);
+   s.cold_to_hot_promotions =
+       state._cache_difficulty_state.total_cold_to_hot_promotions.load(
+           std::memory_order_relaxed);
+   s.cold_to_hot_bytes =
+       state._cache_difficulty_state.total_cold_to_hot_promoted_bytes.load(
+           std::memory_order_relaxed);
+   s.hot_to_hot_promotions =
+       state._cache_difficulty_state.total_hot_to_hot_promotions.load(
+           std::memory_order_relaxed);
+   s.hot_to_hot_bytes =
+       state._cache_difficulty_state.total_hot_to_hot_promoted_bytes.load(
+           std::memory_order_relaxed);
+   s.hot_to_hot_pressure_ppm =
+       state._cache_difficulty_state.total_hot_to_hot_demote_pressure_ppm.load(
+           std::memory_order_relaxed);
+   s.hot_to_hot_byte_pressure_ppm =
+       state._cache_difficulty_state.total_hot_to_hot_byte_demote_pressure_ppm.load(
+           std::memory_order_relaxed);
+   s.young_hot_skips =
+       state._cache_difficulty_state.total_young_hot_skips.load(std::memory_order_relaxed);
+   s.young_hot_skipped_bytes =
+       state._cache_difficulty_state.total_young_hot_skipped_bytes.load(
+           std::memory_order_relaxed);
+   s.young_hot_skip_pressure_ppm =
+       state._cache_difficulty_state.total_young_hot_skip_demote_pressure_ppm.load(
+           std::memory_order_relaxed);
+   s.young_hot_skip_byte_pressure_ppm =
+       state._cache_difficulty_state.total_young_hot_skip_byte_demote_pressure_ppm.load(
+           std::memory_order_relaxed);
+   s.promoted_to_cold_count =
+       state._cache_difficulty_state.total_promoted_to_cold_promotions.load(
+           std::memory_order_relaxed);
+   s.promoted_to_cold_bytes =
+       state._cache_difficulty_state.total_promoted_to_cold_bytes.load(
+           std::memory_order_relaxed);
+   s.cache_bytes = state._cache_difficulty_state._total_cache_size;
+   s.window_sec =
+       uint64_t(state._cache_difficulty_state._cache_frequency_window.count() / 1000);
+   s.target_bps = state._cache_difficulty_state.target_promoted_bytes_per_sec();
+   s.mlocked_regions = state._segment_provider.mlock_segments.count();
+   s.successful_mlock_regions =
+       state._segment_provider.successful_mlock_regions.load(std::memory_order_relaxed);
+   s.failed_mlock_regions =
+       state._segment_provider.failed_mlock_regions.load(std::memory_order_relaxed);
+   s.successful_munlock_regions =
+       state._segment_provider.successful_munlock_regions.load(std::memory_order_relaxed);
+   s.failed_munlock_regions =
+       state._segment_provider.failed_munlock_regions.load(std::memory_order_relaxed);
+   if (ptr_header)
+   {
+      s.cb_header_pinned =
+          ptr_header->control_block_header_mlock_pinned.load(std::memory_order_relaxed);
+      s.cb_mlock_success_regions =
+          ptr_header->control_block_zone_mlock_success_regions.load(
+              std::memory_order_relaxed) +
+          ptr_header->control_block_freelist_mlock_success_regions.load(
+              std::memory_order_relaxed);
+      s.cb_mlock_failed_regions =
+          ptr_header->control_block_zone_mlock_failed_regions.load(
+              std::memory_order_relaxed) +
+          ptr_header->control_block_freelist_mlock_failed_regions.load(
+              std::memory_order_relaxed);
+      s.cb_mlock_skipped_regions =
+          ptr_header->control_block_zone_mlock_skipped_regions.load(
+              std::memory_order_relaxed) +
+          ptr_header->control_block_freelist_mlock_skipped_regions.load(
+              std::memory_order_relaxed);
+      s.cb_mlock_success_bytes =
+          ptr_header->control_block_zone_mlock_success_bytes.load(std::memory_order_relaxed) +
+          ptr_header->control_block_freelist_mlock_success_bytes.load(
+              std::memory_order_relaxed);
+   }
+   return s;
+}
+
+int cmd_mfu_watch(const fs::path& dir, uint64_t interval_ms, uint64_t samples)
+{
+   if (interval_ms == 0)
+      interval_ms = 1000;
+
+   fs::path db_dir = dir;
+   if (!fs::exists(db_dir / "header") && fs::exists(db_dir / "chaindata" / "header"))
+      db_dir = db_dir / "chaindata";
+
+   passive_header_mapping mapping(db_dir / "header");
+   const auto*            state = mapping.state();
+   std::unique_ptr<passive_ptr_header_mapping> ptr_mapping;
+   if (fs::exists(db_dir / "ptrs" / "header.bin"))
+      ptr_mapping = std::make_unique<passive_ptr_header_mapping>(db_dir / "ptrs" / "header.bin");
+   const auto* ptr_header = ptr_mapping ? ptr_mapping->header() : nullptr;
+
+   auto first = read_mfu_snapshot(*state, ptr_header);
+   auto prev  = first;
+
+   std::cout << "Passive MFU watch: " << fs::canonical(db_dir) << "\n";
+   std::cout << "Reads only the mmap'd header; it does not open a database session.\n\n";
+	   std::cout << std::setw(8) << std::left << "sample"
+	             << std::setw(16) << std::left << "promote/s"
+	             << std::setw(16) << std::left << "cold->hot/s"
+	             << std::setw(16) << std::left << "refresh/s"
+	             << std::setw(16) << std::left << "skip/s"
+	             << std::setw(16) << std::left << "policy/s"
+	             << std::setw(16) << std::left << "avg/s"
+	             << std::setw(16) << std::left << "target/s"
+	             << std::setw(18) << std::left << "promoted"
+	             << std::setw(18) << std::left << "policy"
+	             << std::setw(18) << std::left << "c2hBytes"
+	             << std::setw(18) << std::left << "refBytes"
+	             << std::setw(18) << std::left << "skipBytes"
+	             << std::setw(18) << std::left << "toColdBytes"
+	             << std::setw(14) << std::left << "c2h"
+	             << std::setw(14) << std::left << "refresh"
+	             << std::setw(14) << std::left << "skip"
+	             << std::setw(14) << std::left << "toCold"
+	             << std::setw(10) << std::left << "mlock"
+	             << std::setw(12) << std::left << "mlockOK"
+	             << std::setw(12) << std::left << "mlockFail"
+             << std::setw(8) << std::left << "cbHdr"
+             << std::setw(10) << std::left << "cbOK"
+             << std::setw(10) << std::left << "cbFail"
+             << std::setw(10) << std::left << "cbSkip"
+             << std::setw(12) << std::left << "cbBytes"
+             << std::setw(10) << std::left << "ref%"
+             << std::setw(10) << std::left << "skip%"
+             << std::setw(14) << std::left << "difficulty"
+             << "odds\n";
+
+   for (uint64_t i = 0; samples == 0 || i < samples; ++i)
+   {
+      if (i != 0)
+         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+
+      auto cur = read_mfu_snapshot(*state, ptr_header);
+      auto interval =
+          std::chrono::duration<double>(cur.t - prev.t).count();
+      auto total_interval =
+          std::chrono::duration<double>(cur.t - first.t).count();
+
+      double interval_bps = 0;
+      if (i != 0 && interval > 0 && cur.promoted >= prev.promoted)
+         interval_bps = double(cur.promoted - prev.promoted) / interval;
+
+      double cold_to_hot_bps = 0;
+      if (i != 0 && interval > 0 && cur.cold_to_hot_bytes >= prev.cold_to_hot_bytes)
+         cold_to_hot_bps = double(cur.cold_to_hot_bytes - prev.cold_to_hot_bytes) / interval;
+
+      double hot_to_hot_bps = 0;
+      if (i != 0 && interval > 0 && cur.hot_to_hot_bytes >= prev.hot_to_hot_bytes)
+         hot_to_hot_bps = double(cur.hot_to_hot_bytes - prev.hot_to_hot_bytes) / interval;
+
+      double young_hot_skip_bps = 0;
+      if (i != 0 && interval > 0 &&
+          cur.young_hot_skipped_bytes >= prev.young_hot_skipped_bytes)
+         young_hot_skip_bps =
+             double(cur.young_hot_skipped_bytes - prev.young_hot_skipped_bytes) / interval;
+
+      double policy_bps = 0;
+      if (i != 0 && interval > 0 && cur.policy_satisfied >= prev.policy_satisfied)
+         policy_bps = double(cur.policy_satisfied - prev.policy_satisfied) / interval;
+
+      double refresh_pressure = 0;
+      if (cur.hot_to_hot_bytes > prev.hot_to_hot_bytes &&
+          cur.hot_to_hot_byte_pressure_ppm >= prev.hot_to_hot_byte_pressure_ppm)
+      {
+         refresh_pressure =
+             double(cur.hot_to_hot_byte_pressure_ppm - prev.hot_to_hot_byte_pressure_ppm) /
+             double(cur.hot_to_hot_bytes - prev.hot_to_hot_bytes) / 10000.0;
+      }
+
+      double skip_pressure = 0;
+      if (cur.young_hot_skipped_bytes > prev.young_hot_skipped_bytes &&
+          cur.young_hot_skip_byte_pressure_ppm >= prev.young_hot_skip_byte_pressure_ppm)
+      {
+         skip_pressure =
+             double(cur.young_hot_skip_byte_pressure_ppm -
+                    prev.young_hot_skip_byte_pressure_ppm) /
+             double(cur.young_hot_skipped_bytes - prev.young_hot_skipped_bytes) / 10000.0;
+      }
+
+      double avg_bps = 0;
+      if (total_interval > 0 && cur.promoted >= first.promoted)
+         avg_bps = double(cur.promoted - first.promoted) / total_interval;
+
+      std::cout << std::setw(8) << std::left << i
+                << std::setw(16) << std::left << format_rate(interval_bps)
+                << std::setw(16) << std::left << format_rate(cold_to_hot_bps)
+                << std::setw(16) << std::left << format_rate(hot_to_hot_bps)
+                << std::setw(16) << std::left << format_rate(young_hot_skip_bps)
+	                << std::setw(16) << std::left << format_rate(policy_bps)
+	                << std::setw(16) << std::left << format_rate(avg_bps)
+	                << std::setw(16) << std::left << format_rate(double(cur.target_bps))
+	                << std::setw(18) << std::left << format_bytes(cur.promoted)
+	                << std::setw(18) << std::left << format_bytes(cur.policy_satisfied)
+	                << std::setw(18) << std::left << format_bytes(cur.cold_to_hot_bytes)
+	                << std::setw(18) << std::left << format_bytes(cur.hot_to_hot_bytes)
+	                << std::setw(18) << std::left << format_bytes(cur.young_hot_skipped_bytes)
+	                << std::setw(18) << std::left << format_bytes(cur.promoted_to_cold_bytes)
+	                << std::setw(14) << std::left << cur.cold_to_hot_promotions
+	                << std::setw(14) << std::left << cur.hot_to_hot_promotions
+	                << std::setw(14) << std::left << cur.young_hot_skips
+	                << std::setw(14) << std::left << cur.promoted_to_cold_count
+	                << std::setw(10) << std::left << cur.mlocked_regions
+	                << std::setw(12) << std::left << cur.successful_mlock_regions
+	                << std::setw(12) << std::left << cur.failed_mlock_regions
+                << std::setw(8) << std::left << (cur.cb_header_pinned ? "yes" : "no")
+                << std::setw(10) << std::left << cur.cb_mlock_success_regions
+                << std::setw(10) << std::left << cur.cb_mlock_failed_regions
+                << std::setw(10) << std::left << cur.cb_mlock_skipped_regions
+                << std::setw(12) << std::left << format_bytes(cur.cb_mlock_success_bytes)
+                << std::setw(10) << std::left << std::fixed << std::setprecision(1)
+                << refresh_pressure
+                << std::setw(10) << std::left << std::fixed << std::setprecision(1)
+                << skip_pressure
+                << std::setw(14) << std::left << cur.difficulty
+                << "1/" << std::setw(12) << std::left
+                << difficulty_attempts(cur.difficulty) << "\n";
+      std::cout.flush();
+
+      prev = cur;
+   }
+
+   return 0;
+}
+
+struct dashboard_snapshot
+{
+   std::chrono::steady_clock::time_point t;
+   mfu_snapshot cache;
+   std::array<uint64_t, sal::mapped_memory::session_operation_count> session_ops{};
+   bool session_ops_available = false;
+   bool wal_status_available = false;
+   uint64_t wal_active_roots = 0;
+   uint64_t wal_merging_roots = 0;
+   uint64_t wal_rw_entries = 0;
+   uint64_t wal_rw_arena_bytes = 0;
+   uint64_t wal_ro_entries = 0;
+   uint64_t wal_ro_arena_bytes = 0;
+   uint64_t wal_rw_file_bytes = 0;
+   uint64_t wal_rw_buffered_bytes = 0;
+   uint64_t wal_rw_logical_bytes = 0;
+   uint64_t wal_ro_file_bytes = 0;
+   uint64_t wal_entries = 0;
+   uint64_t wal_ops = 0;
+   uint64_t wal_upsert_data_ops = 0;
+   uint64_t wal_upsert_subtree_ops = 0;
+   uint64_t wal_remove_ops = 0;
+   uint64_t wal_remove_range_ops = 0;
+   uint64_t wal_multi_entries = 0;
+   uint64_t wal_committed_entry_bytes = 0;
+   uint64_t wal_key_bytes = 0;
+   uint64_t wal_value_bytes = 0;
+   uint64_t wal_write_calls = 0;
+   uint64_t wal_write_bytes = 0;
+   uint64_t wal_flush_calls = 0;
+   uint64_t wal_fsync_calls = 0;
+   uint64_t wal_fullsync_calls = 0;
+   uint64_t wal_clean_closes = 0;
+   uint64_t wal_discarded_entries = 0;
+   uint64_t wal_swaps = 0;
+   uint64_t wal_merge_requests = 0;
+   uint64_t wal_merge_completions = 0;
+   uint64_t wal_merge_aborts = 0;
+   uint64_t wal_merge_entries = 0;
+   uint64_t wal_merge_range_tombstones = 0;
+   uint64_t wal_merge_wall_ns = 0;
+   uint64_t wal_merge_commit_ns = 0;
+   uint64_t wal_merge_cpu_ns = 0;
+   uint64_t wal_max_throttle_sleep_ns = 0;
+
+   bool        dbfile_metadata_available = false;
+   bool        root_metadata_available   = false;
+   bool        clean_shutdown            = false;
+   bool        ref_counts_stale          = false;
+   uint32_t    db_flags                  = 0;
+   uint64_t    top_version               = 0;
+   uint64_t    epoch_interval            = 0;
+   uint64_t    epoch_base                = 0;
+   uint64_t    populated_roots           = 0;
+   uint64_t    roots_with_version        = 0;
+   uint64_t    roots_without_version     = 0;
+   uint64_t    active_root_versions      = 0;
+   uint64_t    oldest_root_version       = 0;
+   uint64_t    newest_root_version       = 0;
+   bool        active_root_address_available = false;
+   uint32_t    active_root_index             = 0;
+   uint32_t    active_root_address           = *sal::null_ptr_address;
+   uint32_t    active_root_version_address   = *sal::null_ptr_address;
+   uint64_t    active_root_record_version    = 0;
+   std::string version_error;
+
+   uint64_t compact_pinned_threshold_mb   = 0;
+   uint64_t compact_unpinned_threshold_mb = 0;
+
+   uint64_t seg_file_bytes = 0;
+   uint64_t total_segments = 0;
+
+   uint64_t active_segments = 0;
+   uint64_t read_only_segments = 0;
+   uint64_t pinned_segments = 0;
+   uint64_t pending_segments = 0;
+   uint64_t free_segments = 0;
+   uint64_t queued_segments = 0;
+   uint64_t zero_flag_segments = 0;
+
+   uint64_t may_compact_segments = 0;
+   uint64_t may_compact_pinned_segments = 0;
+   uint64_t may_compact_unpinned_segments = 0;
+   uint64_t reclaimable_bytes = 0;
+   uint64_t eligible_reclaimable_bytes = 0;
+   uint64_t eligible_pinned_reclaimable_bytes = 0;
+   uint64_t eligible_unpinned_reclaimable_bytes = 0;
+   uint64_t blocked_reclaimable_bytes = 0;
+   uint64_t active_reclaimable_bytes = 0;
+   uint64_t pending_reclaimable_bytes = 0;
+   uint64_t free_segment_bytes = 0;
+
+   uint64_t ready_pinned_depth = 0;
+   uint64_t ready_unpinned_depth = 0;
+   uint64_t recycled_depth = 0;
+   uint64_t recycled_capacity = 0;
+   uint64_t recycled_available_to_pop = 0;
+   uint64_t recycled_available_to_push = 0;
+   uint64_t recycle_readlock_blocked = 0;
+
+   uint64_t active_sessions = 0;
+   uint64_t session_bytes_written = 0;
+   uint64_t rcache_depth = 0;
+   uint64_t release_queue_depth = 0;
+   uint64_t mlock_success_regions = 0;
+   uint64_t mlock_fail_regions = 0;
+   uint64_t munlock_success_regions = 0;
+   uint64_t munlock_fail_regions = 0;
+   uint64_t cb_mlock_success_bytes = 0;
+};
+
+constexpr uint32_t seg_flag_read_only = 1u << 0;
+constexpr uint32_t seg_flag_pinned    = 1u << 1;
+constexpr uint32_t seg_flag_active    = 1u << 2;
+constexpr uint32_t seg_flag_pending   = 1u << 3;
+constexpr uint32_t seg_flag_free      = 1u << 4;
+constexpr uint32_t seg_flag_queued    = 1u << 5;
+
+void read_version_metadata(const fs::path& db_dir, dashboard_snapshot& s)
+{
+   try
+   {
+      if (fs::exists(db_dir / "dbfile.bin"))
+      {
+         passive_database_mapping db_mapping(db_dir / "dbfile.bin");
+         const auto*              db_state = db_mapping.state();
+         s.dbfile_metadata_available = true;
+         s.clean_shutdown =
+             db_state->clean_shutdown.load(std::memory_order_relaxed);
+         s.db_flags         = db_state->flags;
+         s.ref_counts_stale = (db_state->flags & psitri::detail::flag_ref_counts_stale) != 0;
+         s.top_version =
+             db_state->global_version.load(std::memory_order_relaxed);
+         s.epoch_interval = db_state->epoch_interval;
+         if (s.epoch_interval != 0)
+            s.epoch_base = (s.top_version / s.epoch_interval) * s.epoch_interval;
+      }
+
+      if (fs::exists(db_dir / "roots"))
+      {
+         passive_roots_mapping roots_mapping(db_dir / "roots");
+         const auto*           roots = roots_mapping.records();
+         std::vector<uint64_t> versions;
+         versions.reserve(num_top_roots);
+
+         for (uint32_t i = 0; i < num_top_roots; ++i)
+         {
+            const uint64_t packed_tree =
+                roots[i].tree.load(std::memory_order_acquire);
+            auto tid = sal::tree_id::unpack(packed_tree);
+            if (tid.root == sal::null_ptr_address)
+               continue;
+
+            ++s.populated_roots;
+            const uint64_t root_version =
+                roots[i].version.load(std::memory_order_relaxed);
+            if (!s.active_root_address_available)
+            {
+               s.active_root_address_available = true;
+               s.active_root_index             = i;
+               s.active_root_address           = *tid.root;
+               s.active_root_version_address   = *tid.ver;
+               s.active_root_record_version    = root_version;
+            }
+            const uint64_t root_check =
+                roots[i].check.load(std::memory_order_relaxed);
+            const bool valid_version_record =
+                root_version != 0 &&
+                root_check == passive_root_object_check(packed_tree, root_version);
+
+            if (valid_version_record)
+            {
+               ++s.roots_with_version;
+               versions.push_back(root_version);
+            }
+            else
+            {
+               ++s.roots_without_version;
+            }
+         }
+
+         std::sort(versions.begin(), versions.end());
+         versions.erase(std::unique(versions.begin(), versions.end()), versions.end());
+         s.active_root_versions = versions.size();
+         if (!versions.empty())
+         {
+            s.oldest_root_version = versions.front();
+            s.newest_root_version = versions.back();
+         }
+         s.root_metadata_available = true;
+      }
+   }
+   catch (const std::exception& e)
+   {
+      s.version_error = e.what();
+   }
+}
+
+dashboard_snapshot read_dashboard_snapshot(const fs::path& db_dir,
+                                           const sal::mapped_memory::allocator_state& state,
+                                           const sal::detail::ptr_alloc_header* ptr_header,
+                                           const sal::mapped_memory::session_operation_stats*
+                                               op_stats,
+                                           const psitri::dwal::wal_status_file* wal_status)
+{
+   dashboard_snapshot s;
+   s.t = std::chrono::steady_clock::now();
+   s.cache = read_mfu_snapshot(state, ptr_header);
+   read_version_metadata(db_dir, s);
+   if (wal_status && wal_status->roots_header.magic == psitri::dwal::wal_status_magic &&
+       wal_status->roots_header.version == psitri::dwal::wal_status_version)
+   {
+      s.wal_status_available = true;
+      const uint32_t root_count =
+         std::min<uint32_t>(wal_status->roots_header.root_count,
+                            psitri::dwal::wal_status_max_roots);
+      for (uint32_t i = 0; i < root_count; ++i)
+      {
+         const auto& r = wal_status->roots[i];
+         if (r.active.load(std::memory_order_relaxed) == 0)
+            continue;
+         ++s.wal_active_roots;
+         if (r.merge_complete.load(std::memory_order_relaxed) == 0)
+            ++s.wal_merging_roots;
+         s.wal_rw_entries += r.rw_layer_entries.load(std::memory_order_relaxed);
+         s.wal_rw_arena_bytes += r.rw_arena_bytes.load(std::memory_order_relaxed);
+         s.wal_ro_entries += r.ro_layer_entries.load(std::memory_order_relaxed);
+         s.wal_ro_arena_bytes += r.ro_arena_bytes.load(std::memory_order_relaxed);
+         s.wal_rw_file_bytes += r.rw_wal_file_bytes.load(std::memory_order_relaxed);
+         s.wal_rw_buffered_bytes += r.rw_wal_buffered_bytes.load(std::memory_order_relaxed);
+         s.wal_rw_logical_bytes += r.rw_wal_logical_bytes.load(std::memory_order_relaxed);
+         s.wal_ro_file_bytes += r.ro_wal_file_bytes.load(std::memory_order_relaxed);
+         s.wal_entries += r.wal_entries.load(std::memory_order_relaxed);
+         s.wal_ops += r.wal_ops.load(std::memory_order_relaxed);
+         s.wal_upsert_data_ops += r.wal_upsert_data_ops.load(std::memory_order_relaxed);
+         s.wal_upsert_subtree_ops += r.wal_upsert_subtree_ops.load(std::memory_order_relaxed);
+         s.wal_remove_ops += r.wal_remove_ops.load(std::memory_order_relaxed);
+         s.wal_remove_range_ops += r.wal_remove_range_ops.load(std::memory_order_relaxed);
+         s.wal_multi_entries += r.wal_multi_entries.load(std::memory_order_relaxed);
+         s.wal_committed_entry_bytes +=
+            r.wal_committed_entry_bytes.load(std::memory_order_relaxed);
+         s.wal_key_bytes += r.wal_key_bytes.load(std::memory_order_relaxed);
+         s.wal_value_bytes += r.wal_value_bytes.load(std::memory_order_relaxed);
+         s.wal_write_calls += r.wal_write_calls.load(std::memory_order_relaxed);
+         s.wal_write_bytes += r.wal_write_bytes.load(std::memory_order_relaxed);
+         s.wal_flush_calls += r.wal_flush_calls.load(std::memory_order_relaxed);
+         s.wal_fsync_calls += r.wal_fsync_calls.load(std::memory_order_relaxed);
+         s.wal_fullsync_calls += r.wal_fullsync_calls.load(std::memory_order_relaxed);
+         s.wal_clean_closes += r.wal_clean_closes.load(std::memory_order_relaxed);
+         s.wal_discarded_entries += r.wal_discarded_entries.load(std::memory_order_relaxed);
+         s.wal_swaps += r.swaps.load(std::memory_order_relaxed);
+         s.wal_merge_requests += r.merge_requests.load(std::memory_order_relaxed);
+         s.wal_merge_completions += r.merge_completions.load(std::memory_order_relaxed);
+         s.wal_merge_aborts += r.merge_aborts.load(std::memory_order_relaxed);
+         s.wal_merge_entries += r.merge_entries.load(std::memory_order_relaxed);
+         s.wal_merge_range_tombstones +=
+            r.merge_range_tombstones.load(std::memory_order_relaxed);
+         s.wal_merge_wall_ns += r.merge_wall_ns.load(std::memory_order_relaxed);
+         s.wal_merge_commit_ns += r.merge_commit_ns.load(std::memory_order_relaxed);
+         s.wal_merge_cpu_ns += r.merge_cpu_ns.load(std::memory_order_relaxed);
+         s.wal_max_throttle_sleep_ns = std::max<uint64_t>(
+            s.wal_max_throttle_sleep_ns,
+            r.throttle_sleep_ns.load(std::memory_order_relaxed));
+      }
+   }
+   s.compact_pinned_threshold_mb =
+       state._config.compact_pinned_unused_threshold_mb;
+   s.compact_unpinned_threshold_mb =
+       state._config.compact_unpinned_unused_threshold_mb;
+
+   s.seg_file_bytes = file_size_or_zero(db_dir / "segs");
+   s.total_segments = s.seg_file_bytes / sal::segment_size;
+
+   const auto& seg_data = state._segment_data;
+   for (uint64_t i = 0; i < s.total_segments; ++i)
+   {
+      sal::segment_number seg{static_cast<uint32_t>(i)};
+      const uint32_t flags = seg_data.get_flags(seg);
+      const uint64_t freed = seg_data.get_freed_space(seg);
+
+      s.reclaimable_bytes += freed;
+      if (flags == 0)
+         ++s.zero_flag_segments;
+      if (flags & seg_flag_active)
+      {
+         ++s.active_segments;
+         s.active_reclaimable_bytes += freed;
+      }
+      if (flags & seg_flag_read_only)
+         ++s.read_only_segments;
+      if (flags & seg_flag_pinned)
+         ++s.pinned_segments;
+      if (flags & seg_flag_pending)
+      {
+         ++s.pending_segments;
+         s.pending_reclaimable_bytes += freed;
+      }
+      if (flags & seg_flag_free)
+      {
+         ++s.free_segments;
+         s.free_segment_bytes += sal::segment_size;
+      }
+      if (flags & seg_flag_queued)
+         ++s.queued_segments;
+
+      if (seg_data.may_compact(seg))
+      {
+         ++s.may_compact_segments;
+         s.eligible_reclaimable_bytes += freed;
+         if (seg_data.is_pinned(seg))
+         {
+            ++s.may_compact_pinned_segments;
+            s.eligible_pinned_reclaimable_bytes += freed;
+         }
+         else
+         {
+            ++s.may_compact_unpinned_segments;
+            s.eligible_unpinned_reclaimable_bytes += freed;
+         }
+      }
+      else
+      {
+         s.blocked_reclaimable_bytes += freed;
+      }
+   }
+
+   s.ready_pinned_depth = state._segment_provider.ready_pinned_segments.usage();
+   s.ready_unpinned_depth = state._segment_provider.ready_unpinned_segments.usage();
+   s.recycled_depth = state._read_lock_queue.recycled_queue_depth();
+   s.recycled_capacity = state._read_lock_queue.recycled_queue_capacity();
+   s.recycled_available_to_pop = state._read_lock_queue.available_to_pop();
+   s.recycled_available_to_push = state._read_lock_queue.available_to_push();
+   if (s.recycled_depth > s.recycled_available_to_pop)
+      s.recycle_readlock_blocked = s.recycled_depth - s.recycled_available_to_pop;
+
+   s.active_sessions = state._session_data.active_session_count();
+   const uint32_t max_session = state._session_data.session_capacity();
+   for (uint32_t i = 0; i < max_session; ++i)
+   {
+      sal::allocator_session_number sn{i};
+      s.session_bytes_written += state._session_data.total_bytes_written(sn);
+      s.rcache_depth += state._session_data.rcache_queue(sn).usage();
+      s.release_queue_depth += state._session_data.release_queue(sn).usage();
+   }
+   if (op_stats && op_stats->compatible())
+   {
+      s.session_ops_available = true;
+      for (uint32_t op = 0; op < sal::mapped_memory::session_operation_count; ++op)
+      {
+         s.session_ops[op] = op_stats->total(
+             static_cast<sal::mapped_memory::session_operation>(op));
+      }
+   }
+
+   s.mlock_success_regions =
+       state._segment_provider.successful_mlock_regions.load(std::memory_order_relaxed);
+   s.mlock_fail_regions =
+       state._segment_provider.failed_mlock_regions.load(std::memory_order_relaxed);
+   s.munlock_success_regions =
+       state._segment_provider.successful_munlock_regions.load(std::memory_order_relaxed);
+   s.munlock_fail_regions =
+       state._segment_provider.failed_munlock_regions.load(std::memory_order_relaxed);
+   s.cb_mlock_success_bytes = ptr_header
+                                  ? ptr_header->control_block_zone_mlock_success_bytes.load(
+                                        std::memory_order_relaxed) +
+                                        ptr_header->control_block_freelist_mlock_success_bytes.load(
+                                            std::memory_order_relaxed)
+                                  : 0;
+   return s;
+}
+
+double byte_rate(uint64_t now, uint64_t prev, double seconds)
+{
+   if (seconds <= 0)
+      return 0;
+   if (now >= prev)
+      return double(now - prev) / seconds;
+   return -double(prev - now) / seconds;
+}
+
+uint64_t counter_delta(uint64_t now, uint64_t prev)
+{
+   return now >= prev ? now - prev : 0;
+}
+
+struct mfu_rate_sample
+{
+   double   seconds = 0;
+   uint64_t promoted = 0;
+   uint64_t policy_satisfied = 0;
+   uint64_t cold_to_hot_bytes = 0;
+   uint64_t hot_to_hot_bytes = 0;
+   uint64_t young_hot_skipped_bytes = 0;
+   uint64_t promoted_to_cold_bytes = 0;
+   uint64_t pinned_copy_bytes = 0;
+   uint64_t pinned_effective_bytes = 0;
+};
+
+struct mfu_rolling_rates
+{
+   uint64_t                    max_samples = 10;
+   std::deque<mfu_rate_sample> samples;
+   mfu_rate_sample             total;
+
+   explicit mfu_rolling_rates(uint64_t window_samples = 10) : max_samples(window_samples) {}
+
+   void push(const dashboard_snapshot& cur, const dashboard_snapshot& prev)
+   {
+      if (max_samples == 0)
+         return;
+
+      mfu_rate_sample s;
+      s.seconds =
+          std::chrono::duration<double>(cur.t - prev.t).count();
+      if (s.seconds <= 0)
+         return;
+
+      s.promoted =
+          counter_delta(cur.cache.promoted, prev.cache.promoted);
+      s.policy_satisfied =
+          counter_delta(cur.cache.policy_satisfied, prev.cache.policy_satisfied);
+      s.cold_to_hot_bytes =
+          counter_delta(cur.cache.cold_to_hot_bytes, prev.cache.cold_to_hot_bytes);
+      s.hot_to_hot_bytes =
+          counter_delta(cur.cache.hot_to_hot_bytes, prev.cache.hot_to_hot_bytes);
+      s.young_hot_skipped_bytes =
+          counter_delta(cur.cache.young_hot_skipped_bytes, prev.cache.young_hot_skipped_bytes);
+      s.promoted_to_cold_bytes =
+          counter_delta(cur.cache.promoted_to_cold_bytes, prev.cache.promoted_to_cold_bytes);
+      s.pinned_copy_bytes = s.cold_to_hot_bytes + s.hot_to_hot_bytes;
+      s.pinned_effective_bytes = s.pinned_copy_bytes + s.young_hot_skipped_bytes;
+
+      add(s);
+      samples.push_back(s);
+      while (samples.size() > max_samples)
+      {
+         subtract(samples.front());
+         samples.pop_front();
+      }
+   }
+
+   double rate(uint64_t mfu_rate_sample::*field) const
+   {
+      if (total.seconds <= 0)
+         return 0;
+      return double(total.*field) / total.seconds;
+   }
+
+   uint64_t size() const { return samples.size(); }
+
+ private:
+   void add(const mfu_rate_sample& s)
+   {
+      total.seconds += s.seconds;
+      total.promoted += s.promoted;
+      total.policy_satisfied += s.policy_satisfied;
+      total.cold_to_hot_bytes += s.cold_to_hot_bytes;
+      total.hot_to_hot_bytes += s.hot_to_hot_bytes;
+      total.young_hot_skipped_bytes += s.young_hot_skipped_bytes;
+      total.promoted_to_cold_bytes += s.promoted_to_cold_bytes;
+      total.pinned_copy_bytes += s.pinned_copy_bytes;
+      total.pinned_effective_bytes += s.pinned_effective_bytes;
+   }
+
+   void subtract(const mfu_rate_sample& s)
+   {
+      total.seconds -= s.seconds;
+      total.promoted -= s.promoted;
+      total.policy_satisfied -= s.policy_satisfied;
+      total.cold_to_hot_bytes -= s.cold_to_hot_bytes;
+      total.hot_to_hot_bytes -= s.hot_to_hot_bytes;
+      total.young_hot_skipped_bytes -= s.young_hot_skipped_bytes;
+      total.promoted_to_cold_bytes -= s.promoted_to_cold_bytes;
+      total.pinned_copy_bytes -= s.pinned_copy_bytes;
+      total.pinned_effective_bytes -= s.pinned_effective_bytes;
+   }
+};
+
+struct session_op_rate_sample
+{
+   double seconds = 0;
+   std::array<uint64_t, sal::mapped_memory::session_operation_count> ops{};
+};
+
+struct session_op_rolling_rates
+{
+   uint64_t                    max_samples = 10;
+   std::deque<session_op_rate_sample> samples;
+   session_op_rate_sample      total;
+
+   explicit session_op_rolling_rates(uint64_t window_samples = 10)
+       : max_samples(window_samples)
+   {
+   }
+
+   void push(const dashboard_snapshot& cur, const dashboard_snapshot& prev)
+   {
+      if (max_samples == 0 || !cur.session_ops_available || !prev.session_ops_available)
+         return;
+
+      session_op_rate_sample s;
+      s.seconds = std::chrono::duration<double>(cur.t - prev.t).count();
+      if (s.seconds <= 0)
+         return;
+
+      for (uint32_t op = 0; op < sal::mapped_memory::session_operation_count; ++op)
+         s.ops[op] = counter_delta(cur.session_ops[op], prev.session_ops[op]);
+
+      add(s);
+      samples.push_back(s);
+      while (samples.size() > max_samples)
+      {
+         subtract(samples.front());
+         samples.pop_front();
+      }
+   }
+
+   double rate(uint32_t op) const
+   {
+      if (total.seconds <= 0)
+         return 0;
+      return double(total.ops[op]) / total.seconds;
+   }
+
+   uint64_t size() const { return samples.size(); }
+
+ private:
+   void add(const session_op_rate_sample& s)
+   {
+      total.seconds += s.seconds;
+      for (uint32_t op = 0; op < sal::mapped_memory::session_operation_count; ++op)
+         total.ops[op] += s.ops[op];
+   }
+
+   void subtract(const session_op_rate_sample& s)
+   {
+      total.seconds -= s.seconds;
+      for (uint32_t op = 0; op < sal::mapped_memory::session_operation_count; ++op)
+         total.ops[op] -= s.ops[op];
+   }
+};
+
+void print_dashboard_row(std::string_view label,
+                         const std::string& value,
+                         const std::string& detail = {})
+{
+   std::cout << "  " << std::setw(27) << std::left << label
+             << std::setw(17) << std::left << value
+             << detail << "\n";
+}
+
+std::string rolling_rate_detail(const mfu_rolling_rates& rates,
+                                uint64_t mfu_rate_sample::*field,
+                                double instant_rate)
+{
+   if (rates.max_samples == 0)
+      return format_rate(instant_rate);
+   if (rates.size() == 0)
+      return "warming";
+   return "avg " + format_rate(rates.rate(field)) + "  inst " + format_rate(instant_rate);
+}
+
+std::string format_ops_rate(double ops_per_sec)
+{
+   if (ops_per_sec <= 0)
+      return "0/s";
+   if (ops_per_sec >= 100)
+      return format_number(static_cast<uint64_t>(ops_per_sec + 0.5)) + "/s";
+   std::ostringstream out;
+   out << std::fixed << std::setprecision(1) << ops_per_sec << "/s";
+   return out.str();
+}
+
+uint64_t total_session_ops(const dashboard_snapshot& s)
+{
+   if (!s.session_ops_available)
+      return 0;
+   uint64_t total = 0;
+   for (uint32_t op = 0; op < sal::mapped_memory::session_operation_count; ++op)
+      total += s.session_ops[op];
+   return total;
+}
+
+double total_session_op_rate(const session_op_rolling_rates& rates)
+{
+   double total = 0;
+   for (uint32_t op = 0; op < sal::mapped_memory::session_operation_count; ++op)
+      total += rates.rate(op);
+   return total;
+}
+
+std::string rolling_op_rate_detail(const session_op_rolling_rates& rates,
+                                   uint32_t                        op,
+                                   double                          instant_rate)
+{
+   if (rates.max_samples == 0)
+      return format_ops_rate(instant_rate);
+   if (rates.size() == 0)
+      return "warming";
+   return "avg " + format_ops_rate(rates.rate(op)) + "  inst " +
+          format_ops_rate(instant_rate);
+}
+
+void print_session_op_header()
+{
+   std::cout << "  " << std::setw(27) << std::left << "operation"
+             << std::setw(17) << std::right << "total"
+             << std::setw(9) << std::right << "% ops"
+             << std::setw(16) << std::right << "avg/s"
+             << std::setw(16) << std::right << "inst/s"
+             << "\n";
+}
+
+void print_session_op_row(std::string_view label,
+                          uint64_t         total,
+                          double           percent,
+                          double           avg_rate,
+                          double           instant_rate)
+{
+   std::cout << "  " << std::setw(27) << std::left << label
+             << std::setw(17) << std::right << format_number(total)
+             << std::setw(9) << std::right << format_ratio(percent, 100.0)
+             << std::setw(16) << std::right << format_ops_rate(avg_rate)
+             << std::setw(16) << std::right << format_ops_rate(instant_rate)
+             << "\n";
+}
+
+std::string format_range(uint64_t low, uint64_t high)
+{
+   if (low == 0 && high == 0)
+      return "n/a";
+   if (low == high)
+      return format_number(low);
+   return format_number(low) + ".." + format_number(high);
+}
+
+std::string format_ptr_address(uint32_t address)
+{
+   if (address == *sal::null_ptr_address)
+      return "null";
+
+   std::ostringstream out;
+   out << "0x" << std::hex << std::setw(8) << std::setfill('0') << address;
+   return out.str();
+}
+
+void print_psitricorder_terms()
+{
+   std::cout
+       << "psitricorder dashboard terms\n\n"
+       << "Usage:\n"
+       << "  psitricorder dashboard <db-dir> --interval-ms 1000\n"
+       << "  psitricorder dashboard <db-dir> --rate-samples 60\n"
+       << "  psitricorder --dashboard --db-dir <db-dir>\n"
+       << "  psitricorder --explain\n\n"
+       << "Cache policy:\n"
+       << "  difficulty        The MFU lottery threshold. Higher difficulty means fewer\n"
+       << "                    read traversals mark objects for promotion. Odds are shown\n"
+       << "                    as roughly 1/N successful lottery hits.\n"
+       << "  cache window      Time horizon for the MFU controller. The target promotion\n"
+       << "                    rate is cache-size / window. This is a write-amplification\n"
+       << "                    budget, not a guarantee; if difficulty reaches 1/1 and\n"
+       << "                    policy/s stays lower, the workload is not producing enough\n"
+       << "                    cost-normalized repeated reads to spend the budget.\n"
+       << "  policy bytes      Bytes that satisfied cache policy: actual promoted bytes\n"
+       << "                    plus young-HOT bytes intentionally skipped. This lets the\n"
+       << "                    controller avoid needless HOT->HOT churn.\n"
+       << "  size policy       Larger objects spend more cache budget, so the read lottery\n"
+       << "                    is cost-normalized by cacheline count. A large object must\n"
+       << "                    be proportionally hotter to displace several small ones.\n"
+       << "  displayed rates   Dashboard rates are viewer-side rolling averages by default.\n"
+       << "                    The default is 60 samples, roughly one minute at the\n"
+       << "                    default 1s interval. Use --rate-samples to tune it.\n"
+       << "  COLD -> HOT       Unpinned objects copied into pinned memory.\n"
+       << "  HOT refresh       Pinned objects copied forward to remain in the hot region.\n"
+       << "  young HOT skipped Pinned objects seen by the promoter but young enough to\n"
+       << "                    leave in place.\n"
+       << "  promoted to cold  Promotion requests that were copied to unpinned memory,\n"
+       << "                    expected to stay near zero in a healthy hot allocation path.\n"
+       << "  pinned copy result\n"
+       << "                    COLD->HOT plus HOT refresh bytes physically copied into\n"
+       << "                    pinned memory.\n"
+       << "  pinned effective  Pinned copy result plus young-HOT skipped bytes, showing\n"
+       << "                    copied-or-retained pinned-cache benefit.\n\n"
+       << "Session operation counters:\n"
+       << "  Session Ops       Per-write-session counters stored in session_ops.bin.\n"
+       << "                    Each session has its own hardware-cacheline-aligned block\n"
+       << "                    (128 bytes on Apple ARM64), and the dashboard shows the\n"
+       << "                    aggregate total plus rolling op/sec by operation type.\n"
+       << "                    Live writers from older builds show this as unavailable\n"
+       << "                    until restarted.\n\n"
+       << "Compaction policy:\n"
+       << "  hot threshold     Free-space threshold for pinned segments. It is lower\n"
+       << "                    because dead bytes inside mlock'd memory waste scarce RAM.\n"
+       << "  cold threshold    Free-space threshold for unpinned segments. It is higher\n"
+       << "                    because cold disk space is cheaper than write amplification.\n"
+       << "  reclaimable       Dead/free bytes known inside segments.\n"
+       << "  eligible          Reclaimable bytes in segments that currently meet the\n"
+       << "                    configured compaction threshold.\n"
+       << "  blocked           Reclaimable bytes not currently compactable, commonly\n"
+       << "                    because the segment is active or still in read-lock delay.\n\n"
+       << "Version policy:\n"
+       << "  top version       Current global MVCC commit/version counter from dbfile.bin.\n"
+       << "  epoch base        Current version maintenance floor. Paths older than this\n"
+       << "                    floor are candidates for COW maintenance on write.\n"
+       << "  active root versions\n"
+       << "                    Distinct committed top-root versions visible from the root\n"
+       << "                    table. This is a passive root-slot view, not a full subtree\n"
+       << "                    or refcount audit.\n"
+       << "  active root address\n"
+       << "                    Current top-root node address from the roots mmap. In the\n"
+       << "                    single-root LMDBX layout this should remain stable unless\n"
+       << "                    root replacement occurs, such as root split/merge,\n"
+       << "                    epoch-forced uniqueness, or unintended COW-to-root.\n";
+}
+
+void render_dashboard(const fs::path& db_dir,
+                      const dashboard_snapshot& cur,
+                      const dashboard_snapshot& prev,
+                      const mfu_rolling_rates& rates,
+                      const session_op_rolling_rates& op_rates,
+                      uint64_t sample_index)
+{
+   const double interval =
+       std::chrono::duration<double>(cur.t - prev.t).count();
+   const uint64_t pinned_useful =
+       cur.cache.cold_to_hot_bytes + cur.cache.hot_to_hot_bytes;
+   const uint64_t pinned_effective =
+       pinned_useful + cur.cache.young_hot_skipped_bytes;
+   const uint64_t recovered_full_segment_bytes =
+       (cur.free_segments + cur.ready_pinned_depth + cur.ready_unpinned_depth +
+        cur.recycled_depth) * sal::segment_size;
+   const uint64_t recycle_capacity_bytes = cur.recycled_capacity * sal::segment_size;
+   const double promoted_rate =
+       byte_rate(cur.cache.promoted, prev.cache.promoted, interval);
+   const double policy_rate =
+       byte_rate(cur.cache.policy_satisfied, prev.cache.policy_satisfied, interval);
+   const double cold_to_hot_rate =
+       byte_rate(cur.cache.cold_to_hot_bytes, prev.cache.cold_to_hot_bytes, interval);
+   const double hot_to_hot_rate =
+       byte_rate(cur.cache.hot_to_hot_bytes, prev.cache.hot_to_hot_bytes, interval);
+   const double young_hot_skip_rate =
+       byte_rate(cur.cache.young_hot_skipped_bytes,
+                 prev.cache.young_hot_skipped_bytes,
+                 interval);
+   const double promoted_to_cold_rate =
+       byte_rate(cur.cache.promoted_to_cold_bytes,
+                 prev.cache.promoted_to_cold_bytes,
+                 interval);
+
+   std::cout << "\033[2J\033[H";
+   std::cout << "psitricorder dashboard  sample=" << sample_index
+             << "  db=" << fs::canonical(db_dir) << "\n";
+   std::cout << "passive mmap view; safe while the DB is live. Run --explain for terms.\n\n";
+
+   std::cout << "Policy / Versions\n";
+   if (cur.dbfile_metadata_available)
+   {
+      print_dashboard_row("top version",
+                          format_number(cur.top_version),
+                          "epoch " + format_number(cur.epoch_base) +
+                              " / interval " + format_number(cur.epoch_interval));
+      print_dashboard_row("shutdown/refcounts",
+                          cur.clean_shutdown ? "clean" : "live/unclean",
+                          cur.ref_counts_stale ? "refcounts stale" : "refcounts ok");
+   }
+   else
+   {
+      print_dashboard_row("top version", "n/a", "dbfile.bin unavailable");
+   }
+   if (cur.root_metadata_available)
+   {
+      print_dashboard_row("active root versions",
+                          format_number(cur.active_root_versions),
+                          "range " +
+                              format_range(cur.oldest_root_version,
+                                           cur.newest_root_version));
+      print_dashboard_row("root version records",
+                          format_number(cur.roots_with_version) + " ok",
+                          format_number(cur.roots_without_version) + " missing, " +
+                              format_number(cur.populated_roots) + " populated roots");
+      if (cur.active_root_address_available)
+      {
+         std::string detail = "root " + format_number(cur.active_root_index) +
+                              ", ver-cb " +
+                              format_ptr_address(cur.active_root_version_address) +
+                              ", version " +
+                              format_number(cur.active_root_record_version);
+         if (prev.active_root_address_available &&
+             cur.active_root_index == prev.active_root_index)
+         {
+            if (cur.active_root_address == prev.active_root_address &&
+                cur.active_root_version_address == prev.active_root_version_address)
+               detail += ", stable";
+            else
+               detail += ", changed from " +
+                         format_ptr_address(prev.active_root_address) + "/" +
+                         format_ptr_address(prev.active_root_version_address);
+         }
+         if (cur.populated_roots != 1)
+            detail += ", first of " + format_number(cur.populated_roots) +
+                      " populated roots";
+         print_dashboard_row("active root address",
+                             format_ptr_address(cur.active_root_address),
+                             detail);
+      }
+   }
+   else
+   {
+      print_dashboard_row("active root versions", "n/a", "roots unavailable");
+   }
+   if (!cur.version_error.empty())
+      print_dashboard_row("version metadata", "partial", cur.version_error);
+   print_dashboard_row("difficulty",
+                       "1/" + format_number(difficulty_attempts(cur.cache.difficulty)),
+                       "raw " + format_number(cur.cache.difficulty));
+   print_dashboard_row("cache budget",
+                       format_bytes(cur.cache.cache_bytes),
+                       "window " + std::to_string(cur.cache.window_sec) +
+                           "s, target " + format_rate(double(cur.cache.target_bps)));
+   print_dashboard_row("compact thresholds",
+                       "hot " + format_number(cur.compact_pinned_threshold_mb) + " MB",
+                       "cold " + format_number(cur.compact_unpinned_threshold_mb) + " MB");
+
+   std::cout << "\nMFU Cache";
+   if (rates.max_samples != 0)
+      std::cout << " (rate avg " << rates.size() << "/" << rates.max_samples << " samples)";
+   std::cout << "\n";
+   print_dashboard_row("cache window",
+                       std::to_string(cur.cache.window_sec) + "s",
+                       "target " + format_rate(double(cur.cache.target_bps)));
+   print_dashboard_row("promoted total",
+                       format_bytes(cur.cache.promoted),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::promoted,
+                                           promoted_rate));
+   print_dashboard_row("policy bytes",
+                       format_bytes(cur.cache.policy_satisfied),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::policy_satisfied,
+                                           policy_rate));
+   print_dashboard_row("COLD -> HOT",
+                       format_bytes(cur.cache.cold_to_hot_bytes),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::cold_to_hot_bytes,
+                                           cold_to_hot_rate) +
+                           "  " + format_number(cur.cache.cold_to_hot_promotions) + " objs");
+   print_dashboard_row("HOT refresh",
+                       format_bytes(cur.cache.hot_to_hot_bytes),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::hot_to_hot_bytes,
+                                           hot_to_hot_rate) +
+                           "  " + format_number(cur.cache.hot_to_hot_promotions) + " objs");
+   print_dashboard_row("young HOT skipped",
+                       format_bytes(cur.cache.young_hot_skipped_bytes),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::young_hot_skipped_bytes,
+                                           young_hot_skip_rate) +
+                           "  " + format_number(cur.cache.young_hot_skips) + " objs");
+   print_dashboard_row("promoted to cold",
+                       format_bytes(cur.cache.promoted_to_cold_bytes),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::promoted_to_cold_bytes,
+                                           promoted_to_cold_rate) +
+                           "  " +
+                           format_ratio(double(cur.cache.promoted_to_cold_bytes),
+                                        double(cur.cache.promoted)));
+   print_dashboard_row("pinned copy result",
+                       format_bytes(pinned_useful),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::pinned_copy_bytes,
+                                           cold_to_hot_rate + hot_to_hot_rate) +
+                           "  " + format_ratio(double(pinned_useful),
+                                               double(cur.cache.promoted)));
+   print_dashboard_row("pinned effective",
+                       format_bytes(pinned_effective),
+                       rolling_rate_detail(rates,
+                                           &mfu_rate_sample::pinned_effective_bytes,
+                                           cold_to_hot_rate + hot_to_hot_rate +
+                                               young_hot_skip_rate));
+
+   std::cout << "\nDWAL / WAL\n";
+   if (!cur.wal_status_available)
+   {
+      print_dashboard_row("wal status", "n/a", "wal/status.bin unavailable");
+   }
+   else
+   {
+      print_dashboard_row("active roots",
+                          format_number(cur.wal_active_roots),
+                          format_number(cur.wal_merging_roots) + " merging");
+      print_dashboard_row("RW layer",
+                          format_number(cur.wal_rw_entries) + " entries",
+                          format_bytes(cur.wal_rw_arena_bytes) + " arena");
+      print_dashboard_row("RO layer",
+                          format_number(cur.wal_ro_entries) + " entries",
+                          format_bytes(cur.wal_ro_arena_bytes) + " arena");
+      print_dashboard_row("WAL rw bytes",
+                          format_bytes(cur.wal_rw_logical_bytes),
+                          "file " + format_bytes(cur.wal_rw_file_bytes) +
+                              ", buffered " + format_bytes(cur.wal_rw_buffered_bytes) +
+                              ", " +
+                              format_signed_rate(byte_rate(cur.wal_rw_logical_bytes,
+                                                           prev.wal_rw_logical_bytes,
+                                                           interval)));
+      print_dashboard_row("WAL ro bytes",
+                          format_bytes(cur.wal_ro_file_bytes),
+                          "frozen WAL waiting for merge");
+      print_dashboard_row("WAL entries/ops",
+                          format_number(cur.wal_entries) + " / " +
+                              format_number(cur.wal_ops),
+                          format_ops_rate(interval > 0 ? double(counter_delta(cur.wal_ops,
+                                                                               prev.wal_ops)) /
+                                                           interval
+                                                       : 0));
+      print_dashboard_row("WAL op mix",
+                          "up " + format_number(cur.wal_upsert_data_ops),
+                          "subtree " + format_number(cur.wal_upsert_subtree_ops) +
+                              ", rm " + format_number(cur.wal_remove_ops) +
+                              ", range " + format_number(cur.wal_remove_range_ops));
+      print_dashboard_row("WAL payload bytes",
+                          format_bytes(cur.wal_committed_entry_bytes),
+                          "keys " + format_bytes(cur.wal_key_bytes) +
+                              ", values " + format_bytes(cur.wal_value_bytes));
+      print_dashboard_row("WAL writes",
+                          format_bytes(cur.wal_write_bytes),
+                          format_number(cur.wal_write_calls) + " pwrite batches, " +
+                              format_number(cur.wal_flush_calls) + " flushes");
+      print_dashboard_row("WAL fsync/fullsync",
+                          format_number(cur.wal_fsync_calls) + " / " +
+                              format_number(cur.wal_fullsync_calls),
+                          "clean closes " + format_number(cur.wal_clean_closes) +
+                              ", discards " + format_number(cur.wal_discarded_entries));
+      print_dashboard_row("WAL swaps/merges",
+                          format_number(cur.wal_swaps) + " / " +
+                              format_number(cur.wal_merge_completions),
+                          "requests " + format_number(cur.wal_merge_requests) +
+                              ", aborts " + format_number(cur.wal_merge_aborts));
+      print_dashboard_row("merge entries",
+                          format_number(cur.wal_merge_entries),
+                          "ranges " + format_number(cur.wal_merge_range_tombstones));
+      print_dashboard_row("merge time",
+                          format_rate(byte_rate(cur.wal_merge_entries,
+                                                prev.wal_merge_entries,
+                                                interval)) + " entries",
+                          "wall " + format_signed_rate(byte_rate(cur.wal_merge_wall_ns,
+                                                                  prev.wal_merge_wall_ns,
+                                                                  interval)) +
+                              "ns/s, commit " +
+                              format_signed_rate(byte_rate(cur.wal_merge_commit_ns,
+                                                           prev.wal_merge_commit_ns,
+                                                           interval)) +
+                              "ns/s");
+      print_dashboard_row("max throttle sleep",
+                          format_number(cur.wal_max_throttle_sleep_ns) + " ns");
+   }
+
+   std::cout << "\nCompactor / Reclamation\n";
+   print_dashboard_row("reclaimable bytes",
+                       format_bytes(cur.reclaimable_bytes),
+                       format_signed_rate(byte_rate(cur.reclaimable_bytes,
+                                                    prev.reclaimable_bytes,
+                                                    interval)));
+   print_dashboard_row("eligible reclaimable",
+                       format_bytes(cur.eligible_reclaimable_bytes),
+                       format_signed_rate(byte_rate(cur.eligible_reclaimable_bytes,
+                                                    prev.eligible_reclaimable_bytes,
+                                                    interval)) +
+                           "  ~" +
+                           std::to_string(cur.eligible_reclaimable_bytes / sal::segment_size) +
+                           " segments");
+   print_dashboard_row("eligible pinned",
+                       format_bytes(cur.eligible_pinned_reclaimable_bytes),
+                       format_number(cur.may_compact_pinned_segments) + " segs");
+   print_dashboard_row("eligible unpinned",
+                       format_bytes(cur.eligible_unpinned_reclaimable_bytes),
+                       format_number(cur.may_compact_unpinned_segments) + " segs");
+   print_dashboard_row("blocked reclaimable",
+                       format_bytes(cur.blocked_reclaimable_bytes),
+                       "active " + format_bytes(cur.active_reclaimable_bytes) +
+                           ", pending " + format_bytes(cur.pending_reclaimable_bytes));
+   print_dashboard_row("full segments recovered",
+                       format_bytes(recovered_full_segment_bytes),
+                       "free/ready/recycled");
+   print_dashboard_row("recycled queue",
+                       std::to_string(cur.recycled_depth) + " / " +
+                           std::to_string(cur.recycled_capacity),
+                       format_bytes(cur.recycled_depth * sal::segment_size) + " of " +
+                           format_bytes(recycle_capacity_bytes));
+   print_dashboard_row("read-lock blocked",
+                       std::to_string(cur.recycle_readlock_blocked),
+                       "available-to-pop " + std::to_string(cur.recycled_available_to_pop));
+   print_dashboard_row("ready pinned/unpinned",
+                       std::to_string(cur.ready_pinned_depth) + " / " +
+                           std::to_string(cur.ready_unpinned_depth),
+                       "provider queues");
+
+   std::cout << "\nSegments / Sessions\n";
+   print_dashboard_row("segment file",
+                       format_bytes(cur.seg_file_bytes),
+                       format_number(cur.total_segments) + " segments");
+   print_dashboard_row("states active/ro/pending",
+                       format_number(cur.active_segments) + " / " +
+                           format_number(cur.read_only_segments) + " / " +
+                           format_number(cur.pending_segments));
+   print_dashboard_row("states free/queued/zero",
+                       format_number(cur.free_segments) + " / " +
+                           format_number(cur.queued_segments) + " / " +
+                           format_number(cur.zero_flag_segments));
+   print_dashboard_row("pinned segments",
+                       format_number(cur.pinned_segments),
+                       format_bytes(cur.pinned_segments * sal::segment_size));
+   print_dashboard_row("active sessions",
+                       format_number(cur.active_sessions),
+                       "rcache " + format_number(cur.rcache_depth) +
+                           ", release " + format_number(cur.release_queue_depth));
+   print_dashboard_row("session synced bytes",
+                       format_bytes(cur.session_bytes_written),
+                       format_signed_rate(byte_rate(cur.session_bytes_written,
+                                                    prev.session_bytes_written,
+                                                    interval)));
+   print_dashboard_row("cache copy / synced",
+                       format_ratio(double(cur.cache.promoted),
+                                    double(cur.session_bytes_written)),
+                       "rough cache write amp");
+   print_dashboard_row("mlock ok/fail",
+                       format_number(cur.mlock_success_regions) + " / " +
+                           format_number(cur.mlock_fail_regions),
+                       "munlock " + format_number(cur.munlock_success_regions) + " / " +
+                           format_number(cur.munlock_fail_regions));
+   print_dashboard_row("control-block pinned",
+                       format_bytes(cur.cb_mlock_success_bytes));
+
+   std::cout << "\nSession Ops";
+   if (op_rates.max_samples != 0)
+      std::cout << " (rate avg " << op_rates.size() << "/" << op_rates.max_samples
+                << " samples)";
+   std::cout << "\n";
+   if (!cur.session_ops_available)
+   {
+      print_dashboard_row("op counters", "n/a", "session_ops.bin unavailable");
+   }
+   else
+   {
+      bool any_ops = false;
+      const uint64_t total_ops      = total_session_ops(cur);
+      const uint64_t prev_total_ops = total_session_ops(prev);
+      const double instant_total =
+          interval > 0 ? double(counter_delta(total_ops, prev_total_ops)) / interval : 0;
+      const double avg_total = total_session_op_rate(op_rates);
+
+      print_session_op_header();
+      print_session_op_row("total ops",
+                           total_ops,
+                           total_ops > 0 ? 100.0 : 0.0,
+                           avg_total,
+                           instant_total);
+      for (uint32_t op = 0; op < sal::mapped_memory::session_operation_count; ++op)
+      {
+         const uint64_t total = cur.session_ops[op];
+         const double instant =
+             interval > 0 ? double(counter_delta(cur.session_ops[op], prev.session_ops[op])) /
+                                interval
+                          : 0;
+         const double avg = op_rates.rate(op);
+         if (total == 0 && instant == 0 && avg == 0)
+            continue;
+
+         any_ops = true;
+         print_session_op_row(sal::mapped_memory::session_operation_names[op],
+                              total,
+                              total_ops > 0 ? 100.0 * double(total) / double(total_ops) : 0.0,
+                              avg,
+                              instant);
+      }
+      if (!any_ops)
+         print_dashboard_row("op counters", "0", "no observed operation types yet");
+   }
+
+   std::cout << "\nNotes: compactor lifetime bytes are derived from current shared state. "
+             << "True cumulative segment-compact source/live/recovered bytes need SAL counters "
+             << "in the writer process.\n";
+   std::cout.flush();
+}
+
+int cmd_dashboard(const fs::path& dir,
+                  uint64_t       interval_ms,
+                  uint64_t       samples,
+                  uint64_t       rate_samples)
+{
+   if (interval_ms == 0)
+      interval_ms = 1000;
+
+   fs::path db_dir = dir;
+   if (!fs::exists(db_dir / "header") && fs::exists(db_dir / "chaindata" / "header"))
+      db_dir = db_dir / "chaindata";
+
+   passive_header_mapping mapping(db_dir / "header");
+   const auto*            state = mapping.state();
+   std::unique_ptr<passive_ptr_header_mapping> ptr_mapping;
+   if (fs::exists(db_dir / "ptrs" / "header.bin"))
+      ptr_mapping = std::make_unique<passive_ptr_header_mapping>(db_dir / "ptrs" / "header.bin");
+   const auto* ptr_header = ptr_mapping ? ptr_mapping->header() : nullptr;
+   std::unique_ptr<passive_session_ops_mapping> op_mapping;
+   if (fs::exists(db_dir / "session_ops.bin"))
+      op_mapping = std::make_unique<passive_session_ops_mapping>(db_dir / "session_ops.bin");
+   const auto* op_stats = op_mapping ? op_mapping->stats() : nullptr;
+   std::unique_ptr<passive_wal_status_mapping> wal_mapping;
+   if (fs::exists(db_dir / "wal" / "status.bin"))
+      wal_mapping = std::make_unique<passive_wal_status_mapping>(db_dir / "wal" / "status.bin");
+   const auto* wal_status = wal_mapping ? wal_mapping->file() : nullptr;
+
+   auto prev = read_dashboard_snapshot(db_dir, *state, ptr_header, op_stats, wal_status);
+   mfu_rolling_rates rates(rate_samples);
+   session_op_rolling_rates op_rates(rate_samples);
+   for (uint64_t i = 0; samples == 0 || i < samples; ++i)
+   {
+      if (i != 0)
+         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+      auto cur = read_dashboard_snapshot(db_dir, *state, ptr_header, op_stats, wal_status);
+      if (i != 0)
+      {
+         rates.push(cur, prev);
+         op_rates.push(cur, prev);
+      }
+      render_dashboard(db_dir, cur, prev, rates, op_rates, i);
+      prev = cur;
+   }
+   return 0;
+}
+
 int hex_digit(char c)
 {
    if (c >= '0' && c <= '9')
@@ -474,6 +2210,95 @@ void cmd_info(database& db, const fs::path& dir)
    std::cout << "  " << std::setw(20) << "Valid objects" << dump.total_read_nodes << "\n";
    std::cout << "  " << std::setw(20) << "Valid bytes" << format_bytes(dump.total_read_bytes)
              << "\n";
+
+   std::cout << "\n── MFU Cache ──\n";
+   const uint64_t max_difficulty = ~uint64_t{0};
+   const uint64_t difficulty_gap = max_difficulty - dump.cache_difficulty;
+   std::cout << "  " << std::setw(20) << "Pinned segments" << dump.mlocked_segments_count
+             << "\n";
+   std::cout << "  " << std::setw(20) << "Pinned capacity"
+             << format_bytes(uint64_t(dump.mlocked_segments_count) * sal::segment_size) << "\n";
+   std::cout << "  " << std::setw(20) << "mlock success"
+             << dump.successful_mlock_regions << " regions, "
+             << format_bytes(dump.successful_mlock_regions * sal::segment_size) << "\n";
+   if (dump.failed_mlock_regions != 0)
+      std::cout << "  " << std::setw(20) << "mlock failed"
+                << dump.failed_mlock_regions << " regions\n";
+   std::cout << "  " << std::setw(20) << "munlock success"
+             << dump.successful_munlock_regions << " regions\n";
+   if (dump.failed_munlock_regions != 0)
+      std::cout << "  " << std::setw(20) << "munlock failed"
+                << dump.failed_munlock_regions << " regions\n";
+   std::cout << "  " << std::setw(20) << "Difficulty" << dump.cache_difficulty;
+   if (difficulty_gap > 0)
+      std::cout << " (about 1 in " << (max_difficulty / difficulty_gap) << ")";
+   std::cout << "\n";
+   std::cout << "  " << std::setw(20) << "Policy bytes"
+             << format_bytes(dump.cache_policy_satisfied_bytes) << "\n";
+   std::cout << "  " << std::setw(20) << "Promoted total"
+             << format_bytes(dump.total_promoted_bytes) << "\n";
+   std::cout << "  " << std::setw(20) << "COLD->HOT"
+             << dump.cache_cold_to_hot_promotions << " objects, "
+             << format_bytes(dump.cache_cold_to_hot_promoted_bytes) << "\n";
+   std::cout << "  " << std::setw(20) << "HOT refresh"
+             << dump.cache_hot_to_hot_promotions << " objects, "
+             << format_bytes(dump.cache_hot_to_hot_promoted_bytes) << "\n";
+   std::cout << "  " << std::setw(20) << "Young HOT skip"
+             << dump.cache_young_hot_skips << " objects, "
+             << format_bytes(dump.cache_young_hot_skipped_bytes) << "\n";
+   if (dump.cache_hot_to_hot_promotions != 0)
+   {
+      const double avg_pressure =
+          double(dump.cache_hot_to_hot_demote_pressure_ppm) /
+          double(dump.cache_hot_to_hot_promotions) / 10000.0;
+      const double byte_avg_pressure =
+          dump.cache_hot_to_hot_promoted_bytes == 0
+              ? 0.0
+              : double(dump.cache_hot_to_hot_byte_demote_pressure_ppm) /
+                    double(dump.cache_hot_to_hot_promoted_bytes) / 10000.0;
+      std::cout << "  " << std::setw(20) << "Refresh pressure"
+                << std::fixed << std::setprecision(1) << avg_pressure
+                << "% avg, " << byte_avg_pressure << "% byte-avg\n";
+   }
+   if (dump.cache_young_hot_skips != 0)
+   {
+      const double avg_pressure =
+          double(dump.cache_young_hot_skip_demote_pressure_ppm) /
+          double(dump.cache_young_hot_skips) / 10000.0;
+      const double byte_avg_pressure =
+          dump.cache_young_hot_skipped_bytes == 0
+              ? 0.0
+              : double(dump.cache_young_hot_skip_byte_demote_pressure_ppm) /
+                    double(dump.cache_young_hot_skipped_bytes) / 10000.0;
+      std::cout << "  " << std::setw(20) << "Skip pressure"
+                << std::fixed << std::setprecision(1) << avg_pressure
+                << "% avg, " << byte_avg_pressure << "% byte-avg\n";
+   }
+   if (dump.cache_promoted_to_cold_promotions != 0)
+      std::cout << "  " << std::setw(20) << "Promoted to cold"
+                << dump.cache_promoted_to_cold_promotions << " objects, "
+                << format_bytes(dump.cache_promoted_to_cold_bytes) << "\n";
+   std::cout << "  " << std::setw(20) << "Target rate"
+             << format_bytes(dump.cache_target_promoted_bytes_per_s) << "/s\n";
+   std::cout << "  " << std::setw(20) << "Recycled queue"
+             << dump.recycled_queue_depth << " / " << dump.recycled_queue_capacity
+             << " segments\n";
+
+   std::cout << "\n── Control Blocks ──\n";
+   std::cout << "  " << std::setw(20) << "Zones" << dump.control_block_zones << "\n";
+   std::cout << "  " << std::setw(20) << "Capacity" << dump.control_block_capacity << "\n";
+   std::cout << "  " << std::setw(20) << "Header mlock"
+             << (dump.control_block_header_pinned ? "yes" : "no") << "\n";
+   std::cout << "  " << std::setw(20) << "Zone mlock"
+             << dump.control_block_zone_mlock_success_regions << " ok, "
+             << dump.control_block_zone_mlock_failed_regions << " failed, "
+             << dump.control_block_zone_mlock_skipped_regions << " skipped, "
+             << format_bytes(dump.control_block_zone_mlock_success_bytes) << " pinned\n";
+   std::cout << "  " << std::setw(20) << "Free-list mlock"
+             << dump.control_block_freelist_mlock_success_regions << " ok, "
+             << dump.control_block_freelist_mlock_failed_regions << " failed, "
+             << dump.control_block_freelist_mlock_skipped_regions << " skipped, "
+             << format_bytes(dump.control_block_freelist_mlock_success_bytes) << " pinned\n";
 
    // Root count
    auto ses        = db.start_read_session();
@@ -1964,14 +3789,21 @@ int main(int argc, char** argv)
    int64_t     root_index = -1;
    uint32_t    range_shards = 1;
    uint32_t    jobs = 0;
-   bool        json_output = false;
+	   uint64_t    watch_interval_ms = 1000;
+	   uint64_t    watch_samples = 0;
+	   uint64_t    rate_samples = 60;
+	   bool        json_output = false;
+	   bool        dashboard_flag = false;
+	   bool        top_flag = false;
+	   bool        explain_terms = false;
+	   bool        legend_terms = false;
 
    po::options_description desc("psitricorder — database inspection & repair utility");
    auto                    opt = desc.add_options();
    opt("help,h", "show this help message");
    opt("db-dir,d", po::value<std::string>(&db_dir), "database directory");
-   opt("command", po::value<std::string>(&command)->default_value("info"),
-       "command: info, tree-stats, verify, audit-versions, audit-refcounts, defrag, vas-info");
+	   opt("command", po::value<std::string>(&command)->default_value("info"),
+	       "command: info, terms, mfu-watch, dashboard, top, tree-stats, verify, audit-versions, audit-refcounts, defrag, vas-info");
    opt("recovery,r", po::value<std::string>(&recovery_str)->default_value("none"),
        "recovery mode: none, deferred, app_crash, power_loss, full_verify");
    opt("max-db-size", po::value<int64_t>(&max_db_size_gb),
@@ -1996,8 +3828,22 @@ int main(int argc, char** argv)
        "use for parallel sampling, not exact global audits");
    opt("jobs", po::value<uint32_t>(&jobs)->default_value(0),
        "tree-stats --range-shards: worker thread count; default is hardware concurrency");
-   opt("json", po::bool_switch(&json_output),
-       "tree-stats: emit machine-readable JSON on stdout");
+	   opt("interval-ms", po::value<uint64_t>(&watch_interval_ms)->default_value(1000),
+	       "mfu-watch/dashboard: polling interval in milliseconds");
+	   opt("samples", po::value<uint64_t>(&watch_samples)->default_value(0),
+	       "mfu-watch/dashboard: number of samples to print; 0 means run until interrupted");
+	   opt("rate-samples", po::value<uint64_t>(&rate_samples)->default_value(60),
+	       "dashboard: rolling samples used for displayed rates; 60 is about one minute at the default interval, 1 is near-instant, 0 disables");
+	   opt("dashboard", po::bool_switch(&dashboard_flag),
+	       "run the passive real-time dashboard; use with --db-dir");
+	   opt("top", po::bool_switch(&top_flag),
+	       "alias for --dashboard");
+	   opt("explain", po::bool_switch(&explain_terms),
+	       "print dashboard/MFU term definitions and exit");
+	   opt("legend", po::bool_switch(&legend_terms),
+	       "alias for --explain");
+	   opt("json", po::bool_switch(&json_output),
+	       "tree-stats: emit machine-readable JSON on stdout");
 
    po::positional_options_description pos;
    pos.add("command", 1);
@@ -2007,12 +3853,24 @@ int main(int argc, char** argv)
    try
    {
       po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
-      po::notify(vm);
-   }
+	      po::notify(vm);
+	   }
    catch (const std::exception& e)
    {
       std::cerr << "Error: " << e.what() << "\n\n" << desc << "\n";
-      return 1;
+	      return 1;
+	   }
+
+	   if ((dashboard_flag || top_flag) && db_dir.empty() && !command.empty() &&
+	       command != "info" && command != "dashboard" && command != "top")
+	      db_dir = command;
+	   if (dashboard_flag || top_flag)
+	      command = "dashboard";
+
+   if (explain_terms || legend_terms || command == "terms" || command == "legend")
+   {
+      print_psitricorder_terms();
+      return 0;
    }
 
    // vas-info doesn't need a db-dir
@@ -2026,8 +3884,11 @@ int main(int argc, char** argv)
    {
       std::cout << "Usage: psitricorder [command] <db-dir> [options]\n\n"
                 << "Commands:\n"
-                << "  info       Show database size summary (default)\n"
-                << "  tree-stats Report tree shape, density histograms, and retained version count\n"
+	                << "  info       Show database size summary (default)\n"
+	                << "  terms      Define dashboard and MFU monitoring terms\n"
+	                << "  mfu-watch  Passively watch MFU difficulty and promotion rate from mmap'd header\n"
+	                << "  dashboard  Real-time passive cache/compactor dashboard; top is an alias\n"
+	                << "  tree-stats Report tree shape, density histograms, and retained version count\n"
                 << "  verify     Full integrity verification (offline)\n"
                 << "  audit-versions\n"
                 << "             Scan version control blocks and validate the dead-version index\n"
@@ -2052,6 +3913,11 @@ int main(int argc, char** argv)
 
    try
    {
+	      if (command == "mfu-watch")
+	         return cmd_mfu_watch(db_dir, watch_interval_ms, watch_samples);
+	      if (command == "dashboard" || command == "top")
+	         return cmd_dashboard(db_dir, watch_interval_ms, watch_samples, rate_samples);
+
       auto mode = parse_recovery(recovery_str);
       auto db   = database::open(db_dir, open_mode::open_existing, cfg, mode);
 
@@ -2073,14 +3939,14 @@ int main(int argc, char** argv)
          return cmd_audit_refcounts(*db, prune_floor, progress_nodes);
       else if (command == "defrag")
          cmd_defrag(*db, db_dir);
-      else if (command == "vas-info")
-         cmd_vas_info();  // also works with a db-dir positional arg
-      else
-      {
-         std::cerr << "Unknown command: " << command << "\n";
-         std::cerr << "Valid commands: info, tree-stats, verify, audit-versions, audit-refcounts, defrag, vas-info\n";
-         return 1;
-      }
+	      else if (command == "vas-info")
+	         cmd_vas_info();  // also works with a db-dir positional arg
+	      else
+	      {
+	         std::cerr << "Unknown command: " << command << "\n";
+	         std::cerr << "Valid commands: info, terms, mfu-watch, dashboard, top, tree-stats, verify, audit-versions, audit-refcounts, defrag, vas-info\n";
+	         return 1;
+	      }
    }
    catch (const std::exception& e)
    {

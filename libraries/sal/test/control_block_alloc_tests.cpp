@@ -168,6 +168,11 @@ TEST_CASE("ControlBlockAllocPersistence", "[sal][control_block_alloc]")
    // First allocator instance
    {
       sal::control_block_alloc alloc(temp_path);
+      auto stats = alloc.get_mlock_stats();
+      REQUIRE((stats.zones.successful_regions + stats.zones.failed_regions +
+               stats.zones.skipped_regions) >= 1);
+      REQUIRE((stats.free_list.successful_regions + stats.free_list.failed_regions +
+               stats.free_list.skipped_regions) >= 1);
 
       // Allocate a small number of pointers
       for (int i = 0; i < 20; ++i)  // Increased count
@@ -185,6 +190,11 @@ TEST_CASE("ControlBlockAllocPersistence", "[sal][control_block_alloc]")
    // Second allocator instance should be able to access the same pointers
    {
       sal::control_block_alloc alloc(temp_path);
+      auto stats = alloc.get_mlock_stats();
+      REQUIRE((stats.zones.successful_regions + stats.zones.failed_regions +
+               stats.zones.skipped_regions) >= 1);
+      REQUIRE((stats.free_list.successful_regions + stats.free_list.failed_regions +
+               stats.free_list.skipped_regions) >= 1);
 
       // Check each pointer can be accessed and freed
       for (size_t i = 0; i < addresses.size(); ++i)

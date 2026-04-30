@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -438,6 +439,9 @@ namespace mdbx
          env::mode       mode       = write_mapped_io;
          env::durability durability = robust_synchronous;
          unsigned         options    = 0;
+         std::optional<uint64_t> psitri_cache_size_mb;
+         std::optional<uint64_t> psitri_cache_window_sec;
+         std::optional<int>      psitri_write_mode;
 
          MDBX_env_flags_t make_flags() const noexcept;
 
