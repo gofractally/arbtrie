@@ -22,8 +22,9 @@ namespace psitri::dwal
 
    wal_writer::wal_writer(const std::filesystem::path& path,
                           uint16_t                     root_index,
-                          uint64_t                     sequence_base)
-       : _next_seq(sequence_base), _path(path)
+                          uint64_t                     sequence_base,
+                          wal_root_status*             status)
+       : _next_seq(sequence_base), _path(path), _status(status)
    {
       _fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
       if (_fd < 0)
@@ -49,6 +50,7 @@ namespace psitri::dwal
             // TODO: scan to find actual end sequence (for now, trust caller)
             if (sequence_base > _next_seq)
                _next_seq = sequence_base;
+            publish_status();
             return;
          }
          // Invalid header — truncate and rewrite.
@@ -73,6 +75,7 @@ namespace psitri::dwal
          throw std::runtime_error("wal_writer: failed to write header");
       }
       _file_pos = sizeof(wal_header);
+      publish_status();
    }
 
    wal_writer::~wal_writer()
@@ -89,7 +92,8 @@ namespace psitri::dwal
          _entry_active(other._entry_active),
          _path(std::move(other._path)),
          _entry_buf(std::move(other._entry_buf)),
-         _write_buf(std::move(other._write_buf))
+         _write_buf(std::move(other._write_buf)),
+         _status(std::exchange(other._status, nullptr))
    {
    }
 
@@ -107,6 +111,7 @@ namespace psitri::dwal
          _path         = std::move(other._path);
          _entry_buf    = std::move(other._entry_buf);
          _write_buf    = std::move(other._write_buf);
+         _status       = std::exchange(other._status, nullptr);
       }
       return *this;
    }
@@ -117,8 +122,14 @@ namespace psitri::dwal
    {
       assert(!_entry_active);
       _entry_buf.clear();
-      _op_count     = 0;
-      _entry_active = true;
+      _op_count            = 0;
+      _entry_upsert_data   = 0;
+      _entry_upsert_subtree = 0;
+      _entry_remove        = 0;
+      _entry_remove_range  = 0;
+      _entry_key_bytes     = 0;
+      _entry_value_bytes   = 0;
+      _entry_active        = true;
 
       // Reserve space for the entry header (written at commit time).
       // Uses the v2 header size (25 bytes) which includes multi-tx fields.
@@ -133,6 +144,9 @@ namespace psitri::dwal
       write_u32(static_cast<uint32_t>(value.size()));
       write_bytes(value.data(), value.size());
       ++_op_count;
+      ++_entry_upsert_data;
+      _entry_key_bytes += key.size();
+      _entry_value_bytes += value.size();
    }
 
    void wal_writer::add_upsert_subtree(std::string_view key, sal::tree_id tid)
@@ -142,6 +156,8 @@ namespace psitri::dwal
       write_string(key);
       write_u64(tid.pack());
       ++_op_count;
+      ++_entry_upsert_subtree;
+      _entry_key_bytes += key.size();
    }
 
    void wal_writer::add_remove(std::string_view key)
@@ -150,6 +166,8 @@ namespace psitri::dwal
       write_u8(static_cast<uint8_t>(wal_op_type::remove));
       write_string(key);
       ++_op_count;
+      ++_entry_remove;
+      _entry_key_bytes += key.size();
    }
 
    void wal_writer::add_remove_range(std::string_view low, std::string_view high)
@@ -159,6 +177,8 @@ namespace psitri::dwal
       write_string(low);
       write_string(high);
       ++_op_count;
+      ++_entry_remove_range;
+      _entry_key_bytes += low.size() + high.size();
    }
 
    uint64_t wal_writer::finalize_entry(uint8_t entry_flags, uint64_t multi_tx_id,
@@ -190,6 +210,27 @@ namespace psitri::dwal
       // Append to the write buffer.
       _write_buf.insert(_write_buf.end(), _entry_buf.begin(), _entry_buf.end());
 
+      if (_status)
+      {
+         _status->wal_entries.fetch_add(1, std::memory_order_relaxed);
+         _status->wal_ops.fetch_add(_op_count, std::memory_order_relaxed);
+         _status->wal_upsert_data_ops.fetch_add(_entry_upsert_data,
+                                                std::memory_order_relaxed);
+         _status->wal_upsert_subtree_ops.fetch_add(_entry_upsert_subtree,
+                                                   std::memory_order_relaxed);
+         _status->wal_remove_ops.fetch_add(_entry_remove, std::memory_order_relaxed);
+         _status->wal_remove_range_ops.fetch_add(_entry_remove_range,
+                                                 std::memory_order_relaxed);
+         if (multi_tx_id != 0)
+            _status->wal_multi_entries.fetch_add(1, std::memory_order_relaxed);
+         _status->wal_committed_entry_bytes.fetch_add(entry_size,
+                                                      std::memory_order_relaxed);
+         _status->wal_key_bytes.fetch_add(_entry_key_bytes, std::memory_order_relaxed);
+         _status->wal_value_bytes.fetch_add(_entry_value_bytes,
+                                            std::memory_order_relaxed);
+         publish_status();
+      }
+
       return seq;
    }
 
@@ -210,6 +251,8 @@ namespace psitri::dwal
       _entry_active = false;
       _entry_buf.clear();
       _op_count = 0;
+      if (_status)
+         _status->wal_discarded_entries.fetch_add(1, std::memory_order_relaxed);
    }
 
    void wal_writer::flush()
@@ -221,8 +264,12 @@ namespace psitri::dwal
    {
       assert(_fd >= 0);
       flush_write_buffer();
+      if (_status)
+         _status->wal_flush_calls.fetch_add(1, std::memory_order_relaxed);
       if (sync >= sal::sync_type::full)
       {
+         if (_status)
+            _status->wal_fullsync_calls.fetch_add(1, std::memory_order_relaxed);
 #ifdef __APPLE__
          ::fcntl(_fd, F_FULLFSYNC);
 #else
@@ -231,6 +278,8 @@ namespace psitri::dwal
       }
       else if (sync >= sal::sync_type::fsync)
       {
+         if (_status)
+            _status->wal_fsync_calls.fetch_add(1, std::memory_order_relaxed);
          ::fsync(_fd);
       }
       // For msync_async or less, write buffer is flushed but no sync call
@@ -242,6 +291,11 @@ namespace psitri::dwal
          return;
 
       flush_write_buffer();
+      if (_status)
+      {
+         _status->wal_clean_closes.fetch_add(1, std::memory_order_relaxed);
+         _status->wal_fullsync_calls.fetch_add(1, std::memory_order_relaxed);
+      }
 
       // Set the clean-close flag in the header.
       uint16_t flags = wal_flag_clean_close;
@@ -255,6 +309,7 @@ namespace psitri::dwal
 
       ::close(_fd);
       _fd = -1;
+      publish_status();
    }
 
    // ── Internal helpers ────────────────────────────────────────────────
@@ -309,7 +364,23 @@ namespace psitri::dwal
          remaining -= static_cast<size_t>(n);
       }
 
+      if (_status)
+      {
+         _status->wal_write_calls.fetch_add(1, std::memory_order_relaxed);
+         _status->wal_write_bytes.fetch_add(_write_buf.size(), std::memory_order_relaxed);
+      }
       _write_buf.clear();
+      publish_status();
+   }
+
+   void wal_writer::publish_status() noexcept
+   {
+      if (!_status)
+         return;
+      _status->rw_wal_file_bytes.store(_file_pos, std::memory_order_relaxed);
+      _status->rw_wal_buffered_bytes.store(_write_buf.size(), std::memory_order_relaxed);
+      _status->rw_wal_logical_bytes.store(logical_size(), std::memory_order_relaxed);
+      _status->wal_next_sequence.store(_next_seq, std::memory_order_relaxed);
    }
 
 }  // namespace psitri::dwal

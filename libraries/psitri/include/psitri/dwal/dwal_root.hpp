@@ -2,6 +2,7 @@
 #include <art/cow_coordinator.hpp>
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/undo_log.hpp>
+#include <psitri/dwal/wal_status.hpp>
 #include <psitri/dwal/wal_writer.hpp>
 #include <psitri/lock_policy.hpp>
 #include <sal/numbers.hpp>
@@ -103,6 +104,9 @@ namespace psitri::dwal
       /// Lock-free reader/writer coordination.
       /// Manages head root, prev_root, reader_count, writer_active, cow_seq.
       art::cow_coordinator cow;
+
+      /// Process-local pointer to this root's shared WAL status record.
+      wal_root_status* status = nullptr;
 
       basic_dwal_root() : rw_layer(std::make_shared<btree_layer>()) {}
    };

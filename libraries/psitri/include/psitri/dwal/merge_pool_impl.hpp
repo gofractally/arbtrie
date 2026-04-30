@@ -112,6 +112,12 @@ namespace psitri::dwal
       }
       if (!ro)
          return;
+      if (root.status)
+      {
+         root.status->ro_layer_entries.store(ro->size(), std::memory_order_relaxed);
+         root.status->ro_arena_bytes.store(ro->map.arena_capacity(),
+                                           std::memory_order_relaxed);
+      }
 
       auto            wall_start = std::chrono::steady_clock::now();
       struct timespec cpu_start_ts;
@@ -150,6 +156,8 @@ namespace psitri::dwal
             aborted = true;
             fprintf(stderr, "[MERGE] shutdown requested — aborting after %llu entries\n",
                     (unsigned long long)entry_count);
+            if (root.status)
+               root.status->merge_aborts.fetch_add(1, std::memory_order_relaxed);
             break;
          }
 
@@ -197,8 +205,12 @@ namespace psitri::dwal
       }
 
       // Apply range tombstones.
+      uint64_t range_tombstone_count = 0;
       for (const auto& range : ro->tombstones.ranges())
+      {
          tx.remove_range_any(range.low, range.high);
+         ++range_tombstone_count;
+      }
 
       auto            wall_pre_commit = std::chrono::steady_clock::now();
       struct timespec cpu_pre_commit_ts;
@@ -221,6 +233,11 @@ namespace psitri::dwal
       double cpu_drain_ms  = to_ms(cpu_start_ts, cpu_pre_commit_ts);
       double cpu_commit_ms = to_ms(cpu_pre_commit_ts, cpu_end_ts);
       double cpu_total_ms  = cpu_drain_ms + cpu_commit_ms;
+      auto ns_between = [](auto a, auto b) -> uint64_t
+      {
+         return static_cast<uint64_t>(
+             std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+      };
       double syscall_pct =
           wall_total_ms > 0 ? 100.0 * (1.0 - cpu_total_ms / wall_total_ms) : 0;
 
@@ -254,11 +271,32 @@ namespace psitri::dwal
       if (new_root)
          root.tri_root.store(static_cast<uint32_t>(new_root.address()),
                              std::memory_order_release);
+      if (root.status)
+      {
+         root.status->tri_root.store(root.tri_root.load(std::memory_order_relaxed),
+                                     std::memory_order_relaxed);
+         root.status->merge_completions.fetch_add(1, std::memory_order_relaxed);
+         root.status->merge_entries.fetch_add(entry_count, std::memory_order_relaxed);
+         root.status->merge_range_tombstones.fetch_add(range_tombstone_count,
+                                                       std::memory_order_relaxed);
+         root.status->merge_wall_ns.fetch_add(ns_between(wall_start, wall_end),
+                                              std::memory_order_relaxed);
+         root.status->merge_commit_ns.fetch_add(ns_between(wall_pre_commit, wall_end),
+                                                std::memory_order_relaxed);
+         root.status->merge_cpu_ns.fetch_add(
+             static_cast<uint64_t>(cpu_total_ms * 1000.0 * 1000.0),
+             std::memory_order_relaxed);
+      }
 
       // Null the buffered shared_ptr — last reader holding a copy will free it.
       {
          std::lock_guard lk(root.buffered_mutex);
          root.buffered_ptr.reset();
+      }
+      if (root.status)
+      {
+         root.status->ro_layer_entries.store(0, std::memory_order_relaxed);
+         root.status->ro_arena_bytes.store(0, std::memory_order_relaxed);
       }
 
       // Drop our local reference.
@@ -276,6 +314,8 @@ namespace psitri::dwal
              _wal_dir / ("root-" + std::to_string(root_index)) / "wal-ro.dwal";
          std::error_code ec;
          std::filesystem::remove(ro_wal, ec);
+         if (root.status && !ec)
+            root.status->ro_wal_file_bytes.store(0, std::memory_order_relaxed);
       }
 
       // ── Adaptive throttle adjustment ──────────────────────────────
@@ -313,6 +353,16 @@ namespace psitri::dwal
       // Signal the writer that it can swap again.
       root.merge_complete.store(true, std::memory_order_release);
       root.merge_complete.notify_all();
+      if (root.status)
+      {
+         root.status->merge_complete.store(1, std::memory_order_relaxed);
+         root.status->arena_at_merge_complete.store(
+            root.arena_at_merge_complete.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+         root.status->throttle_sleep_ns.store(
+            root.throttle_sleep_ns.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+      }
 
       // Under COWART, fresh readers use prev_root (zero coordination).
       // No need for merge-thread-initiated swaps.

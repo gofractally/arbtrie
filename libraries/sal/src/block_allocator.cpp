@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <bit>  // Add this for std::countl_zero and std::popcount
 #include <sys/resource.h>
 #include <sal/block_allocator.hpp>
@@ -337,6 +338,69 @@ namespace sal
       return false;
    }
 
+   bool block_allocator::mlock_mapped_blocks(uint32_t desired_num_blocks) noexcept
+   {
+      std::lock_guard l{_resize_mutex};
+      return mlock_mapped_blocks_locked(desired_num_blocks);
+   }
+
+   bool block_allocator::mlock_mapped_blocks_locked(uint32_t desired_num_blocks) noexcept
+   {
+      auto file_size = _file_size.load(std::memory_order_relaxed);
+      if (!_mapped_base || _mapped_base == MAP_FAILED || file_size == 0)
+         return true;
+
+      auto capacity = static_cast<uint32_t>(file_size / _block_size);
+      auto target_blocks =
+          desired_num_blocks == 0 ? capacity : std::min(desired_num_blocks, capacity);
+      auto start_block = _mlock_attempted_blocks.load(std::memory_order_relaxed);
+      if (start_block >= target_blocks)
+         return true;
+
+      bool all_pinned = true;
+      for (uint32_t block = start_block; block < target_blocks; ++block)
+      {
+         auto*  addr = static_cast<char*>(_mapped_base) + uint64_t(block) * _block_size;
+         size_t size = static_cast<size_t>(_block_size);
+
+         if (_mlock_limit_bytes != RLIM_INFINITY && _block_size > _mlock_limit_bytes)
+         {
+            _skipped_mlock_regions.fetch_add(1, std::memory_order_relaxed);
+            _skipped_mlock_bytes.fetch_add(_block_size, std::memory_order_relaxed);
+            all_pinned = false;
+            if (!_mlock_limit_warned)
+            {
+               _mlock_limit_warned = true;
+               SAL_WARN(
+                   "mlock skipped for {}: RLIMIT_MEMLOCK ({} KB) is smaller than block "
+                   "size ({} KB).",
+                   _filename.native(), _mlock_limit_bytes / 1024, _block_size / 1024);
+            }
+         }
+         else if (::mlock(addr, size) != 0)
+         {
+            _failed_mlock_regions.fetch_add(1, std::memory_order_relaxed);
+            _failed_mlock_bytes.fetch_add(_block_size, std::memory_order_relaxed);
+            all_pinned = false;
+            if (!_mlock_error_warned)
+            {
+               _mlock_error_warned = true;
+               SAL_ERROR("Failed to mlock {} block {}: {}", _filename.native(), block,
+                         strerror(errno));
+            }
+         }
+         else
+         {
+            _successful_mlock_regions.fetch_add(1, std::memory_order_relaxed);
+            _successful_mlock_bytes.fetch_add(_block_size, std::memory_order_relaxed);
+         }
+
+         _mlock_attempted_blocks.store(block + 1, std::memory_order_release);
+      }
+
+      return all_pinned;
+   }
+
    uint32_t block_allocator::reserve(uint32_t desired_num_blocks, bool mlock)
    {
       if (desired_num_blocks > _max_blocks)
@@ -349,7 +413,11 @@ namespace sal
 
       // Check if we already have enough space reserved in the file
       if (capacity >= desired_num_blocks)
+      {
+         if (mlock)
+            mlock_mapped_blocks_locked(desired_num_blocks);
          return capacity;
+      }
 
       auto add_count = desired_num_blocks - capacity;
       auto new_size  = _file_size.load(std::memory_order_relaxed) + _block_size * add_count;
@@ -395,34 +463,6 @@ namespace sal
 
       if (addr != MAP_FAILED)
       {
-         if (mlock)
-         {
-            // Use the cached RLIMIT_MEMLOCK (no syscall on hot path).
-            // If the limit is smaller than one block, mlock will always fail — skip it
-            // and warn once so the user knows pinned cache is unavailable.
-            if (_mlock_limit_bytes != RLIM_INFINITY && map_size > _mlock_limit_bytes)
-            {
-               static bool warned = false;
-               if (!warned)
-               {
-                  warned = true;
-                  SAL_WARN(
-                      "mlock skipped: RLIMIT_MEMLOCK ({} KB) is smaller than one segment "
-                      "({} KB) — pinned cache is disabled. "
-#ifdef __linux__
-                      "Run `ulimit -l unlimited` or set `* hard memlock unlimited` in "
-                      "/etc/security/limits.conf to enable.",
-#else
-                      "Run `ulimit -l unlimited` to enable.",
-#endif
-                      _mlock_limit_bytes / 1024, map_size / 1024);
-               }
-            }
-            else if (::mlock(addr, map_size) != 0)
-            {
-               SAL_ERROR("Failed to mlock file: {}", strerror(errno));
-            }
-         }
          // Successfully mapped the file
          if (capacity == 0)
          {
@@ -432,6 +472,8 @@ namespace sal
 
          // Update file size (increases capacity)
          _file_size = new_size;
+         if (mlock)
+            mlock_mapped_blocks_locked(desired_num_blocks);
 
          // Return the new capacity (not num_blocks)
          return desired_num_blocks;

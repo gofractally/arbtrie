@@ -80,7 +80,7 @@ namespace sal
    /**
     * Generate a random number for cache decisions
     * 
-    * @return A random 32-bit number
+    * @return A random 64-bit number
     */
    inline uint64_t allocator_session::get_random() noexcept
    {
@@ -218,6 +218,12 @@ namespace sal
       auto  cread = cb.load(std::memory_order_acquire);
       auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
       assert(int(T::type_id) == int(alloc_header::type_id) or int(T::type_id) == int(ptr->type()));
+      if (_sega._mapped_state->_config.enable_read_cache && cread.ref > 0 &&
+          is_read_only(cread.loc()) && should_cache(adr, ptr->size()) &&
+          cb.try_mark_read_cache_pending())
+      {
+         (void)_rcache_queue.try_push(adr);
+      }
       // assert(cread.ref > 0);
       return smart_ref<T>(get_session_ptr(), ptr, cb, cread);
    }
@@ -287,12 +293,14 @@ namespace sal
    /**
     * Check if an object should be cached based on its size and difficulty threshold
     * 
+    * @param adr The control block address being dereferenced
     * @param size The size of the object in bytes
     * @return true if the object should be cached, false otherwise
     */
-   inline bool allocator_session::should_cache(uint32_t size) noexcept
+   inline bool allocator_session::should_cache(ptr_address adr, uint32_t size) noexcept
    {
-      return _sega._mapped_state->_cache_difficulty_state.should_cache(get_random(), size);
+      return _sega._mapped_state->_cache_difficulty_state.should_cache(
+          get_random() ^ uint64_t(*adr), size);
    }
    inline ptr_address allocator_session::alloc_custom_cb(uint64_t user_value) noexcept
    {
@@ -505,6 +513,17 @@ namespace sal
    inline uint64_t allocator_session::get_pending_release_count() const noexcept
    {
       return _release_queue.usage();
+   }
+
+   inline allocator_session::operation_scope
+   allocator_session::record_operation(mapped_memory::session_operation op,
+                                       uint64_t                         count) noexcept
+   {
+      const bool is_outer_operation = detail::session_operation_depth == 0;
+      ++detail::session_operation_depth;
+      if (is_outer_operation)
+         _sega.record_session_operation(_session_num, op, count);
+      return operation_scope(true);
    }
 
    template <typename Visitor>

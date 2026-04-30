@@ -120,14 +120,14 @@ namespace psitri
    /**
     * simulate lower_bound and track how often each position is accessed
     */
-   constexpr void lower_bound_idx_pos(int n, int key, uint16_t* table)
+   constexpr void lower_bound_idx_pos(int n, int key, uint32_t* table)
    {
       int left  = -1;
       int right = n;
       while (right - left > 1)
       {
          int middle = (left + right) >> 1;
-         table[middle] += 256;
+         table[middle] += 1u << 16;
          if (middle < key)
             left = middle;
          else
@@ -142,11 +142,16 @@ namespace psitri
     * laid out in the node so that they are accessed in a linear,
     * cache-friendly manner.
     */
-   constexpr std::array<uint8_t, (256 * 255) / 2> create_table()
+   constexpr std::array<uint16_t,
+                        (leaf_node::max_leaf_branches * (leaf_node::max_leaf_branches + 1)) /
+                            2>
+   create_table()
    {
-      std::array<uint8_t, (256 * 255) / 2> sequence_table;
-      uint16_t                             table[256];
-      for (int i = 1; i < 256; ++i)
+      std::array<uint16_t,
+                 (leaf_node::max_leaf_branches * (leaf_node::max_leaf_branches + 1)) / 2>
+          sequence_table;
+      uint32_t table[leaf_node::max_leaf_branches + 1];
+      for (int i = 1; i <= leaf_node::max_leaf_branches; ++i)
       {
          auto* tbl_pos = sequence_table.data() + (i * (i - 1)) / 2;
          for (int x = 0; x < i; ++x)
@@ -154,10 +159,12 @@ namespace psitri
          for (int x = 0; x < i; ++x)
             lower_bound_idx_pos(i, x, table);
 
-         std::stable_sort(table, table + i, [](auto a, auto b) { return (a >> 8) > (b >> 8); });
+         std::stable_sort(table,
+                          table + i,
+                          [](auto a, auto b) { return (a >> 16) > (b >> 16); });
          std::reverse(table, table + i);
          for (int x = 0; x < i; ++x)
-            tbl_pos[x] = table[x] & 0xff;
+            tbl_pos[x] = table[x] & 0xffff;
       }
       return sequence_table;
    }
@@ -280,7 +287,7 @@ namespace psitri
             memcpy(_key_hashs, clone->_key_hashs, nb * sizeof(uint8_t));
 
             /// copy the keys in the optimal layout order
-            const uint8_t* seq = search_seq_table.data() + ((nb - 1) * nb) / 2;
+            const uint16_t* seq = search_seq_table.data() + ((nb - 1) * nb) / 2;
             auto           kos = keys_offsets();
 
             /// allocate the keys in the optimal layout order
@@ -371,7 +378,7 @@ namespace psitri
          const uint16_t ins_bn = *ins.lb;
          set_num_branches(dst_nb);
 
-         const uint8_t* seq_table = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
+         const uint16_t* seq_table = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
          auto           kos       = keys_offsets();
          auto           kh        = key_hashs();
          for (uint16_t x = dst_nb; x-- > 0;)
@@ -441,7 +448,7 @@ namespace psitri
 
       memcpy(_key_hashs, clone->_key_hashs, nb * sizeof(uint8_t));
 
-      const uint8_t* seq_table = search_seq_table.data() + ((nb - 1) * nb) / 2;
+      const uint16_t* seq_table = search_seq_table.data() + ((nb - 1) * nb) / 2;
       auto           kos       = keys_offsets();
       for (uint16_t x = nb; x-- > 0;)
       {
@@ -493,7 +500,7 @@ namespace psitri
          if (dst_nb == 0)
             return;
 
-         const uint8_t* seq_table = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
+         const uint16_t* seq_table = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
          auto           kos       = keys_offsets();
          auto           kh        = key_hashs();
          for (uint16_t x = dst_nb; x-- > 0;)
@@ -552,7 +559,7 @@ namespace psitri
          if (dst_nb == 0)
             return;
 
-         const uint8_t* seq_table     = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
+         const uint16_t* seq_table     = search_seq_table.data() + ((dst_nb - 1) * dst_nb) / 2;
          auto           kos           = keys_offsets();
          auto           kh            = key_hashs();
          auto           src_index_for = [&](uint16_t dst_idx)
@@ -611,7 +618,7 @@ namespace psitri
       if (nb == 0)
          return;
 
-      const uint8_t* aseq = search_seq_table.data() + ((nb - 1) * nb) / 2;
+      const uint16_t* aseq = search_seq_table.data() + ((nb - 1) * nb) / 2;
       auto           kos  = keys_offsets();
       auto           kh   = key_hashs();
 
@@ -711,7 +718,7 @@ namespace psitri
       set_num_branches(*end - *start);
       auto nb = num_branches();
 
-      const uint8_t* aseq = search_seq_table.data() + ((nb - 1) * nb) / 2;
+      const uint16_t* aseq = search_seq_table.data() + ((nb - 1) * nb) / 2;
       auto           kos  = keys_offsets();
       auto           kh   = key_hashs();
 
@@ -822,6 +829,8 @@ namespace psitri
    {
       assert(ins.key.size() <= 1024);  // TODO: max key size constant
       assert(not ins.value.is_remove());
+      if (num_branches() >= max_leaf_branches)
+         return can_apply_mode::none;
       // key hash(1), key_offset(2), value_branch(2)
       size_t size_required = sizeof(uint8_t) + sizeof(key_offset) + sizeof(value_branch);
       if (ins.value.is_view())
@@ -915,6 +924,8 @@ namespace psitri
       const uint16_t   dst_nb = src_nb + 1;
       const uint16_t   ins_bn = *ins.lb;
       assert(ins_bn <= src_nb);
+      if (dst_nb > max_leaf_branches)
+         return false;
 
       leaf_rebuild_meter meter(dst_nb,
                                max_size,

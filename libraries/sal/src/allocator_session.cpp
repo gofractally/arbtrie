@@ -20,7 +20,9 @@ namespace sal
          _sega(a),
          _ptr_alloc(a._ptr_alloc),
          _alloc_seg_ptr(nullptr),
-         _session_rng(0xABBA7777 ^ *ses_num),
+         _session_rng(uint64_t(reinterpret_cast<uintptr_t>(this)) ^
+                      (uint64_t(reinterpret_cast<uintptr_t>(&a)) << 17) ^
+                      (uint64_t(*ses_num) << 32) ^ 0xABBA7777ull),
          _dirty_segments(a._mapped_state->_session_data.dirty_segments(ses_num)),
          _alloc_seg_num(-1),
          _session_rlock(a.get_session_rlock(ses_num))

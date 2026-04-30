@@ -57,7 +57,7 @@ namespace psitri
       bool get(key_view key, std::invocable<value_view> auto&& lambda) const
       {
          psitri::cursor c(_root);
-         if (!c.seek(key) || c.is_subtree())
+         if (!c.find(key) || c.is_subtree())
             return false;
          c.get_value(std::forward<decltype(lambda)>(lambda));
          return true;
@@ -82,7 +82,7 @@ namespace psitri
       tree get_subtree(key_view key) const
       {
          psitri::cursor c(_root);
-         if (c.seek(key) && c.is_subtree())
+         if (c.find(key) && c.is_subtree())
             return tree(c.subtree());
          return tree(_root.session());
       }

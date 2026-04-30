@@ -43,6 +43,11 @@ Statistics are gathered as data is freed from each segment so that a segment can
 
 Empty space in pinned segments wastes precious cache, so the compactor is more aggressive about compacting pinned memory segments (defragmenting when ~12.5% of a segment is free -- 4 MB of 32 MB), but more lazy about compacting unpinned segments (requiring ~50% free -- 16 MB of 32 MB) because disk space is relatively plentiful.
 
+The two thresholds are deliberately asymmetric:
+
+- **Hot/pinned compact threshold**: lower, because free bytes inside `mlock`'d segments consume scarce RAM budget.
+- **Cold/unpinned compact threshold**: higher, because cold disk space is cheaper than unnecessary copy traffic and write amplification.
+
 ## Most Frequently Used (MFU) Caching
 
 A linear scan can thrash an LRU cache by keeping data that will never be seen again. Even completely random access evicts likely-needed nodes for merely-recent nodes. PsiTri organizes data pinned in memory by frequency of access, minimizing page swaps.
@@ -65,6 +70,30 @@ The promotion difficulty self-tunes using the same principle as Bitcoin mining:
 - **Promoting too slow** (1/16 of window elapsed without filling budget): Decrease difficulty (multiply gap by 9/8)
 
 Larger objects are proportionally harder to promote, preventing a few large objects from monopolizing the cache.
+
+## Tricorder Dashboard Terms
+
+`psitricorder dashboard <db-dir>` and `psitricorder mfu-watch <db-dir>` read shared metadata passively through `mmap`. They do not open a database session, so they are safe to use while another process is writing. Run `psitricorder --explain` for the command-line legend.
+
+The dashboard keeps a viewer-side rolling average for MFU byte rates and session operation rates, controlled by `--rate-samples`. Totals are read directly from shared counters; only the displayed `/s` derivative is smoothed.
+
+Key terms:
+
+- **Difficulty**: the MFU promotion lottery threshold. Higher difficulty means fewer read traversals mark objects for promotion. The dashboard also shows the approximate `1/N` odds.
+- **Cache window**: the time horizon used by the controller. Target promotion rate is `cache size / cache window`.
+- **Policy bytes**: bytes that satisfied cache policy. This includes actual copied promotion bytes plus young-HOT bytes intentionally skipped, so the controller does not over-promote data that is already safely pinned.
+- **COLD -> HOT**: unpinned objects copied into pinned memory.
+- **HOT refresh**: pinned objects copied forward to stay in the hot region before they age out.
+- **Young HOT skipped**: pinned objects that received a promotion request but were young enough to leave in place.
+- **Promoted to cold**: promotion candidates copied to unpinned memory. This should stay near zero in a healthy hot allocation path.
+- **Pinned copy result**: `COLD -> HOT` plus `HOT refresh` bytes physically copied into pinned memory.
+- **Pinned effective**: pinned copy result plus `Young HOT skipped`, showing copied-or-retained pinned-cache benefit.
+- **Session ops**: per-write-session operation counters stored in `session_ops.bin`. Each session has its own cacheline-aligned counter block, and `psitricorder dashboard` displays the aggregate total and rolling op/sec by operation type. Existing live writers will show this as unavailable until restarted with a build that creates the sidecar file.
+- **Reclaimable bytes**: dead/free bytes currently known inside segments.
+- **Eligible reclaimable**: reclaimable bytes in segments that meet the configured hot or cold compaction threshold.
+- **Blocked reclaimable**: reclaimable bytes that are not currently compactable, commonly because the segment is active or still protected by read-lock delay.
+- **Top version**: the current global MVCC version counter from `dbfile.bin`.
+- **Active root versions**: distinct committed top-root versions visible from the root table. This is a cheap passive root-slot view, not a full subtree or refcount audit.
 
 ## Segment Lifecycle
 

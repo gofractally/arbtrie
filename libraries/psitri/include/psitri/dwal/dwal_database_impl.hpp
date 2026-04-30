@@ -23,6 +23,7 @@ namespace psitri::dwal
        : _db(std::move(db)), _wal_dir(std::move(wal_dir)), _cfg(cfg)
    {
       std::filesystem::create_directories(_wal_dir);
+      _wal_status = std::make_unique<wal_status_mapping>(_wal_dir);
 
       recover();
 
@@ -379,6 +380,35 @@ namespace psitri::dwal
       {
          _roots[index] = std::make_unique<dwal_root_type>();
       }
+      _roots[index]->status = _wal_status ? _wal_status->root(index) : nullptr;
+      if (_roots[index]->status)
+      {
+         auto* status = _roots[index]->status;
+         status->active.store(1, std::memory_order_relaxed);
+         status->generation.store(_roots[index]->generation.load(std::memory_order_relaxed),
+                                  std::memory_order_relaxed);
+         status->merge_complete.store(
+            _roots[index]->merge_complete.load(std::memory_order_relaxed) ? 1 : 0,
+            std::memory_order_relaxed);
+         status->tri_root.store(_roots[index]->tri_root.load(std::memory_order_relaxed),
+                                std::memory_order_relaxed);
+         status->ro_base_root.store(
+            _roots[index]->ro_base_root.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+         status->throttle_sleep_ns.store(
+            _roots[index]->throttle_sleep_ns.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+         status->arena_at_merge_complete.store(
+            _roots[index]->arena_at_merge_complete.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+         if (_roots[index]->rw_layer)
+         {
+            status->rw_layer_entries.store(_roots[index]->rw_layer->size(),
+                                           std::memory_order_relaxed);
+            status->rw_arena_bytes.store(_roots[index]->rw_layer->map.arena_capacity(),
+                                         std::memory_order_relaxed);
+         }
+      }
       // Bind the allocator so the btree_layer can retain/release subtree
       // addresses. `sal::allocator::retain` is atomic and `release`
       // forwards to the calling thread's thread-local session, so the
@@ -398,7 +428,8 @@ namespace psitri::dwal
          auto dir = _wal_dir / ("root-" + std::to_string(root_index));
          std::filesystem::create_directories(dir);
          root.wal = std::make_unique<wal_writer>(
-             dir / "wal-rw.dwal", static_cast<uint16_t>(root_index), root.next_wal_seq);
+             dir / "wal-rw.dwal", static_cast<uint16_t>(root_index), root.next_wal_seq,
+             root.status);
       }
    }
 
@@ -541,6 +572,25 @@ namespace psitri::dwal
       root.merge_complete.store(false, std::memory_order_release);
 
       root.generation.fetch_add(1, std::memory_order_release);
+      if (root.status)
+      {
+         root.status->swaps.fetch_add(1, std::memory_order_relaxed);
+         root.status->generation.store(root.generation.load(std::memory_order_relaxed),
+                                       std::memory_order_relaxed);
+         root.status->merge_complete.store(0, std::memory_order_relaxed);
+         root.status->ro_base_root.store(base, std::memory_order_relaxed);
+         root.status->rw_layer_entries.store(root.rw_layer ? root.rw_layer->size() : 0,
+                                             std::memory_order_relaxed);
+         root.status->rw_arena_bytes.store(
+            root.rw_layer ? root.rw_layer->map.arena_capacity() : 0,
+            std::memory_order_relaxed);
+         std::lock_guard lk(root.buffered_mutex);
+         root.status->ro_layer_entries.store(root.buffered_ptr ? root.buffered_ptr->size() : 0,
+                                             std::memory_order_relaxed);
+         root.status->ro_arena_bytes.store(
+            root.buffered_ptr ? root.buffered_ptr->map.arena_capacity() : 0,
+            std::memory_order_relaxed);
+      }
 
       if (root.wal)
       {
@@ -554,15 +604,27 @@ namespace psitri::dwal
 
          if (std::filesystem::exists(rw_wal))
             std::filesystem::rename(rw_wal, ro_wal);
+         if (root.status)
+         {
+            std::error_code ec;
+            auto ro_wal_bytes = std::filesystem::file_size(ro_wal, ec);
+            root.status->ro_wal_file_bytes.store(ec ? 0 : ro_wal_bytes,
+                                                 std::memory_order_relaxed);
+         }
 
          root.wal = std::make_unique<wal_writer>(
-             rw_wal, static_cast<uint16_t>(root_index), root.next_wal_seq);
+             rw_wal, static_cast<uint16_t>(root_index), root.next_wal_seq,
+             root.status);
       }
 
       _epochs.broadcast_all(root.generation.load(std::memory_order_relaxed));
 
       if (_merge_pool)
+      {
+         if (root.status)
+            root.status->merge_requests.fetch_add(1, std::memory_order_relaxed);
          _merge_pool->signal(root_index, root);
+      }
    }
 
    template <class LockPolicy>

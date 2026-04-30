@@ -1120,7 +1120,7 @@ TEST_CASE("COW replace_branch refreshes last_unique_version", "[epoch]")
    }
 }
 
-TEST_CASE("inner_prefix collapse refreshes last_unique_version", "[epoch]")
+TEST_CASE("inner_prefix single-child remove refreshes last_unique_version", "[epoch]")
 {
    sal::set_current_thread_name("main");
    mvcc_db db;
@@ -1135,7 +1135,10 @@ TEST_CASE("inner_prefix collapse refreshes last_unique_version", "[epoch]")
    {
       tree_context ctx(db.root());
       ctx.set_epoch_base(10);
-      for (int i = 0; i < 3; ++i)
+      // Five 1000-byte survivor keys do not fit in one 4K leaf.  After the
+      // other branch is removed, foreground remove must keep this as an
+      // inner_prefix with a non-leaf child instead of recursively collapsing it.
+      for (int i = 0; i < 5; ++i)
          ctx.upsert(to_kv(make_key(0x00, i)), value_type(to_vv("keep")));
       ctx.upsert(to_kv(make_key(0x01, 0)), value_type(to_vv("remove")));
       db.set_root(ctx.take_root());
@@ -1154,7 +1157,7 @@ TEST_CASE("inner_prefix collapse refreshes last_unique_version", "[epoch]")
    CHECK(ref.as<inner_prefix_node>()->last_unique_version() == 20);
 
    tree_context ctx(db.root());
-   for (int i = 0; i < 3; ++i)
+   for (int i = 0; i < 5; ++i)
       CHECK(read_value(ctx, make_key(0x00, i)) == "keep");
    CHECK(read_value(ctx, make_key(0x01, 0)).empty());
 }

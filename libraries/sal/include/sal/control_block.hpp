@@ -279,6 +279,33 @@ namespace sal
       }
 
       /**
+       * Marks a sampled read. The first sampled hit sets the active bit; a
+       * later sampled hit within the decay window sets pending_cache and asks
+       * the caller to enqueue the object for promotion.
+       *
+       * @return true only when this call transitioned the object to
+       * pending_cache and the read-cache queue should receive the address.
+       */
+      bool try_mark_read_cache_pending() noexcept
+      {
+         uint64_t           expected = _data.load(std::memory_order_relaxed);
+         control_block_data updated(expected);
+         if (updated.pending_cache)
+            return false;
+
+         if (updated.active)
+         {
+            return _data.compare_exchange_weak(expected,
+                                               updated.set_pending_cache(true).to_int(),
+                                               std::memory_order_relaxed);
+         }
+
+         _data.compare_exchange_weak(expected, updated.set_active(true).to_int(),
+                                     std::memory_order_relaxed);
+         return false;
+      }
+
+      /**
        *  Clears the pending cache bit, returns false if it is already cleared
        * 
        * @return true if the pending cache bit was cleared, false otherwise

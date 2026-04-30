@@ -299,6 +299,24 @@ namespace psitri::dwal
                _root->rw_layer->map.bump_cow_seq();
          }
 
+         if (_root->status)
+         {
+            _root->status->generation.store(
+               _root->generation.load(std::memory_order_relaxed),
+               std::memory_order_relaxed);
+            _root->status->merge_complete.store(
+               _root->merge_complete.load(std::memory_order_relaxed) ? 1 : 0,
+               std::memory_order_relaxed);
+            _root->status->rw_layer_entries.store(_root->rw_layer->size(),
+                                                  std::memory_order_relaxed);
+            _root->status->rw_arena_bytes.store(
+               _root->rw_layer->map.arena_capacity(),
+               std::memory_order_relaxed);
+            _root->status->throttle_sleep_ns.store(
+               _root->throttle_sleep_ns.load(std::memory_order_relaxed),
+               std::memory_order_relaxed);
+         }
+
          if (_db && _root->merge_complete.load(std::memory_order_acquire) &&
              _db->should_swap(_root_index))
          {
@@ -337,6 +355,13 @@ namespace psitri::dwal
          bool     notified = _root->cow.end_write(new_root, cur_seq);
          if (notified)
             _root->rw_layer->map.bump_cow_seq();
+      }
+      if (_root->status)
+      {
+         _root->status->rw_layer_entries.store(_root->rw_layer->size(),
+                                               std::memory_order_relaxed);
+         _root->status->rw_arena_bytes.store(_root->rw_layer->map.arena_capacity(),
+                                             std::memory_order_relaxed);
       }
    }
 

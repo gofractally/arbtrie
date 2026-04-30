@@ -7,6 +7,7 @@
 #include <psitri/node/value_node.hpp>
 #include <psitri/value_pin.hpp>
 #include <psitri/value_type.hpp>
+#include <sal/mapped_memory/session_op_stats.hpp>
 #include <sal/smart_ptr.hpp>
 #include <stdexcept>
 #include <utility>
@@ -153,7 +154,8 @@ namespace psitri
       bool lower_bound(key_view key) noexcept;
       bool upper_bound(key_view key) noexcept;
 
-      /// goes to exactly the given key, @return is_end() if not found
+      /// Deprecated exact-positioning alias. Use find() for exact lookup
+      /// and lower_bound() for ordered seek/range positioning.
       bool seek(key_view key) noexcept;
       /// Finds exactly the given key using the point-lookup path.
       /// On miss, positions the cursor at end.
@@ -195,8 +197,9 @@ namespace psitri
 
       bool get(key_view key, std::invocable<value_view> auto&& lambda) const
       {
+         auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_get);
          cursor c(_node, _version);
-         if (!c.seek(key) || c.is_subtree())
+         if (!c.find(key) || c.is_subtree())
             return false;
          c.get_value(std::forward<decltype(lambda)>(lambda));
          return true;
@@ -254,6 +257,12 @@ namespace psitri
       bool     prev_impl() noexcept;
       bool     lower_bound_impl(key_view key) noexcept;
       bool     find_impl(key_view key) noexcept;
+      [[nodiscard]] sal::allocator_session::operation_scope
+      record_operation(sal::mapped_memory::session_operation op,
+                       uint64_t count = 1) const noexcept
+      {
+         return _node.session()->record_operation(op, count);
+      }
 
       auto visit(ptr_address adr, auto&& lambda);
 
@@ -375,15 +384,18 @@ namespace psitri
 
    inline bool cursor::lower_bound(key_view key) noexcept
    {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_lower_bound);
       auto read_lock = _node.session()->lock();
       return lower_bound_impl(key);
    }
    inline bool cursor::upper_bound(key_view key) noexcept
    {
-      if (!lower_bound(key))
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_upper_bound);
+      auto read_lock = _node.session()->lock();
+      if (!lower_bound_impl(key))
          return false;  // at end — nothing >= key
       if (this->key() == key)
-         return next();  // skip exact match; true=found next, false=at end
+         return next_impl();  // skip exact match; true=found next, false=at end
       return true;       // already positioned past key
    }
    inline bool cursor::lower_bound_impl(key_view key) noexcept
@@ -456,6 +468,7 @@ namespace psitri
    }
    int32_t cursor::get(key_view key, Buffer auto* buffer)
    {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_get);
       if (sal::null_ptr_address == _node.address()) [[unlikely]]
          return cursor::value_not_found;
       auto read_lock = _node.session()->lock();
@@ -551,6 +564,7 @@ namespace psitri
 
 	   inline bool cursor::find(key_view key) noexcept
 	   {
+		      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_find);
 	      if (sal::null_ptr_address == _node.address()) [[unlikely]]
 	         return seek_end();
 	      auto read_lock = _node.session()->lock();
@@ -675,12 +689,15 @@ namespace psitri
    }
    inline bool cursor::seek(key_view key) noexcept
    {
-      if (lower_bound(key))
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_seek);
+      auto read_lock = _node.session()->lock();
+      if (lower_bound_impl(key))
          return this->key() == key;
       return false;
    }
    inline uint64_t cursor::count_keys(key_view lower, key_view upper) const noexcept
    {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_count_keys);
       if (_node.address() == sal::null_ptr_address)
          return 0;
       auto read_lock = _node.session()->lock();
@@ -688,6 +705,7 @@ namespace psitri
    }
    inline key_info cursor::get_key_info(key_view key) const noexcept
    {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_key_info);
       if (sal::null_ptr_address == _node.address())
          return {};
       cursor tmp(*this);
@@ -776,6 +794,7 @@ namespace psitri
    }
    inline bool cursor::next() noexcept
    {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_next);
       assert(not is_end());
       auto read_lock = _node.session()->lock();
       return next_impl();
@@ -826,6 +845,7 @@ namespace psitri
    }
    inline bool cursor::prev() noexcept
    {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_prev);
       assert(not is_rend());
       auto read_lock = _node.session()->lock();
       return prev_impl();

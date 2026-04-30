@@ -1,5 +1,6 @@
 #pragma once
 #include <hash/lehmer64.h>
+#include <cassert>
 #include <cstdint>
 #include <optional>
 #include <sal/config.hpp>
@@ -10,6 +11,7 @@
 #include <sal/mapped_memory/read_lock_queue.hpp>
 #include <sal/mapped_memory/segment.hpp>
 #include <sal/mapped_memory/session_data.hpp>
+#include <sal/mapped_memory/session_op_stats.hpp>
 #include <sal/numbers.hpp>
 #include <sal/time.hpp>
 #include "ucc/round.hpp"
@@ -17,6 +19,11 @@
 
 namespace sal
 {
+   namespace detail
+   {
+      inline thread_local uint32_t session_operation_depth = 0;
+   }
+
    class allocator;
    class read_lock;
 
@@ -37,6 +44,41 @@ namespace sal
    class allocator_session
    {
      public:
+      class operation_scope
+      {
+        public:
+         explicit operation_scope(bool entered = false) noexcept : _entered(entered) {}
+         operation_scope(const operation_scope&)            = delete;
+         operation_scope& operator=(const operation_scope&) = delete;
+         operation_scope(operation_scope&& other) noexcept : _entered(other._entered)
+         {
+            other._entered = false;
+         }
+         operation_scope& operator=(operation_scope&& other) noexcept
+         {
+            if (this != &other)
+            {
+               release();
+               _entered       = other._entered;
+               other._entered = false;
+            }
+            return *this;
+         }
+         ~operation_scope() { release(); }
+
+        private:
+         void release() noexcept
+         {
+            if (!_entered)
+               return;
+            assert(detail::session_operation_depth > 0);
+            --detail::session_operation_depth;
+            _entered = false;
+         }
+
+         bool _entered = false;
+      };
+
       /**
        * Returns an object that prevents the compactor from overwriting data 
        * that has been moved but for which this thread may still be reading the
@@ -204,6 +246,8 @@ namespace sal
       ~allocator_session();
       allocator&               get_allocator() const noexcept { return _sega; }
       allocator_session_number get_session_num() const noexcept { return _session_num; }
+      [[nodiscard]] operation_scope record_operation(mapped_memory::session_operation op,
+                                                     uint64_t count = 1) noexcept;
 
       bool config_update_checksum_on_modify() const noexcept
       {
@@ -264,10 +308,11 @@ namespace sal
 
       /**
        * Check if an object should be cached based on its size and difficulty threshold
+       * @param adr The control block address being dereferenced
        * @param size The size of the object in bytes
        * @return true if the object should be cached, false otherwise
        */
-      inline bool should_cache(uint32_t size) noexcept;
+      inline bool should_cache(ptr_address adr, uint32_t size) noexcept;
 
       /**
        * Generate a random number for cache decisions

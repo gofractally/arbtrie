@@ -57,6 +57,12 @@ namespace ucc
       static constexpr uint64_t npos = uint64_t(-1);
       bool                      is_full() const { return usage() >= buffer_size; }
 
+      void reset() noexcept
+      {
+         read_pos.store(0, std::memory_order_relaxed);
+         push_pos.store(0, std::memory_order_relaxed);
+      }
+
       // Push data into the buffer, only one thread can push at a time
       // @return the virtual index after the push, or throw if the buffer is full
       uint64_t push(T data)

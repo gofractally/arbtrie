@@ -262,9 +262,8 @@ TEST_CASE("tree_ops: subtree collapse after byte-fit pruning", "[tree_ops][colla
 TEST_CASE("tree_ops: subtree collapse is byte-fit driven", "[tree_ops][collapse]")
 {
    test_db env("tree_ops_byte_fit_db");
-   // N must be large enough to force a multi-level tree structure;
-   // a single leaf holds ~50-60 small entries, so don't scale this down.
-   const int N = 60;
+   // N must be large enough to force a multi-level tree structure with 4K leaves.
+   const int N = 180;
 
    // Build tree with enough keys to create multi-level structure
    {
@@ -279,6 +278,7 @@ TEST_CASE("tree_ops: subtree collapse is byte-fit driven", "[tree_ops][collapse]
    REQUIRE(root_before);
    write_cursor wc_before(root_before);
    auto stats_before = wc_before.get_stats();
+   REQUIRE(stats_before.total_nodes() > 1);
 
    // Hold snapshot for shared mode
    auto snapshot = env.ses->get_root(0);
@@ -417,13 +417,13 @@ TEST_CASE("tree_ops: shared remove merges adjacent sparse siblings", "[tree_ops]
    CHECK(snap_cur.get<std::string>(merge_key('D', 1)).has_value());
 }
 
-TEST_CASE("tree_ops: remove merges siblings under inner_prefix parent",
-          "[tree_ops][remove][merge][prefix]")
+TEST_CASE("tree_ops: remove under inner_prefix parent preserves validity",
+          "[tree_ops][remove][prefix]")
 {
    test_db env("tree_ops_prefix_sibling_merge_db");
 
    constexpr int groups    = 16;
-   constexpr int per_group = 2;
+   constexpr int per_group = 3;
 
    {
       auto trx = env.ses->start_transaction(0);
@@ -454,8 +454,8 @@ TEST_CASE("tree_ops: remove merges siblings under inner_prefix parent",
    auto         stats_after = wc_after.get_stats();
 
    CHECK(stats_after.total_keys == stats_before.total_keys - 1);
-   CHECK(stats_after.branches == stats_before.branches - 1);
-   CHECK(stats_after.leaf_nodes < stats_before.leaf_nodes);
+   CHECK(stats_after.branches <= stats_before.branches);
+   CHECK(stats_after.leaf_nodes <= stats_before.leaf_nodes);
    wc_after.validate();
 
    auto verify = env.ses->start_transaction(0);
@@ -1064,43 +1064,18 @@ TEST_CASE("tree_ops: validate on empty tree", "[tree_ops][validate]")
    REQUIRE_NOTHROW(wc->validate());
 }
 
-// Exercise size_subtree traversal through inner_node (non-prefix) children.
-//
-// The inner_node case in size_subtree (line 362) is hit when collapse checks a
-// node whose children include inner_nodes. This happens when:
-// 1. An inner_prefix_node accumulates enough branches to split, producing two
-//    inner_node children (see split() at line 877-884)
-// 2. Removing keys leaves a parent whose remaining contents fit in one leaf,
-//    triggering size_subtree on all children
-// 3. Sibling inner_nodes NOT on the remove path remain as inner_nodes
-//
-// Strategy: insert many keys under a shared prefix (byte 0 = 0x00) to force
-// the inner_prefix_node at that branch to split into inner_node children.
-// Then hold a snapshot (shared mode) and remove enough keys to trigger collapse.
-TEST_CASE("tree_ops: size_subtree through inner_node children", "[tree_ops][collapse][size_subtree]")
+// Foreground remove must not recursively size/collapse through non-leaf
+// children.  That work is too expensive for the hot path and belongs in
+// maintenance.  This fixture keeps inner_prefix children under the parent and
+// verifies that removing one sparse group preserves that shape.
+TEST_CASE("tree_ops: foreground collapse skips non-leaf children",
+          "[tree_ops][collapse][no_recursive_collapse]")
 {
    test_db env("tree_ops_size_subtree_inner_db");
 
-   // Phase 1: Build a tree where inner_prefix_node children survive collapse.
-   //
-   // size_subtree has paths for inner_prefix_node (line 369) and inner_node
-   // (line 362). To hit these, the collapsing parent must have children that
-   // are inner_prefix_nodes (not leaves). This requires:
-   //
-   // 1. Children are inner_prefix_nodes (created by leaf overflow)
-   // 2. Untouched children remain as inner_prefix_nodes during removal
-   // 3. Parent subtree contents fit in one rewritten leaf
-   //
-   // The key challenge: normal keys (~10 bytes) allow ~100 entries per leaf,
-   // so inner_prefix is only created with >100 keys per group. Solution: use
-   // VERY LARGE keys (~1000 bytes) so
-   // only 2 entries fit per leaf. Then 3 keys per group overflows a leaf and
-   // creates an inner_prefix_node. 8 groups × 3 keys keeps the final subtree
-   // small enough for one rewritten leaf.
-   //
-   // After removing 1 key from one group, the remaining root subtree fits in
-   // one rewritten leaf. Root collapse fires, and untouched sibling groups are
-   // still inner_prefix_nodes.
+   // Large keys force each group to overflow a direct leaf and create
+   // inner_prefix children.  The remaining key count is small enough that the
+   // old recursive collapse path would try to flatten the whole parent.
    const int NUM_GROUPS = 8;
    const int KEYS_PER_GROUP = 3;
 
@@ -1143,11 +1118,9 @@ TEST_CASE("tree_ops: size_subtree through inner_node children", "[tree_ops][coll
    // Hold snapshot for shared mode (COW path during removes)
    auto snapshot = env.ses->get_root(0);
 
-   // Phase 2: Remove ALL keys from group 0 so its branch returns empty.
-   // In unique_remove mode, Phase 3 (collapse) only fires when
-   // sub_branches.count()==0 (branch completely emptied). After the branch
-   // is removed, the root has 7 sparse branches whose contents fit in one leaf.
-   // Phase 3 fires and size_subtree encounters groups 1-7 as inner_prefix_nodes.
+   // Remove ALL keys from group 0 so its branch returns empty.  Foreground
+   // collapse may clean up direct leaves, but must not recursively walk the
+   // remaining inner_prefix siblings.
    {
       auto trx = env.ses->start_transaction(0);
       for (int k = 0; k < KEYS_PER_GROUP; ++k)
@@ -1167,6 +1140,8 @@ TEST_CASE("tree_ops: size_subtree through inner_node children", "[tree_ops][coll
            << " leaves=" << stats.leaf_nodes
            << " keys=" << stats.total_keys);
       CHECK(stats.total_keys == remaining);
+      CHECK(stats.inner_prefix_nodes >= 1);
+      CHECK(stats.total_nodes() > 1);
 
       // Verify remaining keys
       for (int g = 1; g < NUM_GROUPS; ++g)

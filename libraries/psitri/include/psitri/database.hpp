@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <hash/xxhash.h>
 #include <memory>
@@ -256,8 +257,41 @@ namespace psitri
       ///@{
       uint32_t pinned_segments        = 0;  ///< Segments currently mlock'd in RAM.
       uint64_t pinned_bytes           = 0;  ///< Total bytes in pinned segments (pinned_segments x 32 MB).
-      uint32_t cache_difficulty       = 0;  ///< Current MFU promotion difficulty (self-tuning).
+      uint64_t successful_mlock_regions = 0;  ///< Cumulative successful mlock() regions.
+      uint64_t failed_mlock_regions     = 0;  ///< Cumulative failed mlock() regions.
+      uint64_t successful_munlock_regions = 0; ///< Cumulative successful munlock() regions.
+      uint64_t failed_munlock_regions     = 0; ///< Cumulative failed munlock() regions.
+      uint64_t cache_difficulty       = 0;  ///< Current MFU promotion difficulty (self-tuning).
+      uint64_t cache_policy_satisfied_bytes = 0; ///< Bytes counted by MFU policy controller.
       uint64_t total_promoted_bytes   = 0;  ///< Cumulative bytes promoted to pinned cache.
+      uint64_t target_promoted_bytes_per_s = 0;  ///< MFU controller target promotion rate.
+      uint64_t cache_hot_to_hot_promotions      = 0;  ///< Successful HOT -> HOT refreshes.
+      uint64_t cache_hot_to_hot_promoted_bytes  = 0;  ///< Bytes copied by HOT -> HOT refreshes.
+      uint64_t cache_hot_to_hot_demote_pressure_ppm = 0; ///< HOT refresh source age pressure.
+      uint64_t cache_hot_to_hot_byte_demote_pressure_ppm = 0; ///< Byte-weighted source pressure.
+      uint64_t cache_young_hot_skips      = 0;  ///< HOT advisories skipped while still young.
+      uint64_t cache_young_hot_skipped_bytes = 0; ///< Bytes skipped by young-HOT filter.
+      uint64_t cache_young_hot_skip_demote_pressure_ppm = 0; ///< Skip source age pressure.
+      uint64_t cache_young_hot_skip_byte_demote_pressure_ppm = 0; ///< Byte-weighted skip pressure.
+      uint64_t cache_cold_to_hot_promotions     = 0;  ///< Successful COLD -> HOT promotions.
+      uint64_t cache_cold_to_hot_promoted_bytes = 0;  ///< Bytes copied by COLD -> HOT promotions.
+      uint64_t cache_promoted_to_cold_promotions = 0; ///< Promotion attempts that landed cold.
+      uint64_t cache_promoted_to_cold_bytes      = 0; ///< Bytes copied by cold-destination moves.
+      ///@}
+
+      /** @name Control Blocks */
+      ///@{
+      uint32_t control_block_zones    = 0;  ///< Number of mapped 32 MB control-block zones.
+      uint64_t control_block_capacity = 0;  ///< Maximum addressable control blocks.
+      bool     control_block_header_pinned = false;
+      uint64_t control_block_zone_mlock_success_regions = 0;
+      uint64_t control_block_zone_mlock_failed_regions  = 0;
+      uint64_t control_block_zone_mlock_skipped_regions = 0;
+      uint64_t control_block_zone_mlock_success_bytes   = 0;
+      uint64_t control_block_freelist_mlock_success_regions = 0;
+      uint64_t control_block_freelist_mlock_failed_regions  = 0;
+      uint64_t control_block_freelist_mlock_skipped_regions = 0;
+      uint64_t control_block_freelist_mlock_success_bytes   = 0;
       ///@}
 
       /** @name Sessions */
@@ -300,8 +334,53 @@ namespace psitri
          s += "Cache:\n";
          s += "  pinned segments: " + std::to_string(pinned_segments) + "\n";
          s += "  pinned memory:   " + fmt_bytes(pinned_bytes) + "\n";
+         s += "  mlock success:   " + std::to_string(successful_mlock_regions) +
+              " / " + fmt_bytes(successful_mlock_regions * sal::segment_size) + "\n";
+         if (failed_mlock_regions != 0)
+            s += "  mlock failed:    " + std::to_string(failed_mlock_regions) + "\n";
          s += "  difficulty:      " + std::to_string(cache_difficulty) + "\n";
+         s += "  policy bytes:    " + fmt_bytes(cache_policy_satisfied_bytes) + "\n";
          s += "  promoted:        " + fmt_bytes(total_promoted_bytes) + "\n";
+         s += "  cold->hot:       " + std::to_string(cache_cold_to_hot_promotions) +
+              " / " + fmt_bytes(cache_cold_to_hot_promoted_bytes) + "\n";
+         s += "  hot refresh:     " + std::to_string(cache_hot_to_hot_promotions) +
+              " / " + fmt_bytes(cache_hot_to_hot_promoted_bytes) + "\n";
+         s += "  young skip:      " + std::to_string(cache_young_hot_skips) +
+              " / " + fmt_bytes(cache_young_hot_skipped_bytes) + "\n";
+         if (cache_hot_to_hot_promotions != 0)
+         {
+            char pressure[128];
+            double avg_pressure =
+                double(cache_hot_to_hot_demote_pressure_ppm) /
+                double(cache_hot_to_hot_promotions) / 10000.0;
+            double byte_avg_pressure =
+                cache_hot_to_hot_promoted_bytes == 0
+                    ? 0.0
+                    : double(cache_hot_to_hot_byte_demote_pressure_ppm) /
+                          double(cache_hot_to_hot_promoted_bytes) / 10000.0;
+            snprintf(pressure, sizeof(pressure), "  refresh pressure: %.1f%% avg, %.1f%% byte-avg\n",
+                     avg_pressure, byte_avg_pressure);
+            s += pressure;
+         }
+         if (cache_promoted_to_cold_promotions != 0)
+            s += "  promoted cold:   " + std::to_string(cache_promoted_to_cold_promotions) +
+                 " / " + fmt_bytes(cache_promoted_to_cold_bytes) + "\n";
+         s += "  target rate:     " + fmt_bytes(target_promoted_bytes_per_s) + "/s\n";
+         s += "Control blocks:\n";
+         s += "  zones:           " + std::to_string(control_block_zones) + "\n";
+         s += "  capacity:        " + std::to_string(control_block_capacity) + "\n";
+         s += "  header mlock:    " +
+              std::string(control_block_header_pinned ? "yes" : "no") + "\n";
+         s += "  zone mlock:      " +
+              std::to_string(control_block_zone_mlock_success_regions) + " ok, " +
+              std::to_string(control_block_zone_mlock_failed_regions) + " failed, " +
+              std::to_string(control_block_zone_mlock_skipped_regions) + " skipped / " +
+              fmt_bytes(control_block_zone_mlock_success_bytes) + "\n";
+         s += "  free mlock:      " +
+              std::to_string(control_block_freelist_mlock_success_regions) + " ok, " +
+              std::to_string(control_block_freelist_mlock_failed_regions) + " failed, " +
+              std::to_string(control_block_freelist_mlock_skipped_regions) + " skipped / " +
+              fmt_bytes(control_block_freelist_mlock_success_bytes) + "\n";
          s += "Sessions:\n";
          s += "  active:          " + std::to_string(active_sessions) + "\n";
          s += "  pending releases:" + std::to_string(pending_releases) + "\n";
@@ -872,8 +951,46 @@ namespace psitri
          s.database_file_bytes  = d.total_segments * sal::segment_size;
          s.pinned_segments      = d.mlocked_segments_count;
          s.pinned_bytes         = uint64_t(d.mlocked_segments_count) * sal::segment_size;
+         s.successful_mlock_regions = d.successful_mlock_regions;
+         s.failed_mlock_regions = d.failed_mlock_regions;
+         s.successful_munlock_regions = d.successful_munlock_regions;
+         s.failed_munlock_regions = d.failed_munlock_regions;
          s.cache_difficulty     = d.cache_difficulty;
+         s.cache_policy_satisfied_bytes = d.cache_policy_satisfied_bytes;
          s.total_promoted_bytes = d.total_promoted_bytes;
+         s.target_promoted_bytes_per_s = d.cache_target_promoted_bytes_per_s;
+         s.cache_hot_to_hot_promotions = d.cache_hot_to_hot_promotions;
+         s.cache_hot_to_hot_promoted_bytes = d.cache_hot_to_hot_promoted_bytes;
+         s.cache_hot_to_hot_demote_pressure_ppm = d.cache_hot_to_hot_demote_pressure_ppm;
+         s.cache_hot_to_hot_byte_demote_pressure_ppm =
+             d.cache_hot_to_hot_byte_demote_pressure_ppm;
+         s.cache_young_hot_skips = d.cache_young_hot_skips;
+         s.cache_young_hot_skipped_bytes = d.cache_young_hot_skipped_bytes;
+         s.cache_young_hot_skip_demote_pressure_ppm =
+             d.cache_young_hot_skip_demote_pressure_ppm;
+         s.cache_young_hot_skip_byte_demote_pressure_ppm =
+             d.cache_young_hot_skip_byte_demote_pressure_ppm;
+         s.cache_cold_to_hot_promotions = d.cache_cold_to_hot_promotions;
+         s.cache_cold_to_hot_promoted_bytes = d.cache_cold_to_hot_promoted_bytes;
+         s.cache_promoted_to_cold_promotions = d.cache_promoted_to_cold_promotions;
+         s.cache_promoted_to_cold_bytes = d.cache_promoted_to_cold_bytes;
+         s.control_block_zones    = d.control_block_zones;
+         s.control_block_capacity = d.control_block_capacity;
+         s.control_block_header_pinned = d.control_block_header_pinned;
+         s.control_block_zone_mlock_success_regions =
+             d.control_block_zone_mlock_success_regions;
+         s.control_block_zone_mlock_failed_regions = d.control_block_zone_mlock_failed_regions;
+         s.control_block_zone_mlock_skipped_regions =
+             d.control_block_zone_mlock_skipped_regions;
+         s.control_block_zone_mlock_success_bytes = d.control_block_zone_mlock_success_bytes;
+         s.control_block_freelist_mlock_success_regions =
+             d.control_block_freelist_mlock_success_regions;
+         s.control_block_freelist_mlock_failed_regions =
+             d.control_block_freelist_mlock_failed_regions;
+         s.control_block_freelist_mlock_skipped_regions =
+             d.control_block_freelist_mlock_skipped_regions;
+         s.control_block_freelist_mlock_success_bytes =
+             d.control_block_freelist_mlock_success_bytes;
          s.active_sessions      = d.active_sessions;
          s.pending_releases     = d.free_release_count;
          s.recycled_queue_depth    = d.recycled_queue_depth;

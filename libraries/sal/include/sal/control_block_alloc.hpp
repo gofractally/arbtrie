@@ -128,6 +128,21 @@ namespace sal
          /// the number of zones allocated
          std::atomic<uint32_t> allocated_zones;
 
+         /// Per-process control-block mlock diagnostics, published on open/growth.
+         std::atomic<uint64_t> control_block_header_mlock_pinned;
+         std::atomic<uint64_t> control_block_zone_mlock_success_regions;
+         std::atomic<uint64_t> control_block_zone_mlock_failed_regions;
+         std::atomic<uint64_t> control_block_zone_mlock_skipped_regions;
+         std::atomic<uint64_t> control_block_zone_mlock_success_bytes;
+         std::atomic<uint64_t> control_block_zone_mlock_failed_bytes;
+         std::atomic<uint64_t> control_block_zone_mlock_skipped_bytes;
+         std::atomic<uint64_t> control_block_freelist_mlock_success_regions;
+         std::atomic<uint64_t> control_block_freelist_mlock_failed_regions;
+         std::atomic<uint64_t> control_block_freelist_mlock_skipped_regions;
+         std::atomic<uint64_t> control_block_freelist_mlock_success_bytes;
+         std::atomic<uint64_t> control_block_freelist_mlock_failed_bytes;
+         std::atomic<uint64_t> control_block_freelist_mlock_skipped_bytes;
+
          /// for each zone, the number of allocated pointers in the zone, max 1024 zones
          /// for 4 billion pointers (2^32)
          std::array<std::atomic<uint32_t>, (1ull << 32) / ptrs_per_zone> zone_alloc_count;
@@ -178,11 +193,24 @@ namespace sal
    class control_block_alloc
    {
      public:
+      struct mlock_stats
+      {
+         bool                         header_pinned = false;
+         block_allocator::mlock_stats zones;
+         block_allocator::mlock_stats free_list;
+      };
+
       /**
        *  @param dir the directory to store the page table and pages
        */
       control_block_alloc(const std::filesystem::path& dir);
       ~control_block_alloc();
+
+      mlock_stats get_mlock_stats() const noexcept
+      {
+         return {_header->pinned(), _zone_allocator->get_mlock_stats(),
+                 _zone_free_list->get_mlock_stats()};
+      }
 
       /**
        *  @throw std::runtime_error if no ptrs are available
@@ -529,6 +557,7 @@ namespace sal
       }
 
      private:
+      void        publish_mlock_stats() noexcept;
       void        ensure_capacity(uint32_t req_zones);
       inline bool claim_address(ptr_address address)
       {
