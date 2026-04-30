@@ -60,6 +60,8 @@ namespace sal
          void                     reset_process_state() noexcept;
          rcache_queue_type&       rcache_queue(allocator_session_number session_num);
          release_queue_type&      release_queue(allocator_session_number session_num);
+         const rcache_queue_type& rcache_queue(allocator_session_number session_num) const;
+         const release_queue_type& release_queue(allocator_session_number session_num) const;
          uint32_t                 max_session_num() const;
 
          // the maximum number of sessions that can be supported
@@ -136,7 +138,17 @@ namespace sal
       {
          return _rcache_queue[*session_num];
       }
+      inline const rcache_queue_type& session_data::rcache_queue(
+          allocator_session_number session_num) const
+      {
+         return _rcache_queue[*session_num];
+      }
       inline release_queue_type& session_data::release_queue(allocator_session_number session_num)
+      {
+         return _release_queue[*session_num];
+      }
+      inline const release_queue_type& session_data::release_queue(
+          allocator_session_number session_num) const
       {
          return _release_queue[*session_num];
       }
