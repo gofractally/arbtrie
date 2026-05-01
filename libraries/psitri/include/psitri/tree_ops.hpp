@@ -3643,7 +3643,6 @@ namespace psitri
          }
          else
          {
-            _session.release(old_child);
             auto result = _session.alloc<bplus_inner_node>(parent_hint, plan);
             auto ref    = _session.get_ref<bplus_inner_node>(result);
             ref.modify()->set_last_unique_version(_root_version);
@@ -3670,8 +3669,6 @@ namespace psitri
          }
          else
          {
-            if (child.left != old_child || child.split)
-               _session.release(old_child);
             auto result = _session.alloc<bplus_inner_node>(parent_hint, plan);
             auto ref    = _session.get_ref<bplus_inner_node>(result);
             ref.modify()->set_last_unique_version(_root_version);
@@ -3695,8 +3692,6 @@ namespace psitri
          left = _session.realloc<bplus_inner_node>(in, left_plan).address();
       else
       {
-         if (child.left != old_child || child.split)
-            _session.release(old_child);
          left = _session.alloc<bplus_inner_node>(parent_hint, left_plan);
       }
       auto right = _session.alloc<bplus_inner_node>(sal::alloc_hint{&left, 1}, right_plan);
