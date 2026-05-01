@@ -636,6 +636,13 @@ class mdbx_view_cursor
    std::string_view key() const { return direct_ ? direct_->key() : (*dwal_)->key(); }
 
    void clear_borrowed_value() { value_pin_.reset(); }
+   bool has_cursor() const noexcept { return direct_.has_value() || dwal_.has_value(); }
+   void reset() noexcept
+   {
+      clear_borrowed_value();
+      direct_.reset();
+      dwal_.reset();
+   }
 
    bool read_value(std::string& out, std::string_view& view)
    {
@@ -734,6 +741,13 @@ struct cursor_state
          val_view     = {};
          val_borrowed = false;
       }
+   }
+
+   void mark_stale_after_write()
+   {
+      drop_borrowed_value();
+      mc.reset();
+      stale_after_write = true;
    }
 
    std::string_view exposed_value() const
@@ -1803,8 +1817,7 @@ static void mark_txn_cursors_stale_after_write(MDBX_txn* txn, uint32_t root_idx)
       {
          continue;
       }
-      cursor->state->drop_borrowed_value();
-      cursor->state->stale_after_write = true;
+      cursor->state->mark_stale_after_write();
    }
 }
 
@@ -1954,8 +1967,7 @@ static void mark_cursor_stale_after_write(MDBX_cursor* cursor,
    (void)flags;
 
    auto& st = *cursor->state;
-   st.drop_borrowed_value();
-   st.stale_after_write = true;
+   st.mark_stale_after_write();
 }
 
 static bool txn_finalized(const MDBX_txn* txn)
@@ -3650,7 +3662,7 @@ int mdbx_cursor_on_first(const MDBX_cursor* cursor)
                 : MDBX_RESULT_FALSE;
    }
 
-   if (cursor->state->mc->is_end())
+   if (cursor->state->mc.has_cursor() && cursor->state->mc->is_end())
       return MDBX_NOTFOUND;
 
    auto root_idx    = cursor->root_idx;
@@ -3684,7 +3696,7 @@ int mdbx_cursor_on_last(const MDBX_cursor* cursor)
                 : MDBX_RESULT_FALSE;
    }
 
-   if (cursor->state->mc->is_end())
+   if (cursor->state->mc.has_cursor() && cursor->state->mc->is_end())
       return MDBX_NOTFOUND;
 
    auto root_idx    = cursor->root_idx;
@@ -4402,8 +4414,11 @@ namespace mdbx
    {
       if (!handle_ || !handle_->state)
          return true;
-      return !handle_->state->valid || handle_->state->mc->is_end()
-             || handle_->state->mc->is_rend();
+      if (!handle_->state->valid)
+         return true;
+      if (handle_->state->stale_after_write || !handle_->state->mc.has_cursor())
+         return false;
+      return handle_->state->mc->is_end() || handle_->state->mc->is_rend();
    }
 
    bool cursor::on_first() const
