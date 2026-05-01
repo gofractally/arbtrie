@@ -3001,7 +3001,7 @@ namespace psitri
             split_rewrite = nullptr;
          }
          ptr_address existing_leaf = _session.alloc<leaf_node>(
-             {}, leaf.obj(), cprefix, branch_zero, branch_number(1), split_rewrite);
+             parent_hint, leaf.obj(), cprefix, branch_zero, branch_number(1), split_rewrite);
          if (split_rewrite)
             release_leaf_rewrite_sources(rewrite_plan);
 
@@ -3052,7 +3052,7 @@ namespace psitri
       if (spos.cprefix.size() > 0)
       {
          ptr_address left = _session.alloc<leaf_node>(
-             {}, leaf.obj(), spos.cprefix, branch_zero, left_size, split_rewrite);
+             parent_hint, leaf.obj(), spos.cprefix, branch_zero, left_size, split_rewrite);
          ptr_address right = _session.alloc<leaf_node>(
              {&left, 1}, leaf.obj(), spos.cprefix, left_size, right_end, split_rewrite);
          if (split_rewrite)
@@ -3087,8 +3087,9 @@ namespace psitri
          left = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), branch_zero,
                                           left_size, split_rewrite);
       }
-      ptr_address right = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), left_size,
-                                                    right_end, split_rewrite);
+      ptr_address right = _session.alloc<leaf_node>(sal::alloc_hint{&left, 1}, leaf.obj(),
+                                                    key_view(), left_size, right_end,
+                                                    split_rewrite);
       if (split_rewrite)
          release_leaf_rewrite_sources(rewrite_plan);
       //     SAL_WARN("left: {} right: {} delta: {}", left, right, right - left);
