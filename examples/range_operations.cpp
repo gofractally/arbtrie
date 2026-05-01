@@ -41,7 +41,7 @@ int main()
    {
       auto tx = ws->start_transaction(0);
 
-      uint64_t removed = tx.remove_range("key/05000", "key/06000");
+      uint64_t removed = tx.remove_range_counted("key/05000", "key/06000");
       std::cout << "Removed in [05000, 06000): " << removed << "\n";
 
       tx.commit();

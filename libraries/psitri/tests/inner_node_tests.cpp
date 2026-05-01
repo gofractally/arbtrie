@@ -244,6 +244,71 @@ TEST_CASE("InnerNode", "[inner_node]")
    }
 }
 
+TEST_CASE("Adaptive inner node layouts", "[inner_node][adaptive]")
+{
+   SECTION("wide_inner_node compresses many branches onto few clines")
+   {
+      op::inner_build_plan plan;
+      plan.clear();
+      auto addr_for = [](uint16_t i) {
+         return ptr_address(0x2000u + uint32_t(i / 16) * 16u + uint32_t(i % 16));
+      };
+
+      plan.push_first(addr_for(0));
+      for (uint16_t i = 1; i < 32; ++i)
+         plan.push_back(static_cast<uint8_t>(i), addr_for(i));
+
+      REQUIRE(plan.num_branches == 32);
+      REQUIRE(plan.num_clines == 2);
+      REQUIRE(plan.compressed_wide_wins());
+
+      auto              asize = wide_inner_node::alloc_size(plan);
+      std::vector<char> buffer(asize);
+      auto* node = new (buffer.data()) wide_inner_node(asize, ptr_address_seq(), plan);
+
+      REQUIRE(node->num_branches() == 32);
+      REQUIRE(node->num_clines() == 2);
+      REQUIRE(node->validate_invariants());
+      REQUIRE(node->lower_bound(key_view("\x00", 1)) == branch_number(0));
+      REQUIRE(node->lower_bound(key_view("\x01", 1)) == branch_number(1));
+      REQUIRE(node->lower_bound(key_view("\x1f", 1)) == branch_number(31));
+      REQUIRE(node->get_branch(branch_number(0)) == addr_for(0));
+      REQUIRE(node->get_branch(branch_number(15)) == addr_for(15));
+      REQUIRE(node->get_branch(branch_number(31)) == addr_for(31));
+   }
+
+   SECTION("direct_inner_node stores raw child addresses when compression loses")
+   {
+      op::inner_build_plan plan;
+      plan.clear();
+      auto addr_for = [](uint16_t i) {
+         return ptr_address(0x4000u + uint32_t(i) * 16u + uint32_t(i % 16));
+      };
+
+      plan.push_first(addr_for(0));
+      for (uint16_t i = 1; i < 20; ++i)
+         plan.push_back(static_cast<uint8_t>(i), addr_for(i));
+
+      REQUIRE(plan.num_branches == 20);
+      REQUIRE(plan.num_clines == 20);
+      REQUIRE_FALSE(plan.compressed_wide_wins());
+
+      auto              asize = direct_inner_node::alloc_size(plan);
+      std::vector<char> buffer(asize);
+      auto* node = new (buffer.data()) direct_inner_node(asize, ptr_address_seq(), plan);
+
+      REQUIRE(node->num_branches() == 20);
+      REQUIRE(node->num_clines() == 20);
+      REQUIRE(node->validate_invariants());
+      REQUIRE(node->lower_bound(key_view("\x00", 1)) == branch_number(0));
+      REQUIRE(node->lower_bound(key_view("\x01", 1)) == branch_number(1));
+      REQUIRE(node->lower_bound(key_view("\x13", 1)) == branch_number(19));
+      REQUIRE(node->get_branch(branch_number(0)) == addr_for(0));
+      REQUIRE(node->get_branch(branch_number(9)) == addr_for(9));
+      REQUIRE(node->get_branch(branch_number(19)) == addr_for(19));
+   }
+}
+
 TEST_CASE("InnerPrefixNode", "[inner_prefix_node]")
 {
    // Helper function to create a prefix string of a given size

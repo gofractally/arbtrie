@@ -50,13 +50,16 @@ namespace psitri
       inner_prefix,
       leaf,
       value,
-      value_index
+      value_index,
+      wide_inner,
+      direct_inner
    };
    inline std::ostream& operator<<(std::ostream& os, node_type t)
    {
-      static const char* names[] = {"inner", "inner_prefix", "leaf", "value", "value_index", "unknown"};
+      static const char* names[] = {"inner",       "inner_prefix", "leaf",         "value",
+                                    "value_index", "wide_inner",   "direct_inner", "unknown"};
       auto               idx     = static_cast<size_t>(t) - static_cast<size_t>(node_type::inner);
-      os << (idx < 5 ? names[idx] : names[5]);
+      os << (idx < 7 ? names[idx] : names[7]);
       return os;
    }
 
@@ -98,6 +101,26 @@ namespace psitri
       }
    } __attribute__((packed));
    static_assert(sizeof(branch) == 1);
+
+   /**
+    * Wide inner nodes keep the same "control-block cline + index within cline"
+    * idea as compact inner nodes, but spend two bytes per child so the cline
+    * slot can exceed 15.  The low nibble remains the child index inside a
+    * control-block cacheline; the remaining 12 bits are the cline slot.
+    */
+   struct wide_branch
+   {
+      uint16_t branch_data;
+      void     set_line_index(uint16_t line, uint8_t index) noexcept
+      {
+         assert(line < 4096);
+         assert(index < 16);
+         branch_data = uint16_t((line << 4) | index);
+      }
+      uint16_t line() const noexcept { return branch_data >> 4; }
+      uint8_t  index() const noexcept { return branch_data & 0x0f; }
+   } __attribute__((packed));
+   static_assert(sizeof(wide_branch) == 2);
 
    /**
     * Holds a temporary set of branches and dividers that exists

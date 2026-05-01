@@ -335,6 +335,12 @@ namespace psitri
                 case (int)node_type::inner_prefix:
                    type_name = "inner_prefix";
                    break;
+                case (int)node_type::wide_inner:
+                   type_name = "wide_inner";
+                   break;
+                case (int)node_type::direct_inner:
+                   type_name = "direct_inner";
+                   break;
                 case (int)node_type::leaf:
                    type_name = "leaf";
                    break;

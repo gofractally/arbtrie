@@ -110,6 +110,12 @@ namespace psitri
          case node_type::inner_prefix:
             result = range_remove_inner<mode>(parent_hint, ref.as<inner_prefix_node>(), range);
             break;
+         case node_type::wide_inner:
+            result = range_remove_inner<mode>(parent_hint, ref.as<wide_inner_node>(), range);
+            break;
+         case node_type::direct_inner:
+            result = range_remove_inner<mode>(parent_hint, ref.as<direct_inner_node>(), range);
+            break;
          case node_type::leaf:
             result = range_remove_leaf<mode>(parent_hint, ref.as<leaf_node>(), range);
             break;
@@ -364,16 +370,16 @@ namespace psitri
 		                     return collapsed;
 		               }
 		               op::inner_remove_branch rm{start};
-		               if constexpr (is_inner_node<NodeT>)
+		               if constexpr (!is_inner_prefix_node<NodeT>)
+			               {
+			                  auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
+		                  auto ref = _session.get_ref<NodeT>(result);
+		                  ref.modify()->set_last_unique_version(_root_version);
+		                  return result;
+		               }
+		               else
 		               {
-		                  auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
-	                  auto ref = _session.get_ref<NodeT>(result);
-	                  ref.modify()->set_last_unique_version(_root_version);
-	                  return result;
-	               }
-	               else
-	               {
-	                  auto result = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
+		                  auto result = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
 	                  auto ref = _session.get_ref<NodeT>(result);
 	                  ref.modify()->set_last_unique_version(_root_version);
 	                  return result;
@@ -608,10 +614,10 @@ namespace psitri
                auto result = merge_branches<upsert_mode::unique>(parent_hint, node, start, ssub);
                if (result.count() == 1)
                {
-                  auto result_ref = _session.template get_ref<NodeT>(result.get_first_branch());
                   auto boundary_new_pos = branch_number(remove_lo);
                   branch_set bsub(new_boundary_addr);
-                  result = merge_branches<upsert_mode::unique>(parent_hint, result_ref, boundary_new_pos, bsub);
+                  result = merge_branches_unique_at(parent_hint, result.get_first_branch(),
+                                                    boundary_new_pos, bsub);
                }
                _delta_removed_keys = total_delta;
                return result;
@@ -649,9 +655,9 @@ namespace psitri
                // If boundary also changed, apply it to the result node
                if (!boundary_empty && has_boundary && boundary_changed && result.count() == 1)
                {
-                  auto result_ref = _session.template get_ref<NodeT>(result.get_first_branch());
                   branch_set bsub(new_boundary_addr);
-                  result = merge_branches<upsert_mode::unique>(parent_hint, result_ref, boundary, bsub);
+                  result = merge_branches_unique_at(parent_hint, result.get_first_branch(),
+                                                    boundary, bsub);
                }
                _delta_removed_keys = total_delta;
                return result;
@@ -715,10 +721,10 @@ namespace psitri
                // merge_branches in shared mode allocates a new node, so we get a smart_ref to it.
                if (after_start.count() == 1)
                {
-                  auto after_ref = _session.template get_ref<NodeT>(after_start.get_first_branch());
                   branch_set bsub(new_boundary_addr);
                   _delta_removed_keys = total_delta;  // apply the full delta on the second merge
-                  return merge_branches<upsert_mode::unique>(parent_hint, after_ref, boundary, bsub);
+                  return merge_branches_unique_at(parent_hint, after_start.get_first_branch(),
+                                                  boundary, bsub);
                }
                // If split occurred (unlikely for a replacement), just return what we have
                return after_start;
@@ -758,9 +764,9 @@ namespace psitri
 	                       parent_hint, node, surviving);
 	                   collapsed != sal::null_ptr_address)
 	                  return collapsed;
-	               if constexpr (is_inner_node<NodeT>)
-	                  return surviving;
-	               else
+		               if constexpr (!is_inner_prefix_node<NodeT>)
+		                  return surviving;
+		               else
 	               {
 	                  branch_set bs(surviving);
 	                  return make_inner_prefix(parent_hint, node->prefix(), bs);
@@ -785,10 +791,10 @@ namespace psitri
                // then handle changed addresses via merge_branches afterward.
                op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi)};
                ptr_address new_addr;
-	               if constexpr (is_inner_node<NodeT>)
-	                  new_addr = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
-	               else
-	                  new_addr = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
+		               if constexpr (!is_inner_prefix_node<NodeT>)
+		                  new_addr = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
+		               else
+		                  new_addr = _session.alloc<NodeT>(parent_hint, node->prefix(), node.obj(), rm);
 
 	               auto new_ref = _session.get_ref<NodeT>(new_addr);
 	               new_ref.modify()->set_last_unique_version(_root_version);
@@ -807,13 +813,12 @@ namespace psitri
                      // boundary position shifted by number of removed branches
                      if (result.count() == 1)
                      {
-                        auto result_ref = _session.get_ref<NodeT>(result.get_first_branch());
                         branch_number new_boundary_pos =
                             branch_number(*start + 1);  // right after start
                         _delta_removed_keys = 0;
                         branch_set bsub(new_boundary_addr);
-                        auto final_result = merge_branches<upsert_mode::unique>(parent_hint, result_ref,
-                                                                   new_boundary_pos, bsub);
+                        auto final_result = merge_branches_unique_at(
+                            parent_hint, result.get_first_branch(), new_boundary_pos, bsub);
                         _delta_removed_keys = total_delta;
                         return final_result;
                      }
@@ -840,9 +845,9 @@ namespace psitri
 
             // Simple case: no address changes, just remove the range
 	            op::inner_remove_range rm{branch_number(remove_lo), branch_number(remove_hi)};
-	            if constexpr (is_inner_node<NodeT>)
-	            {
-	               auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
+		            if constexpr (!is_inner_prefix_node<NodeT>)
+		            {
+		               auto result = _session.alloc<NodeT>(parent_hint, node.obj(), rm);
 	               auto ref = _session.get_ref<NodeT>(result);
 	               ref.modify()->set_last_unique_version(_root_version);
 	               return result;

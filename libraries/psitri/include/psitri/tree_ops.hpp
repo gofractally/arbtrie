@@ -12,6 +12,10 @@
 #include <sal/smart_ptr.hpp>
 #include "sal/numbers.hpp"
 
+#ifndef PSITRI_ENABLE_ADAPTIVE_INNER_NODES
+#define PSITRI_ENABLE_ADAPTIVE_INNER_NODES 1
+#endif
+
 namespace psitri
 {
    using sal::alloc_header;
@@ -121,6 +125,20 @@ namespace psitri
                   result += count_child_keys(ipn->get_branch(branch_number(i)));
                break;
             }
+            case node_type::wide_inner:
+            {
+               auto in = ref.as<wide_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  result += count_child_keys(in->get_branch(branch_number(i)));
+               break;
+            }
+            case node_type::direct_inner:
+            {
+               auto in = ref.as<direct_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  result += count_child_keys(in->get_branch(branch_number(i)));
+               break;
+            }
             case node_type::leaf:
                result = ref.as<leaf_node>()->num_branches();
                break;
@@ -201,6 +219,148 @@ namespace psitri
          auto                   needed_clines = find_clines(branches, out_cline_idx);
          return _session.realloc<inner_prefix_node>(in, prefix, branches, needed_clines,
                                                     out_cline_idx, _root_version);
+      }
+
+      void plan_push_child(op::inner_build_plan& plan,
+                           bool&                 first,
+                           uint8_t               divider,
+                           ptr_address           addr) noexcept
+      {
+         if (first)
+         {
+            plan.push_first(addr);
+            first = false;
+         }
+         else
+            plan.push_back(divider, addr);
+      }
+
+      template <any_inner_node_type InnerNodeType>
+      op::inner_build_plan make_replace_plan(const InnerNodeType* in,
+                                             branch_number        br,
+                                             const branch_set&    sub_branches,
+                                             key_view             prefix) noexcept
+      {
+         op::inner_build_plan plan;
+         plan.clear(prefix);
+         bool first = true;
+
+         for (uint16_t i = 0; i < *br; ++i)
+            plan_push_child(plan, first, i == 0 ? 0 : uint8_t(in->divs()[i - 1]),
+                            in->get_branch(branch_number(i)));
+
+         auto sub_addrs = sub_branches.addresses();
+         auto sub_divs  = sub_branches.dividers();
+         for (uint16_t i = 0; i < sub_addrs.size(); ++i)
+         {
+            uint8_t div = 0;
+            if (*br > 0 && i == 0)
+               div = uint8_t(in->divs()[*br - 1]);
+            else if (i > 0)
+               div = uint8_t(sub_divs[i - 1]);
+            plan_push_child(plan, first, div, sub_addrs[i]);
+         }
+
+         for (uint16_t i = *br + 1; i < in->num_branches(); ++i)
+            plan_push_child(plan, first, uint8_t(in->divs()[i - 1]),
+                            in->get_branch(branch_number(i)));
+
+         assert(plan.num_branches == in->num_branches() + sub_branches.count() - 1);
+         assert(std::is_sorted(plan.dividers.begin(), plan.dividers.begin() +
+                                                     (plan.num_branches - 1)));
+         return plan;
+      }
+
+      template <any_inner_node_type InnerNodeType>
+      op::inner_build_plan make_range_plan(const InnerNodeType* in,
+                                           subrange             range,
+                                           key_view             prefix = {}) noexcept
+      {
+         op::inner_build_plan plan;
+         plan.clear(prefix);
+         bool first = true;
+         for (uint16_t i = *range.begin; i < *range.end; ++i)
+            plan_push_child(plan, first, i == *range.begin ? 0 : uint8_t(in->divs()[i - 1]),
+                            in->get_branch(branch_number(i)));
+         assert(plan.num_branches == *range.end - *range.begin);
+         assert(std::is_sorted(plan.dividers.begin(), plan.dividers.begin() +
+                                                     (plan.num_branches - 1)));
+         return plan;
+      }
+
+      template <any_inner_node_type InnerNodeType>
+      op::inner_build_plan make_merge_pair_plan(const InnerNodeType* in,
+                                                branch_number        left,
+                                                ptr_address          merged_addr,
+                                                key_view             prefix = {}) noexcept
+      {
+         op::inner_build_plan plan;
+         plan.clear(prefix);
+         bool first = true;
+
+         const branch_number right(uint32_t(*left) + 1);
+         for (uint16_t i = 0; i < *left; ++i)
+            plan_push_child(plan, first, i == 0 ? 0 : uint8_t(in->divs()[i - 1]),
+                            in->get_branch(branch_number(i)));
+
+         plan_push_child(plan, first, *left == 0 ? 0 : uint8_t(in->divs()[*left - 1]),
+                         merged_addr);
+
+         for (uint16_t i = uint16_t(*right) + 1; i < in->num_branches(); ++i)
+            plan_push_child(plan, first, uint8_t(in->divs()[i - 1]),
+                            in->get_branch(branch_number(i)));
+
+         assert(plan.num_branches + 1 == in->num_branches());
+         assert(std::is_sorted(plan.dividers.begin(), plan.dividers.begin() +
+                                                     (plan.num_branches - 1)));
+         return plan;
+      }
+
+      bool use_wide_inner_plan(const op::inner_build_plan& plan) const noexcept
+      {
+         return plan.compressed_wide_wins();
+      }
+
+      ptr_address alloc_adaptive_inner(const sal::alloc_hint&      hint,
+                                       const op::inner_build_plan& plan) noexcept
+      {
+         ptr_address addr;
+         if (use_wide_inner_plan(plan))
+            addr = _session.alloc<wide_inner_node>(hint, plan);
+         else
+            addr = _session.alloc<direct_inner_node>(hint, plan);
+         auto ref = _session.get_ref<alloc_header>(addr);
+         if (node_type(ref->type()) == node_type::wide_inner)
+            ref.as<wide_inner_node>().modify()->set_last_unique_version(_root_version);
+         else
+            ref.as<direct_inner_node>().modify()->set_last_unique_version(_root_version);
+         return addr;
+      }
+
+      template <any_inner_node_type FromNodeType>
+      ptr_address realloc_adaptive_inner(smart_ref<FromNodeType>&  from,
+                                         const op::inner_build_plan& plan) noexcept
+      {
+         if (use_wide_inner_plan(plan))
+         {
+            auto result = _session.realloc<wide_inner_node>(from, plan);
+            result.modify()->set_last_unique_version(_root_version);
+            return result.address();
+         }
+         auto result = _session.realloc<direct_inner_node>(from, plan);
+         result.modify()->set_last_unique_version(_root_version);
+         return result.address();
+      }
+
+      template <upsert_mode mode, any_inner_node_type InnerNodeType>
+      branch_set rebuild_adaptive_inner(const sal::alloc_hint&      parent_hint,
+                                        smart_ref<InnerNodeType>&   in,
+                                        const op::inner_build_plan& plan) noexcept
+      {
+         if constexpr (mode.is_unique())
+            return realloc_adaptive_inner(in, plan);
+         else
+            return alloc_adaptive_inner(parent_hint, plan);
       }
 
       template <typename InnerNodeType>
@@ -419,6 +579,12 @@ namespace psitri
             case node_type::inner_prefix:
                print(r.as<inner_prefix_node>(), depth + 1);
                break;
+            case node_type::wide_inner:
+               print(r.as<wide_inner_node>(), depth + 1);
+               break;
+            case node_type::direct_inner:
+               print(r.as<direct_inner_node>(), depth + 1);
+               break;
             case node_type::leaf:
                print(r.as<leaf_node>(), depth + 1);
                break;
@@ -432,6 +598,8 @@ namespace psitri
       {
          uint64_t inner_nodes           = 0;
          uint64_t inner_prefix_nodes    = 0;
+         uint64_t wide_inner_nodes      = 0;
+         uint64_t direct_inner_nodes    = 0;
          uint64_t leaf_nodes            = 0;
          uint64_t value_nodes           = 0;
          uint64_t branches              = 0;
@@ -447,19 +615,23 @@ namespace psitri
          double   branch_per_cline      = 0;
          int      average_inner_node_size() const
          {
-            return int(total_inner_node_size / (inner_nodes + inner_prefix_nodes));
+            return int(total_inner_node_size / total_inner_nodes());
          }
          double average_clines_per_inner_node() const
          {
-            return double(clines) / (inner_nodes + inner_prefix_nodes);
+            return double(clines) / total_inner_nodes();
          }
          double average_branch_per_inner_node() const
          {
-            return double(branches) / (inner_nodes + inner_prefix_nodes);
+            return double(branches) / total_inner_nodes();
+         }
+         uint64_t total_inner_nodes() const
+         {
+            return inner_nodes + inner_prefix_nodes + wide_inner_nodes + direct_inner_nodes;
          }
          uint64_t total_nodes() const
          {
-            return inner_nodes + inner_prefix_nodes + leaf_nodes + value_nodes;
+            return total_inner_nodes() + leaf_nodes + value_nodes;
          }
       };
       stats get_stats()
@@ -581,6 +753,20 @@ namespace psitri
                                out);
                break;
             }
+            case node_type::wide_inner:
+            {
+               auto in = ref.template as<wide_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  size_subtree(in->get_branch(branch_number(i)), prefix_len, out);
+               break;
+            }
+            case node_type::direct_inner:
+            {
+               auto in = ref.template as<direct_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  size_subtree(in->get_branch(branch_number(i)), prefix_len, out);
+               break;
+            }
             default:
                out.overflow = true;
          }
@@ -672,6 +858,22 @@ namespace psitri
                                       prefix_len + pfx.size(), ins, session);
                break;
             }
+            case node_type::wide_inner:
+            {
+               auto in = ref.template as<wide_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  walk_subtree_insert(in->get_branch(branch_number(i)), prefix_buf, prefix_len,
+                                      ins, session);
+               break;
+            }
+            case node_type::direct_inner:
+            {
+               auto in = ref.template as<direct_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  walk_subtree_insert(in->get_branch(branch_number(i)), prefix_buf, prefix_len,
+                                      ins, session);
+               break;
+            }
             default:
                break;
          }
@@ -711,6 +913,20 @@ namespace psitri
                auto ip = ref.template as<inner_prefix_node>();
                for (uint16_t i = 0; i < ip->num_branches(); ++i)
                   retain_subtree_leaf_values_by_addr(ip->get_branch(branch_number(i)));
+               break;
+            }
+            case node_type::wide_inner:
+            {
+               auto in = ref.template as<wide_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  retain_subtree_leaf_values_by_addr(in->get_branch(branch_number(i)));
+               break;
+            }
+            case node_type::direct_inner:
+            {
+               auto in = ref.template as<direct_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  retain_subtree_leaf_values_by_addr(in->get_branch(branch_number(i)));
                break;
             }
             default:
@@ -943,6 +1159,11 @@ namespace psitri
                              branch_number             br,
                              const branch_set&         sub_branches);
 
+      branch_set merge_branches_unique_at(const sal::alloc_hint& parent_hint,
+                                          ptr_address            addr,
+                                          branch_number          br,
+                                          const branch_set&      sub_branches);
+
       template <upsert_mode mode, any_inner_node_type InnerNodeType>
       branch_set merge_branches(const sal::alloc_hint&    parent_hint,
                                 smart_ref<InnerNodeType>& in,
@@ -1017,6 +1238,23 @@ namespace psitri
             print(ref, depth);
          }
       }
+      template <any_inner_node_type NodeType>
+         requires(is_wide_inner_node<NodeType> || is_direct_inner_node<NodeType>)
+      void print(smart_ref<NodeType> r, int depth = 0)
+      {
+         assert(_session.get_ref(r.address()).obj() == r.obj());
+         std::string indent(4 * depth, ' ');
+         std::cout << indent << "#" << r.address() << "  " << r->type() << " r:" << r.ref()
+                   << " divs: '" << r->divs() << "' branches: " << r->num_branches()
+                   << "  cline:" << r->num_clines() << " this: " << r.obj() << "\n";
+         for (int i = 0; i < r->num_branches(); ++i)
+         {
+            auto br  = r->get_branch(branch_number(i));
+            auto ref = _session.get_ref(br);
+            std::cout << br << "->";
+            print(ref, depth);
+         }
+      }
       void print(smart_ref<leaf_node> r, int depth = 0)
       {
          std::string indent(4 * depth, ' ');
@@ -1046,6 +1284,10 @@ namespace psitri
                return validate_inner(r.as<inner_node>(), depth + 1);
             case node_type::inner_prefix:
                return validate_inner(r.as<inner_prefix_node>(), depth + 1);
+            case node_type::wide_inner:
+               return validate_inner(r.as<wide_inner_node>(), depth + 1);
+            case node_type::direct_inner:
+               return validate_inner(r.as<direct_inner_node>(), depth + 1);
             case node_type::leaf:
                return r.as<leaf_node>()->num_branches();
             case node_type::value:
@@ -1088,6 +1330,12 @@ namespace psitri
             case node_type::inner_prefix:
                validate_unique_refs_inner(r.as<inner_prefix_node>());
                break;
+            case node_type::wide_inner:
+               validate_unique_refs_inner(r.as<wide_inner_node>());
+               break;
+            case node_type::direct_inner:
+               validate_unique_refs_inner(r.as<direct_inner_node>());
+               break;
             case node_type::leaf:
             {
                auto leaf = r.as<leaf_node>();
@@ -1119,6 +1367,12 @@ namespace psitri
                break;
             case node_type::inner_prefix:
                validate_unique_refs_inner(r.as<inner_prefix_node>());
+               break;
+            case node_type::wide_inner:
+               validate_unique_refs_inner(r.as<wide_inner_node>());
+               break;
+            case node_type::direct_inner:
+               validate_unique_refs_inner(r.as<direct_inner_node>());
                break;
             case node_type::leaf:
             {
@@ -1193,6 +1447,14 @@ namespace psitri
                s.inner_prefix_nodes++;
                calc_stats(s, r.as<inner_prefix_node>(), depth + 1);
                break;
+            case node_type::wide_inner:
+               s.wide_inner_nodes++;
+               calc_stats(s, r.as<wide_inner_node>(), depth + 1);
+               break;
+            case node_type::direct_inner:
+               s.direct_inner_nodes++;
+               calc_stats(s, r.as<direct_inner_node>(), depth + 1);
+               break;
             case node_type::leaf:
             {
                s.leaf_nodes++;
@@ -1236,6 +1498,12 @@ namespace psitri
                break;
             case node_type::inner_prefix:
                [[likely]] result = upsert<mode>(parent_hint, r.as<inner_prefix_node>(), key);
+               break;
+            case node_type::wide_inner:
+               [[likely]] result = upsert<mode>(parent_hint, r.as<wide_inner_node>(), key);
+               break;
+            case node_type::direct_inner:
+               [[likely]] result = upsert<mode>(parent_hint, r.as<direct_inner_node>(), key);
                break;
             case node_type::leaf:
                [[unlikely]] result = upsert<mode>(parent_hint, r.as<leaf_node>(), key);
@@ -1289,6 +1557,19 @@ namespace psitri
          ptr_address right = make_inner_node({&left, 1}, in.obj(), subrange(nb2, nb));
          return {left, right};
       }
+      else if constexpr (is_wide_inner_node<InnerNodeType> ||
+                         is_direct_inner_node<InnerNodeType>)
+      {
+         auto left_plan  = make_range_plan(in.obj(), subrange(branch_number(0), nb2));
+         auto right_plan = make_range_plan(in.obj(), subrange(nb2, nb));
+         ptr_address left;
+         if constexpr (mode.is_unique())
+            left = realloc_adaptive_inner(in, left_plan);
+         else
+            left = alloc_adaptive_inner(parent_hint, left_plan);
+         auto right = alloc_adaptive_inner(sal::alloc_hint{&left, 1}, right_plan);
+         return {left, right};
+      }
       else if constexpr (mode.is_unique())
       {
          //auto left  = _session.realloc<inner_node>(in, in.obj(), subrange(branch_number(0), nb2));
@@ -1307,6 +1588,31 @@ namespace psitri
    /**
     * TODO: 
     */
+   inline branch_set tree_context::merge_branches_unique_at(const sal::alloc_hint& parent_hint,
+                                                            ptr_address            addr,
+                                                            branch_number          br,
+                                                            const branch_set&      sub_branches)
+   {
+      auto ref = _session.get_ref(addr);
+      switch (node_type(ref->type()))
+      {
+         case node_type::inner:
+            return merge_branches<upsert_mode::unique>(parent_hint, ref.as<inner_node>(), br,
+                                                       sub_branches);
+         case node_type::inner_prefix:
+            return merge_branches<upsert_mode::unique>(
+                parent_hint, ref.as<inner_prefix_node>(), br, sub_branches);
+         case node_type::wide_inner:
+            return merge_branches<upsert_mode::unique>(
+                parent_hint, ref.as<wide_inner_node>(), br, sub_branches);
+         case node_type::direct_inner:
+            return merge_branches<upsert_mode::unique>(
+                parent_hint, ref.as<direct_inner_node>(), br, sub_branches);
+         default:
+            std::unreachable();
+      }
+   }
+
    template <upsert_mode mode, any_inner_node_type InnerNodeType>
    branch_set tree_context::split_merge(const sal::alloc_hint&    parent_hint,
                                         smart_ref<InnerNodeType>& in,
@@ -1314,23 +1620,21 @@ namespace psitri
                                         const branch_set&         sub_branches)
    {
       auto nb = in->num_branches();
+      auto split_divider = in->divs()[nb / 2 - 1];
 
       auto [left, right] = split<mode>(parent_hint, in, br, sub_branches);
 
       if (br < nb / 2)
       {
-         smart_ref<inner_node> left_ref = _session.get_ref<inner_node>(left);
-         auto                  left_result =
-             merge_branches<upsert_mode::unique>(parent_hint, left_ref, br, sub_branches);
-         left_result.push_back(in->divs()[nb / 2 - 1], right);
+         auto left_result = merge_branches_unique_at(parent_hint, left, br, sub_branches);
+         left_result.push_back(split_divider, right);
          return left_result;
       }
       else
       {
-         smart_ref<inner_node> right_ref    = _session.get_ref<inner_node>(right);
-         branch_set            right_result = merge_branches<upsert_mode::unique>(
-             parent_hint, right_ref, branch_number(*br - nb / 2), sub_branches);
-         right_result.push_front(left, in->divs()[nb / 2 - 1]);
+         branch_set right_result = merge_branches_unique_at(
+             parent_hint, right, branch_number(*br - nb / 2), sub_branches);
+         right_result.push_front(left, split_divider);
          return right_result;
       }
    }
@@ -1348,6 +1652,16 @@ namespace psitri
 
       auto bref = _session.get_ref(in->get_branch(br));
 
+      if constexpr (is_wide_inner_node<InnerNodeType> || is_direct_inner_node<InnerNodeType>)
+      {
+         auto plan = make_replace_plan(in.obj(), br, sub_branches, key_view());
+         if (plan.num_branches <= op::inner_build_plan::max_branches) [[likely]]
+            return rebuild_adaptive_inner<mode>(parent_hint, in, plan);
+         return split_merge<mode>(parent_hint, in, br, sub_branches);
+      }
+
+      else
+      {
       std::array<uint8_t, 8> cline_indices;
       auto needed_clines = psitri::find_clines(in->get_branch_clines(), in->get_branch(br),
                                                sub_branches.addresses(), cline_indices);
@@ -1357,7 +1671,14 @@ namespace psitri
       /// a node gets to 16 cachelines and thus most updates don't require a split.
       if (needed_clines == insufficient_clines) [[unlikely]]
       {
-         if constexpr (is_inner_node<InnerNodeType>)
+         if constexpr (PSITRI_ENABLE_ADAPTIVE_INNER_NODES && is_inner_node<InnerNodeType>)
+         {
+            auto plan = make_replace_plan(in.obj(), br, sub_branches, key_view());
+            if (plan.num_branches <= op::inner_build_plan::max_branches)
+               return rebuild_adaptive_inner<mode>(parent_hint, in, plan);
+            return split_merge<mode>(parent_hint, in, br, sub_branches);
+         }
+         else if constexpr (is_inner_node<InnerNodeType>)
             return split_merge<mode>(parent_hint, in, br, sub_branches);
          else if constexpr (is_inner_prefix_node<InnerNodeType>)
          {
@@ -1386,7 +1707,7 @@ namespace psitri
          }
          else
          {
-            if constexpr (is_inner_node<InnerNodeType>)
+            if constexpr (!is_inner_prefix_node<InnerNodeType>)
             {
                auto result = _session.realloc<InnerNodeType>(in, in.obj(), update);
                result.modify()->set_last_unique_version(_root_version);
@@ -1422,6 +1743,7 @@ namespace psitri
             ref.modify()->set_last_unique_version(_root_version);
             return result;
          }
+      }
       }
    }
 
@@ -1529,7 +1851,7 @@ namespace psitri
          case node_type::leaf:
          {
             auto leaf_ref = child_ref.template as<leaf_node>();
-            if constexpr (is_inner_node<InnerNodeType>)
+            if constexpr (!is_inner_prefix_node<InnerNodeType>)
             {
                if constexpr (mode.is_unique())
                {
@@ -1607,7 +1929,7 @@ namespace psitri
             auto range = subrange(branch_number(0), branch_number(child_ptr->num_branches()));
 
             ptr_address result_addr;
-            if constexpr (is_inner_node<InnerNodeType>)
+            if constexpr (!is_inner_prefix_node<InnerNodeType>)
             {
                if constexpr (mode.is_unique())
                {
@@ -1708,6 +2030,60 @@ namespace psitri
       if (!_collapse_enabled || in->num_branches() < 2)
          return sal::null_ptr_address;
 
+      if constexpr (is_wide_inner_node<InnerNodeType> || is_direct_inner_node<InnerNodeType>)
+      {
+         auto try_pair = [&](branch_number left, bool current_is_left) -> ptr_address
+         {
+            branch_number right(uint32_t(*left) + 1);
+            ptr_address   old_left_addr  = in->get_branch(left);
+            ptr_address   old_right_addr = in->get_branch(right);
+            ptr_address   left_addr      = current_is_left ? child_addr : old_left_addr;
+            ptr_address   right_addr     = current_is_left ? old_right_addr : child_addr;
+
+            subtree_sizer sizer(max_leaf_rewrite_entries);
+            if (!size_direct_leaf_child(left_addr, 0, sizer) ||
+                !size_direct_leaf_child(right_addr, 0, sizer))
+               return sal::null_ptr_address;
+            if (!sizer.fits_in_leaf())
+               return sal::null_ptr_address;
+
+            retain_direct_leaf_values_by_addr(left_addr);
+            retain_direct_leaf_values_by_addr(right_addr);
+
+            ptr_address      branches[2] = {left_addr, right_addr};
+            collapse_context cctx{_session, branches, 2, key_view()};
+            ptr_address      merged_leaf = _session.alloc<leaf_node>(
+                in->get_branch_clines(), op::leaf_from_visitor{&collapse_visitor, &cctx, sizer.count});
+
+            auto plan = make_merge_pair_plan(in.obj(), left, merged_leaf, key_view());
+            ptr_address result_addr;
+            if (plan.num_branches == 1)
+               result_addr = try_collapse_single_child_node<mode>(parent_hint, in, merged_leaf);
+            else
+               result_addr = rebuild_adaptive_inner<mode>(parent_hint, in, plan).front();
+
+            _session.release(left_addr);
+            _session.release(right_addr);
+            return result_addr;
+         };
+
+         if (*br > 0)
+         {
+            if (auto merged = try_pair(branch_number(uint32_t(*br) - 1), false);
+                merged != sal::null_ptr_address)
+               return merged;
+         }
+
+         if (uint32_t(*br) + 1 < in->num_branches())
+         {
+            if (auto merged = try_pair(br, true); merged != sal::null_ptr_address)
+               return merged;
+         }
+
+         return sal::null_ptr_address;
+      }
+      else
+      {
       auto try_pair = [&](branch_number left, bool current_is_left) -> ptr_address
       {
          branch_number right(uint32_t(*left) + 1);
@@ -1807,6 +2183,7 @@ namespace psitri
       }
 
       return sal::null_ptr_address;
+      }
    }
 
    template <upsert_mode mode, any_inner_node_type InnerNodeType>
@@ -2028,14 +2405,22 @@ namespace psitri
 	                  ref.modify()->set_last_unique_version(_root_version);
 	                  return result;
 	               }
-	               else if constexpr (is_inner_prefix_node<InnerNodeType>)
-	               {
-	                  auto result = _session.alloc<InnerNodeType>(parent_hint, in->prefix(), in.obj(), rm);
-	                  auto ref = _session.get_ref<InnerNodeType>(result);
-	                  ref.modify()->set_last_unique_version(_root_version);
-	                  return result;
-	               }
-            }
+		               else if constexpr (is_inner_prefix_node<InnerNodeType>)
+		               {
+		                  auto result = _session.alloc<InnerNodeType>(parent_hint, in->prefix(), in.obj(), rm);
+		                  auto ref = _session.get_ref<InnerNodeType>(result);
+		                  ref.modify()->set_last_unique_version(_root_version);
+		                  return result;
+		               }
+		               else if constexpr (is_wide_inner_node<InnerNodeType> ||
+		                                  is_direct_inner_node<InnerNodeType>)
+		               {
+		                  auto result = _session.alloc<InnerNodeType>(parent_hint, in.obj(), rm);
+		                  auto ref = _session.get_ref<InnerNodeType>(result);
+		                  ref.modify()->set_last_unique_version(_root_version);
+		                  return result;
+		               }
+	            }
             std::unreachable();
          }
       }
@@ -2090,17 +2475,24 @@ namespace psitri
 	                                         subrange(branch_number(0),
 	                                                  branch_number(in->num_branches())));
 	               }
-	               else if constexpr (is_inner_prefix_node<InnerNodeType>)
-	               {
-	                  const branch* brs = in->const_branches();
-	                  auto          freq =
-	                      create_cline_freq_table(brs, brs + in->num_branches());
-	                  return _session.alloc<inner_prefix_node>(
-	                      parent_hint, in.obj(), in->prefix(),
-	                      subrange(branch_number(0), branch_number(in->num_branches())), freq,
-	                      _root_version);
-	               }
-	            }
+		               else if constexpr (is_inner_prefix_node<InnerNodeType>)
+		               {
+		                  const branch* brs = in->const_branches();
+		                  auto          freq =
+		                      create_cline_freq_table(brs, brs + in->num_branches());
+		                  return _session.alloc<inner_prefix_node>(
+		                      parent_hint, in.obj(), in->prefix(),
+		                      subrange(branch_number(0), branch_number(in->num_branches())), freq,
+		                      _root_version);
+		               }
+		               else if constexpr (is_wide_inner_node<InnerNodeType> ||
+		                                  is_direct_inner_node<InnerNodeType>)
+		               {
+		                  auto plan = make_range_plan(
+		                      in.obj(), subrange(branch_number(0), branch_number(in->num_branches())));
+		                  return alloc_adaptive_inner(parent_hint, plan);
+		               }
+		            }
 	            // Undo retains: no new node was created, so the retained refs
 	            // are unbalanced — release all children to restore balance.
 	            in->visit_branches([this](ptr_address br) { _session.release(br); });
@@ -2828,6 +3220,22 @@ namespace psitri
                addr = in->get_branch(in->lower_bound(remaining));
                continue;
             }
+            case node_type::wide_inner:
+            {
+               auto in = ref.as<wide_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return sal::null_ptr_address;
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::direct_inner:
+            {
+               auto in = ref.as<direct_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return sal::null_ptr_address;
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
             case node_type::leaf:
             {
                auto          leaf = ref.as<leaf_node>();
@@ -2882,6 +3290,22 @@ namespace psitri
                auto in = ref.as<inner_node>();
                if (needs_structural_refresh(in->last_unique_version()))
                   return false;  // stale epoch → COW cascade
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::wide_inner:
+            {
+               auto in = ref.as<wide_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return false;
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::direct_inner:
+            {
+               auto in = ref.as<direct_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return false;
                addr = in->get_branch(in->lower_bound(remaining));
                continue;
             }
@@ -2992,6 +3416,22 @@ namespace psitri
                auto in = ref.as<inner_node>();
                if (needs_structural_refresh(in->last_unique_version()))
                   return false;  // stale epoch → COW cascade
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::wide_inner:
+            {
+               auto in = ref.as<wide_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return false;
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::direct_inner:
+            {
+               auto in = ref.as<direct_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return false;
                addr = in->get_branch(in->lower_bound(remaining));
                continue;
             }
@@ -3180,6 +3620,20 @@ namespace psitri
          {
             auto in = ref.as<inner_node>();
             for (uint8_t i = 0; i < in->num_branches(); ++i)
+               cleaned += defrag_subtree(in->get_branch(branch_number(i)));
+            break;
+         }
+         case node_type::wide_inner:
+         {
+            auto in = ref.as<wide_inner_node>();
+            for (uint16_t i = 0; i < in->num_branches(); ++i)
+               cleaned += defrag_subtree(in->get_branch(branch_number(i)));
+            break;
+         }
+         case node_type::direct_inner:
+         {
+            auto in = ref.as<direct_inner_node>();
+            for (uint16_t i = 0; i < in->num_branches(); ++i)
                cleaned += defrag_subtree(in->get_branch(branch_number(i)));
             break;
          }

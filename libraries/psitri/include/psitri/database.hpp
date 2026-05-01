@@ -209,6 +209,8 @@ namespace psitri
                leaf(context),
                inner(context),
                inner_prefix(context),
+               wide_inner(context),
+               direct_inner(context),
                value(context)
          {
          }
@@ -218,13 +220,17 @@ namespace psitri
             alloc.register_type_ops<leaf_node>(leaf);
             alloc.register_type_ops<inner_node>(inner);
             alloc.register_type_ops<inner_prefix_node>(inner_prefix);
+            alloc.register_type_ops<wide_inner_node>(wide_inner);
+            alloc.register_type_ops<direct_inner_node>(direct_inner);
             alloc.register_type_ops<value_node>(value);
          }
 
          psitri_object_context               context;
          psitri_node_ops<leaf_node>          leaf;
          psitri_node_ops<inner_node>         inner;
-         psitri_node_ops<inner_prefix_node> inner_prefix;
+         psitri_node_ops<inner_prefix_node>  inner_prefix;
+         psitri_node_ops<wide_inner_node>    wide_inner;
+         psitri_node_ops<direct_inner_node>  direct_inner;
          psitri_value_node_ops               value;
       };
 

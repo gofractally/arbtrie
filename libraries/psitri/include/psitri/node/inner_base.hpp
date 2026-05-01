@@ -23,9 +23,87 @@ namespace psitri
          branch_number lo;                ///< first branch to remove (inclusive)
          branch_number hi;                ///< last branch to remove (exclusive)
       };
+      struct inner_build_plan
+      {
+         static constexpr uint16_t max_branches = 256;
+
+         key_view                         prefix;
+         uint16_t                         num_branches = 0;
+         uint16_t                         num_clines   = 0;
+         std::array<uint8_t, 255>         dividers     = {};
+         std::array<ptr_address, 256>     branches     = {};
+         std::array<ptr_address, 256>     clines       = {};
+         std::array<uint8_t, 256>         cline_refs   = {};
+
+         static ptr_address cline_base(ptr_address addr) noexcept
+         {
+            return ptr_address(*addr & ~uint32_t(0x0f));
+         }
+
+         void clear(key_view p = {}) noexcept
+         {
+            prefix       = p;
+            num_branches = 0;
+            num_clines   = 0;
+            cline_refs.fill(0);
+         }
+
+         uint16_t add_cline(ptr_address addr) noexcept
+         {
+            ptr_address base = cline_base(addr);
+            for (uint16_t i = 0; i < num_clines; ++i)
+            {
+               if (clines[i] == base)
+               {
+                  assert(cline_refs[i] < 16);
+                  ++cline_refs[i];
+                  return i;
+               }
+            }
+            assert(num_clines < max_branches);
+            clines[num_clines]     = base;
+            cline_refs[num_clines] = 1;
+            return num_clines++;
+         }
+
+         void push_first(ptr_address addr) noexcept
+         {
+            assert(num_branches == 0);
+            assert(addr != sal::null_ptr_address);
+            branches[num_branches++] = addr;
+            add_cline(addr);
+         }
+
+         void push_back(uint8_t divider, ptr_address addr) noexcept
+         {
+            assert(num_branches > 0);
+            assert(num_branches < max_branches);
+            assert(addr != sal::null_ptr_address);
+            dividers[num_branches - 1] = divider;
+            branches[num_branches++]   = addr;
+            add_cline(addr);
+         }
+
+         uint16_t cline_index(ptr_address addr) const noexcept
+         {
+            ptr_address base = cline_base(addr);
+            for (uint16_t i = 0; i < num_clines; ++i)
+               if (clines[i] == base)
+                  return i;
+            assert(false && "address cline missing from inner_build_plan");
+            return 0;
+         }
+
+         bool compressed_wide_wins() const noexcept
+         {
+            return uint32_t(num_clines) * 2u < uint32_t(num_branches);
+         }
+      };
    };  // namespace op
    class inner_node;
    class inner_prefix_node;
+   class wide_inner_node;
+   class direct_inner_node;
 
    template <typename T>
    concept is_inner_node =
@@ -36,7 +114,35 @@ namespace psitri
        std::is_same_v<std::remove_cvref_t<std::remove_pointer_t<T>>, inner_prefix_node>;
 
    template <typename T>
-   concept any_inner_node_type = is_inner_node<T> || is_inner_prefix_node<T>;
+   concept is_wide_inner_node =
+       std::is_same_v<std::remove_cvref_t<std::remove_pointer_t<T>>, wide_inner_node>;
+
+   template <typename T>
+   concept is_direct_inner_node =
+       std::is_same_v<std::remove_cvref_t<std::remove_pointer_t<T>>, direct_inner_node>;
+
+   template <typename T>
+   concept any_inner_node_type = is_inner_node<T> || is_inner_prefix_node<T> ||
+                                 is_wide_inner_node<T> || is_direct_inner_node<T>;
+
+   template <typename T>
+   concept has_inner_prefix_storage =
+       is_inner_prefix_node<T>;
+
+   template <typename T>
+   key_view inner_prefix_of(const T* n) noexcept
+   {
+      if constexpr (has_inner_prefix_storage<T>)
+         return n->prefix();
+      else
+         return {};
+   }
+
+   template <typename T>
+   bool inner_has_prefix(const T* n) noexcept
+   {
+      return !inner_prefix_of(n).empty();
+   }
 
    /**
     * This base class is used to abstract the common functionality between
