@@ -374,8 +374,9 @@ namespace psitri
          ptr_address  left      = sal::null_ptr_address;
          ptr_address  right     = sal::null_ptr_address;
          std::string  separator;
-         bool         split     = false;
-         bool         empty     = false;
+         bool         split        = false;
+         bool         empty        = false;
+         bool         contains_old = false;
       };
 
       op::bplus_build_plan make_bplus_leaf_split_plan(ptr_address left,
@@ -442,6 +443,12 @@ namespace psitri
       bplus_result bplus_upsert(const sal::alloc_hint& parent_hint,
                                 smart_ref<leaf_node>&  leaf,
                                 key_view               key);
+
+      template <upsert_mode mode>
+      bplus_result bplus_update_leaf(const sal::alloc_hint& parent_hint,
+                                     smart_ref<leaf_node>&  leaf,
+                                     key_view               key,
+                                     branch_number          br);
 
       template <upsert_mode mode>
       bplus_result bplus_upsert(const sal::alloc_hint&        parent_hint,
@@ -3261,19 +3268,23 @@ namespace psitri
          std::unreachable();
       }
       ptr_address left;
+      ptr_address right;
       if constexpr (mode.is_unique())
+      {
+         right = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), left_size,
+                                           right_end, split_rewrite);
          left = _session
                     .realloc<leaf_node>(leaf, leaf.obj(), key_view(), branch_zero, left_size,
                                         split_rewrite)
                     .address();
+      }
       else
       {
          left = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), branch_zero,
                                           left_size, split_rewrite);
+         right = _session.alloc<leaf_node>(sal::alloc_hint{&left, 1}, leaf.obj(),
+                                           key_view(), left_size, right_end, split_rewrite);
       }
-      ptr_address right = _session.alloc<leaf_node>(sal::alloc_hint{&left, 1}, leaf.obj(),
-                                                    key_view(), left_size, right_end,
-                                                    split_rewrite);
       if (split_rewrite)
          release_leaf_rewrite_sources(rewrite_plan);
       //     SAL_WARN("left: {} right: {} delta: {}", left, right, right - left);
@@ -3437,18 +3448,23 @@ namespace psitri
       }
 
       ptr_address left;
+      ptr_address right;
       if constexpr (mode.is_unique())
+      {
+         right = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), mid,
+                                           branch_number(nb), split_rewrite);
          left = _session
                     .realloc<leaf_node>(leaf, leaf.obj(), key_view(), branch_zero, mid,
                                         split_rewrite)
                     .address();
+      }
       else
+      {
          left = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), branch_zero, mid,
                                           split_rewrite);
-
-      ptr_address right = _session.alloc<leaf_node>(sal::alloc_hint{&left, 1}, leaf.obj(),
-                                                    key_view(), mid, branch_number(nb),
-                                                    split_rewrite);
+         right = _session.alloc<leaf_node>(sal::alloc_hint{&left, 1}, leaf.obj(), key_view(),
+                                           mid, branch_number(nb), split_rewrite);
+      }
       if (split_rewrite)
          release_leaf_rewrite_sources(rewrite_plan);
 
@@ -3459,17 +3475,172 @@ namespace psitri
          target_addr          = key < right_first ? &left : &right;
       }
 
-      auto          target_ref = _session.get_ref<leaf_node>(*target_addr);
-      branch_number target_lb  = target_ref->lower_bound(key);
-      auto inserted = insert<upsert_mode::unique_upsert>(sal::alloc_hint{target_addr, 1},
-                                                         target_ref, key, target_lb);
-      assert(inserted.count() == 1);
-      *target_addr = inserted.get_first_branch();
+      auto target_ref = _session.get_ref<leaf_node>(*target_addr);
+      auto inserted  = bplus_upsert<upsert_mode::unique_upsert>(
+          sal::alloc_hint{target_addr, 1}, target_ref, key);
+      bool old_leaf_nested = false;
+      if (!inserted.split)
+      {
+         *target_addr = inserted.left;
+      }
+      else
+      {
+         op::bplus_build_plan sub_plan;
+         sub_plan.push_first(inserted.left);
+         sub_plan.push_back(inserted.separator, inserted.right);
+         if constexpr (mode.is_unique())
+            old_leaf_nested = (target_addr == &left);
+         *target_addr = _session.alloc<bplus_inner_node>(sal::alloc_hint{target_addr, 1},
+                                                         sub_plan);
+         auto sub_ref = _session.get_ref<bplus_inner_node>(*target_addr);
+         sub_ref.modify()->set_last_unique_version(_root_version);
+      }
 
-      return {.left      = left,
-              .right     = right,
-              .separator = bplus_first_key(right),
-              .split     = true};
+      return {.left         = left,
+              .right        = right,
+              .separator    = bplus_first_key(right),
+              .split        = true,
+              .contains_old = old_leaf_nested};
+   }
+
+   template <upsert_mode mode>
+   tree_context::bplus_result
+   tree_context::bplus_update_leaf(const sal::alloc_hint& parent_hint,
+                                   smart_ref<leaf_node>&  leaf,
+                                   key_view               key,
+                                   branch_number          br)
+   {
+      auto old_value = leaf->get_value(br);
+      if (old_value.is_value_node())
+         _old_value_size = _session.get_ref(old_value.value_address())->size();
+      else
+         _old_value_size = old_value.size();
+
+      if constexpr (mode.is_unique())
+      {
+         if (old_value.is_value_node() && _new_value.is_view())
+         {
+            auto vn_ref   = _session.get_ref<value_node>(old_value.value_address());
+            auto new_view = _new_value.view();
+            if (vn_ref.ref() == 1 && !vn_ref->is_subtree_container() && new_view.size() > 64)
+            {
+               if (!vn_ref->is_flat() && vn_ref->num_versions() == 1 && vn_ref->num_next() == 0 &&
+                   new_view.size() <= value_node::max_inline_entry_size &&
+                   vn_ref->can_coalesce_in_place(vn_ref->latest_version(), new_view))
+               {
+                  vn_ref.modify()->coalesce_top_entry(new_view);
+                  return {.left = leaf.address()};
+               }
+
+               (void)_session.realloc<value_node>(vn_ref, new_view);
+               return {.left = leaf.address()};
+            }
+         }
+      }
+
+      auto new_val = make_value(_new_value, leaf->clines());
+      op::leaf_update update_op{.src = *leaf.obj(), .lb = br, .key = key, .value = new_val};
+
+      if constexpr (mode.is_unique())
+      {
+         bool old_has_address = leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node;
+
+         switch (leaf->can_apply(update_op))
+         {
+            case leaf_node::can_apply_mode::modify:
+               if (old_has_address)
+                  release_value_ref(leaf->get_value(br));
+               leaf.modify()->update_value(br, new_val);
+               return {.left = leaf.address()};
+            case leaf_node::can_apply_mode::defrag:
+            {
+               auto plan = make_leaf_rewrite_plan_skipping(
+                   *leaf.obj(), br, branch_number(uint32_t(*br) + 1));
+               auto rewrite_policy = leaf_rewrite_policy(plan);
+               update_op.rewrite   = &rewrite_policy;
+               if (!leaf->rebuilt_size_fits(update_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  update_op.rewrite = nullptr;
+               }
+               if (old_has_address)
+                  release_value_ref(leaf->get_value(br));
+               auto result = _session.realloc<leaf_node>(leaf, update_op).address();
+               if (update_op.rewrite)
+                  release_leaf_rewrite_sources(plan);
+               return {.left = result};
+            }
+            case leaf_node::can_apply_mode::none:
+            {
+               if (old_has_address)
+                  release_value_ref(leaf->get_value(br));
+               if (new_val.is_value_node())
+                  _session.release(new_val.value_address());
+
+               auto plan = make_leaf_rewrite_plan_skipping(
+                   *leaf.obj(), br, branch_number(uint32_t(*br) + 1));
+               auto rewrite_policy = leaf_rewrite_policy(plan);
+               op::leaf_remove rm_op{.src = *leaf.obj(), .bn = br, .rewrite = &rewrite_policy};
+               if (!leaf->rebuilt_size_fits(rm_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  rm_op.rewrite = nullptr;
+               }
+               auto removed = _session.realloc<leaf_node>(leaf, rm_op);
+               if (rm_op.rewrite)
+                  release_leaf_rewrite_sources(plan);
+               return bplus_upsert<upsert_mode::unique_upsert>(parent_hint, removed, key);
+            }
+         }
+      }
+      else
+      {
+         bool old_has_address = leaf->get_value_type(br) >= leaf_node::value_type_flag::value_node;
+
+         if (leaf->can_apply(update_op) != leaf_node::can_apply_mode::none) [[likely]]
+         {
+            retain_children(leaf);
+            if (old_has_address)
+               release_value_ref(leaf->get_value(br));
+
+            auto plan = make_leaf_rewrite_plan_skipping(
+                *leaf.obj(), br, branch_number(uint32_t(*br) + 1));
+            auto rewrite_policy = leaf_rewrite_policy(plan);
+            update_op.rewrite   = &rewrite_policy;
+            if (!leaf->rebuilt_size_fits(update_op))
+            {
+               release_leaf_rewrite_replacements(plan);
+               update_op.rewrite = nullptr;
+            }
+            auto result = _session.alloc<leaf_node>(parent_hint, update_op);
+            if (update_op.rewrite)
+               release_leaf_rewrite_sources(plan);
+            return {.left = result};
+         }
+
+         retain_children(leaf);
+         if (old_has_address)
+            release_value_ref(leaf->get_value(br));
+         if (new_val.is_value_node())
+            _session.release(new_val.value_address());
+
+         auto plan = make_leaf_rewrite_plan_skipping(
+             *leaf.obj(), br, branch_number(uint32_t(*br) + 1));
+         auto rewrite_policy = leaf_rewrite_policy(plan);
+         op::leaf_remove rm_op{.src = *leaf.obj(), .bn = br, .rewrite = &rewrite_policy};
+         if (!leaf->rebuilt_size_fits(rm_op))
+         {
+            release_leaf_rewrite_replacements(plan);
+            rm_op.rewrite = nullptr;
+         }
+         auto rm_addr = _session.alloc<leaf_node>(parent_hint, rm_op);
+         if (rm_op.rewrite)
+            release_leaf_rewrite_sources(plan);
+         auto removed = _session.get_ref<leaf_node>(rm_addr);
+         return bplus_upsert<upsert_mode::unique_upsert>(parent_hint, removed, key);
+      }
+
+      std::unreachable();
    }
 
    template <upsert_mode mode>
@@ -3487,7 +3658,7 @@ namespace psitri
             assert(!"update precondition violated: key does not exist");
             std::unreachable();
          }
-         return bplus_from_branch_set(update<mode>(parent_hint, leaf, key, br));
+         return bplus_update_leaf<mode>(parent_hint, leaf, key, br);
       }
       if constexpr (mode.must_remove())
       {
@@ -3519,7 +3690,7 @@ namespace psitri
       if constexpr (mode.is_upsert())
       {
          if (lb != leaf->num_branches() && leaf->get_key(lb) == key)
-            return bplus_from_branch_set(update<mode>(parent_hint, leaf, key, lb));
+            return bplus_update_leaf<mode>(parent_hint, leaf, key, lb);
       }
       else if constexpr (mode.is_insert())
       {
@@ -3536,18 +3707,21 @@ namespace psitri
          retain_children(leaf);
 
       uint8_t cline_idx = 0xff;
-      _new_value = make_value(_new_value, leaf->clines());
-      if (_new_value.is_value_node())
+      auto new_val = make_value(_new_value, leaf->clines());
+      if (new_val.is_value_node())
       {
-         cline_idx = leaf->find_cline_index(_new_value.value_address());
+         cline_idx = leaf->find_cline_index(new_val.value_address());
          if (cline_idx >= leaf_node::max_value_clines)
+         {
+            _session.release(new_val.value_address());
             return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
+         }
       }
 
       op::leaf_insert insert_op{.src       = *leaf.obj(),
                                 .lb        = lb,
                                 .key       = key,
-                                .value     = _new_value,
+                                .value     = new_val,
                                 .cline_idx = cline_idx};
 
       if constexpr (mode.is_unique())
@@ -3565,6 +3739,8 @@ namespace psitri
                if (!leaf->rebuilt_size_fits(insert_op))
                {
                   release_leaf_rewrite_replacements(plan);
+                  if (new_val.is_value_node())
+                     _session.release(new_val.value_address());
                   return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
                }
                auto result =
@@ -3573,6 +3749,8 @@ namespace psitri
                return {.left = result};
             }
             case leaf_node::can_apply_mode::none:
+               if (new_val.is_value_node())
+                  _session.release(new_val.value_address());
                return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
          }
       }
@@ -3589,6 +3767,8 @@ namespace psitri
                if (!leaf->rebuilt_size_fits(insert_op))
                {
                   release_leaf_rewrite_replacements(plan);
+                  if (new_val.is_value_node())
+                     _session.release(new_val.value_address());
                   return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
                }
                auto result = _session.alloc<leaf_node>(parent_hint, leaf.obj(), insert_op);
@@ -3596,6 +3776,8 @@ namespace psitri
                return {.left = result};
             }
             case leaf_node::can_apply_mode::none:
+               if (new_val.is_value_node())
+                  _session.release(new_val.value_address());
                return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
          }
       }
@@ -3622,6 +3804,16 @@ namespace psitri
       if constexpr (mode.is_shared())
          retain_children(in);
 
+      bool pre_retained_removed_child = false;
+      if constexpr (mode.is_unique() && mode.is_remove())
+      {
+         if (in->num_branches() <= 2)
+         {
+            _session.retain(old_child);
+            pre_retained_removed_child = true;
+         }
+      }
+
       auto child = bplus_upsert<mode>(in->get_branch_clines(), child_ref, key);
 
       if (child.empty)
@@ -3631,7 +3823,10 @@ namespace psitri
          if (in->num_branches() == 2)
          {
             branch_number keep(*br == 0 ? 1 : 0);
-            return {.left = in->get_branch(keep)};
+            auto          keep_addr = in->get_branch(keep);
+            if constexpr (mode.is_unique())
+               _session.retain(keep_addr);
+            return {.left = keep_addr};
          }
 
          auto plan = make_bplus_remove_plan(in.obj(), br);
@@ -3649,6 +3844,9 @@ namespace psitri
             return {.left = result};
          }
       }
+
+      if (pre_retained_removed_child)
+         _session.release(old_child);
 
       if (!child.split && child.left == old_child)
       {
@@ -3724,7 +3922,8 @@ namespace psitri
             std::unreachable();
       }
 
-      const bool contains_old = (!result.empty && result.left == r.address()) ||
+      const bool contains_old = result.contains_old ||
+                                (!result.empty && result.left == r.address()) ||
                                 (result.split && result.right == r.address());
       if constexpr (mode.is_unique())
       {
