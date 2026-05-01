@@ -371,12 +371,64 @@ namespace psitri
 
       struct bplus_result
       {
-         ptr_address  left      = sal::null_ptr_address;
-         ptr_address  right     = sal::null_ptr_address;
-         std::string  separator;
-         bool         split        = false;
-         bool         empty        = false;
-         bool         contains_old = false;
+         static constexpr uint16_t max_branches = 32;
+
+         ptr_address                             left  = sal::null_ptr_address;
+         ptr_address                             right = sal::null_ptr_address;
+         std::string                             separator;
+         bool                                    split        = false;
+         bool                                    empty        = false;
+         bool                                    contains_old = false;
+         uint16_t                                branch_count = 0;
+         std::array<ptr_address, max_branches>   branches     = {};
+         std::array<std::string, max_branches - 1> separators = {};
+
+         static bplus_result empty_result() noexcept
+         {
+            bplus_result r;
+            r.empty = true;
+            return r;
+         }
+
+         static bplus_result single(ptr_address addr) noexcept
+         {
+            bplus_result r;
+            r.push_first(addr);
+            return r;
+         }
+
+         bool contains(ptr_address addr) const noexcept
+         {
+            for (uint16_t i = 0; i < branch_count; ++i)
+               if (branches[i] == addr)
+                  return true;
+            return false;
+         }
+
+         void push_first(ptr_address addr) noexcept
+         {
+            assert(branch_count == 0);
+            assert(addr != sal::null_ptr_address);
+            branches[branch_count++] = addr;
+            left                     = addr;
+            empty                    = false;
+         }
+
+         void push_back(key_view sep, ptr_address addr)
+         {
+            assert(branch_count > 0);
+            if (branch_count >= max_branches) [[unlikely]]
+               std::abort();
+            assert(addr != sal::null_ptr_address);
+            separators[branch_count - 1] = std::string(sep);
+            branches[branch_count++]     = addr;
+            if (branch_count == 2)
+            {
+               separator = separators[0];
+               right     = addr;
+            }
+            split = branch_count > 1;
+         }
       };
 
       op::bplus_build_plan make_bplus_leaf_split_plan(ptr_address left,
@@ -414,13 +466,26 @@ namespace psitri
                continue;
             }
 
-            if (plan.num_branches == 0)
-               plan.push_first(child.left);
-            else
-               plan.push_back(bplus_first_key(child.left), child.left);
+            assert(child.branch_count > 0);
+            for (uint16_t child_i = 0; child_i < child.branch_count; ++child_i)
+            {
+               auto child_addr = child.branches[child_i];
+               if (plan.num_branches == 0)
+               {
+                  plan.push_first(child_addr);
+                  continue;
+               }
 
-            if (child.split)
-               plan.push_back(child.separator, child.right);
+               if (child_i == 0)
+               {
+                  auto sep = bplus_first_key(child_addr);
+                  plan.push_back(sep, child_addr);
+               }
+               else
+               {
+                  plan.push_back(child.separators[child_i - 1], child_addr);
+               }
+            }
          }
          return plan;
       }
@@ -3423,16 +3488,16 @@ namespace psitri
    inline tree_context::bplus_result tree_context::bplus_from_branch_set(branch_set result)
    {
       if (result.count() == 0)
-         return {.empty = true};
+         return bplus_result::empty_result();
       if (result.count() == 1)
-         return {.left = result.get_first_branch()};
+         return bplus_result::single(result.get_first_branch());
 
       auto addrs = result.addresses();
-      assert(addrs.size() == 2);
-      return {.left      = addrs[0],
-              .right     = addrs[1],
-              .separator = bplus_first_key(addrs[1]),
-              .split     = true};
+      bplus_result out;
+      out.push_first(addrs[0]);
+      for (uint16_t i = 1; i < addrs.size(); ++i)
+         out.push_back(bplus_first_key(addrs[i]), addrs[i]);
+      return out;
    }
 
    template <upsert_mode mode>
@@ -3491,29 +3556,29 @@ namespace psitri
       auto target_ref = _session.get_ref<leaf_node>(*target_addr);
       auto inserted  = bplus_upsert<upsert_mode::unique_upsert>(
           sal::alloc_hint{target_addr, 1}, target_ref, key);
-      bool old_leaf_nested = false;
-      if (!inserted.split)
+      bplus_result out;
+      if (target_addr == &left)
       {
-         *target_addr = inserted.left;
+         out = std::move(inserted);
+         out.push_back(bplus_first_key(right), right);
       }
       else
       {
-         op::bplus_build_plan sub_plan;
-         sub_plan.push_first(inserted.left);
-         sub_plan.push_back(inserted.separator, inserted.right);
-         if constexpr (mode.is_unique())
-            old_leaf_nested = (target_addr == &left);
-         *target_addr = _session.alloc<bplus_inner_node>(sal::alloc_hint{target_addr, 1},
-                                                         sub_plan);
-         auto sub_ref = _session.get_ref<bplus_inner_node>(*target_addr);
-         sub_ref.modify()->set_last_unique_version(_root_version);
+         out.push_first(left);
+         for (uint16_t i = 0; i < inserted.branch_count; ++i)
+         {
+            auto addr = inserted.branches[i];
+            if (i == 0)
+               out.push_back(bplus_first_key(addr), addr);
+            else
+               out.push_back(inserted.separators[i - 1], addr);
+         }
       }
-
-      return {.left         = left,
-              .right        = right,
-              .separator    = bplus_first_key(right),
-              .split        = true,
-              .contains_old = old_leaf_nested};
+      if constexpr (mode.is_unique())
+         out.contains_old = true;
+      else
+         out.contains_old = false;
+      return out;
    }
 
    template <upsert_mode mode>
@@ -3542,11 +3607,11 @@ namespace psitri
                    vn_ref->can_coalesce_in_place(vn_ref->latest_version(), new_view))
                {
                   vn_ref.modify()->coalesce_top_entry(new_view);
-                  return {.left = leaf.address()};
+                  return bplus_result::single(leaf.address());
                }
 
                (void)_session.realloc<value_node>(vn_ref, new_view);
-               return {.left = leaf.address()};
+               return bplus_result::single(leaf.address());
             }
          }
       }
@@ -3564,7 +3629,7 @@ namespace psitri
                if (old_has_address)
                   release_value_ref(leaf->get_value(br));
                leaf.modify()->update_value(br, new_val);
-               return {.left = leaf.address()};
+               return bplus_result::single(leaf.address());
             case leaf_node::can_apply_mode::defrag:
             {
                auto plan = make_leaf_rewrite_plan_skipping(
@@ -3581,7 +3646,7 @@ namespace psitri
                auto result = _session.realloc<leaf_node>(leaf, update_op).address();
                if (update_op.rewrite)
                   release_leaf_rewrite_sources(plan);
-               return {.left = result};
+               return bplus_result::single(result);
             }
             case leaf_node::can_apply_mode::none:
             {
@@ -3628,7 +3693,7 @@ namespace psitri
             auto result = _session.alloc<leaf_node>(parent_hint, update_op);
             if (update_op.rewrite)
                release_leaf_rewrite_sources(plan);
-            return {.left = result};
+            return bplus_result::single(result);
          }
 
          retain_children(leaf);
@@ -3650,7 +3715,9 @@ namespace psitri
          if (rm_op.rewrite)
             release_leaf_rewrite_sources(plan);
          auto removed = _session.get_ref<leaf_node>(rm_addr);
-         return bplus_upsert<upsert_mode::unique_upsert>(parent_hint, removed, key);
+         auto result = bplus_upsert<upsert_mode::unique_upsert>(parent_hint, removed, key);
+         result.contains_old = false;
+         return result;
       }
 
       std::unreachable();
@@ -3667,7 +3734,7 @@ namespace psitri
          if (br == leaf->num_branches())
          {
             if constexpr (mode.is_shared())
-               return {.left = leaf.address()};
+               return bplus_result::single(leaf.address());
             assert(!"update precondition violated: key does not exist");
             std::unreachable();
          }
@@ -3679,7 +3746,7 @@ namespace psitri
          if (br == leaf->num_branches())
          {
             if constexpr (mode.is_shared())
-               return {.left = leaf.address()};
+               return bplus_result::single(leaf.address());
             assert(!"must_remove precondition violated: key does not exist");
             std::unreachable();
          }
@@ -3697,7 +3764,7 @@ namespace psitri
       {
          if (lb != leaf->num_branches())
             return bplus_from_branch_set(remove<mode>(parent_hint, leaf, key, lb));
-         return {.left = leaf.address()};
+         return bplus_result::single(leaf.address());
       }
 
       if constexpr (mode.is_upsert())
@@ -3710,7 +3777,7 @@ namespace psitri
          if (!(lb == leaf->num_branches() || leaf->get_key(lb) != key))
          {
             if constexpr (mode.is_shared())
-               return {.left = leaf.address()};
+               return bplus_result::single(leaf.address());
             assert(!"insert precondition violated: key already exists");
             std::unreachable();
          }
@@ -3741,9 +3808,9 @@ namespace psitri
       {
          switch (leaf->can_apply(insert_op))
          {
-            case leaf_node::can_apply_mode::modify:
-               leaf.modify()->apply(insert_op);
-               return {.left = leaf.address()};
+	            case leaf_node::can_apply_mode::modify:
+	               leaf.modify()->apply(insert_op);
+	               return bplus_result::single(leaf.address());
             case leaf_node::can_apply_mode::defrag:
             {
                auto plan           = make_leaf_rewrite_plan(*leaf.obj());
@@ -3759,7 +3826,7 @@ namespace psitri
                auto result =
                    _session.realloc<leaf_node>(leaf, leaf.obj(), insert_op).address();
                release_leaf_rewrite_sources(plan);
-               return {.left = result};
+               return bplus_result::single(result);
             }
             case leaf_node::can_apply_mode::none:
                if (new_val.is_value_node())
@@ -3786,7 +3853,7 @@ namespace psitri
                }
                auto result = _session.alloc<leaf_node>(parent_hint, leaf.obj(), insert_op);
                release_leaf_rewrite_sources(plan);
-               return {.left = result};
+               return bplus_result::single(result);
             }
             case leaf_node::can_apply_mode::none:
                if (new_val.is_value_node())
@@ -3817,13 +3884,13 @@ namespace psitri
       if constexpr (mode.is_shared())
          retain_children(in);
 
-      bool pre_retained_removed_child = false;
+      bool pre_retained_last_child = false;
       if constexpr (mode.is_unique() && mode.is_remove())
       {
-         if (in->num_branches() <= 2)
+         if (in->num_branches() == 1)
          {
             _session.retain(old_child);
-            pre_retained_removed_child = true;
+            pre_retained_last_child = true;
          }
       }
 
@@ -3832,40 +3899,31 @@ namespace psitri
       if (child.empty)
       {
          if (in->num_branches() == 1)
-            return {.empty = true};
-         if (in->num_branches() == 2)
-         {
-            branch_number keep(*br == 0 ? 1 : 0);
-            auto          keep_addr = in->get_branch(keep);
-            if constexpr (mode.is_unique())
-               _session.retain(keep_addr);
-            return {.left = keep_addr};
-         }
-
+            return bplus_result::empty_result();
          auto plan = make_bplus_remove_plan(in.obj(), br);
          if constexpr (mode.is_unique())
          {
             auto result = _session.realloc<bplus_inner_node>(in, plan);
             result.modify()->set_last_unique_version(_root_version);
-            return {.left = result.address()};
+            return bplus_result::single(result.address());
          }
          else
          {
             auto result = _session.alloc<bplus_inner_node>(parent_hint, plan);
             auto ref    = _session.get_ref<bplus_inner_node>(result);
             ref.modify()->set_last_unique_version(_root_version);
-            return {.left = result};
+            return bplus_result::single(result);
          }
       }
 
-      if (pre_retained_removed_child)
+      if (pre_retained_last_child)
          _session.release(old_child);
 
-      if (!child.split && child.left == old_child)
+      if (child.branch_count == 1 && child.branches[0] == old_child)
       {
          if constexpr (mode.is_shared())
             in->visit_branches([this](ptr_address addr) { _session.release(addr); });
-         return {.left = in.address()};
+         return bplus_result::single(in.address());
       }
 
       auto plan = make_bplus_replace_plan(in.obj(), br, child);
@@ -3876,14 +3934,14 @@ namespace psitri
          {
             auto result = _session.realloc<bplus_inner_node>(in, plan);
             result.modify()->set_last_unique_version(_root_version);
-            return {.left = result.address()};
+            return bplus_result::single(result.address());
          }
          else
          {
             auto result = _session.alloc<bplus_inner_node>(parent_hint, plan);
             auto ref    = _session.get_ref<bplus_inner_node>(result);
             ref.modify()->set_last_unique_version(_root_version);
-            return {.left = result};
+            return bplus_result::single(result);
          }
       }
 
@@ -3910,7 +3968,10 @@ namespace psitri
       left_ref.modify()->set_last_unique_version(_root_version);
       auto right_ref = _session.get_ref<bplus_inner_node>(right);
       right_ref.modify()->set_last_unique_version(_root_version);
-      return {.left = left, .right = right, .separator = std::move(separator), .split = true};
+      bplus_result out;
+      out.push_first(left);
+      out.push_back(separator, right);
+      return out;
    }
 
    template <upsert_mode mode>
@@ -3935,9 +3996,7 @@ namespace psitri
             std::unreachable();
       }
 
-      const bool contains_old = result.contains_old ||
-                                (!result.empty && result.left == r.address()) ||
-                                (result.split && result.right == r.address());
+      const bool contains_old = result.contains_old || result.contains(r.address());
       if constexpr (mode.is_unique())
       {
          if constexpr (mode.is_remove())
@@ -3984,16 +4043,19 @@ namespace psitri
 
       if (result.empty)
          ;
-      else if (result.split)
+      else if (result.branch_count > 1)
       {
-         auto plan     = make_bplus_leaf_split_plan(result.left, result.separator, result.right);
+         op::bplus_build_plan plan;
+         plan.push_first(result.branches[0]);
+         for (uint16_t i = 1; i < result.branch_count; ++i)
+            plan.push_back(result.separators[i - 1], result.branches[i]);
          auto new_root = _session.alloc<bplus_inner_node>({}, plan);
          auto ref      = _session.get_ref<bplus_inner_node>(new_root);
          ref.modify()->set_last_unique_version(_root_version);
          _root.give(new_root);
       }
       else
-         _root.give(result.left);
+         _root.give(result.branches[0]);
       return _old_value_size;
    }
 
@@ -4010,16 +4072,19 @@ namespace psitri
       auto result         = bplus_upsert<upsert_mode::unique_remove>({}, rref, key);
       if (result.empty)
          ;
-      else if (result.split)
+      else if (result.branch_count > 1)
       {
-         auto plan     = make_bplus_leaf_split_plan(result.left, result.separator, result.right);
+         op::bplus_build_plan plan;
+         plan.push_first(result.branches[0]);
+         for (uint16_t i = 1; i < result.branch_count; ++i)
+            plan.push_back(result.separators[i - 1], result.branches[i]);
          auto new_root = _session.alloc<bplus_inner_node>({}, plan);
          auto ref      = _session.get_ref<bplus_inner_node>(new_root);
          ref.modify()->set_last_unique_version(_root_version);
          _root.give(new_root);
       }
       else
-         _root.give(result.left);
+         _root.give(result.branches[0]);
       return _old_value_size;
    }
 
