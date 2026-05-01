@@ -395,20 +395,18 @@ namespace psitri
       {
          op::bplus_build_plan plan;
          plan.clear();
+         std::array<ptr_address, op::bplus_build_plan::max_branches> branches{};
+         uint16_t count = 0;
 
          for (uint16_t i = 0; i < in->num_branches(); ++i)
          {
-            if (i == 0)
-               plan.push_first(i == *br ? child.left : in->get_branch(branch_number(i)));
-            else
-            {
-               key_view sep = in->separator(i - 1);
-               plan.push_back(sep, i == *br ? child.left : in->get_branch(branch_number(i)));
-            }
-
+            branches[count++] = i == *br ? child.left : in->get_branch(branch_number(i));
             if (i == *br && child.split)
-               plan.push_back(child.separator, child.right);
+               branches[count++] = child.right;
          }
+         plan.push_first(branches[0]);
+         for (uint16_t i = 1; i < count; ++i)
+            plan.push_back(bplus_first_key(branches[i]), branches[i]);
          return plan;
       }
 
@@ -418,24 +416,17 @@ namespace psitri
       {
          op::bplus_build_plan plan;
          plan.clear();
-         bool first = true;
+         std::array<ptr_address, op::bplus_build_plan::max_branches> branches{};
+         uint16_t count = 0;
          for (uint16_t i = 0; i < in->num_branches(); ++i)
          {
             if (i == *br)
                continue;
-            if (first)
-            {
-               plan.push_first(in->get_branch(branch_number(i)));
-               first = false;
-            }
-            else
-            {
-               uint16_t sep_index = (i > *br) ? i - 1 : i;
-               if (sep_index >= in->num_divisions())
-                  sep_index = in->num_divisions() - 1;
-               plan.push_back(in->separator(sep_index), in->get_branch(branch_number(i)));
-            }
+            branches[count++] = in->get_branch(branch_number(i));
          }
+         plan.push_first(branches[0]);
+         for (uint16_t i = 1; i < count; ++i)
+            plan.push_back(bplus_first_key(branches[i]), branches[i]);
          return plan;
       }
 
@@ -3667,10 +3658,9 @@ namespace psitri
          return {.left = in.address()};
       }
 
-      auto plan      = make_bplus_replace_plan(in.obj(), br, child);
-      auto plan_size = bplus_inner_node::alloc_size(plan);
-      if (plan.num_branches <= op::bplus_build_plan::max_branches &&
-          plan_size <= bplus_inner_node::max_inner_size)
+      auto plan = make_bplus_replace_plan(in.obj(), br, child);
+      if (plan.num_branches <= bplus_inner_node::max_branches &&
+          bplus_inner_node::alloc_size(plan) <= bplus_inner_node::max_inner_size)
       {
          if constexpr (mode.is_unique())
          {
@@ -3694,11 +3684,11 @@ namespace psitri
       op::bplus_build_plan right_plan;
       left_plan.push_first(plan.branches[0]);
       for (uint16_t i = 1; i < mid; ++i)
-         left_plan.push_back(plan.separators[i - 1], plan.branches[i]);
-      std::string separator(plan.separators[mid - 1]);
+         left_plan.push_back(bplus_first_key(plan.branches[i]), plan.branches[i]);
+      std::string separator = bplus_first_key(plan.branches[mid]);
       right_plan.push_first(plan.branches[mid]);
       for (uint16_t i = mid + 1; i < plan.num_branches; ++i)
-         right_plan.push_back(plan.separators[i - 1], plan.branches[i]);
+         right_plan.push_back(bplus_first_key(plan.branches[i]), plan.branches[i]);
 
       ptr_address left;
       if constexpr (mode.is_unique())

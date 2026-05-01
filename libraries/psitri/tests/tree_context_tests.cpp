@@ -49,6 +49,9 @@ namespace
       alloc.register_type_ops<leaf_node>();
       alloc.register_type_ops<inner_prefix_node>();
       alloc.register_type_ops<inner_node>();
+      alloc.register_type_ops<wide_inner_node>();
+      alloc.register_type_ops<direct_inner_node>();
+      alloc.register_type_ops<bplus_inner_node>();
       alloc.register_type_ops<value_node>();
    }
 }  // namespace

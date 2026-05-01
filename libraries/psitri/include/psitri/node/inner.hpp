@@ -856,12 +856,13 @@ namespace psitri
    {
      public:
       static constexpr node_type type_id = node_type::bplus_inner;
+      static constexpr uint16_t  max_branches = op::bplus_build_plan::max_node_branches;
       static constexpr uint32_t  max_inner_size = 16 * 1024;
 
       static uint32_t alloc_size(const op::bplus_build_plan& plan) noexcept
       {
          assert(plan.num_branches > 0);
-         assert(plan.num_branches <= op::bplus_build_plan::max_branches);
+         assert(plan.num_branches <= max_branches);
          uint32_t bytes = sizeof(bplus_inner_node) +
                           plan.num_branches * sizeof(ptr_address) +
                           (plan.num_branches - 1) * sizeof(uint16_t);
@@ -955,7 +956,7 @@ namespace psitri
 
       [[nodiscard]] bool validate_invariants() const noexcept
       {
-         if (num_branches() == 0 || num_branches() > op::bplus_build_plan::max_branches)
+         if (num_branches() == 0 || num_branches() > max_branches)
             return false;
          for (uint16_t i = 1; i < num_divisions(); ++i)
             if (!(separator(i - 1) < separator(i)))

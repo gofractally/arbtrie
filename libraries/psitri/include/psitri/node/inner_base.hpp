@@ -1,4 +1,7 @@
 #pragma once
+#include <array>
+#include <cstdlib>
+#include <cstring>
 #include <psitri/node/inner_node_util.hpp>
 #include <psitri/node/node.hpp>
 #include <psitri/util.hpp>
@@ -102,13 +105,43 @@ namespace psitri
 
       struct bplus_build_plan
       {
-         static constexpr uint16_t max_branches = 256;
+         static constexpr uint16_t max_node_branches   = 256;
+         static constexpr uint16_t max_branches        = max_node_branches + 1;
+         static constexpr uint16_t max_separators      = max_branches - 1;
+         static constexpr uint16_t max_separator_size  = 1024;
+         static constexpr uint32_t max_separator_bytes = 32 * 1024;
 
-         uint16_t                         num_branches = 0;
-         std::array<ptr_address, 256>     branches     = {};
-         std::array<key_view, 255>        separators   = {};
+         uint16_t                              num_branches      = 0;
+         std::array<ptr_address, max_branches> branches          = {};
+         std::array<key_view, max_separators>  separators        = {};
+         std::array<uint32_t, max_separators>  separator_offsets = {};
+         std::array<uint16_t, max_separators>  separator_sizes   = {};
+         std::array<char, max_separator_bytes> separator_bytes;
+         uint32_t                              separator_end     = 0;
 
-         void clear() noexcept { num_branches = 0; }
+         bplus_build_plan() = default;
+         bplus_build_plan(const bplus_build_plan& other) { *this = other; }
+         bplus_build_plan& operator=(const bplus_build_plan& other) noexcept
+         {
+            if (this == &other)
+               return *this;
+            num_branches      = other.num_branches;
+            branches          = other.branches;
+            separator_offsets = other.separator_offsets;
+            separator_sizes   = other.separator_sizes;
+            separator_end     = other.separator_end;
+            std::memcpy(separator_bytes.data(), other.separator_bytes.data(), separator_end);
+            rebind_separators();
+            return *this;
+         }
+         bplus_build_plan(bplus_build_plan&& other) noexcept { *this = other; }
+         bplus_build_plan& operator=(bplus_build_plan&& other) noexcept { return *this = other; }
+
+         void clear() noexcept
+         {
+            num_branches  = 0;
+            separator_end = 0;
+         }
 
          void push_first(ptr_address addr) noexcept
          {
@@ -122,8 +155,25 @@ namespace psitri
             assert(num_branches > 0);
             assert(num_branches < max_branches);
             assert(addr != sal::null_ptr_address);
-            separators[num_branches - 1] = separator;
-            branches[num_branches++]     = addr;
+            if (separator.size() > max_separator_size ||
+                separator_end + separator.size() > separator_bytes.size()) [[unlikely]]
+               std::abort();
+            const uint16_t sep_idx     = num_branches - 1;
+            separator_offsets[sep_idx] = separator_end;
+            separator_sizes[sep_idx]   = separator.size();
+            std::memcpy(separator_bytes.data() + separator_end, separator.data(), separator.size());
+            separators[sep_idx] =
+                key_view(separator_bytes.data() + separator_end, separator.size());
+            separator_end += separator.size();
+            branches[num_branches++] = addr;
+         }
+
+       private:
+         void rebind_separators() noexcept
+         {
+            for (uint16_t i = 0; i + 1 < num_branches; ++i)
+               separators[i] =
+                   key_view(separator_bytes.data() + separator_offsets[i], separator_sizes[i]);
          }
       };
    };  // namespace op
