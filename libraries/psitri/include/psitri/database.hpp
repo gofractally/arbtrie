@@ -211,6 +211,7 @@ namespace psitri
                inner_prefix(context),
                wide_inner(context),
                direct_inner(context),
+               bplus_inner(context),
                value(context)
          {
          }
@@ -222,6 +223,7 @@ namespace psitri
             alloc.register_type_ops<inner_prefix_node>(inner_prefix);
             alloc.register_type_ops<wide_inner_node>(wide_inner);
             alloc.register_type_ops<direct_inner_node>(direct_inner);
+            alloc.register_type_ops<bplus_inner_node>(bplus_inner);
             alloc.register_type_ops<value_node>(value);
          }
 
@@ -231,6 +233,7 @@ namespace psitri
          psitri_node_ops<inner_prefix_node>  inner_prefix;
          psitri_node_ops<wide_inner_node>    wide_inner;
          psitri_node_ops<direct_inner_node>  direct_inner;
+         psitri_node_ops<bplus_inner_node>   bplus_inner;
          psitri_value_node_ops               value;
       };
 

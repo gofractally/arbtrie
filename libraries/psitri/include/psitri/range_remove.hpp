@@ -8,6 +8,9 @@ namespace psitri
 
    inline uint64_t tree_context::remove_range_counted(key_view lower, key_view upper)
    {
+      if (_family == tree_family::bplus)
+         return bplus_remove_range_counted(lower, upper);
+
       auto op_scope = _session.record_operation(
           sal::mapped_memory::session_operation::tree_remove_range_counted);
       if (!_root)
@@ -46,6 +49,9 @@ namespace psitri
 
    inline bool tree_context::remove_range_any(key_view lower, key_view upper)
    {
+      if (_family == tree_family::bplus)
+         return bplus_remove_range_any(lower, upper);
+
       auto op_scope =
           _session.record_operation(sal::mapped_memory::session_operation::tree_remove_range_any);
       if (!_root)

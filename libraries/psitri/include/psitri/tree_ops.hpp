@@ -1,5 +1,8 @@
 #pragma once
 #include <array>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 #include <vector>
 #include <psitri/count_keys.hpp>
 #include <psitri/node/inner.hpp>
@@ -23,6 +26,12 @@ namespace psitri
    using sal::smart_ref;
    class tree_context
    {
+      enum class tree_family : uint8_t
+      {
+         psitri,
+         bplus
+      };
+
       value_type                   _new_value;
       sal::allocator_session&      _session;
       sal::smart_ptr<alloc_header> _root;
@@ -35,6 +44,20 @@ namespace psitri
       uint64_t                        _root_version = 0;
       uint64_t                        _root_value_version = 0;
       std::vector<ptr_address>        _pending_releases;
+      tree_family                     _family = tree_family::psitri;
+
+      static tree_family default_tree_family() noexcept
+      {
+         const char* env = std::getenv("PSITRI_TREE_FAMILY");
+         if (env && (std::strcmp(env, "bplus") == 0 || std::strcmp(env, "b+tree") == 0))
+            return tree_family::bplus;
+         return tree_family::psitri;
+      }
+
+      static tree_family family_from_type(node_type type) noexcept
+      {
+         return type == node_type::bplus_inner ? tree_family::bplus : tree_family::psitri;
+      }
 
       sal::pending_release_list make_pending_release_list(std::size_t reserve_hint)
       {
@@ -81,6 +104,8 @@ namespace psitri
       tree_context(sal::smart_ptr<alloc_header> root)
           : _root(std::move(root)), _session(*(root.session()))
       {
+         _family = _root ? family_from_type(node_type(_session.get_ref<node>(_root.address())->type()))
+                         : default_tree_family();
          const uint64_t ver = txn_version();
          _root_version = version_token(ver, last_unique_version_bits);
          _root_value_version = version_token(ver, value_version_bits);
@@ -135,6 +160,13 @@ namespace psitri
             case node_type::direct_inner:
             {
                auto in = ref.as<direct_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  result += count_child_keys(in->get_branch(branch_number(i)));
+               break;
+            }
+            case node_type::bplus_inner:
+            {
+               auto in = ref.as<bplus_inner_node>();
                for (uint16_t i = 0; i < in->num_branches(); ++i)
                   result += count_child_keys(in->get_branch(branch_number(i)));
                break;
@@ -337,6 +369,108 @@ namespace psitri
          return addr;
       }
 
+      struct bplus_result
+      {
+         ptr_address  left      = sal::null_ptr_address;
+         ptr_address  right     = sal::null_ptr_address;
+         std::string  separator;
+         bool         split     = false;
+         bool         empty     = false;
+      };
+
+      op::bplus_build_plan make_bplus_leaf_split_plan(ptr_address left,
+                                                      key_view    separator,
+                                                      ptr_address right) const noexcept
+      {
+         op::bplus_build_plan plan;
+         plan.push_first(left);
+         plan.push_back(separator, right);
+         return plan;
+      }
+
+      template <typename InnerNodeType>
+      op::bplus_build_plan make_bplus_replace_plan(const InnerNodeType* in,
+                                                   branch_number        br,
+                                                   const bplus_result&  child) const
+      {
+         op::bplus_build_plan plan;
+         plan.clear();
+
+         for (uint16_t i = 0; i < in->num_branches(); ++i)
+         {
+            if (i == 0)
+               plan.push_first(i == *br ? child.left : in->get_branch(branch_number(i)));
+            else
+            {
+               key_view sep = in->separator(i - 1);
+               plan.push_back(sep, i == *br ? child.left : in->get_branch(branch_number(i)));
+            }
+
+            if (i == *br && child.split)
+               plan.push_back(child.separator, child.right);
+         }
+         return plan;
+      }
+
+      template <typename InnerNodeType>
+      op::bplus_build_plan make_bplus_remove_plan(const InnerNodeType* in,
+                                                  branch_number        br) const
+      {
+         op::bplus_build_plan plan;
+         plan.clear();
+         bool first = true;
+         for (uint16_t i = 0; i < in->num_branches(); ++i)
+         {
+            if (i == *br)
+               continue;
+            if (first)
+            {
+               plan.push_first(in->get_branch(branch_number(i)));
+               first = false;
+            }
+            else
+            {
+               uint16_t sep_index = (i > *br) ? i - 1 : i;
+               if (sep_index >= in->num_divisions())
+                  sep_index = in->num_divisions() - 1;
+               plan.push_back(in->separator(sep_index), in->get_branch(branch_number(i)));
+            }
+         }
+         return plan;
+      }
+
+      template <upsert_mode mode>
+      bplus_result bplus_split_leaf(const sal::alloc_hint& parent_hint,
+                                    smart_ref<leaf_node>&  leaf,
+                                    key_view               key,
+                                    branch_number          lb);
+      std::string bplus_first_key(ptr_address addr) const;
+      bplus_result bplus_from_branch_set(branch_set result);
+
+      template <upsert_mode mode>
+      bplus_result bplus_upsert(const sal::alloc_hint& parent_hint,
+                                smart_ref<leaf_node>&  leaf,
+                                key_view               key);
+
+      template <upsert_mode mode>
+      bplus_result bplus_upsert(const sal::alloc_hint&        parent_hint,
+                                smart_ref<bplus_inner_node>& in,
+                                key_view                     key);
+
+      template <upsert_mode mode>
+      bplus_result bplus_upsert(const sal::alloc_hint&   parent_hint,
+                                smart_ref<alloc_header>& r,
+                                key_view                 key);
+
+      int bplus_upsert_root(key_view key, value_type value);
+      int bplus_remove_root(key_view key);
+      void bplus_collect_range_keys(ptr_address              addr,
+                                    key_view                 lower,
+                                    key_view                 upper,
+                                    std::vector<std::string>& keys) const;
+      uint64_t bplus_remove_range_counted(key_view lower, key_view upper);
+      bool bplus_remove_range_any(key_view lower, key_view upper);
+
       template <any_inner_node_type FromNodeType>
       ptr_address realloc_adaptive_inner(smart_ref<FromNodeType>&  from,
                                          const op::inner_build_plan& plan) noexcept
@@ -402,6 +536,9 @@ namespace psitri
       template <upsert_mode mode = upsert_mode::unique_upsert>
       int upsert(key_view key, value_type value)
       {
+         if (_family == tree_family::bplus)
+            return bplus_upsert_root(key, std::move(value));
+
          auto op_scope =
              _session.record_operation(sal::mapped_memory::session_operation::tree_upsert);
          _old_value_size     = -1;
@@ -445,6 +582,9 @@ namespace psitri
       /// @return the size of the prior value, or -1 if the value was not found.
       int remove(key_view key)
       {
+         if (_family == tree_family::bplus)
+            return bplus_remove_root(key);
+
          auto op_scope =
              _session.record_operation(sal::mapped_memory::session_operation::tree_remove);
          if (not _root)
@@ -585,6 +725,9 @@ namespace psitri
             case node_type::direct_inner:
                print(r.as<direct_inner_node>(), depth + 1);
                break;
+            case node_type::bplus_inner:
+               print(r.as<bplus_inner_node>(), depth + 1);
+               break;
             case node_type::leaf:
                print(r.as<leaf_node>(), depth + 1);
                break;
@@ -600,6 +743,7 @@ namespace psitri
          uint64_t inner_prefix_nodes    = 0;
          uint64_t wide_inner_nodes      = 0;
          uint64_t direct_inner_nodes    = 0;
+         uint64_t bplus_inner_nodes     = 0;
          uint64_t leaf_nodes            = 0;
          uint64_t value_nodes           = 0;
          uint64_t branches              = 0;
@@ -627,7 +771,8 @@ namespace psitri
          }
          uint64_t total_inner_nodes() const
          {
-            return inner_nodes + inner_prefix_nodes + wide_inner_nodes + direct_inner_nodes;
+            return inner_nodes + inner_prefix_nodes + wide_inner_nodes + direct_inner_nodes +
+                   bplus_inner_nodes;
          }
          uint64_t total_nodes() const
          {
@@ -767,6 +912,13 @@ namespace psitri
                   size_subtree(in->get_branch(branch_number(i)), prefix_len, out);
                break;
             }
+            case node_type::bplus_inner:
+            {
+               auto in = ref.template as<bplus_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  size_subtree(in->get_branch(branch_number(i)), prefix_len, out);
+               break;
+            }
             default:
                out.overflow = true;
          }
@@ -874,6 +1026,14 @@ namespace psitri
                                       ins, session);
                break;
             }
+            case node_type::bplus_inner:
+            {
+               auto in = ref.template as<bplus_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  walk_subtree_insert(in->get_branch(branch_number(i)), prefix_buf, prefix_len,
+                                      ins, session);
+               break;
+            }
             default:
                break;
          }
@@ -925,6 +1085,13 @@ namespace psitri
             case node_type::direct_inner:
             {
                auto in = ref.template as<direct_inner_node>();
+               for (uint16_t i = 0; i < in->num_branches(); ++i)
+                  retain_subtree_leaf_values_by_addr(in->get_branch(branch_number(i)));
+               break;
+            }
+            case node_type::bplus_inner:
+            {
+               auto in = ref.template as<bplus_inner_node>();
                for (uint16_t i = 0; i < in->num_branches(); ++i)
                   retain_subtree_leaf_values_by_addr(in->get_branch(branch_number(i)));
                break;
@@ -1255,6 +1422,20 @@ namespace psitri
             print(ref, depth);
          }
       }
+      void print(smart_ref<bplus_inner_node> r, int depth = 0)
+      {
+         assert(_session.get_ref(r.address()).obj() == r.obj());
+         std::string indent(4 * depth, ' ');
+         std::cout << indent << "#" << r.address() << "  " << r->type() << " r:" << r.ref()
+                   << " branches: " << r->num_branches() << " this: " << r.obj() << "\n";
+         for (int i = 0; i < r->num_branches(); ++i)
+         {
+            auto br  = r->get_branch(branch_number(i));
+            auto ref = _session.get_ref(br);
+            std::cout << br << "->";
+            print(ref, depth);
+         }
+      }
       void print(smart_ref<leaf_node> r, int depth = 0)
       {
          std::string indent(4 * depth, ' ');
@@ -1288,6 +1469,8 @@ namespace psitri
                return validate_inner(r.as<wide_inner_node>(), depth + 1);
             case node_type::direct_inner:
                return validate_inner(r.as<direct_inner_node>(), depth + 1);
+            case node_type::bplus_inner:
+               return validate_inner(r.as<bplus_inner_node>(), depth + 1);
             case node_type::leaf:
                return r.as<leaf_node>()->num_branches();
             case node_type::value:
@@ -1336,6 +1519,9 @@ namespace psitri
             case node_type::direct_inner:
                validate_unique_refs_inner(r.as<direct_inner_node>());
                break;
+            case node_type::bplus_inner:
+               validate_unique_refs_inner(r.as<bplus_inner_node>());
+               break;
             case node_type::leaf:
             {
                auto leaf = r.as<leaf_node>();
@@ -1373,6 +1559,9 @@ namespace psitri
                break;
             case node_type::direct_inner:
                validate_unique_refs_inner(r.as<direct_inner_node>());
+               break;
+            case node_type::bplus_inner:
+               validate_unique_refs_inner(r.as<bplus_inner_node>());
                break;
             case node_type::leaf:
             {
@@ -1454,6 +1643,10 @@ namespace psitri
             case node_type::direct_inner:
                s.direct_inner_nodes++;
                calc_stats(s, r.as<direct_inner_node>(), depth + 1);
+               break;
+            case node_type::bplus_inner:
+               s.bplus_inner_nodes++;
+               calc_stats(s, r.as<bplus_inner_node>(), depth + 1);
                break;
             case node_type::leaf:
             {
@@ -3187,6 +3380,540 @@ namespace psitri
       std::unreachable();
    }
 
+   inline std::string tree_context::bplus_first_key(ptr_address addr) const
+   {
+      for (;;)
+      {
+         auto ref = _session.get_ref(addr);
+         switch (node_type(ref->type()))
+         {
+            case node_type::bplus_inner:
+            {
+               auto in = ref.as<bplus_inner_node>();
+               addr    = in->get_branch(branch_number(0));
+               continue;
+            }
+            case node_type::leaf:
+            {
+               auto leaf = ref.as<leaf_node>();
+               assert(leaf->num_branches() > 0);
+               return std::string(leaf->get_key(branch_number(0)));
+            }
+            default:
+               std::unreachable();
+         }
+      }
+   }
+
+   inline tree_context::bplus_result tree_context::bplus_from_branch_set(branch_set result)
+   {
+      if (result.count() == 0)
+         return {.empty = true};
+      if (result.count() == 1)
+         return {.left = result.get_first_branch()};
+
+      auto addrs = result.addresses();
+      assert(addrs.size() == 2);
+      return {.left      = addrs[0],
+              .right     = addrs[1],
+              .separator = bplus_first_key(addrs[1]),
+              .split     = true};
+   }
+
+   template <upsert_mode mode>
+   tree_context::bplus_result tree_context::bplus_split_leaf(const sal::alloc_hint& parent_hint,
+                                                            smart_ref<leaf_node>&  leaf,
+                                                            key_view               key,
+                                                            branch_number          lb)
+   {
+      const uint16_t nb = leaf->num_branches();
+      branch_number  mid(nb / 2);
+      if (*lb > *mid)
+         mid = branch_number(*mid + 1);
+      if (mid == branch_number(0))
+         mid = branch_number(1);
+      if (mid == leaf->num_branches())
+         mid = branch_number(leaf->num_branches() - 1);
+
+      auto rewrite_plan   = make_leaf_rewrite_plan(*leaf.obj());
+      auto rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+      const op::leaf_value_rewrite* split_rewrite = &rewrite_policy;
+      if (!leaf->rebuilt_size_fits(key_view(), branch_zero, mid, split_rewrite) ||
+          !leaf->rebuilt_size_fits(key_view(), mid, branch_number(nb), split_rewrite))
+      {
+         release_leaf_rewrite_replacements(rewrite_plan);
+         split_rewrite = nullptr;
+      }
+
+      ptr_address left;
+      if constexpr (mode.is_unique())
+         left = _session
+                    .realloc<leaf_node>(leaf, leaf.obj(), key_view(), branch_zero, mid,
+                                        split_rewrite)
+                    .address();
+      else
+         left = _session.alloc<leaf_node>(parent_hint, leaf.obj(), key_view(), branch_zero, mid,
+                                          split_rewrite);
+
+      ptr_address right = _session.alloc<leaf_node>(sal::alloc_hint{&left, 1}, leaf.obj(),
+                                                    key_view(), mid, branch_number(nb),
+                                                    split_rewrite);
+      if (split_rewrite)
+         release_leaf_rewrite_sources(rewrite_plan);
+
+      ptr_address* target_addr = nullptr;
+      {
+         auto     right_ref   = _session.get_ref<leaf_node>(right);
+         key_view right_first = right_ref->get_key(branch_number(0));
+         target_addr          = key < right_first ? &left : &right;
+      }
+
+      auto          target_ref = _session.get_ref<leaf_node>(*target_addr);
+      branch_number target_lb  = target_ref->lower_bound(key);
+      auto inserted = insert<upsert_mode::unique_upsert>(sal::alloc_hint{target_addr, 1},
+                                                         target_ref, key, target_lb);
+      assert(inserted.count() == 1);
+      *target_addr = inserted.get_first_branch();
+
+      return {.left      = left,
+              .right     = right,
+              .separator = bplus_first_key(right),
+              .split     = true};
+   }
+
+   template <upsert_mode mode>
+   tree_context::bplus_result tree_context::bplus_upsert(const sal::alloc_hint& parent_hint,
+                                                         smart_ref<leaf_node>&  leaf,
+                                                         key_view               key)
+   {
+      if constexpr (mode.must_update())
+      {
+         branch_number br = leaf->get(key);
+         if (br == leaf->num_branches())
+         {
+            if constexpr (mode.is_shared())
+               return {.left = leaf.address()};
+            assert(!"update precondition violated: key does not exist");
+            std::unreachable();
+         }
+         return bplus_from_branch_set(update<mode>(parent_hint, leaf, key, br));
+      }
+      if constexpr (mode.must_remove())
+      {
+         branch_number br = leaf->get(key);
+         if (br == leaf->num_branches())
+         {
+            if constexpr (mode.is_shared())
+               return {.left = leaf.address()};
+            assert(!"must_remove precondition violated: key does not exist");
+            std::unreachable();
+         }
+         return bplus_from_branch_set(remove<mode>(parent_hint, leaf, key, br));
+      }
+
+      branch_number lb = [&] {
+         if constexpr (mode.is_sorted())
+            return leaf->lower_bound_append_hint(key);
+         else
+            return leaf->lower_bound(key);
+      }();
+
+      if constexpr (mode.is_remove())
+      {
+         if (lb != leaf->num_branches())
+            return bplus_from_branch_set(remove<mode>(parent_hint, leaf, key, lb));
+         return {.left = leaf.address()};
+      }
+
+      if constexpr (mode.is_upsert())
+      {
+         if (lb != leaf->num_branches() && leaf->get_key(lb) == key)
+            return bplus_from_branch_set(update<mode>(parent_hint, leaf, key, lb));
+      }
+      else if constexpr (mode.is_insert())
+      {
+         if (!(lb == leaf->num_branches() || leaf->get_key(lb) != key))
+         {
+            if constexpr (mode.is_shared())
+               return {.left = leaf.address()};
+            assert(!"insert precondition violated: key already exists");
+            std::unreachable();
+         }
+      }
+
+      if constexpr (mode.is_shared())
+         retain_children(leaf);
+
+      uint8_t cline_idx = 0xff;
+      _new_value = make_value(_new_value, leaf->clines());
+      if (_new_value.is_value_node())
+      {
+         cline_idx = leaf->find_cline_index(_new_value.value_address());
+         if (cline_idx >= leaf_node::max_value_clines)
+            return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
+      }
+
+      op::leaf_insert insert_op{.src       = *leaf.obj(),
+                                .lb        = lb,
+                                .key       = key,
+                                .value     = _new_value,
+                                .cline_idx = cline_idx};
+
+      if constexpr (mode.is_unique())
+      {
+         switch (leaf->can_apply(insert_op))
+         {
+            case leaf_node::can_apply_mode::modify:
+               leaf.modify()->apply(insert_op);
+               return {.left = leaf.address()};
+            case leaf_node::can_apply_mode::defrag:
+            {
+               auto plan           = make_leaf_rewrite_plan(*leaf.obj());
+               auto rewrite_policy = leaf_rewrite_policy(plan);
+               insert_op.rewrite   = &rewrite_policy;
+               if (!leaf->rebuilt_size_fits(insert_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
+               }
+               auto result =
+                   _session.realloc<leaf_node>(leaf, leaf.obj(), insert_op).address();
+               release_leaf_rewrite_sources(plan);
+               return {.left = result};
+            }
+            case leaf_node::can_apply_mode::none:
+               return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
+         }
+      }
+      else
+      {
+         switch (leaf->can_apply(insert_op))
+         {
+            case leaf_node::can_apply_mode::modify:
+            case leaf_node::can_apply_mode::defrag:
+            {
+               auto plan           = make_leaf_rewrite_plan(*leaf.obj());
+               auto rewrite_policy = leaf_rewrite_policy(plan);
+               insert_op.rewrite   = &rewrite_policy;
+               if (!leaf->rebuilt_size_fits(insert_op))
+               {
+                  release_leaf_rewrite_replacements(plan);
+                  return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
+               }
+               auto result = _session.alloc<leaf_node>(parent_hint, leaf.obj(), insert_op);
+               release_leaf_rewrite_sources(plan);
+               return {.left = result};
+            }
+            case leaf_node::can_apply_mode::none:
+               return bplus_split_leaf<mode>(parent_hint, leaf, key, lb);
+         }
+      }
+      std::unreachable();
+   }
+
+   template <upsert_mode mode>
+   tree_context::bplus_result
+   tree_context::bplus_upsert(const sal::alloc_hint&        parent_hint,
+                              smart_ref<bplus_inner_node>& in,
+                              key_view                     key)
+   {
+      const bool refresh_this_node = needs_structural_refresh(in->last_unique_version());
+      if constexpr (mode.is_unique())
+      {
+         if (refresh_this_node)
+            in.modify()->set_last_unique_version(_root_version);
+      }
+
+      branch_number br        = in->lower_bound(key);
+      ptr_address   old_child = in->get_branch(br);
+      auto          child_ref = _session.get_ref(old_child);
+
+      if constexpr (mode.is_shared())
+         retain_children(in);
+
+      auto child = bplus_upsert<mode>(in->get_branch_clines(), child_ref, key);
+
+      if (child.empty)
+      {
+         if (in->num_branches() == 1)
+            return {.empty = true};
+         if (in->num_branches() == 2)
+         {
+            branch_number keep(*br == 0 ? 1 : 0);
+            return {.left = in->get_branch(keep)};
+         }
+
+         auto plan = make_bplus_remove_plan(in.obj(), br);
+         if constexpr (mode.is_unique())
+         {
+            auto result = _session.realloc<bplus_inner_node>(in, plan);
+            result.modify()->set_last_unique_version(_root_version);
+            return {.left = result.address()};
+         }
+         else
+         {
+            _session.release(old_child);
+            auto result = _session.alloc<bplus_inner_node>(parent_hint, plan);
+            auto ref    = _session.get_ref<bplus_inner_node>(result);
+            ref.modify()->set_last_unique_version(_root_version);
+            return {.left = result};
+         }
+      }
+
+      if (!child.split && child.left == old_child)
+      {
+         if constexpr (mode.is_shared())
+            in->visit_branches([this](ptr_address addr) { _session.release(addr); });
+         return {.left = in.address()};
+      }
+
+      auto plan      = make_bplus_replace_plan(in.obj(), br, child);
+      auto plan_size = bplus_inner_node::alloc_size(plan);
+      if (plan.num_branches <= op::bplus_build_plan::max_branches &&
+          plan_size <= bplus_inner_node::max_inner_size)
+      {
+         if constexpr (mode.is_unique())
+         {
+            auto result = _session.realloc<bplus_inner_node>(in, plan);
+            result.modify()->set_last_unique_version(_root_version);
+            return {.left = result.address()};
+         }
+         else
+         {
+            if (child.left != old_child || child.split)
+               _session.release(old_child);
+            auto result = _session.alloc<bplus_inner_node>(parent_hint, plan);
+            auto ref    = _session.get_ref<bplus_inner_node>(result);
+            ref.modify()->set_last_unique_version(_root_version);
+            return {.left = result};
+         }
+      }
+
+      const uint16_t mid = plan.num_branches / 2;
+      op::bplus_build_plan left_plan;
+      op::bplus_build_plan right_plan;
+      left_plan.push_first(plan.branches[0]);
+      for (uint16_t i = 1; i < mid; ++i)
+         left_plan.push_back(plan.separators[i - 1], plan.branches[i]);
+      std::string separator(plan.separators[mid - 1]);
+      right_plan.push_first(plan.branches[mid]);
+      for (uint16_t i = mid + 1; i < plan.num_branches; ++i)
+         right_plan.push_back(plan.separators[i - 1], plan.branches[i]);
+
+      ptr_address left;
+      if constexpr (mode.is_unique())
+         left = _session.realloc<bplus_inner_node>(in, left_plan).address();
+      else
+      {
+         if (child.left != old_child || child.split)
+            _session.release(old_child);
+         left = _session.alloc<bplus_inner_node>(parent_hint, left_plan);
+      }
+      auto right = _session.alloc<bplus_inner_node>(sal::alloc_hint{&left, 1}, right_plan);
+      auto left_ref = _session.get_ref<bplus_inner_node>(left);
+      left_ref.modify()->set_last_unique_version(_root_version);
+      auto right_ref = _session.get_ref<bplus_inner_node>(right);
+      right_ref.modify()->set_last_unique_version(_root_version);
+      return {.left = left, .right = right, .separator = std::move(separator), .split = true};
+   }
+
+   template <upsert_mode mode>
+   tree_context::bplus_result tree_context::bplus_upsert(const sal::alloc_hint&   parent_hint,
+                                                         smart_ref<alloc_header>& r,
+                                                         key_view                 key)
+   {
+      if constexpr (mode.is_unique())
+         if (r.ref() > 1)
+            return bplus_upsert<mode.make_shared()>(parent_hint, r, key);
+
+      bplus_result result;
+      switch (node_type(r->type()))
+      {
+         case node_type::bplus_inner:
+            result = bplus_upsert<mode>(parent_hint, r.as<bplus_inner_node>(), key);
+            break;
+         case node_type::leaf:
+            result = bplus_upsert<mode>(parent_hint, r.as<leaf_node>(), key);
+            break;
+         default:
+            std::unreachable();
+      }
+
+      const bool contains_old = (!result.empty && result.left == r.address()) ||
+                                (result.split && result.right == r.address());
+      if constexpr (mode.is_unique())
+      {
+         if constexpr (mode.is_remove())
+         {
+            if (result.empty)
+               r.release();
+            else if (!contains_old)
+               r.release();
+         }
+         assert(result.empty || contains_old || mode.is_remove());
+      }
+      else if (!contains_old)
+         r.release();
+      return result;
+   }
+
+   inline int tree_context::bplus_upsert_root(key_view key, value_type value)
+   {
+      auto op_scope =
+          _session.record_operation(sal::mapped_memory::session_operation::tree_upsert);
+      _old_value_size     = -1;
+      sal::read_lock lock = _session.lock();
+      _new_value          = std::move(value);
+      if (!_root)
+      {
+         auto leaf_addr = _session.alloc<leaf_node>(sal::alloc_hint(), key,
+                                                    make_value(_new_value, sal::alloc_hint()));
+         _root.give(leaf_addr);
+         return -1;
+      }
+
+      auto rref     = *_root;
+      auto old_addr = _root.take();
+      bplus_result result;
+      try
+      {
+         result = bplus_upsert<upsert_mode::unique_upsert>({}, rref, key);
+      }
+      catch (...)
+      {
+         _root.give(old_addr);
+         throw;
+      }
+
+      if (result.empty)
+         ;
+      else if (result.split)
+      {
+         auto plan     = make_bplus_leaf_split_plan(result.left, result.separator, result.right);
+         auto new_root = _session.alloc<bplus_inner_node>({}, plan);
+         auto ref      = _session.get_ref<bplus_inner_node>(new_root);
+         ref.modify()->set_last_unique_version(_root_version);
+         _root.give(new_root);
+      }
+      else
+         _root.give(result.left);
+      return _old_value_size;
+   }
+
+   inline int tree_context::bplus_remove_root(key_view key)
+   {
+      auto op_scope =
+          _session.record_operation(sal::mapped_memory::session_operation::tree_remove);
+      if (!_root)
+         return -1;
+      _old_value_size     = -1;
+      sal::read_lock lock = _session.lock();
+      auto rref           = *_root;
+      auto old_addr       = _root.take();
+      auto result         = bplus_upsert<upsert_mode::unique_remove>({}, rref, key);
+      if (result.empty)
+         ;
+      else if (result.split)
+      {
+         auto plan     = make_bplus_leaf_split_plan(result.left, result.separator, result.right);
+         auto new_root = _session.alloc<bplus_inner_node>({}, plan);
+         auto ref      = _session.get_ref<bplus_inner_node>(new_root);
+         ref.modify()->set_last_unique_version(_root_version);
+         _root.give(new_root);
+      }
+      else
+         _root.give(result.left);
+      return _old_value_size;
+   }
+
+   inline void tree_context::bplus_collect_range_keys(ptr_address              addr,
+                                                      key_view                 lower,
+                                                      key_view                 upper,
+                                                      std::vector<std::string>& keys) const
+   {
+      if (addr == sal::null_ptr_address)
+         return;
+
+      auto ref = _session.get_ref(addr);
+      switch (node_type(ref->type()))
+      {
+         case node_type::bplus_inner:
+         {
+            auto in = ref.as<bplus_inner_node>();
+            for (uint16_t i = 0; i < in->num_branches(); ++i)
+            {
+               if (!upper.empty() && i > 0 && in->separator(i - 1) >= upper)
+                  break;
+               if (!lower.empty() && i + 1 < in->num_branches() &&
+                   in->separator(i) <= lower)
+                  continue;
+               bplus_collect_range_keys(in->get_branch(branch_number(i)), lower, upper, keys);
+            }
+            break;
+         }
+         case node_type::leaf:
+         {
+            auto          leaf = ref.as<leaf_node>();
+            branch_number pos  = lower.empty() ? branch_number(0) : leaf->lower_bound(lower);
+            for (uint16_t i = *pos; i < leaf->num_branches(); ++i)
+            {
+               auto key = leaf->get_key(branch_number(i));
+               if (!upper.empty() && key >= upper)
+                  break;
+               keys.emplace_back(key.data(), key.size());
+            }
+            break;
+         }
+         default:
+            std::unreachable();
+      }
+   }
+
+   inline uint64_t tree_context::bplus_remove_range_counted(key_view lower, key_view upper)
+   {
+      auto op_scope = _session.record_operation(
+          sal::mapped_memory::session_operation::tree_remove_range_counted);
+      if (!_root)
+         return 0;
+      if (lower >= upper && upper != max_key)
+         return 0;
+
+      key_view internal_upper = upper == max_key ? key_view() : upper;
+      std::vector<std::string> keys;
+      {
+         sal::read_lock lock = _session.lock();
+         bplus_collect_range_keys(_root.address(), lower, internal_upper, keys);
+      }
+
+      uint64_t removed = 0;
+      for (const auto& key : keys)
+         if (bplus_remove_root(key_view(key.data(), key.size())) >= 0)
+            ++removed;
+      return removed;
+   }
+
+   inline bool tree_context::bplus_remove_range_any(key_view lower, key_view upper)
+   {
+      auto op_scope =
+          _session.record_operation(sal::mapped_memory::session_operation::tree_remove_range_any);
+      if (!_root)
+         return false;
+      if (lower >= upper && upper != max_key)
+         return false;
+
+      key_view internal_upper = upper == max_key ? key_view() : upper;
+      std::vector<std::string> keys;
+      {
+         sal::read_lock lock = _session.lock();
+         bplus_collect_range_keys(_root.address(), lower, internal_upper, keys);
+      }
+
+      bool removed = false;
+      for (const auto& key : keys)
+         removed = (bplus_remove_root(key_view(key.data(), key.size())) >= 0) || removed;
+      return removed;
+   }
+
    // ─── Explicit-version write target ────────────────────────────────
    inline ptr_address tree_context::find_versioned_write_target(key_view key) const
    {
@@ -3232,6 +3959,14 @@ namespace psitri
             case node_type::direct_inner:
             {
                auto in = ref.as<direct_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return sal::null_ptr_address;
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::bplus_inner:
+            {
+               auto in = ref.as<bplus_inner_node>();
                if (needs_structural_refresh(in->last_unique_version()))
                   return sal::null_ptr_address;
                addr = in->get_branch(in->lower_bound(remaining));
@@ -3305,6 +4040,14 @@ namespace psitri
             case node_type::direct_inner:
             {
                auto in = ref.as<direct_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return false;
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::bplus_inner:
+            {
+               auto in = ref.as<bplus_inner_node>();
                if (needs_structural_refresh(in->last_unique_version()))
                   return false;
                addr = in->get_branch(in->lower_bound(remaining));
@@ -3431,6 +4174,14 @@ namespace psitri
             case node_type::direct_inner:
             {
                auto in = ref.as<direct_inner_node>();
+               if (needs_structural_refresh(in->last_unique_version()))
+                  return false;
+               addr = in->get_branch(in->lower_bound(remaining));
+               continue;
+            }
+            case node_type::bplus_inner:
+            {
+               auto in = ref.as<bplus_inner_node>();
                if (needs_structural_refresh(in->last_unique_version()))
                   return false;
                addr = in->get_branch(in->lower_bound(remaining));
@@ -3634,6 +4385,13 @@ namespace psitri
          case node_type::direct_inner:
          {
             auto in = ref.as<direct_inner_node>();
+            for (uint16_t i = 0; i < in->num_branches(); ++i)
+               cleaned += defrag_subtree(in->get_branch(branch_number(i)));
+            break;
+         }
+         case node_type::bplus_inner:
+         {
+            auto in = ref.as<bplus_inner_node>();
             for (uint16_t i = 0; i < in->num_branches(); ++i)
                cleaned += defrag_subtree(in->get_branch(branch_number(i)));
             break;

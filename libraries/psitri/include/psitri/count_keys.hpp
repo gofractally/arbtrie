@@ -63,6 +63,14 @@ namespace psitri
                total += count_child_keys(session, in->get_branch(branch_number(i)));
             return total;
          }
+         case node_type::bplus_inner:
+         {
+            auto     in    = ref.as<bplus_inner_node>();
+            uint64_t total = 0;
+            for (uint16_t i = 0; i < in->num_branches(); ++i)
+               total += count_child_keys(session, in->get_branch(branch_number(i)));
+            return total;
+         }
          case node_type::leaf:
             return ref.as<leaf_node>()->num_branches();
          case node_type::value:
@@ -259,6 +267,14 @@ namespace psitri
             return count_keys_inner(session, *ref.as<wide_inner_node>(), range);
          case node_type::direct_inner:
             return count_keys_inner(session, *ref.as<direct_inner_node>(), range);
+         case node_type::bplus_inner:
+         {
+            auto     in    = ref.as<bplus_inner_node>();
+            uint64_t total = 0;
+            for (uint16_t i = 0; i < in->num_branches(); ++i)
+               total += count_keys(session, in->get_branch(branch_number(i)), range);
+            return total;
+         }
          case node_type::leaf:
             return count_keys_leaf(*ref.as<leaf_node>(), range);
          case node_type::value:

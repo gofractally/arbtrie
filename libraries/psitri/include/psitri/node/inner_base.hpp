@@ -99,11 +99,39 @@ namespace psitri
             return uint32_t(num_clines) * 2u < uint32_t(num_branches);
          }
       };
+
+      struct bplus_build_plan
+      {
+         static constexpr uint16_t max_branches = 256;
+
+         uint16_t                         num_branches = 0;
+         std::array<ptr_address, 256>     branches     = {};
+         std::array<key_view, 255>        separators   = {};
+
+         void clear() noexcept { num_branches = 0; }
+
+         void push_first(ptr_address addr) noexcept
+         {
+            assert(num_branches == 0);
+            assert(addr != sal::null_ptr_address);
+            branches[num_branches++] = addr;
+         }
+
+         void push_back(key_view separator, ptr_address addr) noexcept
+         {
+            assert(num_branches > 0);
+            assert(num_branches < max_branches);
+            assert(addr != sal::null_ptr_address);
+            separators[num_branches - 1] = separator;
+            branches[num_branches++]     = addr;
+         }
+      };
    };  // namespace op
    class inner_node;
    class inner_prefix_node;
    class wide_inner_node;
    class direct_inner_node;
+   class bplus_inner_node;
 
    template <typename T>
    concept is_inner_node =
@@ -122,8 +150,13 @@ namespace psitri
        std::is_same_v<std::remove_cvref_t<std::remove_pointer_t<T>>, direct_inner_node>;
 
    template <typename T>
+   concept is_bplus_inner_node =
+       std::is_same_v<std::remove_cvref_t<std::remove_pointer_t<T>>, bplus_inner_node>;
+
+   template <typename T>
    concept any_inner_node_type = is_inner_node<T> || is_inner_prefix_node<T> ||
-                                 is_wide_inner_node<T> || is_direct_inner_node<T>;
+                                 is_wide_inner_node<T> || is_direct_inner_node<T> ||
+                                 is_bplus_inner_node<T>;
 
    template <typename T>
    concept has_inner_prefix_storage =

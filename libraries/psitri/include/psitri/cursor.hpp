@@ -313,6 +313,7 @@ namespace psitri
          case node_type::inner_prefix:
          case node_type::wide_inner:
          case node_type::direct_inner:
+         case node_type::bplus_inner:
          case node_type::value:
             return true;
          default:
@@ -335,6 +336,8 @@ namespace psitri
             return lambda(*ref.as<wide_inner_node>());
          case node_type::direct_inner:
             return lambda(*ref.as<direct_inner_node>());
+         case node_type::bplus_inner:
+            return lambda(*ref.as<bplus_inner_node>());
          case node_type::value:
             return lambda(*ref.as<value_node>());
          default:
@@ -456,6 +459,14 @@ namespace psitri
                push(i->get_branch(branch));
                continue;
             }
+            [[likely]] case node_type::bplus_inner:
+            {
+               auto*         i      = static_cast<const bplus_inner_node*>(n);
+               branch_number branch = i->lower_bound(key);
+               _path_back->branch = branch;
+               push(i->get_branch(branch));
+               continue;
+            }
             [[likely]] case node_type::inner_prefix:
             {
                auto* ip   = static_cast<const inner_prefix_node*>(n);
@@ -533,6 +544,14 @@ namespace psitri
             [[likely]] case node_type::direct_inner:
             {
                const auto*   i      = static_cast<const direct_inner_node*>(n);
+               branch_number branch = i->lower_bound(key);
+               _path_back->branch   = branch;
+               push(i->get_branch(branch));
+               continue;
+            }
+            [[likely]] case node_type::bplus_inner:
+            {
+               const auto*   i      = static_cast<const bplus_inner_node*>(n);
                branch_number branch = i->lower_bound(key);
                _path_back->branch   = branch;
                push(i->get_branch(branch));
@@ -636,6 +655,14 @@ namespace psitri
 	            [[likely]] case node_type::direct_inner:
 	            {
 	               const auto*   i      = static_cast<const direct_inner_node*>(n);
+	               branch_number branch = i->lower_bound(key);
+	               _path_back->branch   = branch;
+	               push(i->get_branch(branch));
+	               continue;
+	            }
+	            [[likely]] case node_type::bplus_inner:
+	            {
+	               const auto*   i      = static_cast<const bplus_inner_node*>(n);
 	               branch_number branch = i->lower_bound(key);
 	               _path_back->branch   = branch;
 	               push(i->get_branch(branch));
@@ -799,6 +826,14 @@ namespace psitri
                push(i->get_branch(branch));
                continue;
             }
+            [[likely]] case node_type::bplus_inner:
+            {
+               const auto*   i      = static_cast<const bplus_inner_node*>(n);
+               branch_number branch = i->lower_bound(key);
+               _path_back->branch   = branch;
+               push(i->get_branch(branch));
+               continue;
+            }
             [[likely]] case node_type::inner_prefix:
             {
                const auto* ip   = static_cast<const inner_prefix_node*>(n);
@@ -909,6 +944,14 @@ namespace psitri
                push(i->get_branch(_path_back->branch));
                continue;
             }
+            [[unlikely]] case node_type::bplus_inner:
+            {
+               auto* i = static_cast<const bplus_inner_node*>(n);
+               if (++_path_back->branch == i->num_branches()) [[unlikely]]
+                  break;
+               push(i->get_branch(_path_back->branch));
+               continue;
+            }
             [[unlikely]] case node_type::inner_prefix:
             {
                auto* ip = static_cast<const inner_prefix_node*>(n);
@@ -977,6 +1020,16 @@ namespace psitri
             [[unlikely]] case node_type::direct_inner:
             {
                auto* i = static_cast<const direct_inner_node*>(n);
+               if (branch_number(-2) == _path_back->branch) [[unlikely]]
+                  _path_back->branch = branch_number(i->num_branches());
+               if (--_path_back->branch == branch_number(-1)) [[unlikely]]
+                  break;
+               push_end(i->get_branch(_path_back->branch));
+               continue;
+            }
+            [[unlikely]] case node_type::bplus_inner:
+            {
+               auto* i = static_cast<const bplus_inner_node*>(n);
                if (branch_number(-2) == _path_back->branch) [[unlikely]]
                   _path_back->branch = branch_number(i->num_branches());
                if (--_path_back->branch == branch_number(-1)) [[unlikely]]

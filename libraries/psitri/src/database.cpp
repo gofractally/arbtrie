@@ -16,6 +16,7 @@ namespace psitri::detail
       alloc.register_type_ops<inner_prefix_node>();
       alloc.register_type_ops<wide_inner_node>();
       alloc.register_type_ops<direct_inner_node>();
+      alloc.register_type_ops<bplus_inner_node>();
       alloc.register_type_ops<value_node>();
    }
 
@@ -141,6 +142,14 @@ namespace psitri::detail
                   verify_node(alloc, n->get_branch(branch_number(b)),
                               child_prefix, root_index, result, visited);
                }
+               break;
+            }
+            case node_type::bplus_inner:
+            {
+               auto* n = static_cast<const bplus_inner_node*>(static_cast<const node*>(obj));
+               for (uint32_t b = 0; b < n->num_branches(); ++b)
+                  verify_node(alloc, n->get_branch(branch_number(b)), key_prefix, root_index,
+                              result, visited);
                break;
             }
             case node_type::leaf:
@@ -551,6 +560,19 @@ namespace psitri::detail
                                           key_prefix, result, visited, options);
                break;
             }
+            case node_type::bplus_inner:
+            {
+               auto* n = static_cast<const bplus_inner_node*>(static_cast<const node*>(obj));
+               auto& row = result.row_for_depth(depth);
+               ++result.inner_nodes;
+               ++row.inner_nodes;
+               record_inner_stats(result, row, n->num_branches(), n->size());
+
+               for (uint32_t b = 0; b < n->num_branches(); ++b)
+                  collect_tree_stats_node(alloc, n->get_branch(branch_number(b)), depth + 1,
+                                          key_prefix, result, visited, options);
+               break;
+            }
             case node_type::leaf:
             {
                auto* leaf = static_cast<const leaf_node*>(static_cast<const node*>(obj));
@@ -819,6 +841,23 @@ namespace psitri::detail
                                                 depth + 1, key_prefix, lower, upper,
                                                 result, visited, options);
                }
+               break;
+            }
+            case node_type::bplus_inner:
+            {
+               auto* n = static_cast<const bplus_inner_node*>(static_cast<const node*>(obj));
+               if (!mark_tree_stats_node_seen(addr, result, visited))
+                  return;
+               record_node_visit(result, obj, options);
+               auto& row = result.row_for_depth(depth);
+               ++result.inner_nodes;
+               ++row.inner_nodes;
+               record_inner_stats(result, row, n->num_branches(), n->size());
+
+               for (uint32_t b = 0; b < n->num_branches(); ++b)
+                  collect_tree_stats_node_range(alloc, n->get_branch(branch_number(b)),
+                                                depth + 1, key_prefix, node_lower, node_upper,
+                                                result, visited, options);
                break;
             }
             case node_type::leaf:
@@ -1099,6 +1138,15 @@ namespace psitri::detail
             {
                ++result.inner_nodes;
                auto* n = static_cast<const direct_inner_node*>(static_cast<const node*>(obj));
+               for (uint32_t b = 0; b < n->num_branches(); ++b)
+                  audit_node(alloc, session, n->get_branch(branch_number(b)), prune_floor,
+                             options, result, visited, versions);
+               break;
+            }
+            case node_type::bplus_inner:
+            {
+               ++result.inner_nodes;
+               auto* n = static_cast<const bplus_inner_node*>(static_cast<const node*>(obj));
                for (uint32_t b = 0; b < n->num_branches(); ++b)
                   audit_node(alloc, session, n->get_branch(branch_number(b)), prune_floor,
                              options, result, visited, versions);

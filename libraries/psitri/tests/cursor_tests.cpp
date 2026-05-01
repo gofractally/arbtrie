@@ -1,5 +1,7 @@
 #include <catch2/catch_all.hpp>
 #include <algorithm>
+#include <cstdlib>
+#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
@@ -44,6 +46,10 @@ namespace
       void insert(key_view key, value_view value) { tx.insert(key, value); }
       void upsert(key_view key, value_view value) { tx.upsert(key, value); }
       int  remove(key_view key) { return tx.remove(key); }
+      uint64_t remove_range_counted(key_view lower, key_view upper)
+      {
+         return tx.remove_range_counted(lower, upper);
+      }
 
       cursor snapshot_cursor() const { return tx.snapshot_cursor(); }
 
@@ -51,6 +57,31 @@ namespace
    };
 
    temp_tree_edit start_temp_edit(cursor_test_db& t) { return temp_tree_edit(*t.ses); }
+
+   struct scoped_env
+   {
+      std::string name;
+      std::string old_value;
+      bool        had_value = false;
+
+      scoped_env(const char* n, const char* value) : name(n)
+      {
+         if (const char* old = std::getenv(n))
+         {
+            old_value = old;
+            had_value = true;
+         }
+         setenv(n, value, 1);
+      }
+
+      ~scoped_env()
+      {
+         if (had_value)
+            setenv(name.c_str(), old_value.c_str(), 1);
+         else
+            unsetenv(name.c_str());
+      }
+   };
 
    std::string make_key(int i)
    {
@@ -136,6 +167,73 @@ TEST_CASE("cursor: iteration after multiple leaf splits", "[cursor][structural]"
       REQUIRE(rc.lower_bound(to_key_view(expected[i])));
       REQUIRE(std::string(rc.key().data(), rc.key().size()) == expected[i]);
    }
+}
+
+TEST_CASE("bplus tree family: insert, iterate, find, and collapse removes", "[cursor][bplus]")
+{
+   scoped_env tree_family("PSITRI_TREE_FAMILY", "bplus");
+   cursor_test_db t("cursor_bplus_testdb");
+   auto           cur = start_temp_edit(t);
+
+   const int N = 3000 / CURSOR_SCALE;
+   std::vector<std::string> keys;
+   keys.reserve(N);
+   for (int i = 0; i < N; ++i)
+      keys.push_back(make_key(i));
+
+   std::vector<int> order(N);
+   std::iota(order.begin(), order.end(), 0);
+   std::mt19937 rng(0xBADC0DE);
+   std::shuffle(order.begin(), order.end(), rng);
+
+   for (int idx : order)
+   {
+      auto value = make_value(idx);
+      cur.upsert(to_key_view(keys[idx]), to_value_view(value));
+   }
+
+   auto rc = cur.snapshot_cursor();
+   tree_context stats_ctx(rc.get_root());
+   auto stats = stats_ctx.get_stats();
+   REQUIRE(stats.bplus_inner_nodes > 0);
+
+   std::sort(keys.begin(), keys.end());
+   REQUIRE(collect_keys_forward(rc) == keys);
+   REQUIRE(collect_keys_backward(rc) == keys);
+
+   for (int i = 0; i < N; i += 137)
+   {
+      std::string value;
+      REQUIRE(rc.get(to_key_view(keys[i]), &value) >= 0);
+   }
+
+   std::vector<std::string> survivors;
+   survivors.reserve(keys.size());
+   for (int i = 0; i < N; ++i)
+   {
+      if (i % 3 == 0)
+      {
+         REQUIRE(cur.remove(to_key_view(keys[i])) >= 0);
+      }
+      else
+         survivors.push_back(keys[i]);
+   }
+
+   auto range_lower = make_key(1000);
+   auto range_upper = make_key(1200);
+   auto old_size    = survivors.size();
+   survivors.erase(std::remove_if(survivors.begin(), survivors.end(),
+                                  [&](const std::string& key)
+                                  {
+                                     return key >= range_lower && key < range_upper;
+                                  }),
+                   survivors.end());
+   REQUIRE(cur.remove_range_counted(to_key_view(range_lower), to_key_view(range_upper)) ==
+           old_size - survivors.size());
+
+   rc = cur.snapshot_cursor();
+   REQUIRE(collect_keys_forward(rc) == survivors);
+   REQUIRE(collect_keys_backward(rc) == survivors);
 }
 
 // ============================================================
