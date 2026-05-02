@@ -94,6 +94,13 @@ namespace psitri
          assert(*n < num_branches());
          return children()[*n];
       }
+      void replace_branch(branch_number n, ptr_address addr) noexcept
+      {
+         assert(*n < num_branches());
+         assert(addr != sal::null_ptr_address);
+         children()[*n] = addr;
+         assert(validate_invariants());
+      }
 
       void visit_branches(std::invocable<ptr_address> auto&& lam) const noexcept
       {

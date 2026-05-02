@@ -3941,6 +3941,21 @@ namespace psitri
          return bplus_result::single(in.address());
       }
 
+      if constexpr (mode.is_unique() && !mode.is_remove())
+      {
+         if (child.branch_count == 1)
+         {
+#ifndef NDEBUG
+            if (*br > 0)
+               assert(bplus_first_key(child.branches[0]) == in->separator(uint16_t(*br - 1)));
+#endif
+            auto guard = in.modify();
+            guard->replace_branch(br, child.branches[0]);
+            guard->set_last_unique_version(_root_version);
+            return bplus_result::single(in.address());
+         }
+      }
+
       auto plan = make_bplus_replace_plan(in.obj(), br, child);
       if (plan.num_branches <= bplus_inner_node::max_branches &&
           bplus_inner_node::alloc_size(plan) <= bplus_inner_node::max_inner_size)

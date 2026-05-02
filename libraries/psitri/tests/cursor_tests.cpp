@@ -97,6 +97,14 @@ namespace
       return buf;
    }
 
+   std::pair<sal::ptr_address, sal::location> root_identity(const transaction& tx)
+   {
+      auto rc   = tx.snapshot_cursor();
+      auto root = rc.get_root();
+      auto ref  = root.session()->get_ref(root.address());
+      return {root.address(), ref.loc()};
+   }
+
    /// Collect all keys via forward iteration
    std::vector<std::string> collect_keys_forward(cursor& rc)
    {
@@ -234,6 +242,41 @@ TEST_CASE("bplus tree family: insert, iterate, find, and collapse removes", "[cu
    rc = cur.snapshot_cursor();
    REQUIRE(collect_keys_forward(rc) == survivors);
    REQUIRE(collect_keys_backward(rc) == survivors);
+}
+
+TEST_CASE("bplus unique parent replaces one child pointer in place", "[cursor][bplus][mvcc]")
+{
+   scoped_env tree_family("PSITRI_TREE_FAMILY", "bplus");
+   cursor_test_db t("cursor_bplus_replace_child_testdb");
+
+   const int N = 3000 / CURSOR_SCALE;
+   std::vector<std::string> keys;
+   keys.reserve(N);
+   for (int i = 0; i < N; ++i)
+      keys.push_back(make_key(i));
+
+   {
+      auto tx = t.ses->start_transaction(0);
+      for (int i = 0; i < N; ++i)
+         tx.insert(to_key_view(keys[i]), to_value_view(make_value(i)));
+      tx.commit();
+   }
+
+   auto tx = t.ses->start_transaction(0);
+   tx.update(to_key_view(keys.front()), to_value_view("patched-first"));
+   auto [root_after_first, loc_after_first] = root_identity(tx);
+
+   tx.update(to_key_view(keys.back()), to_value_view("patched-last"));
+   auto [root_after_second, loc_after_second] = root_identity(tx);
+
+   CHECK(root_after_second == root_after_first);
+   CHECK(loc_after_second == loc_after_first);
+
+   std::string value;
+   REQUIRE(tx.get(to_key_view(keys.front()), &value) >= 0);
+   CHECK(value == "patched-first");
+   REQUIRE(tx.get(to_key_view(keys.back()), &value) >= 0);
+   CHECK(value == "patched-last");
 }
 
 // ============================================================
