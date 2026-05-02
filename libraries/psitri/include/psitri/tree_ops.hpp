@@ -375,13 +375,13 @@ namespace psitri
 
          ptr_address                             left  = sal::null_ptr_address;
          ptr_address                             right = sal::null_ptr_address;
-         std::string                             separator;
+         key_view                                separator;
          bool                                    split        = false;
          bool                                    empty        = false;
          bool                                    contains_old = false;
          uint16_t                                branch_count = 0;
          std::array<ptr_address, max_branches>   branches     = {};
-         std::array<std::string, max_branches - 1> separators = {};
+         std::array<key_view, max_branches - 1>  separators   = {};
 
          static bplus_result empty_result() noexcept
          {
@@ -420,7 +420,7 @@ namespace psitri
             if (branch_count >= max_branches) [[unlikely]]
                std::abort();
             assert(addr != sal::null_ptr_address);
-            separators[branch_count - 1] = std::string(sep);
+            separators[branch_count - 1] = sep;
             branches[branch_count++]     = addr;
             if (branch_count == 2)
             {
@@ -514,7 +514,7 @@ namespace psitri
                                     smart_ref<leaf_node>&  leaf,
                                     key_view               key,
                                     branch_number          lb);
-      std::string bplus_first_key(ptr_address addr) const;
+      key_view bplus_first_key(ptr_address addr) const;
       bplus_result bplus_from_branch_set(branch_set result);
 
       template <upsert_mode mode>
@@ -540,10 +540,25 @@ namespace psitri
 
       int bplus_upsert_root(key_view key, value_type value);
       int bplus_remove_root(key_view key);
-      void bplus_collect_range_keys(ptr_address              addr,
-                                    key_view                 lower,
-                                    key_view                 upper,
-                                    std::vector<std::string>& keys) const;
+      static bplus_result bplus_same_result(ptr_address addr) noexcept
+      {
+         bplus_result r = bplus_result::single(addr);
+         r.contains_old = true;
+         return r;
+      }
+      void bplus_plan_push_branch(op::bplus_build_plan& plan, ptr_address addr) const;
+      template <upsert_mode mode>
+      bplus_result bplus_range_remove(const sal::alloc_hint&   parent_hint,
+                                      smart_ref<alloc_header>& ref,
+                                      key_range                range);
+      template <upsert_mode mode>
+      bplus_result bplus_range_remove_leaf(const sal::alloc_hint& parent_hint,
+                                           smart_ref<leaf_node>&  leaf,
+                                           key_range              range);
+      template <upsert_mode mode>
+      bplus_result bplus_range_remove_inner(const sal::alloc_hint&    parent_hint,
+                                            smart_ref<bplus_inner_node>& in,
+                                            key_range                   range);
       uint64_t bplus_remove_range_counted(key_view lower, key_view upper);
       bool bplus_remove_range_any(key_view lower, key_view upper);
 
@@ -3460,7 +3475,7 @@ namespace psitri
       std::unreachable();
    }
 
-   inline std::string tree_context::bplus_first_key(ptr_address addr) const
+   inline key_view tree_context::bplus_first_key(ptr_address addr) const
    {
       for (;;)
       {
@@ -3477,7 +3492,7 @@ namespace psitri
             {
                auto leaf = ref.as<leaf_node>();
                assert(leaf->num_branches() > 0);
-               return std::string(leaf->get_key(branch_number(0)));
+               return leaf->get_key(branch_number(0));
             }
             default:
                std::unreachable();
@@ -3951,7 +3966,6 @@ namespace psitri
       left_plan.push_first(plan.branches[0]);
       for (uint16_t i = 1; i < mid; ++i)
          left_plan.push_back(plan.separators[i - 1], plan.branches[i]);
-      std::string separator(plan.separators[mid - 1]);
       right_plan.push_first(plan.branches[mid]);
       for (uint16_t i = mid + 1; i < plan.num_branches; ++i)
          right_plan.push_back(plan.separators[i - 1], plan.branches[i]);
@@ -3970,7 +3984,7 @@ namespace psitri
       right_ref.modify()->set_last_unique_version(_root_version);
       bplus_result out;
       out.push_first(left);
-      out.push_back(separator, right);
+      out.push_back(bplus_first_key(right), right);
       return out;
    }
 
@@ -4088,47 +4102,342 @@ namespace psitri
       return _old_value_size;
    }
 
-   inline void tree_context::bplus_collect_range_keys(ptr_address              addr,
-                                                      key_view                 lower,
-                                                      key_view                 upper,
-                                                      std::vector<std::string>& keys) const
+   inline void tree_context::bplus_plan_push_branch(op::bplus_build_plan& plan,
+                                                    ptr_address           addr) const
    {
-      if (addr == sal::null_ptr_address)
-         return;
+      if (plan.num_branches == 0)
+         plan.push_first(addr);
+      else
+         plan.push_back(bplus_first_key(addr), addr);
+   }
 
-      auto ref = _session.get_ref(addr);
+   template <upsert_mode mode>
+   tree_context::bplus_result
+   tree_context::bplus_range_remove(const sal::alloc_hint&   parent_hint,
+                                    smart_ref<alloc_header>& ref,
+                                    key_range                range)
+   {
+      if constexpr (mode.is_unique())
+         if (ref.ref() > 1)
+            return bplus_range_remove<mode.make_shared()>(parent_hint, ref, range);
+
+      bplus_result result;
       switch (node_type(ref->type()))
       {
          case node_type::bplus_inner:
-         {
-            auto in = ref.as<bplus_inner_node>();
-            for (uint16_t i = 0; i < in->num_branches(); ++i)
-            {
-               if (!upper.empty() && i > 0 && in->separator(i - 1) >= upper)
-                  break;
-               if (!lower.empty() && i + 1 < in->num_branches() &&
-                   in->separator(i) <= lower)
-                  continue;
-               bplus_collect_range_keys(in->get_branch(branch_number(i)), lower, upper, keys);
-            }
+            result = bplus_range_remove_inner<mode>(parent_hint, ref.as<bplus_inner_node>(), range);
             break;
-         }
          case node_type::leaf:
+            result = bplus_range_remove_leaf<mode>(parent_hint, ref.as<leaf_node>(), range);
+            break;
+         case node_type::value:
          {
-            auto          leaf = ref.as<leaf_node>();
-            branch_number pos  = lower.empty() ? branch_number(0) : leaf->lower_bound(lower);
-            for (uint16_t i = *pos; i < leaf->num_branches(); ++i)
+            bool in_range = (range.lower_bound.empty() || key_view() >= range.lower_bound) &&
+                            (range.upper_bound.empty() || key_view() < range.upper_bound);
+            if (in_range)
             {
-               auto key = leaf->get_key(branch_number(i));
-               if (!upper.empty() && key >= upper)
-                  break;
-               keys.emplace_back(key.data(), key.size());
+               note_removed_keys();
+               result = bplus_result::empty_result();
+            }
+            else
+            {
+               result = bplus_same_result(ref.address());
             }
             break;
          }
          default:
             std::unreachable();
       }
+
+      if constexpr (!mode.is_unique())
+      {
+         if (!result.contains(ref.address()))
+            ref.release();
+      }
+
+      return result;
+   }
+
+   template <upsert_mode mode>
+   tree_context::bplus_result
+   tree_context::bplus_range_remove_leaf(const sal::alloc_hint& parent_hint,
+                                         smart_ref<leaf_node>&  leaf,
+                                         key_range              range)
+   {
+      branch_number lo = range.lower_bound.empty() ? branch_number(0)
+                                                   : leaf->lower_bound(range.lower_bound);
+      branch_number hi = range.upper_bound.empty() ? branch_number(leaf->num_branches())
+                                                   : leaf->lower_bound(range.upper_bound);
+
+      if (*hi <= *lo)
+         return bplus_same_result(leaf.address());
+
+      uint16_t count = *hi - *lo;
+      uint16_t total = leaf->num_branches();
+      if (count == total)
+      {
+         note_removed_keys(count);
+         return bplus_result::empty_result();
+      }
+
+      note_removed_keys(count);
+
+      if constexpr (mode.is_unique())
+      {
+         for (uint16_t i = *lo; i < *hi; ++i)
+            if (leaf->get_value_type(branch_number(i)) >= leaf_node::value_type_flag::value_node)
+               release_value_ref(leaf->get_value(branch_number(i)));
+         leaf.modify()->remove_range(lo, hi);
+         return bplus_same_result(leaf.address());
+      }
+      else
+      {
+         retain_children(leaf);
+         for (uint16_t i = *lo; i < *hi; ++i)
+            if (leaf->get_value_type(branch_number(i)) >= leaf_node::value_type_flag::value_node)
+               release_value_ref(leaf->get_value(branch_number(i)));
+
+         auto                  rewrite_plan   = make_leaf_rewrite_plan_skipping(*leaf.obj(), lo, hi);
+         auto                  rewrite_policy = leaf_rewrite_policy(rewrite_plan);
+         op::leaf_remove_range rm{
+             .src = *leaf.obj(), .lo = lo, .hi = hi, .rewrite = &rewrite_policy};
+         if (!leaf->rebuilt_size_fits(rm))
+         {
+            release_leaf_rewrite_replacements(rewrite_plan);
+            rm.rewrite = nullptr;
+         }
+         auto result = _session.alloc<leaf_node>(parent_hint, rm);
+         if (rm.rewrite)
+            release_leaf_rewrite_sources(rewrite_plan);
+         return bplus_result::single(result);
+      }
+   }
+
+   template <upsert_mode mode>
+   tree_context::bplus_result
+   tree_context::bplus_range_remove_inner(const sal::alloc_hint&      parent_hint,
+                                          smart_ref<bplus_inner_node>& in,
+                                          key_range                   range)
+   {
+      if (range.is_unbounded())
+      {
+         for (uint16_t i = 0; i < in->num_branches(); ++i)
+            note_removed_child(in->get_branch(branch_number(i)));
+         return bplus_result::empty_result();
+      }
+
+      if (range.is_empty_range())
+         return bplus_same_result(in.address());
+
+      branch_number start = range.lower_bound.empty()
+                                ? branch_number(0)
+                                : in->lower_bound(range.lower_bound);
+      if (*start >= in->num_branches())
+         return bplus_same_result(in.address());
+
+      branch_number end          = branch_number(in->num_branches());
+      branch_number boundary     = end;
+      bool          has_boundary = false;
+      if (!range.upper_bound.empty())
+      {
+         boundary = in->lower_bound(range.upper_bound);
+         end      = boundary;
+         if (*boundary < in->num_branches())
+            has_boundary = true;
+      }
+
+      if constexpr (mode.is_shared())
+         retain_children(in);
+
+      auto finish_rebuild = [&](op::bplus_build_plan& plan) -> bplus_result
+      {
+         if (plan.num_branches == 0)
+            return bplus_result::empty_result();
+
+         bool unchanged = plan.num_branches == in->num_branches();
+         for (uint16_t i = 0; unchanged && i < plan.num_branches; ++i)
+            unchanged = plan.branches[i] == in->get_branch(branch_number(i));
+         if (unchanged)
+         {
+            if constexpr (mode.is_shared())
+               in->visit_branches([this](ptr_address addr) { _session.release(addr); });
+            return bplus_same_result(in.address());
+         }
+
+         if constexpr (mode.is_unique())
+         {
+            auto result = _session.realloc<bplus_inner_node>(in, plan);
+            result.modify()->set_last_unique_version(_root_version);
+            return bplus_result::single(result.address());
+         }
+         else
+         {
+            auto result = _session.alloc<bplus_inner_node>(parent_hint, plan);
+            auto ref    = _session.get_ref<bplus_inner_node>(result);
+            ref.modify()->set_last_unique_version(_root_version);
+            return bplus_result::single(result);
+         }
+      };
+
+      auto add_branch = [&](op::bplus_build_plan& plan, ptr_address addr)
+      {
+         bplus_plan_push_branch(plan, addr);
+      };
+
+      if (*start == *boundary && has_boundary)
+      {
+         ptr_address child_addr   = in->get_branch(start);
+         auto        child_ref    = _session.get_ref(child_addr);
+         bool        child_shared = child_ref.ref() > 1;
+         auto        sub          = bplus_range_remove<mode>(in->get_branch_clines(),
+                                                    child_ref, range);
+
+         if (sub.branch_count == 1 && sub.branches[0] == child_addr)
+         {
+            if constexpr (mode.is_shared())
+               in->visit_branches([this](ptr_address addr) { _session.release(addr); });
+            return bplus_same_result(in.address());
+         }
+
+         op::bplus_build_plan plan;
+         for (uint16_t i = 0; i < in->num_branches(); ++i)
+         {
+            if (i != *start)
+            {
+               add_branch(plan, in->get_branch(branch_number(i)));
+               continue;
+            }
+            if (!sub.empty)
+            {
+               assert(sub.branch_count == 1);
+               add_branch(plan, sub.branches[0]);
+            }
+         }
+
+         if (plan.num_branches == 0)
+         {
+            if constexpr (mode.is_unique())
+               if (child_shared)
+                  _session.retain(child_addr);
+            return bplus_result::empty_result();
+         }
+
+         if constexpr (mode.is_unique())
+            if (sub.empty && !child_shared)
+               _session.release(child_addr);
+
+         return finish_rebuild(plan);
+      }
+
+      ptr_address start_addr     = in->get_branch(start);
+      ptr_address new_start_addr = start_addr;
+      bool        start_recursed = !range.lower_bound.empty();
+      bool        start_empty    = !start_recursed;
+      bool        start_shared   = false;
+
+      if (start_recursed)
+      {
+         auto start_ref = _session.get_ref(start_addr);
+         start_shared   = start_ref.ref() > 1;
+         auto sub       = bplus_range_remove<mode>(in->get_branch_clines(), start_ref, range);
+         if (sub.empty)
+            start_empty = true;
+         else
+         {
+            assert(sub.branch_count == 1);
+            new_start_addr = sub.branches[0];
+         }
+      }
+      else
+      {
+         note_removed_child(start_addr);
+      }
+
+      for (uint16_t i = *start + 1; i < *end; ++i)
+         note_removed_child(in->get_branch(branch_number(i)));
+
+      ptr_address boundary_addr     = sal::null_ptr_address;
+      ptr_address new_boundary_addr = sal::null_ptr_address;
+      bool        boundary_empty    = false;
+      bool        boundary_shared   = false;
+
+      if (has_boundary)
+      {
+         boundary_addr     = in->get_branch(boundary);
+         new_boundary_addr = boundary_addr;
+         auto boundary_ref = _session.get_ref(boundary_addr);
+         boundary_shared   = boundary_ref.ref() > 1;
+         auto sub          = bplus_range_remove<mode>(in->get_branch_clines(),
+                                             boundary_ref, range);
+         if (sub.empty)
+            boundary_empty = true;
+         else
+         {
+            assert(sub.branch_count == 1);
+            new_boundary_addr = sub.branches[0];
+         }
+      }
+
+      op::bplus_build_plan plan;
+      for (uint16_t i = 0; i < in->num_branches(); ++i)
+      {
+         if (i == *start)
+         {
+            if (!start_empty)
+               add_branch(plan, new_start_addr);
+            continue;
+         }
+         if (i > *start && i < *end)
+            continue;
+         if (has_boundary && i == *boundary)
+         {
+            if (!boundary_empty)
+               add_branch(plan, new_boundary_addr);
+            continue;
+         }
+         add_branch(plan, in->get_branch(branch_number(i)));
+      }
+
+      if (plan.num_branches == 0)
+      {
+         if constexpr (mode.is_unique())
+         {
+            if (start_recursed && start_shared)
+               _session.retain(start_addr);
+            if (has_boundary && boundary_shared)
+               _session.retain(boundary_addr);
+         }
+         else
+         {
+            if (!start_recursed)
+               _session.release(start_addr);
+            for (uint16_t i = *start + 1; i < *end; ++i)
+               _session.release(in->get_branch(branch_number(i)));
+         }
+         return bplus_result::empty_result();
+      }
+
+      if constexpr (mode.is_unique())
+      {
+         if (start_empty)
+         {
+            if (!start_recursed || !start_shared)
+               _session.release(start_addr);
+         }
+         for (uint16_t i = *start + 1; i < *end; ++i)
+            _session.release(in->get_branch(branch_number(i)));
+         if (has_boundary && boundary_empty && !boundary_shared)
+            _session.release(boundary_addr);
+      }
+      else
+      {
+         if (!start_recursed)
+            _session.release(start_addr);
+         for (uint16_t i = *start + 1; i < *end; ++i)
+            _session.release(in->get_branch(branch_number(i)));
+      }
+
+      return finish_rebuild(plan);
    }
 
    inline uint64_t tree_context::bplus_remove_range_counted(key_view lower, key_view upper)
@@ -4140,18 +4449,26 @@ namespace psitri
       if (lower >= upper && upper != max_key)
          return 0;
 
-      key_view internal_upper = upper == max_key ? key_view() : upper;
-      std::vector<std::string> keys;
-      {
-         sal::read_lock lock = _session.lock();
-         bplus_collect_range_keys(_root.address(), lower, internal_upper, keys);
-      }
+      sal::read_lock lock = _session.lock();
+      _delta_removed_keys = 0;
+      _count_removed_keys = true;
+      key_range range     = {lower, upper == max_key ? key_view() : upper};
 
-      uint64_t removed = 0;
-      for (const auto& key : keys)
-         if (bplus_remove_root(key_view(key.data(), key.size())) >= 0)
-            ++removed;
-      return removed;
+      auto rref     = *_root;
+      auto old_addr = _root.take();
+      bool uniquely_owned = rref.ref() == 1;
+      auto result   = bplus_range_remove<upsert_mode::unique>({}, rref, range);
+      if (result.empty)
+      {
+         if (uniquely_owned)
+            _session.release(old_addr);
+      }
+      else
+      {
+         assert(result.branch_count == 1);
+         _root.give(result.branches[0]);
+      }
+      return static_cast<uint64_t>(-_delta_removed_keys);
    }
 
    inline bool tree_context::bplus_remove_range_any(key_view lower, key_view upper)
@@ -4163,17 +4480,37 @@ namespace psitri
       if (lower >= upper && upper != max_key)
          return false;
 
-      key_view internal_upper = upper == max_key ? key_view() : upper;
-      std::vector<std::string> keys;
+      sal::read_lock lock = _session.lock();
+      _delta_removed_keys = 0;
+      _count_removed_keys = false;
+      key_range range     = {lower, upper == max_key ? key_view() : upper};
+
+      auto rref     = *_root;
+      auto old_addr = _root.take();
+      bool uniquely_owned = rref.ref() == 1;
+
+      try
       {
-         sal::read_lock lock = _session.lock();
-         bplus_collect_range_keys(_root.address(), lower, internal_upper, keys);
+         auto result = bplus_range_remove<upsert_mode::unique>({}, rref, range);
+         if (result.empty)
+         {
+            if (uniquely_owned)
+               _session.release(old_addr);
+         }
+         else
+         {
+            assert(result.branch_count == 1);
+            _root.give(result.branches[0]);
+         }
+      }
+      catch (...)
+      {
+         _count_removed_keys = true;
+         throw;
       }
 
-      bool removed = false;
-      for (const auto& key : keys)
-         removed = (bplus_remove_root(key_view(key.data(), key.size())) >= 0) || removed;
-      return removed;
+      _count_removed_keys = true;
+      return _delta_removed_keys < 0;
    }
 
    // ─── Explicit-version write target ────────────────────────────────
