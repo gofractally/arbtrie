@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include <psitri/node/node_type.hpp>
 #include <psitri/version_compare.hpp>
 #include <sal/alloc_header.hpp>
 #include <string_view>
@@ -41,31 +42,6 @@ namespace psitri
    };
 
    /**
-    * The type of node, inner, leaf, or value, extends the types
-    * sal::alloc_header::header_type enum.
-    */
-   enum class node_type : uint8_t
-   {
-      inner = (uint8_t)sal::header_type::start_user_type,
-      inner_prefix,
-      leaf,
-      value,
-      value_index,
-      wide_inner,
-      direct_inner,
-      bplus_inner
-   };
-   inline std::ostream& operator<<(std::ostream& os, node_type t)
-   {
-      static const char* names[] = {"inner",       "inner_prefix", "leaf",         "value",
-                                    "value_index", "wide_inner",   "direct_inner", "bplus_inner",
-                                    "unknown"};
-      auto               idx     = static_cast<size_t>(t) - static_cast<size_t>(node_type::inner);
-      os << (idx < 8 ? names[idx] : names[8]);
-      return os;
-   }
-
-   /**
     * Each node maintains a list of ptr_address that point to the
     * cacheline, a brnach is an position(line) in this list plus an index
     * the cacheline (index). Each line is points to 128 bytes or
@@ -103,26 +79,6 @@ namespace psitri
       }
    } __attribute__((packed));
    static_assert(sizeof(branch) == 1);
-
-   /**
-    * Wide inner nodes keep the same "control-block cline + index within cline"
-    * idea as compact inner nodes, but spend two bytes per child so the cline
-    * slot can exceed 15.  The low nibble remains the child index inside a
-    * control-block cacheline; the remaining 12 bits are the cline slot.
-    */
-   struct wide_branch
-   {
-      uint16_t branch_data;
-      void     set_line_index(uint16_t line, uint8_t index) noexcept
-      {
-         assert(line < 4096);
-         assert(index < 16);
-         branch_data = uint16_t((line << 4) | index);
-      }
-      uint16_t line() const noexcept { return branch_data >> 4; }
-      uint8_t  index() const noexcept { return branch_data & 0x0f; }
-   } __attribute__((packed));
-   static_assert(sizeof(wide_branch) == 2);
 
    /**
     * Holds a temporary set of branches and dividers that exists
