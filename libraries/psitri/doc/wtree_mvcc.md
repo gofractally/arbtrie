@@ -53,6 +53,9 @@ Per-value 1-byte tag, stolen from a 4-bit type:
 - `tree`   — `value[]` is a 4-byte `ptr_address` to a subtree root **(single
              ptr — not a `tree_id{root,ver}` pair)**
 
+See `big_values.md` for the out-of-line `big` design (immutable ≤ 2 MB blob now;
+filesystem-style offset+length + chunking deferred).
+
 `big`/`tree` are a **single `ptr_address`**. Versioned subtrees go through a
 `version_node {version#, ptr_address→root}` reached by that one ptr (unversioned
 = ptr straight to the root). This is the shape the `smart_ptr` cleanup converges
