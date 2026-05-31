@@ -202,3 +202,10 @@ add_executable(bench_wtree_staged ../libraries/psitri/tests/bench_wtree_staged.c
 target_link_libraries(bench_wtree_staged PRIVATE psitri)
 target_include_directories(bench_wtree_staged PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
 set_target_properties(bench_wtree_staged PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# bench_sal_dump_race — regression reproducer for the allocator::dump() SIGBUS
+# (dump() derefs a segment before reserve() commits its file backing).
+add_executable(bench_sal_dump_race ../libraries/psitri/tests/bench_sal_dump_race.cpp)
+target_link_libraries(bench_sal_dump_race PRIVATE psitri Threads::Threads)
+target_include_directories(bench_sal_dump_race PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+set_target_properties(bench_sal_dump_race PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

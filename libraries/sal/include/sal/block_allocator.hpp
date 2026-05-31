@@ -50,6 +50,18 @@ namespace sal
       uint64_t block_size() const { return _block_size; }
       uint64_t num_blocks() const { return _num_blocks.load(std::memory_order_relaxed); }
 
+      // Number of blocks whose file backing is committed AND mmap'd — i.e. the
+      // blocks that are safe to dereference. alloc() bumps num_blocks() BEFORE
+      // reserve() grows the file (ftruncate+mmap) and publishes _file_size, so
+      // num_blocks() can transiently exceed this. Any observer that walks
+      // segments and dereferences their memory (e.g. allocator::dump()) MUST
+      // clamp to this count or it can fault on a not-yet-committed segment.
+      // The acquire load pairs with reserve()'s _file_size store (after mmap).
+      uint64_t mapped_blocks() const
+      {
+         return _file_size.load(std::memory_order_acquire) / _block_size;
+      }
+
       /**
        * Resizes the file and num_blocks() count to nblocks.
        */

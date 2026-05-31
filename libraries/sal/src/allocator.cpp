@@ -1805,8 +1805,13 @@ namespace sal
       // Initialize total non-value nodes counter
       result.total_non_value_nodes = 0;
 
-      // Gather segment information
-      for (segment_number i{0}; i < total_segs; ++i)
+      // Gather segment information. Only walk segments whose file backing is
+      // committed: alloc() bumps num_blocks() before reserve() ftruncate+mmaps
+      // the new segment, so num_blocks() can transiently count a segment whose
+      // footer page is still beyond EOF — dereferencing it faults (SIGBUS).
+      const uint64_t mapped_segs = _block_alloc.mapped_blocks();
+      const uint64_t safe_segs   = total_segs < mapped_segs ? total_segs : mapped_segs;
+      for (segment_number i{0}; i < safe_segs; ++i)
       {
          auto seg = get_segment(i);
 
