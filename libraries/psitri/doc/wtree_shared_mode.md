@@ -135,37 +135,78 @@ address).
 
 ---
 
-## 3. Plan to add shared mode (COW-to-root)
+## 3. Plan to add shared mode (COW-to-root) — the eager-clone approach
 
-1. **Template the descent on `upsert_mode`**: `node_upsert_<mode>`,
-   `replace_slot_<mode>`, `leaf_upsert<mode>` (mirror core signatures). Public
-   `upsert` enters with `unique_upsert`.
-2. **Demote per node**: at the top of `node_upsert_<mode>`,
-   `if constexpr (mode.is_unique()) if (ref(addr) > 1) return node_upsert_<mode.make_shared()>(...)`.
-   Need a light refcount peek (`wsession().get_ref<T>(addr).ref()`).
-3. **Shared specializations alloc-fresh, not `cow_*`:**
-   - inner: `inner_alloc_sized(...)` a NEW node copying content with the one
-     child repointed; `retain_children` on the surviving siblings; return the
-     **new** address (existing threading repoints the parent / reassigns `root_`).
-   - leaf: allocate a NEW leaf (new address) copying the page; `retain_children`
-     (the §3 hook) so its big/subtree refs are owned by both versions; return the
-     new address.
-   Unique specializations keep today's `cow_*` (same-address) fast path verbatim.
-4. **Root publish**: already handled — `root_ = <new top address>` falls out of
-   the threaded return. (Durable publish via SAL `set_root` is a later step when
-   wtree gets transaction commit.)
-5. **Snapshot source**: a reader holding the root `ptr_address` (`ref>=2`) is
-   what trips step 2. Wire `wtree`'s snapshot/read-view to retain the root CB.
+Because the mode **locks to shared from the first shared node downward** (§1),
+we don't have to write a shared specialization for every sub-case of
+`node_upsert_` (split, K=1 promote, container-wrap). At the first shared node we
+**eager-clone `in` to a fresh, uniquely-owned copy and then run the existing
+unique in-place logic on that private copy.** Only `node_upsert_` and
+`leaf_upsert` need the `mode` template; every helper they call
+(`replace_slot_`, splits, promotes, `apply<unique_upsert>`) already operates on
+an already-private node and is reused unchanged.
+
+1. **Template only the two descent entry points**: `node_upsert_<mode>` and
+   `leaf_upsert<mode>`. Public `upsert` enters `node_upsert_<unique_upsert>`.
+   Helpers stay non-templated (they run after the eager-clone, on a private node).
+2. **Demote per step** (after the leaf check, before any mutation):
+   ```cpp
+   if constexpr (mode.is_unique())
+       if (wsession().get_ref<inner_node>(in->address()).ref() > 1)
+           return node_upsert_<mode.make_shared()>(node, key, depth, value);
+   ```
+3. **Eager-clone at the first shared node** (inner): after `pos`/`child` are
+   computed, `if constexpr (mode.is_shared())`:
+   - `in = clone_inner_fresh(in)` → NEW address, payload copied.
+   - **retain the OFF-PATH siblings only** (every child except slot `pos`). The
+     on-path child is NOT retained — the recursion path-copies it and the old
+     child stays ref-1 owned by the snapshot's old `in`.
+   - Fall through to the unchanged body: `cow_inner(in)` is now a no-op (fresh +
+     unique), `replace_slot_`/split/promote all mutate the private copy
+     correctly.
+4. **Eager-clone leaf** (in `leaf_upsert<mode>`): replace the top `p =
+   cow_leaf(p)` with `if constexpr (mode.is_shared()) { p = clone_leaf_fresh(p);
+   p->retain_children(_sess); } else { p = cow_leaf(p); }`. The retain pairs with
+   the in-place overwrite's `leaf_retire_value_region_` release, so the snapshot
+   keeps its old big/subtree values.
+5. **Recursion carries `mode`**: `node_upsert_<mode>(child, …)` and
+   `leaf_upsert<mode>(…)`. On-path child sees shared → path-copies unconditionally
+   (correct even at ref==1 — reachable via the snapshot's old parent).
+6. **Root publish**: already handled — the new top address threads up through the
+   existing `upsert_result`/repoint machinery into `root_`. (Durable SAL
+   `set_root` is later, with wtree transaction commit.)
+7. **Snapshot source**: a read-view holding the root `ptr_address` with the CB
+   retained (`ref>=2`) is what trips step 2. Add `wtree::snapshot()` (retain
+   root → a non-owning read `wtree`) for the test.
+
+### The one fiddly primitive: `clone_*_fresh` (new address, payload copied)
+
+`inner_node::copy_to` (`inner_node.hpp:319`) clobbers dst's 12-byte SAL header
+with src's — correct for COW-*move* (address preserved via the moved CB), WRONG
+for a fresh clone (dst must keep its own new address/seq/size). The clone helper
+must save/restore the new node's header, exactly like `leaf_node::copy_to`
+already does (`leaf_node.hpp:212-216`). So:
+```cpp
+inner_node* clone_inner_fresh(inner_node* src) {  // NEW address
+    inner_node* dst = inner_alloc_sized(src->cap_in_cls, src->address());
+    save dst header; src->copy_to(dst); restore dst header;  // payload only
+    return dst;
+}
+```
+Leaf is simpler — `leaf_node::copy_to` already preserves dst's header, so
+`clone_leaf_fresh` = `leaf_alloc()` + `src->copy_to(new)`.
 
 ### Correctness guardrails
 
-- Never call `cow_inner`/`cow_leaf` in a shared path — they alias the
-  `ptr_address` (§0). Shared = `alloc` new + `retain_children`.
-- `retain_children` must cover the leaf's **big/subtree** value refs (done, §3)
-  and inner's child column, and (future, §4) the alt/history chain.
-- The in-place `leaf_value_overwrite` assert (`!owns_child_ptr()`) and the
-  retire-on-drop sites stay valid; shared mode never mutates the old node, so its
-  refs are untouched until the old root is released.
+- Never call `cow_inner`/`cow_leaf` to fork — they alias the `ptr_address` (§0).
+  The eager-clone uses `*_alloc` (new address) + `copy_to` payload + retain.
+- Retain **off-path siblings only** for inner (on-path child path-copies); retain
+  **all** value refs for the leaf (`retain_children`, §3) — the overwrite-retire
+  release rebalances.
+- Unique path is byte-for-byte today's code (the `if constexpr` unique branch is
+  the existing body); zero hot-path regression.
+- (Future, §4) `retain_children` / the clone must also cover the alt/history
+  chain once leaf versioning lands.
 
 ---
 
