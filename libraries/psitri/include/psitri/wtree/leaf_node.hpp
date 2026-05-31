@@ -688,7 +688,7 @@ inline uint16_t leaf_count_lt(const uint32_t* stems, uint16_t num_keys,
 }
 
 // ─── Forward decl: radix walk used by leaf_find ───────────────────
-inline const uint8_t* radix_find(const leaf_node* p, uint16_t root_off,
+inline value_type radix_find(const leaf_node* p, uint16_t root_off,
                                   word_key_type key,
                                   uint16_t consumed_words,
                                   uint16_t value_len) noexcept;
@@ -703,7 +703,7 @@ inline const uint8_t* radix_find(const leaf_node* p, uint16_t root_off,
 //   2. If stems[pos] != q, miss.
 //   3. Dispatch on offs[pos]: value-region (verify full suffix) or
 //      radix root (descend via radix_find).
-inline const uint8_t* leaf_find(const leaf_node* p,
+inline value_type leaf_find(const leaf_node* p,
                                  word_key_type key,
                                  uint16_t depth, uint16_t value_len) noexcept {
     assert(depth < key.size());
@@ -727,7 +727,7 @@ inline const uint8_t* leaf_find(const leaf_node* p,
 #ifdef LEAF_STATS
         ++g_leaf_miss;
 #endif
-        return nullptr;
+        return value_type{};
     }
     const uint16_t off = offs[pos];   // warm from prefetch
     // Prefetch value_region NOW — stems[pos] verify + radix check +
@@ -742,7 +742,7 @@ inline const uint8_t* leaf_find(const leaf_node* p,
 #ifdef LEAF_STATS
         ++g_leaf_miss;
 #endif
-        return nullptr;
+        return value_type{};
     }
     assert(off != kLeafOffSentinel);
     if (offs_is_radix(off)) {
@@ -757,12 +757,12 @@ inline const uint8_t* leaf_find(const leaf_node* p,
 #endif
     // Suffix is the remainder of the key past (depth+1) consumed words.
     const auto suffix = key.subspan(size_t(depth) + 1);
-    if (vr->suffix_words != uint8_t(suffix.size())) return nullptr;
+    if (vr->suffix_words != uint8_t(suffix.size())) return value_type{};
     if (!suffix.empty() &&
         std::memcmp(vr->suffix_bytes(), suffix.data(), suffix.size_bytes()) != 0) {
-        return nullptr;
+        return value_type{};
     }
-    return vr->value(value_len);
+    return vr->value_span();
 }
 
 // ─── radix_find ───────────────────────────────────────────────────
@@ -770,7 +770,7 @@ inline const uint8_t* leaf_find(const leaf_node* p,
 // Walks the radix tree.  Each level consumes one more u32 from k_u32
 // past the leaf's depth.  Verifies the remaining suffix in the
 // terminal value-region.
-inline const uint8_t* radix_find(const leaf_node* p, uint16_t root_off,
+inline value_type radix_find(const leaf_node* p, uint16_t root_off,
                                   word_key_type key,
                                   uint16_t consumed_words,
                                   uint16_t value_len) noexcept {
@@ -782,11 +782,11 @@ inline const uint8_t* radix_find(const leaf_node* p, uint16_t root_off,
         // compressed path words before any sub_stem / terminal handling.
         if (rn->has_path()) {
             const uint8_t pw = rn->path_words();
-            if (size_t(consumed_words) + pw > key.size()) return nullptr;
+            if (size_t(consumed_words) + pw > key.size()) return value_type{};
             if (std::memcmp(rn->path_data(),
                             key.data() + consumed_words,
                             size_t(pw) * 4) != 0) {
-                return nullptr;
+                return value_type{};
             }
             consumed_words = uint16_t(consumed_words + pw);
         }
@@ -794,16 +794,16 @@ inline const uint8_t* radix_find(const leaf_node* p, uint16_t root_off,
         // Look at the terminal slot; if present, that's the match.
         if (consumed_words >= key.size()) {
             const uint16_t toff = rn->terminal_off();
-            if (toff == kLeafOffSentinel) return nullptr;
+            if (toff == kLeafOffSentinel) return value_type{};
             const auto* vr = reinterpret_cast<const value_region*>(page_end - toff);
             assert(vr->suffix_words == 0);
-            return vr->value(value_len);
+            return vr->value_span();
         }
         const uint32_t qw   = key[consumed_words];
         const uint16_t rcap = rn->cap_slots();
         const uint32_t* sub = rn->sub_stems();
         const uint16_t rpos = count_lt_capped(sub, rcap, qw);
-        if (rpos >= rn->n_entries() || sub[rpos] != qw) return nullptr;
+        if (rpos >= rn->n_entries() || sub[rpos] != qw) return value_type{};
         const uint16_t next_off = rn->offs()[rpos];
         assert(next_off != kLeafOffSentinel);
         ++consumed_words;
@@ -811,12 +811,12 @@ inline const uint8_t* radix_find(const leaf_node* p, uint16_t root_off,
             const auto* vr = reinterpret_cast<const value_region*>(
                 page_end - next_off);
             const auto suffix = key.subspan(consumed_words);
-            if (vr->suffix_words != uint8_t(suffix.size())) return nullptr;
+            if (vr->suffix_words != uint8_t(suffix.size())) return value_type{};
             if (!suffix.empty() &&
                 std::memcmp(vr->suffix_bytes(), suffix.data(), suffix.size_bytes()) != 0) {
-                return nullptr;
+                return value_type{};
             }
-            return vr->value(value_len);
+            return vr->value_span();
         }
         off = next_off & kRadixOffMask;
     }
@@ -986,7 +986,7 @@ inline uint16_t radix_insert(leaf_node* p, uint16_t root_off,
             p, value_region::size_bytes(uint16_t(suffix_words_span.size()), value_len));
         if (voff == kLeafOffSentinel) return kLeafOffSentinel;
         auto* vr = reinterpret_cast<value_region*>(leaf_at(p, voff));
-        vr->suffix_words = uint8_t(suffix_words_span.size());
+        vr->suffix_words = uint8_t(suffix_words_span.size()); vr->value_len = uint8_t(value_len); vr->type_alt = 0;
         if (!suffix_words_span.empty()) {
             std::memcpy(vr->suffix_bytes(), suffix_words_span.data(),
                         suffix_words_span.size_bytes());
@@ -1188,7 +1188,7 @@ inline uint16_t radix_insert(leaf_node* p, uint16_t root_off,
                         p, value_region::size_bytes(0, value_len));
                     if (voff == kLeafOffSentinel) return false;
                     auto* vr = reinterpret_cast<value_region*>(leaf_at(p, voff));
-                    vr->suffix_words = 0;
+                    vr->suffix_words = 0; vr->value_len = uint8_t(value_len); vr->type_alt = 0;
                     std::memcpy(vr->value(value_len), old_val_buf, value_len);
                     auto* sr = reinterpret_cast<radix_node*>(leaf_at(p, sub_root_off));
                     sr->set_terminal_off(voff);
@@ -1202,7 +1202,7 @@ inline uint16_t radix_insert(leaf_node* p, uint16_t root_off,
                     p, value_region::size_bytes(old_rem, value_len));
                 if (voff == kLeafOffSentinel) return false;
                 auto* vr = reinterpret_cast<value_region*>(leaf_at(p, voff));
-                vr->suffix_words = old_rem;
+                vr->suffix_words = old_rem; vr->value_len = uint8_t(value_len); vr->type_alt = 0;
                 if (old_rem > 0) {
                     std::memcpy(vr->suffix_bytes(), old_suf_buf + 4, size_t(old_rem) * 4);
                 }
@@ -1375,7 +1375,7 @@ inline bool leaf_insert(leaf_node* p,
 
             // Populate OLD value_region.
             auto* old_new_vr = reinterpret_cast<value_region*>(leaf_at(p, old_voff));
-            old_new_vr->suffix_words = old_tail_words;
+            old_new_vr->suffix_words = old_tail_words; old_new_vr->value_len = uint8_t(value_len); old_new_vr->type_alt = 0;
             if (old_tail_words > 0) {
                 std::memcpy(old_new_vr->suffix_bytes(),
                             old_suf_buf + (common + 1) * 4,
@@ -1384,7 +1384,7 @@ inline bool leaf_insert(leaf_node* p,
             std::memcpy(old_new_vr->value(value_len), old_val_buf, value_len);
             // Populate NEW value_region.
             auto* new_new_vr = reinterpret_cast<value_region*>(leaf_at(p, new_voff));
-            new_new_vr->suffix_words = uint8_t(new_tail.size());
+            new_new_vr->suffix_words = uint8_t(new_tail.size()); new_new_vr->value_len = uint8_t(value_len); new_new_vr->type_alt = 0;
             if (!new_tail.empty()) {
                 std::memcpy(new_new_vr->suffix_bytes(),
                             new_tail.data(),
@@ -1433,7 +1433,7 @@ inline bool leaf_insert(leaf_node* p,
                 p, value_region::size_bytes(0, value_len));
             if (voff == kLeafOffSentinel) return false;
             auto* vr = reinterpret_cast<value_region*>(leaf_at(p, voff));
-            vr->suffix_words = 0;
+            vr->suffix_words = 0; vr->value_len = uint8_t(value_len); vr->type_alt = 0;
             std::memcpy(vr->value(value_len), old_val_buf, value_len);
             auto* sr = reinterpret_cast<radix_node*>(leaf_at(p, sub_root));
             sr->set_terminal_off(voff);
@@ -1446,7 +1446,7 @@ inline bool leaf_insert(leaf_node* p,
                 p, value_region::size_bytes(old_rem, value_len));
             if (voff == kLeafOffSentinel) return false;
             auto* vr = reinterpret_cast<value_region*>(leaf_at(p, voff));
-            vr->suffix_words = old_rem;
+            vr->suffix_words = old_rem; vr->value_len = uint8_t(value_len); vr->type_alt = 0;
             if (old_rem > 0) {
                 std::memcpy(vr->suffix_bytes(), old_suf_buf + 4, size_t(old_rem) * 4);
             }
@@ -1479,7 +1479,7 @@ inline bool leaf_insert(leaf_node* p,
         p, value_region::size_bytes(uint16_t(new_suffix.size()), value_len));
     if (voff == kLeafOffSentinel) return false;
     auto* vr = reinterpret_cast<value_region*>(leaf_at(p, voff));
-    vr->suffix_words = uint8_t(new_suffix.size());
+    vr->suffix_words = uint8_t(new_suffix.size()); vr->value_len = uint8_t(value_len); vr->type_alt = 0;
     if (!new_suffix.empty()) {
         std::memcpy(vr->suffix_bytes(), new_suffix.data(), new_suffix.size_bytes());
     }

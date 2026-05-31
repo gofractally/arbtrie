@@ -286,9 +286,9 @@ TEST_CASE("wtree leaf dead_bytes tracks abandoned heap", "[wtree][dead]")
    for (uint32_t i = 0; i < inserted; ++i)
    {
       uint32_t w[4]; make_words(i, w);
-      const uint8_t* got = pw::leaf_find(lf, pw::word_key_type(w, 4), 0, 8);
-      REQUIRE(got != nullptr);
-      uint64_t out; std::memcpy(&out, got, 8);
+      auto got = pw::leaf_find(lf, pw::word_key_type(w, 4), 0, 8);
+      REQUIRE(got.data() != nullptr);
+      uint64_t out; std::memcpy(&out, got.data(), 8);
       REQUIRE(out == uint64_t(i));
    }
 }
@@ -305,9 +305,9 @@ TEST_CASE("wtree deep-radix value update", "[wtree][radix-update]")
    auto key_of = [](uint32_t i, uint32_t w[4]) { w[0]=0xAAAA; w[1]=i; w[2]=7; w[3]=9; };
    auto find_v = [&](uint32_t i) -> uint64_t {
       uint32_t w[4]; key_of(i, w);
-      const uint8_t* got = pw::leaf_find(lf, pw::word_key_type(w, 4), 0, 8);
-      REQUIRE(got != nullptr);
-      uint64_t out; std::memcpy(&out, got, 8); return out;
+      auto got = pw::leaf_find(lf, pw::word_key_type(w, 4), 0, 8);
+      REQUIRE(got.data() != nullptr);
+      uint64_t out; std::memcpy(&out, got.data(), 8); return out;
    };
 
    // Build colliding keys (shared first word → deep in-leaf radix), tolerate full.
@@ -357,9 +357,9 @@ TEST_CASE("wtree deep-radix update correctness", "[wtree][radix-update]")
    };
    auto find_v = [&](uint32_t i) -> uint64_t {
       uint32_t w[4]; key_of(i, w);
-      const uint8_t* got = pw::leaf_find(lf, pw::word_key_type(w, 4), 0, 8);
-      REQUIRE(got != nullptr);
-      uint64_t out; std::memcpy(&out, got, 8); return out;
+      auto got = pw::leaf_find(lf, pw::word_key_type(w, 4), 0, 8);
+      REQUIRE(got.data() != nullptr);
+      uint64_t out; std::memcpy(&out, got.data(), 8); return out;
    };
    auto inv_ok = [&] {
       const uint32_t live = pw::leaf_live_bytes(lf, 8);

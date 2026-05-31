@@ -131,8 +131,7 @@ public:
         if (root_ == kNoChild) return {};
         uint32_t kw[kVarlenEncBuf / 4];
         const uint16_t n_u32 = key_bytes_to_u32_(key, kw);
-        const uint8_t* v = node_find_(root_ptr(), word_key_type(kw, size_t(n_u32)), /*depth=*/0);
-        return v ? value_type(v, value_len_) : value_type{};
+        return node_find_(root_ptr(), word_key_type(kw, size_t(n_u32)), /*depth=*/0);
     }
 
     // Remove `key`. Returns true if it was present. Empties tombstone their
@@ -406,7 +405,7 @@ private:
             if (node->type() == node_type::wtree_leaf) {
                 const auto* lf = as_leaf(node);
                 tr.leaf  = static_cast<const void*>(lf);
-                tr.value = leaf_find(lf, key, depth, value_len_);
+                tr.value = leaf_find(lf, key, depth, value_len_).data();
                 return tr;
             }
             const auto* in = as_inner(node);
@@ -443,7 +442,7 @@ private:
             if (!node) return tr;
         }
     }
-    const uint8_t* node_find_(const common_header* node,
+    value_type node_find_(const common_header* node,
                                word_key_type key,
                                uint16_t depth) const noexcept {
         while (true) {
@@ -454,7 +453,7 @@ private:
             const uint32_t q = (depth < key.size()) ? key[depth] : 0u;
             const uint16_t pos = inner_find_branch(in, q);
             node = inner_child(in, pos);
-            if (!node) return nullptr;   // sentinel slot (empty); key absent
+            if (!node) return value_type{};   // sentinel slot (empty); key absent
             __builtin_prefetch(node,                                0, 1);
             __builtin_prefetch(reinterpret_cast<const char*>(node) + kCacheLine, 0, 1);
             // Depth-advance is now decided by the CHILD's self-asserted
@@ -472,7 +471,7 @@ private:
                         // the counter and treat as miss rather than
                         // descend with wrong depth.
                         ++psitri::wtree::g_routing_inconsistency;
-                        return nullptr;
+                        return value_type{};
                     }
                     depth = uint16_t(depth + sub->prefix_len);
                 }
@@ -877,7 +876,7 @@ private:
             leaf_node* lf = as_leaf(node);
             // Read-only presence check first (handles value + radix), so a miss
             // (or absent key) never wastes a COW.
-            if (leaf_find(lf, key, depth, value_len_) == nullptr) return rm::not_found;
+            if (leaf_find(lf, key, depth, value_len_).data() == nullptr) return rm::not_found;
             leaf_node* w     = cow_leaf(lf);            // mutate → make writable (addr stable)
             bool       empty = false;
             const bool ok    = leaf_remove(w, key, depth, value_len_, &empty);
