@@ -1279,6 +1279,51 @@ TEST_CASE("wtree clone_leaf_fresh forks to an independent copy", "[wtree][clone]
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── Snapshot infrastructure (retain root → read view) ──────────────
+//
+// snapshot() retains the root and returns a wtree that reads it. Here we verify
+// the retain/release balance and that the snapshot reads the same data — WITHOUT
+// writing to the live tree between (snapshot isolation UNDER concurrent writes
+// needs shared-mode COW, the next step). A read-only snapshot must add no net
+// live objects once dropped.
+
+TEST_CASE("wtree snapshot reads and balances refcounts", "[wtree][snapshot]")
+{
+   sal_fixture fx("snapshot-basic");
+   const uint64_t base = fx.live_objects();
+   auto read_v = [](std::span<const uint8_t> vv) {
+      uint64_t out = 0; if (vv.size() == 8) std::memcpy(&out, vv.data(), 8); return out;
+   };
+   {
+      wtree t(*fx.ses, 8);
+      std::map<uint32_t, uint64_t> model;
+      for (uint32_t i = 0; i < 200; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         uint64_t v = uint64_t(i) * 1000 + 7;
+         REQUIRE(t.upsert(kview(k, 24), vview(v)));
+         model[i] = v;
+      }
+      {
+         wtree snap = t.snapshot();   // retains root (ref ≥ 2)
+         for (auto& [i, v] : model)
+         {
+            uint8_t k[24]; make_key24(i, k);
+            REQUIRE(read_v(snap.find(kview(k, 24))) == v);   // snapshot reads all
+            REQUIRE(read_v(t.find(kview(k, 24)))    == v);   // live reads all
+         }
+      }   // snapshot dropped → releases its retain
+      // Live tree is intact and still readable after the snapshot is gone.
+      for (auto& [i, v] : model)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(read_v(t.find(kview(k, 24))) == v);
+      }
+   }   // live tree dropped → frees everything
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

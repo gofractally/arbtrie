@@ -42,7 +42,7 @@ public:
     // free-functions (alloc/free/child-deref) can reach it.
     wtree(session_t& session, uint16_t value_len) noexcept
         : _session(&session), value_len_(value_len) {
-        assert(value_len > 0 && value_len <= 255);
+        assert(value_len <= 255);   // 0 ⇒ variable-length mode
     }
     // Non-owning VIEW of an existing tree (shared root) through another session
     // — e.g. a per-thread reader session over a tree built elsewhere. Its
@@ -50,10 +50,35 @@ public:
     // allocator's data; concurrent readers each use their own session.
     wtree(session_t& session, uint16_t value_len, ptr_address root) noexcept
         : _session(&session), root_(root), value_len_(value_len), owns_root_(false) {
-        assert(value_len > 0 && value_len <= 255);
+        assert(value_len <= 255);   // 0 ⇒ variable-length mode
     }
     // Root address of this tree (for opening a reader view from another session).
     ptr_address root() const noexcept { return root_; }
+
+    // Move: transfer the root ownership and neuter the source so its destructor
+    // doesn't double-release. Needed so snapshot() can return a wtree by value.
+    wtree(wtree&& o) noexcept
+        : _session(o._session), root_(o.root_),
+          value_len_(o.value_len_), owns_root_(o.owns_root_) {
+        o.root_      = kNoChild;
+        o.owns_root_ = false;
+    }
+
+    // Take a point-in-time MVCC snapshot: retain the current root (bumping its
+    // refcount to ≥2) and hand back a wtree that reads it. The extra ref both
+    // (a) keeps the old spine alive after the live tree path-copies away from
+    // it, and (b) makes the live writer see the root as shared (ref>1), forcing
+    // copy-on-write to a new root instead of mutating in place. The returned
+    // snapshot OWNS that one retain and releases it on destruction (recursing
+    // through destroy()). Read-only by convention — find() only.
+    wtree snapshot() const noexcept {
+        activate();
+        sal::read_lock lock = _session->lock();
+        if (root_ != kNoChild) _session->retain(root_);
+        wtree snap(*_session, value_len_);   // owning → its dtor release()s the retain
+        snap.root_ = root_;
+        return snap;
+    }
 
     ~wtree() {
         if (!owns_root_) return;                  // views don't free the shared tree
