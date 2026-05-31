@@ -945,6 +945,190 @@ TEST_CASE("wtree raw terminal-in-fat-collision is honest", "[wtree][raw][correct
    fx.wait_for_compactor();
 }
 
+// ── Variable-length values ─────────────────────────────────────────
+//
+// value_region v2 stores a per-entry length, so the SAME key can be
+// re-upserted with values of different sizes (the slot is re-homed to a
+// fresh region on a size change, the old one marked dead).  These tests
+// pin down (a) read-back correctness across resizes and (b) the leaf
+// dead-byte accounting invariant under varlen churn.
+
+namespace
+{
+   // Deterministic value of `n` bytes from a seed (distinct per (seed,len)).
+   std::vector<uint8_t> mkval(uint8_t seed, size_t n)
+   {
+      std::vector<uint8_t> v(n);
+      for (size_t i = 0; i < n; ++i)
+         v[i] = uint8_t(seed * 31u + i * 7u + 1u);
+      return v;
+   }
+   std::span<const uint8_t> sp(const std::vector<uint8_t>& v)
+   {
+      return std::span<const uint8_t>(v.data(), v.size());
+   }
+}  // namespace
+
+TEST_CASE("wtree upsert same key with different value sizes", "[wtree][varlen-value]")
+{
+   sal_fixture fx("varlen-resize");
+   wtree       t(*fx.ses, /*value_len=*/0);   // 0 ⇒ variable-length mode
+
+   uint8_t k[24];
+   make_key24(42, k);
+
+   // Re-upsert the SAME key through a sequence of sizes, verifying each
+   // read-back exactly (length + bytes).  Includes grow, shrink, and the
+   // 0..255 extremes.
+   const std::vector<size_t> sizes = {1, 12, 64, 1, 255, 8, 0, 200, 3};
+   uint8_t seed = 0;
+   for (size_t n : sizes)
+   {
+      const auto v = mkval(++seed, n);
+      REQUIRE(t.upsert(kview(k, 24), sp(v)));
+      auto got = t.find(kview(k, 24));
+      INFO("size=" << n);
+      REQUIRE(got.data() != nullptr);                 // present (even at len 0)
+      REQUIRE(got.size() == n);
+      REQUIRE(std::equal(got.begin(), got.end(), v.begin(), v.end()));
+   }
+
+   // Remove and confirm it is gone; a second remove is a no-op.
+   REQUIRE(t.remove(kview(k, 24)));
+   REQUIRE(t.find(kview(k, 24)).data() == nullptr);
+   REQUIRE_FALSE(t.remove(kview(k, 24)));
+
+   // Many distinct keys, each carrying an independent varlen value; then
+   // resize a subset and re-verify all (no cross-key corruption).
+   constexpr uint32_t M = 300;
+   std::map<uint32_t, std::vector<uint8_t>> model;
+   for (uint32_t i = 0; i < M; ++i)
+   {
+      uint8_t ki[24]; make_key24(1000 + i, ki);
+      auto v = mkval(uint8_t(i), size_t(i % 64));     // sizes 0..63
+      REQUIRE(t.upsert(kview(ki, 24), sp(v)));
+      model[i] = std::move(v);
+   }
+   auto verify_all = [&] {
+      for (const auto& [i, v] : model)
+      {
+         uint8_t ki[24]; make_key24(1000 + i, ki);
+         auto got = t.find(kview(ki, 24));
+         INFO("key i=" << i);
+         REQUIRE(got.size() == v.size());
+         REQUIRE(std::equal(got.begin(), got.end(), v.begin(), v.end()));
+      }
+   };
+   verify_all();
+   // Resize every 7th key to a different length (grow some, shrink others).
+   for (uint32_t i = 0; i < M; i += 7)
+   {
+      uint8_t ki[24]; make_key24(1000 + i, ki);
+      auto v = mkval(uint8_t(i + 128), size_t((i * 5 + 17) % 200));
+      REQUIRE(t.upsert(kview(ki, 24), sp(v)));
+      model[i] = std::move(v);
+   }
+   verify_all();
+
+   fx.wait_for_compactor();
+}
+
+TEST_CASE("wtree varlen leaf dead-byte accounting", "[wtree][varlen-value][leaf-accounting]")
+{
+   namespace pw = psitri::wtree;
+   sal_fixture fx("varlen-accounting");
+   pw::g_wtree_session = fx.ses.get();
+   pw::leaf_node* lf = pw::leaf_alloc();
+   pw::leaf_init(lf);
+
+   // dead_bytes must always equal tail_alloc_pos - live (value_len param to
+   // leaf_live_bytes is ignored now — each region self-describes its length).
+   auto inv_ok = [&] {
+      const uint32_t live = pw::leaf_live_bytes(lf, /*ignored=*/0);
+      return uint32_t(lf->dead_bytes) == uint32_t(lf->tail_alloc_pos) - live;
+   };
+   auto W = [](uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t w[4]) {
+      w[0] = a; w[1] = b; w[2] = c; w[3] = d;
+   };
+
+   // Single key, churned through many sizes — exercises the in-place vs
+   // re-home overwrite paths and the dead accounting after each.
+   uint32_t w[4]; W(7, 11, 13, 17, w);
+   const std::vector<size_t> sizes = {4, 40, 4, 120, 1, 255, 8, 0, 64};
+   uint8_t seed = 0;
+   for (size_t n : sizes)
+   {
+      const auto v = mkval(++seed, n);
+      REQUIRE(pw::leaf_insert(lf, pw::word_key_type(w, 4), 0, sp(v)));
+      auto got = pw::leaf_find(lf, pw::word_key_type(w, 4), 0, 0);
+      INFO("single-key size=" << n);
+      REQUIRE(got.size() == n);
+      REQUIRE(std::equal(got.begin(), got.end(), v.begin(), v.end()));
+      REQUIRE(inv_ok());
+   }
+
+   // Multiple colliding/non-colliding keys with mixed sizes; update + remove
+   // while holding the invariant.  Keys share leading words to force in-leaf
+   // radix collisions (the variable-length collision-split paths).
+   // Modest population that stays well under the 4 KB leaf even with resize
+   // churn (a raw leaf has no split/compaction fallback, and dead bytes are
+   // never reclaimed here — a mid-collision leaf_insert that runs out of heap
+   // legitimately orphans its partial allocation, which would break the
+   // accounting invariant; the real wtree avoids that by splitting).
+   std::map<uint32_t, std::vector<uint8_t>> model;
+   auto key_of = [&](uint32_t i, uint32_t ww[4]) { W(7, 11, 13, 100 + i, ww); };
+   const uint32_t N = 18;
+   for (uint32_t i = 0; i < N; ++i)
+   {
+      uint32_t ww[4]; key_of(i, ww);
+      auto v = mkval(uint8_t(i), size_t((i * 5) % 32));
+      REQUIRE(pw::leaf_insert(lf, pw::word_key_type(ww, 4), 0, sp(v)));
+      model[i] = std::move(v);
+      REQUIRE(inv_ok());
+   }
+   auto verify_all = [&] {
+      for (const auto& [i, v] : model)
+      {
+         uint32_t ww[4]; key_of(i, ww);
+         auto got = pw::leaf_find(lf, pw::word_key_type(ww, 4), 0, 0);
+         INFO("multi-key i=" << i);
+         REQUIRE(got.size() == v.size());
+         REQUIRE(std::equal(got.begin(), got.end(), v.begin(), v.end()));
+      }
+   };
+   verify_all();
+   REQUIRE(inv_ok());
+   // Resize a subset (grow some, shrink others); invariant holds after each.
+   for (uint32_t i = 1; i < N; i += 3)
+   {
+      uint32_t ww[4]; key_of(i, ww);
+      auto v = mkval(uint8_t(i + 200), size_t((i * 3 + 7) % 40));
+      REQUIRE(pw::leaf_insert(lf, pw::word_key_type(ww, 4), 0, sp(v)));
+      model[i] = std::move(v);
+      REQUIRE(inv_ok());
+   }
+   verify_all();
+   // Remove the even-indexed survivors; the rest stay correct, invariant holds.
+   std::vector<uint32_t> removed;
+   for (const auto& [i, v] : model) if (i % 2 == 0) removed.push_back(i);
+   for (uint32_t i : removed)
+   {
+      uint32_t ww[4]; key_of(i, ww);
+      bool empty = false;
+      REQUIRE(pw::leaf_remove(lf, pw::word_key_type(ww, 4), 0, 0, &empty));
+      model.erase(i);
+      REQUIRE(inv_ok());
+   }
+   verify_all();
+   for (uint32_t i : removed)
+   {
+      uint32_t ww[4]; key_of(i, ww);
+      REQUIRE(pw::leaf_find(lf, pw::word_key_type(ww, 4), 0, 0).data() == nullptr);
+   }
+
+   pw::leaf_free(lf);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

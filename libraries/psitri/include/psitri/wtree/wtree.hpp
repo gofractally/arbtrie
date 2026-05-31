@@ -77,7 +77,10 @@ public:
         // insert and freed leaves are reclaimed in step. This is the canonical
         // psitri pattern (tree_ops::upsert: `sal::read_lock lock = _session.lock();`).
         sal::read_lock lock = _session->lock();
-        assert(value.size() == value_len_);
+        // value_len_ == 0 ⇒ variable-length mode (each entry self-describes its
+        // length, 0..255); otherwise enforce the tree's fixed width.
+        assert(value_len_ == 0 || value.size() == value_len_);
+        assert(value.size() <= 255);
         assert(key.size() % 4 == 0);
         assert(key.size() <= kVarlenEncBuf);
         if (root_ == kNoChild) {
