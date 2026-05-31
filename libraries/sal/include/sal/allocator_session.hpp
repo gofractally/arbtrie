@@ -187,6 +187,14 @@ namespace sal
       template <typename T = alloc_header>
       [[nodiscard]] smart_ref<T> get_ref(ptr_address adr) noexcept;
 
+      // Lean borrow: resolve a node's control block to a raw pointer + prefetch,
+      // WITHOUT constructing a smart_ref or retaining the session. Caller must
+      // hold a read_lock for the access window (see wtree). On the evolved SAL
+      // this also feeds the read-cache; that promotion path is deferred to the
+      // unified SAL effort, so this is a plain resolve for now.
+      template <typename T = alloc_header>
+      [[nodiscard]] T* get_ptr(ptr_address adr) noexcept;
+
       inline void prefetch(ptr_address adr) const noexcept;
       inline bool is_read_only(ptr_address adr) const noexcept;
 

@@ -218,6 +218,20 @@ namespace sal
       return smart_ref<T>(get_session_ptr(), ptr, cb, cread);
    }
 
+   // Lean borrow — see declaration. Resolves CB → mmap pointer + prefetches,
+   // no smart_ref / no session retain. (Read-cache feeding deferred to the
+   // unified SAL effort.)
+   template <typename T>
+   [[nodiscard]] T* allocator_session::get_ptr(ptr_address adr) noexcept
+   {
+      assert(adr != null_ptr_address);
+      auto& cb    = _ptr_alloc.get(adr);
+      auto  cread = cb.load(std::memory_order_acquire);
+      auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
+      __builtin_prefetch(ptr, 0, 3);
+      return ptr;
+   }
+
    /// Issue a hardware prefetch for the node at the given address.
    /// Resolves the control block → offset → mmap pointer, then prefetches
    /// the first cache line without constructing a smart_ref or touching

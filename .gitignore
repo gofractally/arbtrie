@@ -17,3 +17,6 @@ mtest
 tfb
 *.csv
 site/
+build-*/
+.test_state/
+*_testdb/

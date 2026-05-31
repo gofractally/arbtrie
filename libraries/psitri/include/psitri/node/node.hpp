@@ -50,13 +50,20 @@ namespace psitri
       inner_prefix,
       leaf,
       value,
-      value_index
+      value_index,
+      // wtree (word-tree) node family — migrated fast_index v4 radix B-tree:
+      // 4-byte/32-bit-word branching radix inner nodes + sorted B-tree leaves
+      // with APGM predictor. See psitri/wtree/.
+      wtree_leaf,
+      wtree_inner,
    };
    inline std::ostream& operator<<(std::ostream& os, node_type t)
    {
-      static const char* names[] = {"inner", "inner_prefix", "leaf", "value", "value_index", "unknown"};
-      auto               idx     = static_cast<size_t>(t) - static_cast<size_t>(node_type::inner);
-      os << (idx < 5 ? names[idx] : names[5]);
+      static const char* names[] = {"inner",      "inner_prefix", "leaf",       "value",
+                                    "value_index", "wtree_leaf",  "wtree_inner", "unknown"};
+      constexpr size_t   n_named  = 7;
+      auto               idx      = static_cast<size_t>(t) - static_cast<size_t>(node_type::inner);
+      os << (idx < n_named ? names[idx] : names[n_named]);
       return os;
    }
 

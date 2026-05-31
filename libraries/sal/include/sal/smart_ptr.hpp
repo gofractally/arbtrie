@@ -426,6 +426,11 @@ namespace sal
       modify_guard<T> modify() noexcept;
       void modify(auto&& update_fn) noexcept(noexcept(update_fn(std::declval<T*>())));
 
+      // True iff a subsequent modify() would copy-on-write (the node is shared
+      // or read-only) instead of mutating in place. Lets callers (e.g. wtree's
+      // apply<>) choose the in-place fast path without speculatively COWing.
+      bool modify_will_copy() const noexcept { return !_asession->can_modify(_cached.loc()); }
+
       friend class allocator_session;
    };
 

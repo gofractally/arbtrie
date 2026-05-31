@@ -183,3 +183,22 @@ if(SQLite3_FOUND)
     )
     set_target_properties(sqlite-arb-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
+
+# ── wtree (word-tree): radix B-tree on SAL — the fast new engine ──────
+# Correctness suite (own Catch2 main) + SAL-backed benches. Links psitri for
+# the SAL stack; wtree itself is header-only in psitri/wtree/.
+add_executable(wtree-tests ../libraries/psitri/tests/wtree_tests.cpp)
+target_link_libraries(wtree-tests PRIVATE psitri Catch2::Catch2WithMain)
+target_include_directories(wtree-tests PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+set_target_properties(wtree-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_test(NAME wtree-tests COMMAND wtree-tests)
+
+add_executable(bench_wtree_sal ../libraries/psitri/tests/bench_wtree_sal.cpp)
+target_link_libraries(bench_wtree_sal PRIVATE psitri)
+target_include_directories(bench_wtree_sal PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+set_target_properties(bench_wtree_sal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(bench_wtree_staged ../libraries/psitri/tests/bench_wtree_staged.cpp)
+target_link_libraries(bench_wtree_staged PRIVATE psitri)
+target_include_directories(bench_wtree_staged PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+set_target_properties(bench_wtree_staged PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
