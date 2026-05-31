@@ -379,10 +379,23 @@ private:
     // ─── upsert_words_: internal entry point with span<u32> key ────
     bool upsert_words_(word_key_type key,
                        value_type value) noexcept {
-        upsert_result r = node_upsert_(root_ptr(), key, /*depth=*/0, value);
+        // If the root is shared with a snapshot (ref>1), the descent will
+        // fork-to-a-new-root (shared mode), leaving the OLD root alive for the
+        // snapshot. The live tree's original ref on the old root must then be
+        // dropped (its ownership moves to the new root). In unique mode the old
+        // root is either kept (same address) or freed by its own split, so no
+        // release here. Captured before the upsert; old_root != new in the
+        // shared case (fork always yields a new address).
+        const ptr_address old_root  = root_;
+        const bool         was_shared =
+            (old_root != kNoChild
+             && wsession().get_ref<sal::alloc_header>(old_root).ref() > 1);
+        upsert_result r =
+            node_upsert_<upsert_mode::unique_upsert>(root_ptr(), key, /*depth=*/0, value);
         // {null,null,0} = drop (heap-tight leaf with no usable structure
         // for promotion).  Surface to caller.
         if (!r.left) return false;
+        if (was_shared) _session->release(old_root);   // drop live's ref on the snapshot's root
         if (!r.right) {
             root_ = r.left->address();
             return true;
@@ -944,12 +957,21 @@ private:
     }
 
     // ─── upsert: dispatch + recursive ─────────────────────────────
+    template <upsert_mode mode>
     upsert_result node_upsert_(common_header* node,
                                 word_key_type key,
                                 uint16_t depth,
                                 value_type value) noexcept {
+        // Per-step unique→shared demotion (psitri upsert_mode): while still
+        // unique, if this node is shared with a live snapshot (ref>1), flip to
+        // shared for it and everything below. In a shared instantiation this
+        // whole block is compiled out (if constexpr) — shared locks the spine
+        // down, no further ref checks, and forces fork-to-new-root.
+        if constexpr (mode.is_unique())
+            if (wsession().get_ref<sal::alloc_header>(node->address()).ref() > 1)
+                return node_upsert_<mode.make_shared()>(node, key, depth, value);
         if (node->type() == node_type::wtree_leaf) {
-            return leaf_upsert(as_leaf(node), key, depth, value);
+            return leaf_upsert<mode>(as_leaf(node), key, depth, value);
         }
         auto* in = as_inner(node);
         const uint32_t q = (depth < key.size()) ? key[depth] : 0u;
@@ -977,6 +999,25 @@ private:
                 delta1 = true;
             }
         }
+        // First shared node on this path: FORK `in` to a private, uniquely-owned
+        // copy (new address) and retain the OFF-PATH siblings so they live in
+        // BOTH the snapshot's old `in` and this new one. The on-path child at
+        // `pos` is deliberately NOT retained — the recursion path-copies it and
+        // the old child stays owned by the snapshot. After this the rest of the
+        // body runs the UNCHANGED unique logic on the private copy: every
+        // cow_inner(in) is a no-op (fresh+unique), and the child always relocates
+        // (new address) so the existing repoint fires. (`child`/its address are
+        // unchanged — the fork copies the child pointers, the child node itself
+        // is untouched.)
+        if constexpr (mode.is_shared()) {
+            in = clone_inner_fresh(in);
+            const uint16_t nk = in->num_keys;
+            for (uint16_t i = 0; i <= nk; ++i) {
+                if (i == pos) continue;
+                const ptr_address ca = inner_child_addr(in, i);
+                if (ca != kNoChild && ca != kSentinelChildAddr) _session->retain(ca);
+            }
+        }
         if (!child) {
             // Sentinel slot from a prior K=1 split — empty range, no
             // child yet.  Allocate a fresh leaf here and insert.
@@ -997,7 +1038,7 @@ private:
         __builtin_prefetch(child,                                              1, 1);
         __builtin_prefetch(reinterpret_cast<const char*>(child) + kCacheLine,  1, 1);
         const ptr_address child_addr = child->address();   // for the no-change skip below
-        upsert_result cr = node_upsert_(child, key, depth, value);
+        upsert_result cr = node_upsert_<mode>(child, key, depth, value);
         if (!cr.left) return { nullptr, nullptr, 0, 0 };   // drop bubbles up
 
         // NOTE: `in` is NOT COW'd up front. In unique mode COW/realloc keep a
@@ -1177,6 +1218,14 @@ private:
             if (cr.left->address() != child_addr) [[unlikely]] {
                 in = cow_inner(in);
                 inner_set_child(in, pos, cr.left);
+                // A changed address with no split means the child FORKED — it was
+                // shared with a snapshot (ref>1) and path-copied to a new node.
+                // In UNIQUE mode `in` owned a real ref on the old child, which we
+                // just stopped pointing at → release it (the snapshot keeps its
+                // own ref). In SHARED mode `in` is itself a fresh clone that never
+                // retained the on-path child, so there's nothing to release here.
+                if constexpr (mode.is_unique())
+                    _session->release(child_addr);
             }
             return upsert_inplace(in);
         }

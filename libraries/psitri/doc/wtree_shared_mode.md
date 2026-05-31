@@ -135,6 +135,23 @@ address).
 
 ---
 
+## STATUS: implemented (steps 1–4, `[wtree][shared]` green)
+
+Done via the eager-clone approach below. `node_upsert_<mode>` / `leaf_upsert<mode>`
+templated on `upsert_mode`; per-step `ref()>1` demotion; eager-clone +
+retain-off-path-siblings (inner) / retain value refs (leaf); `was_shared` root
+release in `upsert_words_`; and the one non-obvious fix surfaced by the leak
+check: a **unique** parent that repoints to a **forked** (shared) child must
+release the old child (`if constexpr (mode.is_unique()) release(child_addr)` in
+the pure-replacement repoint) — in pure unique-no-snapshot runs that branch never
+fires (addresses are stable), so it was never needed before. Snapshot isolation
++ zero-leak verified under heavy overwrite+insert on a multi-level tree.
+
+Open perf note: the per-step demotion constructs a `smart_ref` just to read
+`ref()` on the unique hot path. Correct, but a lighter `ref_of(addr)` peek
+(single relaxed CB load) would avoid the smart_ref build — optimize if the
+baseline bench shows regression.
+
 ## 3. Plan to add shared mode (COW-to-root) — the eager-clone approach
 
 Because the mode **locks to shared from the first shared node downward** (§1),

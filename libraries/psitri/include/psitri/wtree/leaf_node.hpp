@@ -37,6 +37,7 @@
 //             heap: value-regions + radix nodes, grows down from byte 4096
 
 #include "common.hpp"
+#include <psitri/upsert_mode.hpp>
 
 #include <algorithm>
 #include <arm_neon.h>
@@ -946,6 +947,16 @@ inline void leaf_node::retain_children(const sal::allocator_session_ptr& session
 // no release.  Reads the active session via g_wtree_session.
 inline void leaf_retire_value_region_(const value_region* vr) noexcept {
     if (vr->owns_child_ptr()) wsession().release(vr->child_ptr());
+}
+
+// Retain every out-of-line value ref (big/subtree) the leaf owns. Called by the
+// shared-mode eager-clone: the fresh clone and the snapshot's original now both
+// own the refs. Pairs with the overwrite/remove retire-release so the snapshot
+// keeps its values. No-op while values are inline-only.
+inline void leaf_retain_value_refs_(const leaf_node* p) noexcept {
+    leaf_for_each_value_region(p, [](const value_region* vr) {
+        if (vr->owns_child_ptr()) wsession().retain(vr->child_ptr());
+    });
 }
 
 // ─── leaf_insert (forward decl; defined below) ────────────────────
@@ -1920,14 +1931,24 @@ inline size_t g_drop_promote_returned_null    = 0;   // leaf_promote_k1 returned
 //                      { L, R, divider }
 //   leaf full, K==1 → promote: 1-stem leaf becomes sub-inner + 2 sub-
 //                      leaves at depth+1, insert key in the right half.
+template <upsert_mode mode>
 inline upsert_result leaf_upsert(leaf_node* p,
                                    word_key_type key,
                                    uint16_t depth,
                                    std::span<const uint8_t> value) noexcept {
     const uint16_t value_len = uint16_t(value.size());
-    // In-place insert mutates the leaf → make it writable first (COW if the
-    // leaf is in a synced/read-only segment; in-place if unique+writable).
-    p = cow_leaf(p);
+    // Make the leaf writable. UNIQUE: cow_leaf keeps the address (in place if
+    // writable, else SAL relocates the same CB). SHARED: FORK to a fresh-address
+    // private copy and retain its value refs, so the snapshot's old leaf is
+    // untouched. After this, `p` is the node we mutate; in shared mode it is the
+    // private clone, so every leaf_free(p)/split/return-p below disposes of the
+    // CLONE while the original survives for the snapshot.
+    if constexpr (mode.is_shared()) {
+        p = clone_leaf_fresh(p);
+        leaf_retain_value_refs_(p);
+    } else {
+        p = cow_leaf(p);
+    }
     if (leaf_insert(p, key, depth, value)) {
         return upsert_inplace(p);
     }
@@ -2041,7 +2062,10 @@ inline upsert_result leaf_upsert(leaf_node* p,
                 const bool      sub_is_TL  = (qr < inner_div);
                 leaf_node* const sub_target = sub_is_TL ? T_L : T_R;
                 leaf_node* const sub_other  = sub_is_TL ? T_R : T_L;
-                upsert_result sub_r = leaf_upsert(sub_target, key, depth, value);
+                // sub_target is a freshly-allocated private split half →
+                // always UNIQUE (mutate in place; never fork a fresh node).
+                upsert_result sub_r =
+                    leaf_upsert<upsert_mode::unique_upsert>(sub_target, key, depth, value);
                 if (sub_r.left) {
                     const bool       target_was_R = (target == R);
                     leaf_node* const outer_other  = target_was_R ? L : R;

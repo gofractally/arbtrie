@@ -1324,6 +1324,73 @@ TEST_CASE("wtree snapshot reads and balances refcounts", "[wtree][snapshot]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── Snapshot isolation UNDER concurrent writes (shared-mode COW) ────
+//
+// The real test: take a snapshot, then heavily mutate the live tree (overwrite
+// every key + insert as many new ones, forcing shared-mode splits up a
+// multi-level spine). The snapshot must stay frozen at the pre-write state
+// (old values, new keys invisible) while the live tree sees the new world —
+// and refcounts must balance so nothing leaks once both drop.
+
+TEST_CASE("wtree snapshot isolation under writes", "[wtree][snapshot][shared]")
+{
+   sal_fixture fx("snapshot-isolation");
+   const uint64_t base = fx.live_objects();
+   auto read_v = [](std::span<const uint8_t> vv) {
+      uint64_t out = 0; if (vv.size() == 8) std::memcpy(&out, vv.data(), 8); return out;
+   };
+   {
+      wtree          t(*fx.ses, 8);
+      const uint32_t N = 2000;   // multi-level tree (inner nodes + many leaves)
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(t.upsert(kview(k, 24), vview(uint64_t(i) * 10 + 1)));
+      }
+
+      wtree snap = t.snapshot();   // ref>1 on root → subsequent writes fork-to-root
+
+      // Overwrite every original key with a new value, and insert N new keys
+      // (grows the tree → exercises shared-mode splits on the cloned spine).
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(t.upsert(kview(k, 24), vview(uint64_t(i) * 10 + 7'000'000)));
+      }
+      for (uint32_t i = N; i < 2 * N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(t.upsert(kview(k, 24), vview(uint64_t(i) * 10 + 1)));
+      }
+
+      // Snapshot is FROZEN at the pre-write state.
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(read_v(snap.find(kview(k, 24))) == uint64_t(i) * 10 + 1);   // old values
+      }
+      for (uint32_t i = N; i < 2 * N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(snap.find(kview(k, 24)).data() == nullptr);                 // new keys invisible
+      }
+
+      // Live tree sees the new world: overwritten values + the new keys.
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(read_v(t.find(kview(k, 24))) == uint64_t(i) * 10 + 7'000'000);
+      }
+      for (uint32_t i = N; i < 2 * N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(read_v(t.find(kview(k, 24))) == uint64_t(i) * 10 + 1);
+      }
+   }   // snap destroyed first (releases old spine), then t (releases new spine)
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");
