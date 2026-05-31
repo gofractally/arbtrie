@@ -198,6 +198,22 @@ inline inner_node* cow_inner(inner_node* p) noexcept {
     return w;
 }
 
+// Clone an inner to a FRESH ptr_address (new control block), copying the
+// payload. Unlike cow_inner (which preserves the address via a CB move), this
+// FORKS: the original is untouched and stays valid for a snapshot. Used only by
+// the shared-mode upsert path. Children are NOT retained here — the caller
+// retains the off-path siblings it keeps (the on-path child is path-copied).
+// inner_node::copy_to clobbers dst's 12-byte SAL header with src's (right for a
+// COW-move, wrong for a fork), so save/restore dst's header around it.
+inline inner_node* clone_inner_fresh(const inner_node* src) noexcept {
+    inner_node* dst = inner_alloc_sized(src->cap_in_cls, src->address());
+    uint8_t     hdr[sizeof(sal::alloc_header)];
+    std::memcpy(hdr, dst, sizeof(hdr));
+    src->copy_to(dst);
+    std::memcpy(dst, hdr, sizeof(hdr));
+    return dst;
+}
+
 // ─── Capacity ─────────────────────────────────────────────────────
 //
 // Stage 2 (SAL): children are 4-byte ptr_addresses (was u48 raw pointers).

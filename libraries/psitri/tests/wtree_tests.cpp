@@ -1219,6 +1219,66 @@ TEST_CASE("wtree leaf lifecycle releases big/subtree refs", "[wtree][lifecycle]"
    }
 }
 
+// ── Fork-clone primitive (foundation for shared-mode COW-to-root) ───
+//
+// clone_leaf_fresh / clone_inner_fresh fork a node to a NEW ptr_address with
+// copied content (vs cow_*, which preserve the address via a CB move). This is
+// the primitive shared-mode upsert uses so a snapshot's old node survives. Here
+// we prove the leaf fork: new address, identical reads, and INDEPENDENT storage
+// (mutating the clone doesn't touch the original).
+
+TEST_CASE("wtree clone_leaf_fresh forks to an independent copy", "[wtree][clone]")
+{
+   namespace pw = psitri::wtree;
+   sal_fixture fx("clone-leaf");
+   pw::g_wtree_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   pw::leaf_node* src = pw::leaf_alloc();
+   pw::leaf_init(src);
+   std::map<uint32_t, uint64_t> model;
+   for (uint32_t i = 0; i < 12; ++i)
+   {
+      uint32_t w[2] = {0x100u + i, i * 7 + 1};
+      uint64_t v    = uint64_t(i) * 1000 + 1;
+      REQUIRE(pw::leaf_insert(src, pw::word_key_type(w, 2), 0, vview(v)));
+      model[i] = v;
+   }
+
+   pw::leaf_node* dst = pw::clone_leaf_fresh(src);
+   REQUIRE(dst->address() != src->address());     // forked → its own control block
+   REQUIRE(dst->num_keys == src->num_keys);
+
+   // Every key reads back identically from the clone.
+   for (auto& [i, v] : model)
+   {
+      uint32_t w[2] = {0x100u + i, i * 7 + 1};
+      auto g = pw::leaf_find(dst, pw::word_key_type(w, 2), 0, 0);
+      REQUIRE(g.size() == 8);
+      uint64_t out; std::memcpy(&out, g.data(), 8);
+      REQUIRE(out == v);
+   }
+
+   // Mutate the clone; the original must be untouched (independent storage —
+   // the whole point of fork vs the address-preserving cow_leaf).
+   {
+      uint32_t w[2] = {0x100u, 1};   // key i=0
+      uint64_t nv   = 999999;
+      REQUIRE(pw::leaf_insert(dst, pw::word_key_type(w, 2), 0, vview(nv)));
+      auto gs = pw::leaf_find(src, pw::word_key_type(w, 2), 0, 0);
+      auto gd = pw::leaf_find(dst, pw::word_key_type(w, 2), 0, 0);
+      uint64_t os, od; std::memcpy(&os, gs.data(), 8); std::memcpy(&od, gd.data(), 8);
+      REQUIRE(os == model[0]);   // original unchanged
+      REQUIRE(od == 999999);     // clone changed
+   }
+
+   // Inline values own no out-of-line refs → destroy releases nothing; free both.
+   pw::leaf_free(src);
+   pw::leaf_free(dst);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

@@ -301,6 +301,18 @@ inline leaf_node* cow_leaf(leaf_node* p) noexcept {
     return w;
 }
 
+// Clone a leaf to a FRESH ptr_address (new control block), copying the page.
+// Unlike cow_leaf (which preserves the address via a CB move), this FORKS: the
+// original is untouched and stays valid for a snapshot. Used only by shared-mode
+// upsert. leaf_node::copy_to already save/restores dst's SAL header, so no
+// manual fixup. Value refs (big/subtree) are NOT retained here — the caller
+// calls retain_children so both versions own them.
+inline leaf_node* clone_leaf_fresh(const leaf_node* src) noexcept {
+    leaf_node* dst = leaf_alloc(src->address());
+    src->copy_to(dst);
+    return dst;
+}
+
 // ─── Diagnostic counters (single-threaded; reset via setters) ─────
 inline size_t g_leaf_value_hits = 0;
 inline size_t g_leaf_radix_hits = 0;
