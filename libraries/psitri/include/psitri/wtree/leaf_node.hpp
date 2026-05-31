@@ -356,28 +356,43 @@ inline bool offs_is_radix(uint16_t off) noexcept {
     return (off & kRadixTagBit) != 0;
 }
 
-// ─── value-region (heap object) ───────────────────────────────────
+// ─── value-region (heap object) — v2 (MVCC-ready) ─────────────────
 //
-//   [u8 suffix_words] [suffix u32s (suffix_words * 4 bytes)] [value bytes]
+//   [u8 suffix_words] [u8 type_alt] [u8 value_len]
+//   [suffix u32s (suffix_words * 4 bytes)] [value bytes (value_len)]
 //
-// Total size = 1 + suffix_words*4 + value_len.  value_len is tree-wide,
-// known by the caller; not stored per entry.  suffix is stored as the
-// byteswapped u32 representation (same bytes the caller's key_to_u32_
-// produced), so a memcmp against another byteswapped u32 array gives
-// the same ordering as a uint32_t-by-uint32_t compare.
+// Total size = 3 + suffix_words*4 + value_len.  value_len is now stored
+// PER ENTRY (variable-length values), replacing the old tree-wide const.
+// type_alt packs [type:3 | has_alt:1 | ver:4]:
+//   type  — inline_data / null / tomb / big / subtree (big & subtree:
+//           value[] is a 4-byte ptr_address; v1 only writes inline_data)
+//   has_alt — an older-versions chain follows (MVCC; v1: 0)
+//   ver   — index into the leaf version table (MVCC; v1: 0 = current-only)
+// suffix is the byteswapped u32 representation, so memcmp gives u32 order.
 struct value_region {
-    uint8_t  suffix_words;
-    // suffix u32s follow at byte offset 1 (unaligned u32 access via memcpy)
-    // value  bytes follow at byte offset 1 + suffix_words * 4
+    uint8_t  suffix_words;   // +0
+    uint8_t  type_alt;       // +1  [type:3 | has_alt:1 | ver:4]
+    uint8_t  value_len;      // +2  per-entry value length (0..255)
+    // suffix u32s at +3 ; value bytes at +3 + suffix_words*4
 
+    enum vtype : uint8_t { inline_data = 0, null_val = 1, tomb = 2, big = 3, subtree = 4 };
+    uint8_t type()    const noexcept { return type_alt & 0x07; }
+    bool    has_alt() const noexcept { return (type_alt & 0x08) != 0; }
+    uint8_t ver()     const noexcept { return uint8_t(type_alt >> 4); }
+    void    set_type(uint8_t t)  noexcept { type_alt = uint8_t((type_alt & ~0x07) | (t & 0x07)); }
+    void    set_has_alt(bool h)  noexcept { type_alt = uint8_t(h ? (type_alt | 0x08) : (type_alt & ~0x08)); }
+    void    set_ver(uint8_t v)   noexcept { type_alt = uint8_t((type_alt & 0x0f) | (v << 4)); }
+
+    static constexpr uint16_t kHeaderBytes = 3;
     static constexpr uint16_t size_bytes(uint16_t swords, uint16_t vlen) noexcept {
-        return uint16_t(1u + uint32_t(swords) * 4u + vlen);
+        return uint16_t(uint32_t(kHeaderBytes) + uint32_t(swords) * 4u + vlen);
     }
+    uint16_t total_bytes() const noexcept { return size_bytes(suffix_words, value_len); }
     const uint8_t* suffix_bytes() const noexcept {
-        return reinterpret_cast<const uint8_t*>(this) + 1;
+        return reinterpret_cast<const uint8_t*>(this) + kHeaderBytes;
     }
     uint8_t* suffix_bytes() noexcept {
-        return reinterpret_cast<uint8_t*>(this) + 1;
+        return reinterpret_cast<uint8_t*>(this) + kHeaderBytes;
     }
     // Byte view of the suffix.  We DON'T expose a span<uint32_t> here
     // because value_region sits at an arbitrary heap byte offset — the
@@ -390,11 +405,16 @@ struct value_region {
     std::span<uint8_t> suffix() noexcept {
         return std::span(suffix_bytes(), size_t(suffix_words) * 4);
     }
-    const uint8_t* value(uint16_t /*vlen*/) const noexcept {
+    // value(): the param is ignored (kept for call-site compat); the value
+    // pointer is fixed by suffix_words. Length is the stored value_len.
+    const uint8_t* value(uint16_t = 0) const noexcept {
         return suffix_bytes() + size_t(suffix_words) * 4;
     }
-    uint8_t* value(uint16_t /*vlen*/) noexcept {
+    uint8_t* value(uint16_t = 0) noexcept {
         return suffix_bytes() + size_t(suffix_words) * 4;
+    }
+    std::span<const uint8_t> value_span() const noexcept {
+        return std::span(value(), size_t(value_len));
     }
 };
 
