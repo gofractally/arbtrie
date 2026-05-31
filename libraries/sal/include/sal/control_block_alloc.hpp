@@ -312,6 +312,10 @@ namespace sal
 
       std::optional<allocation> try_alloc(ptr_address addr)
       {
+         // Reserved sentinels (null/tombstone/…) are not real addresses; do not
+         // resolve one to a cacheline (it would index far out of bounds).
+         if (is_reserved_ptr_address(addr)) [[unlikely]]
+            return std::nullopt;
          // round down to the nearest 16 element boundary
          uint32_t cl      = *addr & ~uint32_t(0x0f);
          uint32_t flblock = cl / 64;
@@ -363,7 +367,7 @@ namespace sal
       {
          for (auto addr : hint)
          {
-            if (addr == null_ptr_address)
+            if (is_reserved_ptr_address(addr))   // null / tombstone / sentinel — not a hint
                continue;
             if (auto alloc = try_alloc(addr))
                return alloc;

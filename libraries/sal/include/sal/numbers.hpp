@@ -38,4 +38,25 @@ namespace sal
       friend bool operator==(const tree_id&, const tree_id&) noexcept = default;
    };
    static constexpr tree_id null_tree_id{};
+   // Reserved high ptr_address range for application sentinels (null, tombstones,
+   // transient promote markers, …). The control-block allocator hands out indices
+   // from 0 up, so it can only collide with this range after ~4.3B live control
+   // blocks (impossible in practice). SAL treats any value in the range as a
+   // non-address: the alloc-hint path SKIPS it instead of resolving it to a
+   // (wildly out-of-bounds) cacheline, and the deref/prefetch helpers reject it —
+   // so a pointer column that doubles as an alloc hint can safely hold sentinels.
+   static constexpr uint32_t    reserved_ptr_address_count = 16;
+   static constexpr ptr_address first_reserved_ptr_address =
+       ptr_address(uint32_t(-1) - (reserved_ptr_address_count - 1));   // 0xFFFFFFF0
+   inline constexpr bool is_reserved_ptr_address(ptr_address a) noexcept
+   {
+      return *a >= *first_reserved_ptr_address;
+   }
+
+   /// Opaque 64-bit payload published with each root. SAL stores it
+   /// atomically alongside the root_object_number; the user chooses the
+   /// encoding (psitri packs root_addr+ver_addr into it). SAL never
+   /// inspects the bits.
+   using root_payload                              = std::uint64_t;
+   inline constexpr root_payload null_root_payload = 0ull;
 }  // namespace sal
