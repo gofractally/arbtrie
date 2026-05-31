@@ -209,3 +209,11 @@ add_executable(bench_sal_dump_race ../libraries/psitri/tests/bench_sal_dump_race
 target_link_libraries(bench_sal_dump_race PRIVATE psitri Threads::Threads)
 target_include_directories(bench_sal_dump_race PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
 set_target_properties(bench_sal_dump_race PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# bench_arbtrie_vs_wtree — apples-to-apples baseline: stable arbtrie engine vs
+# wtree, same data + same query order, insert-time vs query-time.
+add_executable(bench_arbtrie_vs_wtree ../libraries/psitri/tests/bench_arbtrie_vs_wtree.cpp)
+target_link_libraries(bench_arbtrie_vs_wtree PRIVATE psitri)
+target_include_directories(bench_arbtrie_vs_wtree PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_definitions(bench_arbtrie_vs_wtree PUBLIC XXH_INLINE_ALL)
+set_target_properties(bench_arbtrie_vs_wtree PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
