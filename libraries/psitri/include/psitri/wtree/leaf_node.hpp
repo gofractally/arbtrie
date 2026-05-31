@@ -226,6 +226,20 @@ struct leaf_node : public node {
                         + ucc::round_up_multiple<64>(size_t(tail_alloc_pos)));
     }
     void compact_to(sal::alloc_header* dst) const noexcept { copy_to(dst); }
+
+    // ── Lifecycle over out-of-line value refs (big / subtree) ─────────
+    // A value_region of type big/subtree owns a single ptr_address stored in
+    // its value bytes.  These walk every reachable value_region (current
+    // versions; the alt/history chain is added in §4 — STUBBED here) and:
+    //   destroy()         — release each owned ref (SAL final-release hook).
+    //   visit_children()  — report each owned ref (compactor relocation walk).
+    //   retain_children() — retain each owned ref (wtree's MVCC share point;
+    //                       NOT a SAL hook — copy_to stays byte-only).
+    // Defined after the value_region / radix walk helpers below.  Inline-value
+    // leaves carry no refs, so all three are no-ops until big/subtree land.
+    void destroy(const sal::allocator_session_ptr& session) const noexcept;
+    void visit_children(const std::function<void(sal::ptr_address)>& v) const noexcept;
+    void retain_children(const sal::allocator_session_ptr& session) const noexcept;
 };
 static_assert(sizeof(leaf_node) == 28, "leaf_node header must be 28 B");
 static_assert(offsetof(leaf_node, tail_alloc_pos)   == 12);
@@ -415,6 +429,17 @@ struct value_region {
     }
     std::span<const uint8_t> value_span() const noexcept {
         return std::span(value(), size_t(value_len));
+    }
+    // big/subtree carry a single 4-byte ptr_address in their value bytes
+    // (value_len == 4).  These let the lifecycle walk find owned refs.
+    bool owns_child_ptr() const noexcept {
+        const uint8_t t = type();
+        return t == big || t == subtree;
+    }
+    sal::ptr_address child_ptr() const noexcept {
+        sal::ptr_address a;
+        std::memcpy(&a, value(), sizeof(a));
+        return a;
     }
 };
 
@@ -854,6 +879,63 @@ inline uint32_t leaf_live_bytes(const leaf_node* p, uint16_t value_len) noexcept
     return sum;
 }
 
+// ─── value_region walk (lifecycle / GC) ───────────────────────────
+// Visit every reachable value_region in the leaf, recursing the in-leaf radix
+// the same way leaf_subgraph_bytes_ does (terminal + each live sub-slot).  fn
+// is invoked with (const value_region*).  CURRENT versions only — the alt/
+// history chain walk is added in §4 (STUB: every value_region here is the
+// single current version).
+template <typename F>
+inline void leaf_for_each_value_region_(const leaf_node* p, uint16_t off_tagged,
+                                        F& fn) noexcept {
+    if (!offs_is_radix(off_tagged)) {
+        fn(reinterpret_cast<const value_region*>(leaf_at(p, off_tagged & kRadixOffMask)));
+        return;
+    }
+    const auto* rn = reinterpret_cast<const radix_node*>(leaf_at(p, off_tagged & kRadixOffMask));
+    if (rn->has_term() && rn->terminal_off() != kLeafOffSentinel)
+        leaf_for_each_value_region_(p, rn->terminal_off(), fn);
+    const uint8_t   n  = rn->n_entries();
+    const uint16_t* os = rn->offs();
+    for (uint8_t i = 0; i < n; ++i)
+        if (os[i] != kLeafOffSentinel)
+            leaf_for_each_value_region_(p, os[i], fn);
+}
+template <typename F>
+inline void leaf_for_each_value_region(const leaf_node* p, F&& fn) noexcept {
+    const uint16_t* offs = leaf_offs(p);
+    for (uint16_t i = 0; i < p->num_keys; ++i)
+        if (offs[i] != kLeafOffSentinel)
+            leaf_for_each_value_region_(p, offs[i], fn);
+}
+
+// ── Lifecycle method definitions (declared in struct leaf_node) ───
+inline void leaf_node::destroy(const sal::allocator_session_ptr& session) const noexcept {
+    leaf_for_each_value_region(this, [&](const value_region* vr) {
+        if (vr->owns_child_ptr()) session->release(vr->child_ptr());
+    });
+}
+inline void leaf_node::visit_children(
+    const std::function<void(sal::ptr_address)>& v) const noexcept {
+    leaf_for_each_value_region(this, [&](const value_region* vr) {
+        if (vr->owns_child_ptr()) v(vr->child_ptr());
+    });
+}
+inline void leaf_node::retain_children(const sal::allocator_session_ptr& session) const noexcept {
+    leaf_for_each_value_region(this, [&](const value_region* vr) {
+        if (vr->owns_child_ptr()) session->retain(vr->child_ptr());
+    });
+}
+
+// Release the out-of-line ref a value_region owns (big/subtree) just before its
+// heap space is abandoned (overwrite-replace / remove / prune).  No-op for
+// inline/null/tomb.  NOT called on collision re-placement, where the value
+// bytes (and thus the ref) are MOVED to a fresh region — ownership transfers,
+// no release.  Reads the active session via g_wtree_session.
+inline void leaf_retire_value_region_(const value_region* vr) noexcept {
+    if (vr->owns_child_ptr()) wsession().release(vr->child_ptr());
+}
+
 // ─── leaf_insert (forward decl; defined below) ────────────────────
 //
 // Returns:
@@ -969,6 +1051,13 @@ inline uint16_t leaf_value_overwrite(leaf_node* p, uint16_t cur_off,
     auto*          vr      = reinterpret_cast<value_region*>(leaf_at(p, cur_off));
     const uint16_t new_len = uint16_t(value.size());
     if (vr->value_len == new_len) {
+        // In-place patch.  leaf_value_overwrite only ever writes INLINE bytes,
+        // so it must not silently overwrite a big/subtree ptr while leaving the
+        // type tag set (the bytes would later be misread as a live ptr).  Once
+        // big-typed writes land they need a dedicated path that releases the old
+        // ref and rewrites the type; this assert is the tripwire for that.
+        assert(!vr->owns_child_ptr()
+               && "big/subtree in-place overwrite needs type handling (§ later)");
         std::memcpy(vr->value(), value.data(), new_len);
         return cur_off;                       // in place; slot unchanged
     }
@@ -980,11 +1069,15 @@ inline uint16_t leaf_value_overwrite(leaf_node* p, uint16_t cur_off,
     assert(size_t(swords) * 4 <= sizeof(suf_buf));
     if (swords > 0) std::memcpy(suf_buf, vr->suffix_bytes(), size_t(swords) * 4);
     const uint16_t noff = leaf_heap_alloc(p, value_region::size_bytes(swords, new_len));
-    if (noff == kLeafOffSentinel) return kLeafOffSentinel;
+    if (noff == kLeafOffSentinel) return kLeafOffSentinel;   // old intact → no drop
     auto* nvr = reinterpret_cast<value_region*>(leaf_at(p, noff));
     nvr->suffix_words = swords; nvr->value_len = uint8_t(new_len); nvr->type_alt = 0;
     if (swords > 0) std::memcpy(nvr->suffix_bytes(), suf_buf, size_t(swords) * 4);
     std::memcpy(nvr->value(), value.data(), new_len);
+    // Old region is now abandoned and its value REPLACED (not moved) → drop any
+    // ref it owned, then mark its bytes dead.  vr is still valid (heap alloc
+    // bump-allocates; existing objects don't move).
+    leaf_retire_value_region_(vr);
     leaf_add_dead(p, old_total);
     return noff;
 }
@@ -2080,6 +2173,7 @@ inline bool leaf_remove(leaf_node* p, word_key_type key, uint16_t depth,
             (!suffix.empty() && std::memcmp(vr->suffix_bytes(), suffix.data(),
                                             suffix.size_bytes()) != 0))
             return false;                       // suffix mismatch → not present
+        leaf_retire_value_region_(vr);          // drop owned big/subtree ref
         leaf_add_dead(p, vr->total_bytes());
         drop_stem = true;
     }
@@ -2126,7 +2220,9 @@ inline bool radix_remove(leaf_node* p, uint16_t root_off, word_key_type key,
     if (consumed >= key.size()) {
         const uint16_t t = rn->terminal_off();
         if (t == kLeafOffSentinel) return false;
-        leaf_add_dead(p, reinterpret_cast<const value_region*>(leaf_at(p, t))->total_bytes());
+        const auto* tvr = reinterpret_cast<const value_region*>(leaf_at(p, t));
+        leaf_retire_value_region_(tvr);         // drop owned big/subtree ref
+        leaf_add_dead(p, tvr->total_bytes());
         rn->set_terminal_off(kLeafOffSentinel);
         node_dead_if_empty();
         return true;
@@ -2156,6 +2252,7 @@ inline bool radix_remove(leaf_node* p, uint16_t root_off, word_key_type key,
             (!suffix.empty() && std::memcmp(vr->suffix_bytes(), suffix.data(),
                                             suffix.size_bytes()) != 0))
             return false;
+        leaf_retire_value_region_(vr);          // drop owned big/subtree ref
         leaf_add_dead(p, vr->total_bytes());
     }
 

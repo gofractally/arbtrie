@@ -1129,6 +1129,96 @@ TEST_CASE("wtree varlen leaf dead-byte accounting", "[wtree][varlen-value][leaf-
    pw::leaf_free(lf);
 }
 
+// ── Node lifecycle over out-of-line value refs (big / subtree) ──────
+//
+// No write path produces big/subtree values yet, so these synthesize one by
+// hand: insert a 4-byte inline value, then patch its value_region's type to
+// `big` and write a live child node's ptr_address into the value bytes. That
+// exercises the destroy / visit_children / retain_children walk for real
+// (release the child on free, report it to the compactor, retain it at a share
+// point) — the foundation big values and subtrees will sit on.
+
+TEST_CASE("wtree leaf lifecycle releases big/subtree refs", "[wtree][lifecycle]")
+{
+   namespace pw = psitri::wtree;
+   sal_fixture fx("lifecycle");
+   pw::g_wtree_session = fx.ses.get();
+
+   // ── single-key big value: visit, retain, destroy ──
+   {
+      const uint64_t base = fx.live_objects();
+      pw::leaf_node* parent = pw::leaf_alloc();
+      pw::leaf_init(parent);
+      uint32_t w[1]  = {0xABCD};
+      uint8_t  v4[4] = {1, 2, 3, 4};
+      REQUIRE(pw::leaf_insert(parent, pw::word_key_type(w, 1), 0,
+                              std::span<const uint8_t>(v4, 4)));
+      pw::leaf_node* child = pw::leaf_alloc();   // ref 1, absorbed by the big slot
+      pw::leaf_init(child);
+      const sal::ptr_address child_addr = child->address();
+
+      // Patch the only (swords==0) value_region into a big → child.
+      const uint16_t off = pw::leaf_offs(parent)[0];
+      REQUIRE(!pw::offs_is_radix(off));
+      auto* vr = reinterpret_cast<pw::value_region*>(pw::leaf_at(parent, off));
+      REQUIRE(vr->suffix_words == 0);
+      REQUIRE(vr->value_len == 4);
+      vr->set_type(pw::value_region::big);
+      std::memcpy(vr->value(), &child_addr, sizeof(child_addr));
+
+      // visit_children reports exactly the child.
+      std::vector<sal::ptr_address> seen;
+      parent->visit_children([&](sal::ptr_address a) { seen.push_back(a); });
+      REQUIRE(seen.size() == 1);
+      REQUIRE(seen[0] == child_addr);
+
+      // retain_children bumps the child so it survives the parent's destroy.
+      parent->retain_children(fx.ses);   // child ref 1 → 2
+      pw::leaf_free(parent);             // destroy → release child (2 → 1)
+      fx.ses->release(child_addr);       // drop our retain (1 → 0) → freed
+      fx.wait_for_compactor();
+      REQUIRE(fx.live_objects() == base);
+   }
+
+   // ── big value buried in an in-leaf radix: recursion + destroy ──
+   {
+      const uint64_t base = fx.live_objects();
+      pw::leaf_node* parent = pw::leaf_alloc();
+      pw::leaf_init(parent);
+      auto key_of = [](uint32_t i, uint32_t w[4]) { w[0]=5; w[1]=6; w[2]=7; w[3]=100+i; };
+      for (uint32_t i = 0; i < 3; ++i)   // ≥2 colliding keys → shared-prefix radix
+      {
+         uint32_t w[4]; key_of(i, w);
+         uint8_t  v4[4] = {uint8_t(i), 0, 0, 0};
+         REQUIRE(pw::leaf_insert(parent, pw::word_key_type(w, 4), 0,
+                                 std::span<const uint8_t>(v4, 4)));
+      }
+      pw::leaf_node* child = pw::leaf_alloc();
+      pw::leaf_init(child);
+      const sal::ptr_address child_addr = child->address();
+
+      // Patch key i=1's deep value_region (swords==0 after collision) to big.
+      uint32_t w1[4]; key_of(1, w1);
+      auto got = pw::leaf_find(parent, pw::word_key_type(w1, 4), 0, 0);
+      REQUIRE(got.size() == 4);
+      auto* vr = reinterpret_cast<pw::value_region*>(
+          const_cast<uint8_t*>(got.data()) - pw::value_region::kHeaderBytes);
+      REQUIRE(vr->suffix_words == 0);
+      vr->set_type(pw::value_region::big);
+      std::memcpy(vr->value(), &child_addr, sizeof(child_addr));
+
+      std::vector<sal::ptr_address> seen;
+      parent->visit_children([&](sal::ptr_address a) { seen.push_back(a); });
+      REQUIRE(seen.size() == 1);
+      REQUIRE(seen[0] == child_addr);
+
+      // destroy (via free) must recurse the radix and release the child.
+      pw::leaf_free(parent);
+      fx.wait_for_compactor();
+      REQUIRE(fx.live_objects() == base);
+   }
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

@@ -208,8 +208,11 @@ SAL. The writer/compactor drops history below the floor on the rebuild/clone.
 1. SAL reserved-ptr-range (port `29e7f48`). [foundation]
 2. value_region v2 + drop global `value_len_` + single-version fast path
    (`ver=0`, `has_alt=0`). [no behavior change for non-MVCC use]
-3. Leaf `destroy`/`visit_children`/`retain_branches` over current (+ stub history);
-   `copy_to` untouched. [lifecycle correctness]
+3. ✅ Leaf `destroy`/`visit_children`/`retain_children` over current (history
+   STUBBED — current versions only); `copy_to` untouched; per-site
+   `leaf_retire_value_region_` release at overwrite-replace / remove drop sites.
+   [lifecycle correctness] — done, `[wtree][lifecycle]` test synthesizes a `big`
+   value and verifies release/visit/retain through the recursive radix walk.
 4. Leaf version table + alt chain + read-version-select + prune-on-rebuild.
 5. `kTombstone` + three-way inner routing.
 6. Inner `branch_meta` column + per-inner version table + history heap +
