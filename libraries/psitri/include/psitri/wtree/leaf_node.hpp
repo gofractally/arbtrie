@@ -1932,22 +1932,24 @@ inline size_t g_drop_promote_returned_null    = 0;   // leaf_promote_k1 returned
 //   leaf full, K==1 → promote: 1-stem leaf becomes sub-inner + 2 sub-
 //                      leaves at depth+1, insert key in the right half.
 template <upsert_mode mode>
-inline upsert_result leaf_upsert(leaf_node* p,
+inline upsert_result leaf_upsert(sal::smart_ref<leaf_node>& lref,
                                    word_key_type key,
                                    uint16_t depth,
                                    std::span<const uint8_t> value) noexcept {
     const uint16_t value_len = uint16_t(value.size());
-    // Make the leaf writable. UNIQUE: cow_leaf keeps the address (in place if
-    // writable, else SAL relocates the same CB). SHARED: FORK to a fresh-address
+    // Make the leaf writable. UNIQUE: modify() through the THREADED smart_ref —
+    // reuses the fetch the caller already made (in place if writable, else SAL
+    // relocates the same CB, keeping the address). SHARED: FORK to a fresh-address
     // private copy and retain its value refs, so the snapshot's old leaf is
     // untouched. After this, `p` is the node we mutate; in shared mode it is the
     // private clone, so every leaf_free(p)/split/return-p below disposes of the
     // CLONE while the original survives for the snapshot.
+    leaf_node* p;
     if constexpr (mode.is_shared()) {
-        p = clone_leaf_fresh(p);
+        p = clone_leaf_fresh(lref.obj());
         leaf_retain_value_refs_(p);
     } else {
-        p = cow_leaf(p);
+        lref.modify([&](leaf_node* n) { p = n; });
     }
     if (leaf_insert(p, key, depth, value)) {
         return upsert_inplace(p);
@@ -2064,8 +2066,9 @@ inline upsert_result leaf_upsert(leaf_node* p,
                 leaf_node* const sub_other  = sub_is_TL ? T_R : T_L;
                 // sub_target is a freshly-allocated private split half →
                 // always UNIQUE (mutate in place; never fork a fresh node).
+                auto sref = wsession().get_ref<leaf_node>(sub_target->address());
                 upsert_result sub_r =
-                    leaf_upsert<upsert_mode::unique_upsert>(sub_target, key, depth, value);
+                    leaf_upsert<upsert_mode::unique_upsert>(sref, key, depth, value);
                 if (sub_r.left) {
                     const bool       target_was_R = (target == R);
                     leaf_node* const outer_other  = target_was_R ? L : R;

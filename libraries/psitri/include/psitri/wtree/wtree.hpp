@@ -386,12 +386,13 @@ private:
         // root is either kept (same address) or freed by its own split, so no
         // release here. Captured before the upsert; old_root != new in the
         // shared case (fork always yields a new address).
-        const ptr_address old_root  = root_;
-        const bool         was_shared =
-            (old_root != kNoChild
-             && wsession().get_ref<sal::alloc_header>(old_root).ref() > 1);
+        const ptr_address old_root = root_;
+        // Fetch the root's smart_ref once; reuse it for the was_shared test AND
+        // as the threaded ref into the descent (no separate fetch).
+        auto       rref       = wsession().get_ref<sal::alloc_header>(old_root);
+        const bool was_shared = (rref.ref() > 1);
         upsert_result r =
-            node_upsert_<upsert_mode::unique_upsert>(root_ptr(), key, /*depth=*/0, value);
+            node_upsert_<upsert_mode::unique_upsert>(rref, key, /*depth=*/0, value);
         // {null,null,0} = drop (heap-tight leaf with no usable structure
         // for promotion).  Surface to caller.
         if (!r.left) return false;
@@ -957,23 +958,42 @@ private:
     }
 
     // ─── upsert: dispatch + recursive ─────────────────────────────
+    // Make `in` writable for in-place mutation. UNIQUE: modify() through the
+    // THREADED smart_ref — reuses the fetch (CB-move keeps the address, updates
+    // nref). SHARED: `in` is already a fresh private clone (eager-clone), so
+    // there's nothing to do. The dead branch is if-constexpr'd away.
     template <upsert_mode mode>
-    upsert_result node_upsert_(psitri::node* node,
+    inner_node* writable_inner_(sal::smart_ref<sal::alloc_header>& nref,
+                                inner_node* in) noexcept {
+        if constexpr (mode.is_unique()) {
+            inner_node* w = in;
+            nref.as<inner_node>().modify([&](inner_node* n) { w = n; });
+            return w;
+        } else {
+            return in;
+        }
+    }
+
+    template <upsert_mode mode>
+    upsert_result node_upsert_(sal::smart_ref<sal::alloc_header>& nref,
                                 word_key_type key,
                                 uint16_t depth,
                                 value_type value) noexcept {
-        // Per-step unique→shared demotion (psitri upsert_mode): while still
-        // unique, if this node is shared with a live snapshot (ref>1), flip to
-        // shared for it and everything below. In a shared instantiation this
-        // whole block is compiled out (if constexpr) — shared locks the spine
-        // down, no further ref checks, and forces fork-to-new-root.
+        // Per-step unique→shared demotion (psitri upsert_mode): read ref() from
+        // the THREADED smart_ref — no throwaway fetch. Once shared, this whole
+        // block is compiled out (if constexpr): shared locks the spine down and
+        // forces fork-to-new-root.
         if constexpr (mode.is_unique())
-            if (wsession().get_ref<sal::alloc_header>(node->address()).ref() > 1)
-                return node_upsert_<mode.make_shared()>(node, key, depth, value);
+            if (nref.ref() > 1)
+                return node_upsert_<mode.make_shared()>(nref, key, depth, value);
+        // Raw working view of the threaded node (nref carries the ref/type; the
+        // body mutates through `node`/`in`, COWs through nref via writable_inner_).
+        psitri::node* node =
+            const_cast<psitri::node*>(reinterpret_cast<const psitri::node*>(nref.obj()));
         if (node->type() == node_type::wtree_leaf) {
-            return leaf_upsert<mode>(as_leaf(node), key, depth, value);
+            return leaf_upsert<mode>(nref.as<leaf_node>(), key, depth, value);
         }
-        auto* in = as_inner(node);
+        inner_node* in = as_inner(node);
         const uint32_t q = (depth < key.size()) ? key[depth] : 0u;
         const uint16_t pos = inner_find_branch(in, q);
         psitri::node* child = inner_child(in, pos);
@@ -1030,7 +1050,7 @@ private:
                 leaf_free(lf);
                 return { nullptr, nullptr, 0, 0 };
             }
-            in = cow_inner(in);   // about to mutate in place → make writable
+            in = writable_inner_<mode>(nref, in);   // about to mutate in place → make writable
             inner_set_child(in, pos, as_header(lf));
             return upsert_inplace(in);
         }
@@ -1038,7 +1058,10 @@ private:
         __builtin_prefetch(child,                                              1, 1);
         __builtin_prefetch(reinterpret_cast<const char*>(child) + kCacheLine,  1, 1);
         const ptr_address child_addr = child->address();   // for the no-change skip below
-        upsert_result cr = node_upsert_<mode>(child, key, depth, value);
+        // Fetch the child's smart_ref ONCE and thread it down: the child's
+        // demotion ref() and (unique) modify() both reuse this single fetch.
+        auto cref = wsession().get_ref<sal::alloc_header>(child_addr);
+        upsert_result cr = node_upsert_<mode>(cref, key, depth, value);
         if (!cr.left) return { nullptr, nullptr, 0, 0 };   // drop bubbles up
 
         // NOTE: `in` is NOT COW'd up front. In unique mode COW/realloc keep a
@@ -1100,7 +1123,7 @@ private:
             container->prefix_len  = child_prefix_len;
             container->prefix_data = child_prefix_data;
             (void)inner_rebuild_corrections(container);
-            in = cow_inner(in);   // repointing child[pos] → make `in` writable
+            in = writable_inner_<mode>(nref, in);   // repointing child[pos] → make `in` writable
             inner_set_child(in, pos, as_header(container));
             return upsert_inplace(in);
         }
@@ -1216,7 +1239,7 @@ private:
             // already correct: skip the COW + write entirely (the win). Only if
             // the child actually relocated do we COW `in` and repoint the slot.
             if (cr.left->address() != child_addr) [[unlikely]] {
-                in = cow_inner(in);
+                in = writable_inner_<mode>(nref, in);
                 inner_set_child(in, pos, cr.left);
                 // A changed address with no split means the child FORKED — it was
                 // shared with a snapshot (ref>1) and path-copied to a new node.
