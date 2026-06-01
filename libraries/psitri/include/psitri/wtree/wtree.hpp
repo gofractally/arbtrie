@@ -6,7 +6,7 @@
 // Tree structure:
 //   - leaves: leaf_node (4 KB only, stems + radix-per-stem + value-region)
 //   - inner:  inner_node (4 KB → 64 KB, dividers + child pointers)
-//   - both share common_header at byte 0 → dispatch via header.type()
+//   - both share psitri::node at byte 0 → dispatch via header.type()
 //
 // upsert pattern (one function per level, same shape):
 //
@@ -184,7 +184,7 @@ public:
         // Fold a chain of single-child B-tree inners at the root back down —
         // ultimately to the single leaf the tree started from.
         while (root_ != kNoChild) {
-            common_header* rt = root_ptr();
+            psitri::node* rt = root_ptr();
             if (rt->type() != node_type::wtree_inner) break;
             inner_node* ri = as_inner(rt);
             if (ri->prefix_len != 0 || ri->num_keys != 0) break;
@@ -250,7 +250,7 @@ public:
         if (root_ != kNoChild) structure_walk_(root_ptr(), seen, r);
         return r;
     }
-    void structure_walk_(common_header* node, std::unordered_set<uint32_t>& seen,
+    void structure_walk_(psitri::node* node, std::unordered_set<uint32_t>& seen,
                          structure_report& r) const noexcept {
         if (!node) return;
         if (!seen.insert(uint32_t(*node->address())).second) { r.tree = r.ok = false; return; }
@@ -279,7 +279,7 @@ public:
         activate();
         sal::read_lock lock = _session->lock();
         size_t d = 0;
-        const common_header* n = root_ptr();
+        const psitri::node* n = root_ptr();
         while (n && n->type() == node_type::wtree_inner) {
             ++d;
             n = inner_child(as_inner(n), 0);
@@ -314,7 +314,7 @@ private:
 
     // Deref the root to a live pointer (nullptr if empty). Within an op the
     // read_lock keeps it valid.
-    common_header* root_ptr() const noexcept {
+    psitri::node* root_ptr() const noexcept {
         return root_ == kNoChild ? nullptr : wderef<node>(root_);
     }
 
@@ -324,11 +324,11 @@ private:
     // addresses, so this is safe even when nodes are synced/read-only —
     // unlike a manual neuter-based walk, whose inner_free_moved writes
     // num_keys=0 into mprotected pages (SIGBUS).
-    void free_subtree_(common_header* node) noexcept {
+    void free_subtree_(psitri::node* node) noexcept {
         if (node) _session->release(node->address());
     }
 
-    static void verify_invariant_walk_(const common_header* node, invariant_report& r) noexcept {
+    static void verify_invariant_walk_(const psitri::node* node, invariant_report& r) noexcept {
         if (!node) return;
         if (node->type() != node_type::wtree_inner) return;
         const auto* in = as_inner(node);
@@ -336,7 +336,7 @@ private:
         for (uint16_t pos = 1; pos < in->num_keys; ++pos) {
             if (stems[pos] - stems[pos - 1] == 1u) {
                 ++r.delta1_pairs;
-                common_header* child = inner_child(in, pos);
+                psitri::node* child = inner_child(in, pos);
                 if (!child) { ++r.null_in_delta1; continue; }
                 if (child->type() == node_type::wtree_leaf) ++r.leaf_violations;
             }
@@ -346,7 +346,7 @@ private:
         }
     }
 
-    static void count_pages_(const common_header* node, page_counts& c) noexcept {
+    static void count_pages_(const psitri::node* node, page_counts& c) noexcept {
         if (!node) return;
         switch (node->type()) {
             case node_type::wtree_leaf: ++c.leaves; return;
@@ -438,7 +438,7 @@ private:
     // create a delta=1 pair MUST trigger the same promotion on the
     // affected child to maintain the invariant — that enforcement is
     // not yet wired (TODO; see the K=1 leaf-split path).
-    find_trace node_find_trace_(const common_header* node,
+    find_trace node_find_trace_(const psitri::node* node,
                                   word_key_type key,
                                   uint16_t depth) const noexcept {
         find_trace tr;
@@ -454,7 +454,7 @@ private:
             const uint16_t pos = inner_find_branch(in, q);
             const uint32_t* stems = inner_stems(in);
             const uint16_t depth_in = depth;
-            common_header* nxt = inner_child(in, pos);
+            psitri::node* nxt = inner_child(in, pos);
             bool adv = false;
             // Child-side prefix decides depth-advance now (was: parent's
             // delta=1 stem pair).  Routing invariant: q must equal the
@@ -483,7 +483,7 @@ private:
             if (!node) return tr;
         }
     }
-    value_type node_find_(const common_header* node,
+    value_type node_find_(const psitri::node* node,
                                word_key_type key,
                                uint16_t depth) const noexcept {
         while (true) {
@@ -570,7 +570,7 @@ private:
                                   uint16_t pos,
                                   uint16_t n_stems,
                                   const uint32_t* repl_stems,
-                                  common_header* const* repl_children) noexcept {
+                                  psitri::node* const* repl_children) noexcept {
         const uint16_t K     = in->num_keys;
         const uint16_t K_new = uint16_t(K + n_stems);
 
@@ -661,7 +661,7 @@ private:
                               uint16_t mk_start, uint16_t n,
                               uint16_t pos, uint16_t n_stems,
                               const uint32_t* repl_stems,
-                              common_header* const* repl_children,
+                              psitri::node* const* repl_children,
                               const uint32_t* src_st, const uint8_t* src_ch) noexcept {
         // Source mapping (merged → original):
         //   stems:    [0, pos) → src_st[0..pos-1]
@@ -691,7 +691,7 @@ private:
             if (mc < pos) {
                 std::memcpy(&a, src_ch + size_t(mc) * kInnerChildBytes, sizeof(a));
             } else if (mc <= pos + n_stems) {
-                common_header* rc = repl_children[mc - pos];
+                psitri::node* rc = repl_children[mc - pos];
                 a = rc ? rc->address() : kNoChild;
             } else {
                 std::memcpy(&a, src_ch + size_t(mc - n_stems) * kInnerChildBytes, sizeof(a));
@@ -738,7 +738,7 @@ private:
     // Returns upsert_inplace if the page absorbed the 2 new stems (with
     // possible grow), or upsert_split if a B-tree split was required.
     upsert_result absorb_k1_promote_(inner_node* in, uint16_t pos,
-                                       uint32_t X, common_header* new_inner,
+                                       uint32_t X, psitri::node* new_inner,
                                        uint32_t Xp1) noexcept {
         const uint16_t vl = value_len_;
         // Try the simple path first: kill old leaf, insert both stems.
@@ -802,7 +802,7 @@ private:
     }
     // Variant that ALSO preserves the X-at-keep_pos / X+1-at-pos delta=1 pair.
     upsert_result split_then_insert_one_keep_pair_(inner_node* in, uint16_t pos,
-                                                      uint32_t divider, common_header* sib,
+                                                      uint32_t divider, psitri::node* sib,
                                                       uint16_t keep_pos) noexcept {
         const uint16_t vl = value_len_;
         ++g_inner_btree_split;
@@ -825,7 +825,7 @@ private:
     }
     // Helper for the rare "first K=1-promote stem fit, second needed split".
     upsert_result split_then_insert_one_(inner_node* in, uint16_t pos,
-                                           uint32_t divider, common_header* sib) noexcept {
+                                           uint32_t divider, psitri::node* sib) noexcept {
         const uint16_t vl = value_len_;
         ++g_inner_btree_split;
         const uint16_t cur_cls = in->cap_in_cls;
@@ -865,8 +865,8 @@ private:
     // data won't fit one page.
     bool attempt_merge_pair_(inner_node*& in, uint16_t a_pos) noexcept {
         if (a_pos >= in->num_keys) return false;                 // need a right sibling
-        common_header* ca = inner_child(in, a_pos);
-        common_header* cb = inner_child(in, uint16_t(a_pos + 1));
+        psitri::node* ca = inner_child(in, a_pos);
+        psitri::node* cb = inner_child(in, uint16_t(a_pos + 1));
         if (!ca || !cb) return false;
         if (ca->type() != node_type::wtree_leaf || cb->type() != node_type::wtree_leaf)
             return false;
@@ -887,7 +887,7 @@ private:
     // After a removal, if child[pos] is an underfull leaf, try to merge it with
     // its right then left leaf sibling.
     void try_merge_leaf_(inner_node*& in, uint16_t pos) noexcept {
-        common_header* c = inner_child(in, pos);
+        psitri::node* c = inner_child(in, pos);
         if (!c || c->type() != node_type::wtree_leaf) return;
         const leaf_node* lf = as_leaf(c);
         if (uint32_t(lf->tail_alloc_pos) - lf->dead_bytes >= kLeafMergeThreshold) return;
@@ -901,7 +901,7 @@ private:
     // advance depth) and free the now-redundant inner. COWs `in`. This is how a
     // shrinking tree folds its spine back down toward a single leaf.
     void try_collapse_inner_(inner_node*& in, uint16_t pos) noexcept {
-        common_header* c = inner_child(in, pos);
+        psitri::node* c = inner_child(in, pos);
         if (!c || c->type() != node_type::wtree_inner) return;
         inner_node* ci = as_inner(c);
         if (ci->prefix_len != 0 || ci->num_keys != 0) return;   // not single-child / depth-advanced
@@ -912,7 +912,7 @@ private:
         inner_free_moved(cow_inner(ci));                        // free the collapsed inner (neuter keeps g)
     }
 
-    rm node_remove_(common_header* node, word_key_type key, uint16_t depth) noexcept {
+    rm node_remove_(psitri::node* node, word_key_type key, uint16_t depth) noexcept {
         if (node->type() == node_type::wtree_leaf) {
             leaf_node* lf = as_leaf(node);
             // Read-only presence check first (handles value + radix), so a miss
@@ -927,7 +927,7 @@ private:
         auto*          in  = as_inner(node);
         const uint32_t q   = (depth < key.size()) ? key[depth] : 0u;
         const uint16_t pos = inner_find_branch(in, q);
-        common_header* child = inner_child(in, pos);
+        psitri::node* child = inner_child(in, pos);
         if (!child) return rm::not_found;               // sentinel → key absent
         uint16_t cdepth = depth;
         if (child->type() == node_type::wtree_inner) {
@@ -958,7 +958,7 @@ private:
 
     // ─── upsert: dispatch + recursive ─────────────────────────────
     template <upsert_mode mode>
-    upsert_result node_upsert_(common_header* node,
+    upsert_result node_upsert_(psitri::node* node,
                                 word_key_type key,
                                 uint16_t depth,
                                 value_type value) noexcept {
@@ -976,7 +976,7 @@ private:
         auto* in = as_inner(node);
         const uint32_t q = (depth < key.size()) ? key[depth] : 0u;
         const uint16_t pos = inner_find_branch(in, q);
-        common_header* child = inner_child(in, pos);
+        psitri::node* child = inner_child(in, pos);
         // Depth-advance is now decided by the CHILD's self-asserted
         // prefix, not the parent's delta=1 detection.  See node_find_
         // for rationale.  Capture the descended-into child's prefix
@@ -1071,7 +1071,7 @@ private:
             // K=1 promote paths, so it's not expected here.
             // Max sequence in the wrap path: 4 prepend (n/a here) + 2
             // primary + 4 tail = 10 children / 9 stems.
-            common_header* ch_buf[10];
+            psitri::node* ch_buf[10];
             uint32_t       st_buf[9];
             uint16_t ci = 0, si = 0;
             ch_buf[ci++] = cr.left;
@@ -1079,9 +1079,9 @@ private:
             ch_buf[ci++] = cr.right;
             if (cr.extra) {
                 assert(cr.extra->n_prepend == 0);   // prepend only with is_promote
-                common_header* const* tc = cr.extra->tail_children;
+                psitri::node* const* tc = cr.extra->tail_children;
                 const uint32_t* td = cr.extra->tail_dividers;
-                common_header* const* tc_end = tc + cr.extra->n_tail;
+                psitri::node* const* tc_end = tc + cr.extra->n_tail;
                 while (tc < tc_end) {
                     st_buf[si++] = *td++;
                     ch_buf[ci++] = *tc++;
@@ -1135,14 +1135,14 @@ private:
             // Build the merged children + stems arrays on the stack.
             // Bound: 2 (K=1) + 4 (max prepend) + 4 (max tail) + 1 = 11
             // children / 10 stems.
-            common_header* ch_buf[11];
+            psitri::node* ch_buf[11];
             uint32_t       st_buf[10];
-            common_header** ch_p = ch_buf;
+            psitri::node** ch_p = ch_buf;
             uint32_t*       st_p = st_buf;
             if (cr.extra && n_prepend > 0) {
-                common_header* const* pc = cr.extra->prepend_children;
+                psitri::node* const* pc = cr.extra->prepend_children;
                 const uint32_t*       pd = cr.extra->prepend_dividers;
-                common_header* const* pc_end = pc + n_prepend;
+                psitri::node* const* pc_end = pc + n_prepend;
                 while (pc < pc_end) {
                     *ch_p++ = *pc++;
                     *st_p++ = *pd++;
@@ -1156,9 +1156,9 @@ private:
             *st_p++ = cr.divider;          // X+1
             *ch_p++ = nullptr;             // sentinel-[X+1, …)
             if (cr.extra && n_tail > 0) {
-                common_header* const* tc = cr.extra->tail_children;
+                psitri::node* const* tc = cr.extra->tail_children;
                 const uint32_t*       td = cr.extra->tail_dividers;
-                common_header* const* tc_end = tc + n_tail;
+                psitri::node* const* tc_end = tc + n_tail;
                 while (tc < tc_end) {
                     *st_p++ = *td++;
                     *ch_p++ = *tc++;
@@ -1231,7 +1231,7 @@ private:
         }
         // Max sequence: 4 prepend + left + right + 4 tail = 10 children,
         // 9 stems.
-        common_header* ch_buf[10];
+        psitri::node* ch_buf[10];
         uint32_t       st_buf[9];
         uint16_t ci = 0, si = 0;
         ch_buf[ci++] = cr.left;
@@ -1241,9 +1241,9 @@ private:
         }
         if (cr.extra) {
             assert(cr.extra->n_prepend == 0);   // prepend only with is_promote
-            common_header* const* tc = cr.extra->tail_children;
+            psitri::node* const* tc = cr.extra->tail_children;
             const uint32_t*       td = cr.extra->tail_dividers;
-            common_header* const* tc_end = tc + cr.extra->n_tail;
+            psitri::node* const* tc_end = tc + cr.extra->n_tail;
             while (tc < tc_end) {
                 st_buf[si++] = *td++;
                 ch_buf[ci++] = *tc++;

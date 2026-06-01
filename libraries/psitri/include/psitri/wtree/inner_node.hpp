@@ -2,7 +2,7 @@
 
 // inner_node — v3 routing page.
 //
-// Same conceptual shape as leaf_node (common_header dispatch, stems +
+// Same conceptual shape as leaf_node (psitri::node dispatch, stems +
 // child_ptrs growing from opposite ends), but:
 //   - Header is 128 B (one cacheline), reserving 96 B for the
 //     INDEXED-page interp + 2-bit correction machinery (recip,
@@ -23,7 +23,7 @@
 //     count_le within ~32 stems (1-2 CLs) instead of scanning all
 //     stems.
 
-#include "leaf_node.hpp"          // common_header, upsert_result, kCacheLine, etc.
+#include "leaf_node.hpp"          // psitri::node, upsert_result, kCacheLine, etc.
 #include "apgm_predictor.hpp"
 #include "apply.hpp"             // apply<mode>(ref, op) dispatcher
 
@@ -149,20 +149,20 @@ struct op_replace_slot {
     uint16_t              pos           = 0;
     uint16_t              n_stems       = 0;
     const uint32_t*       repl_stems    = nullptr;   // [n_stems]
-    common_header* const* repl_children = nullptr;   // [n_stems + 1]
+    psitri::node* const* repl_children = nullptr;   // [n_stems + 1]
     // plan (filled by alloc_size)
     uint16_t              result_cap    = 0;
     copy_mode             copy          = copy_mode::fast;
 };
 
 // ─── Pointer-interconvertibility helpers ──────────────────────────
-inline common_header* as_header(inner_node* p)             noexcept { return reinterpret_cast<common_header*>(p); }
-inline const common_header* as_header(const inner_node* p) noexcept { return reinterpret_cast<const common_header*>(p); }
-inline inner_node* as_inner(common_header* h) noexcept {
+inline psitri::node* as_header(inner_node* p)             noexcept { return reinterpret_cast<psitri::node*>(p); }
+inline const psitri::node* as_header(const inner_node* p) noexcept { return reinterpret_cast<const psitri::node*>(p); }
+inline inner_node* as_inner(psitri::node* h) noexcept {
     assert(h->type() == node_type::wtree_inner);
     return reinterpret_cast<inner_node*>(h);
 }
-inline const inner_node* as_inner(const common_header* h) noexcept {
+inline const inner_node* as_inner(const psitri::node* h) noexcept {
     assert(h->type() == node_type::wtree_inner);
     return reinterpret_cast<const inner_node*>(h);
 }
@@ -278,14 +278,14 @@ inline ptr_address inner_child_addr(const inner_node* p, uint16_t pos) noexcept 
 }
 // Read child[pos] as a deref'd node pointer (via the active session).
 // Empty slot (kNoChild) → nullptr, so `if (!child)` keeps working.
-inline common_header* inner_child(const inner_node* p, uint16_t pos) noexcept {
+inline psitri::node* inner_child(const inner_node* p, uint16_t pos) noexcept {
     const ptr_address a = inner_child_addr(p, pos);
     if (a == kNoChild) return nullptr;
     return wderef<node>(a);
 }
 // Write child[pos]. nullptr installs an empty (kNoChild) sentinel slot —
 // used by the K=1 promotion path to mark a [X+1, next) range with no keys.
-inline void inner_set_child(inner_node* p, uint16_t pos, common_header* child) noexcept {
+inline void inner_set_child(inner_node* p, uint16_t pos, psitri::node* child) noexcept {
     uint8_t*    slot = inner_children_base(p) + size_t(pos) * kInnerChildBytes;
     ptr_address a    = child ? child->address() : kNoChild;
     std::memcpy(slot, &a, sizeof(a));
@@ -609,7 +609,7 @@ inline size_t g_absorb_k1_second_split = 0;
 // move to the new node), so no neuter is needed. Returns the resulting node,
 // or nullptr if at max page size (caller must split).
 inline inner_node* inner_insert_after_split(inner_node* p, uint16_t branch_pos,
-                                              uint32_t divider, common_header* right) noexcept {
+                                              uint32_t divider, psitri::node* right) noexcept {
     op_insert op{};
     op.pos     = branch_pos;
     op.divider = divider;
@@ -958,7 +958,7 @@ inline void inner_enforce_invariant_at(inner_node* p, uint16_t pos, uint16_t val
     const uint32_t* stems = inner_stems(p);
     if (stems[pos] - stems[pos - 1] != 1u) return;
     ++g_enforce_delta1_seen;
-    common_header* child = inner_child(p, pos);
+    psitri::node* child = inner_child(p, pos);
     if (!child) return;
     if (child->type() != node_type::wtree_leaf) {
         ++g_enforce_child_already_inner;

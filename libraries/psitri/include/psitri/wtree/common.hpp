@@ -23,7 +23,6 @@ inline constexpr std::size_t kCacheLine = 128;
 
 // ── SAL type bridge ────────────────────────────────────────────────
 using node            = psitri::node;          // 12-byte SAL header base
-using common_header   = psitri::node;          // alias: a deref'd node pointer
 using node_type       = psitri::node_type;
 using ptr_address     = sal::ptr_address;
 using ptr_address_seq = sal::ptr_address_seq;

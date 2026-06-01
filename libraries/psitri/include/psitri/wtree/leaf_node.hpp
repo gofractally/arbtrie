@@ -25,7 +25,7 @@
 //
 // Layout in a 4 KB leaf:
 //
-//   byte  0   [common_header (12 B)]
+//   byte  0   [psitri::node (12 B)]
 //   byte 12   [u16 tail_alloc_pos] [u8 cap_in_cls] [u8 num_keys]
 //             [u8 num_branches]   [3 B pad]
 //   byte 20   stems[K]  u32  → grows forward
@@ -68,7 +68,7 @@ inline constexpr size_t   kLeafPageCls        = kLeafPageBytes / kCacheLine;  //
 
 // ─── Node header ───────────────────────────────────────────────────
 // The 12-byte header is now sal::alloc_header (via psitri::node, aliased
-// as `common_header` in common.hpp). `node->type()` returns node_type;
+// as `psitri::node` in common.hpp). `node->type()` returns node_type;
 // the wtree node-kind tags are node_type::wtree_leaf / wtree_inner.
 // `node->size()` is the allocation size in bytes.
 
@@ -120,17 +120,17 @@ struct upsert_extra {
     // from the NEXT child in the sequence (so prepend_dividers[N-1] sits
     // between the last prepend and the first primary child).
     uint8_t        n_prepend       = 0;
-    common_header* prepend_children[4]{};
+    psitri::node* prepend_children[4]{};
     uint32_t       prepend_dividers[4]{};
     // Post-primary tail region.  Same shape mirrored.
     uint8_t        n_tail          = 0;
-    common_header* tail_children[4]{};
+    psitri::node* tail_children[4]{};
     uint32_t       tail_dividers[4]{};
 };
 
 struct upsert_result {
-    common_header* left;
-    common_header* right;
+    psitri::node* left;
+    psitri::node* right;
     uint32_t       divider;
     uint32_t       prev_divider;
     upsert_extra*  extra = nullptr;   // owned; absorber frees
@@ -139,17 +139,17 @@ struct upsert_result {
 // Only PAGE storage uses ptr_address (inner_child/inner_set_child convert at
 // the boundary). kSentinelChild() is a transient marker, never stored in a
 // page; addr 1 (128-B-misaligned) can never be a real deref'd node pointer.
-inline common_header* kSentinelChild() noexcept {
-    return reinterpret_cast<common_header*>(static_cast<uintptr_t>(1));
+inline psitri::node* kSentinelChild() noexcept {
+    return reinterpret_cast<psitri::node*>(static_cast<uintptr_t>(1));
 }
 
-inline upsert_result upsert_inplace(common_header* p) noexcept {
+inline upsert_result upsert_inplace(psitri::node* p) noexcept {
     return { p, nullptr, 0u, 0u };
 }
-inline upsert_result upsert_split(common_header* l, uint32_t div, common_header* r) noexcept {
+inline upsert_result upsert_split(psitri::node* l, uint32_t div, psitri::node* r) noexcept {
     return { l, r, div, 0u };
 }
-inline upsert_result upsert_promote(common_header* new_inner,
+inline upsert_result upsert_promote(psitri::node* new_inner,
                                       uint32_t prev_div, uint32_t sentinel_div) noexcept {
     return { new_inner, kSentinelChild(), sentinel_div, prev_div };
 }
@@ -254,18 +254,18 @@ static_assert(offsetof(leaf_node, dead_bytes)       == 24);
 inline constexpr uint16_t kLeafHeaderBytes = sizeof(leaf_node);  // 28
 
 // ─── Pointer-interconvertibility helpers ──────────────────────────
-// Every concrete node type has common_header as its first member, so
-// reinterpret_cast between common_header* and the concrete type is
+// Every concrete node type has psitri::node as its first member, so
+// reinterpret_cast between psitri::node* and the concrete type is
 // well-defined (standard-layout + pointer-interconvertibility rules,
 // C++17 §6.9.2/4).  Use these helpers rather than raw casts at call
 // sites — the assertion documents the invariant and catches bugs.
-inline common_header* as_header(leaf_node* p)             noexcept { return reinterpret_cast<common_header*>(p); }
-inline const common_header* as_header(const leaf_node* p) noexcept { return reinterpret_cast<const common_header*>(p); }
-inline leaf_node* as_leaf(common_header* h) noexcept {
+inline psitri::node* as_header(leaf_node* p)             noexcept { return reinterpret_cast<psitri::node*>(p); }
+inline const psitri::node* as_header(const leaf_node* p) noexcept { return reinterpret_cast<const psitri::node*>(p); }
+inline leaf_node* as_leaf(psitri::node* h) noexcept {
     assert(h->type() == node_type::wtree_leaf);
     return reinterpret_cast<leaf_node*>(h);
 }
-inline const leaf_node* as_leaf(const common_header* h) noexcept {
+inline const leaf_node* as_leaf(const psitri::node* h) noexcept {
     assert(h->type() == node_type::wtree_leaf);
     return reinterpret_cast<const leaf_node*>(h);
 }
@@ -2079,10 +2079,10 @@ inline upsert_result leaf_upsert(leaf_node* p,
                     //   target_was_R | sub_is_TR ⇒ before=[L,T_L], after=[]
                     //   target_was_L | sub_is_TL ⇒ before=[],      after=[T_R,R]
                     //   target_was_L | sub_is_TR ⇒ before=[T_L],   after=[R]
-                    common_header* before_c[2]{};
+                    psitri::node* before_c[2]{};
                     uint32_t       before_d[2]{};   // div AFTER each before[i]
                     uint8_t        n_before = 0;
-                    common_header* after_c[2]{};
+                    psitri::node* after_c[2]{};
                     uint32_t       after_d[2]{};    // div BEFORE each after[i]
                     uint8_t        n_after = 0;
                     if (target_was_R) {
@@ -2125,10 +2125,10 @@ inline upsert_result leaf_upsert(leaf_node* p,
                             ex->prepend_dividers[dst - ex->prepend_children] =
                                 ex->prepend_dividers[src - ex->prepend_children];
                         }
-                        common_header** pc = ex->prepend_children;
+                        psitri::node** pc = ex->prepend_children;
                         uint32_t*       pd = ex->prepend_dividers;
-                        common_header* const* sc_end = before_c + n_before;
-                        common_header* const* sc = before_c;
+                        psitri::node* const* sc_end = before_c + n_before;
+                        psitri::node* const* sc = before_c;
                         const uint32_t*       sd = before_d;
                         while (sc < sc_end) {
                             *pc++ = *sc++;
@@ -2140,10 +2140,10 @@ inline upsert_result leaf_upsert(leaf_node* p,
                     if (n_after > 0) {
                         assert(uint16_t(ex->n_tail) + n_after
                                <= sizeof(ex->tail_children) / sizeof(ex->tail_children[0]));
-                        common_header** tc = ex->tail_children + ex->n_tail;
+                        psitri::node** tc = ex->tail_children + ex->n_tail;
                         uint32_t*       td = ex->tail_dividers + ex->n_tail;
-                        common_header* const* sc_end = after_c + n_after;
-                        common_header* const* sc = after_c;
+                        psitri::node* const* sc_end = after_c + n_after;
+                        psitri::node* const* sc = after_c;
                         const uint32_t*       sd = after_d;
                         while (sc < sc_end) {
                             *tc++ = *sc++;
