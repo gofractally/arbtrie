@@ -1461,7 +1461,7 @@ TEST_CASE("wtree2 node layout + sizing", "[wtree2][layout]")
    auto check = [&](uint16_t n, uint8_t pfx) {
       // size_for must equal what an instance with these dims reports, and must
       // be cacheline-aligned with strictly-ordered, cl-aligned regions.
-      const uint32_t sz = w2::node2::size_for(n, pfx);
+      const uint32_t sz = w2::node2::size_for(n, pfx, 0, /*is_inner=*/true);
       REQUIRE(sz % CL == 0);
 
       // Stamp a buffer as a node2 and check its accessors agree with size_for.
@@ -1548,7 +1548,7 @@ TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
    REQUIRE(in->children()[0] == cA);
    REQUIRE(in->children()[1] == cB);
    REQUIRE(in->children()[2] == cC);
-   REQUIRE(in->total_bytes() == w2::node2::size_for(2, 1));
+   REQUIRE(in->total_bytes() == w2::node2::size_for(2, 1, 0, /*is_inner=*/true));
 
    // Routing matches stem_upper_bound semantics.
    auto route = [&](uint32_t q) { return in->children()[w2::stem_upper_bound(in->stems(), in->num_stems, q)]; };
@@ -1564,6 +1564,60 @@ TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
    w2::w2session().release(cA);
    w2::w2session().release(cB);
    w2::w2session().release(cC);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
+// ── wtree2 — APGM predictor on a wide inner (algo §6) ──────────────────
+// A wide inner must build an estimator (segment_count != 0) and inner_stem_ub
+// (predictor-seeded) must return the EXACT same slot as binary search for every
+// query class: below-first, exact-stem, between-stems, above-last.
+TEST_CASE("wtree2 inner predictor matches binary search", "[wtree2][predictor]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-predictor");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   // Build a wide inner over N stems. Use a non-uniform (quadratic) key
+   // distribution so the predictor must lay down multiple segments, not a single
+   // perfect line — the correction walk is what we're really exercising.
+   constexpr uint16_t N = 1000;
+   std::vector<uint32_t>       stems(N);
+   std::vector<w2::ptr_address> kids;
+   kids.reserve(N + 1);
+   for (uint16_t i = 0; i < N; ++i)
+      stems[i] = 1000u + uint32_t(i) * uint32_t(i) * 3u;   // strictly increasing, curved
+   auto mk_child = [&] {
+      return w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf, 0, 0);
+   };
+   for (uint16_t i = 0; i <= N; ++i) kids.push_back(mk_child());
+
+   w2::node2* in = w2::build_inner({}, {stems.data(), N}, {kids.data(), size_t(N) + 1});
+
+   // A wide, well-behaved inner must have a usable estimator.
+   REQUIRE(in->estimator()->segment_count != 0);
+
+   // Exhaustive query sweep: for each stem probe q-1, q, q+1, plus the extremes.
+   auto check_q = [&](uint32_t q) {
+      const uint16_t want = w2::stem_upper_bound(in->stems(), in->num_stems, q);
+      const uint16_t got  = w2::inner_stem_ub(in, q);
+      REQUIRE(got == want);
+   };
+   check_q(0);
+   check_q(1);
+   for (uint16_t i = 0; i < N; ++i)
+   {
+      const uint32_t s = stems[i];
+      if (s > 0) check_q(s - 1);
+      check_q(s);
+      check_q(s + 1);
+   }
+   check_q(0xFFFFFFFFu);
+
+   w2::node2_free(in);
+   for (auto c : kids) w2::w2session().release(c);
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
