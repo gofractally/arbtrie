@@ -134,6 +134,10 @@ struct upsert_result {
     uint32_t       divider;
     uint32_t       prev_divider;
     upsert_extra*  extra = nullptr;   // owned; absorber frees
+    // REMOVE mode only: `left` carries the (possibly forked) child; `emptied`
+    // means the child subtree is now empty so the parent drops its slot. A
+    // remove miss is {left=nullptr, emptied=false}; upsert never sets emptied.
+    bool           emptied = false;
 };
 // In-RAM currency stays raw node* (valid in unique mode — no relocation).
 // Only PAGE storage uses ptr_address (inner_child/inner_set_child convert at

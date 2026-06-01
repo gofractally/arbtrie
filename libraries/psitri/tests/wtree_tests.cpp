@@ -1391,6 +1391,60 @@ TEST_CASE("wtree snapshot isolation under writes", "[wtree][snapshot][shared]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── Snapshot isolation under REMOVES (shared-mode remove via node_modify_) ──
+//
+// Remove now shares the mode-templated descent with upsert, so removing a key
+// while a snapshot is held forks to a new root instead of mutating shared nodes
+// in place (the previously-latent corruption). The snapshot must keep the
+// removed keys; the live tree must not see them; refcounts must balance.
+
+TEST_CASE("wtree snapshot isolation under removes", "[wtree][snapshot][shared][remove]")
+{
+   sal_fixture fx("snapshot-remove");
+   const uint64_t base = fx.live_objects();
+   auto read_v = [](std::span<const uint8_t> vv) {
+      uint64_t out = 0; if (vv.size() == 8) std::memcpy(&out, vv.data(), 8); return out;
+   };
+   {
+      wtree          t(*fx.ses, 8);
+      const uint32_t N = 2000;
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(t.upsert(kview(k, 24), vview(uint64_t(i) * 10 + 1)));
+      }
+
+      wtree snap = t.snapshot();   // freeze the full set
+
+      // Remove every even key from the LIVE tree (forks the spine behind the
+      // snapshot; exercises shared-mode leaf remove + slot-drop + the
+      // address-bubbling unwind).
+      for (uint32_t i = 0; i < N; i += 2)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(t.remove(kview(k, 24)));
+         REQUIRE_FALSE(t.remove(kview(k, 24)));   // second remove is a miss
+      }
+
+      // Snapshot is FROZEN with ALL keys still present at their old values.
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         REQUIRE(read_v(snap.find(kview(k, 24))) == uint64_t(i) * 10 + 1);
+      }
+      // Live tree: evens gone, odds intact.
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         uint8_t k[24]; make_key24(i, k);
+         auto g = t.find(kview(k, 24));
+         if (i % 2 == 0) REQUIRE(g.data() == nullptr);
+         else            REQUIRE(read_v(g) == uint64_t(i) * 10 + 1);
+      }
+   }   // snap (old full set) then t (odds) drop
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

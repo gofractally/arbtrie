@@ -172,26 +172,41 @@ public:
         assert(key.size() <= kVarlenEncBuf);
         if (root_ == kNoChild) return false;
         uint32_t kw[kVarlenEncBuf / 4];
-        const uint16_t   n_u32     = key_bytes_to_u32_(key, kw);
-        const ptr_address root_addr = root_;
-        const rm r = node_remove_(root_ptr(), word_key_type(kw, size_t(n_u32)), /*depth=*/0);
-        if (r == rm::not_found) return false;
-        if (r == rm::removed_empty) {           // whole tree emptied
-            _session->release(root_addr);
+        const uint16_t n_u32 = key_bytes_to_u32_(key, kw);
+        return remove_words_(word_key_type(kw, size_t(n_u32)));
+    }
+
+    // Internal remove: shares node_modify_'s mode-templated descent with upsert
+    // (so removal is shared-mode-correct — forks to a new root behind a snapshot
+    // instead of mutating it). Keeps literal removal + page-shrinking on the
+    // unique fast path; a shared fork defers shrink (snapshots are transient).
+    bool remove_words_(word_key_type key) noexcept {
+        const ptr_address old_root  = root_;
+        auto              rref      = wsession().get_ref<sal::alloc_header>(old_root);
+        const bool        was_shared = (rref.ref() > 1);
+        upsert_result r =
+            node_modify_<upsert_mode::unique_remove>(rref, key, /*depth=*/0, value_type{});
+        if (!r.left && !r.emptied) return false;        // not_found — nothing changed
+        if (was_shared) _session->release(old_root);    // shared forked the root
+        if (r.emptied) {                                // whole tree emptied
+            _session->release(r.left->address());       // free the (possibly forked) empty root
             root_ = kNoChild;
             return true;
         }
-        // Fold a chain of single-child B-tree inners at the root back down —
-        // ultimately to the single leaf the tree started from.
-        while (root_ != kNoChild) {
-            psitri::node* rt = root_ptr();
-            if (rt->type() != node_type::wtree_inner) break;
-            inner_node* ri = as_inner(rt);
-            if (ri->prefix_len != 0 || ri->num_keys != 0) break;
-            const ptr_address g = inner_child_addr(ri, 0);
-            if (g == kNoChild) break;
-            root_ = g;
-            inner_free_moved(cow_inner(ri));
+        root_ = r.left->address();
+        // Fold a chain of single-child root inners back down to the single leaf
+        // the tree started from (unique fast path only).
+        if (!was_shared) {
+            while (root_ != kNoChild) {
+                psitri::node* rt = root_ptr();
+                if (rt->type() != node_type::wtree_inner) break;
+                inner_node* ri = as_inner(rt);
+                if (ri->prefix_len != 0 || ri->num_keys != 0) break;
+                const ptr_address g = inner_child_addr(ri, 0);
+                if (g == kNoChild) break;
+                root_ = g;
+                inner_free_moved(cow_inner(ri));
+            }
         }
         return true;
     }
@@ -392,7 +407,7 @@ private:
         auto       rref       = wsession().get_ref<sal::alloc_header>(old_root);
         const bool was_shared = (rref.ref() > 1);
         upsert_result r =
-            node_upsert_<upsert_mode::unique_upsert>(rref, key, /*depth=*/0, value);
+            node_modify_<upsert_mode::unique_upsert>(rref, key, /*depth=*/0, value);
         // {null,null,0} = drop (heap-tight leaf with no usable structure
         // for promotion).  Surface to caller.
         if (!r.left) return false;
@@ -937,51 +952,9 @@ private:
         inner_free_moved(cow_inner(ci));                        // free the collapsed inner (neuter keeps g)
     }
 
-    rm node_remove_(psitri::node* node, word_key_type key, uint16_t depth) noexcept {
-        if (node->type() == node_type::wtree_leaf) {
-            leaf_node* lf = as_leaf(node);
-            // Read-only presence check first (handles value + radix), so a miss
-            // (or absent key) never wastes a COW.
-            if (leaf_find(lf, key, depth, value_len_).data() == nullptr) return rm::not_found;
-            leaf_node* w     = cow_leaf(lf);            // mutate → make writable (addr stable)
-            bool       empty = false;
-            const bool ok    = leaf_remove(w, key, depth, value_len_, &empty);
-            (void)ok; assert(ok);                       // find said present
-            return empty ? rm::removed_empty : rm::removed;
-        }
-        auto*          in  = as_inner(node);
-        const uint32_t q   = (depth < key.size()) ? key[depth] : 0u;
-        const uint16_t pos = inner_find_branch(in, q);
-        psitri::node* child = inner_child(in, pos);
-        if (!child) return rm::not_found;               // sentinel → key absent
-        uint16_t cdepth = depth;
-        if (child->type() == node_type::wtree_inner) {
-            const auto* sub = as_inner(child);
-            if (sub->prefix_len > 0) {
-                if (q != sub->prefix_data) return rm::not_found;   // routing mismatch → absent
-                cdepth = uint16_t(depth + sub->prefix_len);
-            }
-        }
-        const ptr_address child_addr = child->address();
-        const rm r = node_remove_(child, key, cdepth);
-        if (r == rm::not_found) return rm::not_found;
-        if (r == rm::removed_empty) {
-            in = cow_inner(in);
-            _session->release(child_addr);              // free the emptied child subtree
-            inner_set_child(in, pos, nullptr);          // tombstone the slot (kNoChild)
-            return inner_all_sentinel_(in) ? rm::removed_empty : rm::removed;
-        }
-        // r == removed, child non-empty: COW kept its address, so `in`'s slot
-        // is still valid. Opportunistically merge an underfull leaf child with
-        // a sibling (B-tree merge-on-underflow). Merge COWs `in` (address still
-        // stable → grandparent still skips); a non-merge leaves the spine
-        // untouched.
-        try_merge_leaf_(in, pos);
-        try_collapse_inner_(in, pos);   // fold a single-child inner back into its child
-        return rm::removed;
-    }
+    // (node_remove_ removed — remove is now a mode of node_modify_ below.)
 
-    // ─── upsert: dispatch + recursive ─────────────────────────────
+    // ─── modify (upsert / remove): dispatch + recursive ───────────
     // Make `in` writable to set a SINGLE child slot at `pos` (sentinel-fill,
     // child-repoint, container-wrap). UNIQUE: modify() through the THREADED
     // smart_ref — reuses the fetch, in place, address kept. SHARED: FORK to a
@@ -1003,8 +976,34 @@ private:
         }
     }
 
+    // Leaf-level remove (the mode.is_remove() leaf case of node_modify_).
+    // Returns {left=writable-leaf, emptied} on hit, {nullptr} on miss. UNIQUE:
+    // mutate in place via the threaded ref. SHARED: fork (clone+retain) so the
+    // snapshot's old leaf is untouched; the removed value's ref is released by
+    // leaf_remove, balancing the retain (snapshot keeps its own).
     template <upsert_mode mode>
-    upsert_result node_upsert_(sal::smart_ref<sal::alloc_header>& nref,
+    upsert_result leaf_remove_(sal::smart_ref<leaf_node>& lref,
+                               word_key_type key, uint16_t depth) noexcept {
+        leaf_node* lf = const_cast<leaf_node*>(lref.obj());
+        if (leaf_find(lf, key, depth, value_len_).data() == nullptr)
+            return { nullptr, nullptr, 0, 0 };          // not_found
+        leaf_node* w;
+        if constexpr (mode.is_shared()) {
+            w = clone_leaf_fresh(lf);
+            leaf_retain_value_refs_(w);
+        } else {
+            lref.modify([&](leaf_node* n) { w = n; });
+        }
+        bool       empty = false;
+        const bool ok    = leaf_remove(w, key, depth, value_len_, &empty);
+        (void)ok; assert(ok);                            // find said present
+        upsert_result r = upsert_inplace(w);
+        r.emptied = empty;
+        return r;
+    }
+
+    template <upsert_mode mode>
+    upsert_result node_modify_(sal::smart_ref<sal::alloc_header>& nref,
                                 word_key_type key,
                                 uint16_t depth,
                                 value_type value) noexcept {
@@ -1014,13 +1013,16 @@ private:
         // forces fork-to-new-root.
         if constexpr (mode.is_unique())
             if (nref.ref() > 1)
-                return node_upsert_<mode.make_shared()>(nref, key, depth, value);
+                return node_modify_<mode.make_shared()>(nref, key, depth, value);
         // Raw working view of the threaded node (nref carries the ref/type; the
         // body mutates through `node`/`in`, COWs through nref via writable_inner_).
         psitri::node* node =
             const_cast<psitri::node*>(reinterpret_cast<const psitri::node*>(nref.obj()));
         if (node->type() == node_type::wtree_leaf) {
-            return leaf_upsert<mode>(nref.as<leaf_node>(), key, depth, value);
+            if constexpr (mode.is_remove())
+                return leaf_remove_<mode>(nref.as<leaf_node>(), key, depth);
+            else
+                return leaf_upsert<mode>(nref.as<leaf_node>(), key, depth, value);
         }
         inner_node* in = as_inner(node);
         const uint32_t q = (depth < key.size()) ? key[depth] : 0u;
@@ -1053,6 +1055,8 @@ private:
         // splice/split), so a shared op fuses the copy with the edit (one pass)
         // and never wastes a clone on a split.
         if (!child) {
+            if constexpr (mode.is_remove())
+                return { nullptr, nullptr, 0, 0 };   // sentinel slot → key absent
             // Sentinel slot from a prior K=1 split — empty range, no
             // child yet.  Allocate a fresh leaf here and insert.
             leaf_node* lf = leaf_alloc(in->address());   // near parent inner
@@ -1075,8 +1079,37 @@ private:
         // Fetch the child's smart_ref ONCE and thread it down: the child's
         // demotion ref() and (unique) modify() both reuse this single fetch.
         auto cref = wsession().get_ref<sal::alloc_header>(child_addr);
-        upsert_result cr = node_upsert_<mode>(cref, key, depth, value);
-        if (!cr.left) return { nullptr, nullptr, 0, 0 };   // drop bubbles up
+        upsert_result cr = node_modify_<mode>(cref, key, depth, value);
+        if (!cr.left) return { nullptr, nullptr, 0, 0 };   // drop / not_found bubbles up
+
+        // ── REMOVE unwind: child returned removed / removed-empty (cr carries the
+        // possibly-forked child + the emptied flag). Shares the descent above with
+        // upsert; only the unwind differs.
+        if constexpr (mode.is_remove()) {
+            if (cr.emptied) {
+                // Child subtree emptied → drop slot pos. UNIQUE: free the emptied
+                // child. SHARED: the snapshot still owns it — don't free.
+                in = writable_inner_<mode>(nref, in, pos);
+                if constexpr (mode.is_unique()) _session->release(child_addr);
+                inner_set_child(in, pos, nullptr);          // tombstone the slot
+                upsert_result r = upsert_inplace(in);
+                r.emptied = inner_all_sentinel_(in);        // propagate up if now empty
+                return r;
+            }
+            // Removed, child non-empty: repoint if it forked (shared) / relocated.
+            if (cr.left->address() != child_addr) {
+                in = writable_inner_<mode>(nref, in, pos);
+                inner_set_child(in, pos, cr.left);
+                if constexpr (mode.is_unique()) _session->release(child_addr);
+            }
+            // Opportunistic page-shrink only on the unique fast path; a shared
+            // fork defers shrink (snapshots are transient).
+            if constexpr (mode.is_unique()) {
+                try_merge_leaf_(in, pos);
+                try_collapse_inner_(in, pos);
+            }
+            return upsert_inplace(in);
+        }
 
         // NOTE: `in` is NOT COW'd up front. In unique mode COW/realloc keep a
         // node's address, so when the child is mutated in place (the common,
