@@ -1645,6 +1645,65 @@ TEST_CASE("wtree2 find descent routes + rejects out-of-range", "[wtree2][find]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — Phase 3b: leaf value model + end-to-end find ──────────────
+
+TEST_CASE("wtree2 leaf build + find (end-to-end DIRECT)", "[wtree2][find]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-leaf");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   auto vspan = [](const std::vector<uint8_t>& v) { return std::span<const uint8_t>(v.data(), v.size()); };
+   auto kspan = [](const std::vector<uint32_t>& k) { return std::span<const uint32_t>(k.data(), k.size()); };
+   auto rd    = [](std::span<const uint8_t> s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+
+   // ── Single leaf: distinct first-words, multi-word keys ──
+   {
+      std::vector<uint32_t> kA{10, 5}, kB{20, 7}, kC{30, 9};
+      std::vector<uint8_t>  vA{1, 2, 3}, vB{4}, vC{5, 6};
+      w2::leaf_entry ents[] = {{kspan(kA), vspan(vA)}, {kspan(kB), vspan(vB)}, {kspan(kC), vspan(vC)}};
+      w2::node2* leaf = w2::build_leaf({ents, 3}, 0);
+      REQUIRE(leaf->is_leaf());
+      REQUIRE(leaf->num_stems == 3);
+      REQUIRE(rd(w2::find_value(leaf, kspan(kA))) == vA);
+      REQUIRE(rd(w2::find_value(leaf, kspan(kB))) == vB);
+      REQUIRE(rd(w2::find_value(leaf, kspan(kC))) == vC);
+      std::vector<uint32_t> m1{20, 8}, m2{25, 7}, m3{10};
+      REQUIRE(w2::find_value(leaf, kspan(m1)).data() == nullptr);   // suffix mismatch
+      REQUIRE(w2::find_value(leaf, kspan(m2)).data() == nullptr);   // not a stem
+      REQUIRE(w2::find_value(leaf, kspan(m3)).data() == nullptr);   // suffix length
+      w2::node2_free(leaf);
+   }
+
+   // ── 2-level: inner routing over two leaves ──
+   {
+      std::vector<uint32_t> a1{50, 1}, a2{60, 2}, b1{150, 3}, b2{160, 4};
+      std::vector<uint8_t>  v1{11}, v2{22}, v3{33}, v4{44};
+      w2::leaf_entry la[] = {{kspan(a1), vspan(v1)}, {kspan(a2), vspan(v2)}};
+      w2::leaf_entry lb[] = {{kspan(b1), vspan(v3)}, {kspan(b2), vspan(v4)}};
+      w2::node2* leafA = w2::build_leaf({la, 2}, 0);
+      w2::node2* leafB = w2::build_leaf({lb, 2}, 0);
+      uint32_t        stems[] = {100u};
+      w2::ptr_address kids[]  = {leafA->address(), leafB->address()};
+      w2::node2* root = w2::build_inner({}, {stems, 1}, {kids, 2});
+
+      REQUIRE(rd(w2::find_value(root, kspan(a1))) == v1);
+      REQUIRE(rd(w2::find_value(root, kspan(a2))) == v2);
+      REQUIRE(rd(w2::find_value(root, kspan(b1))) == v3);
+      REQUIRE(rd(w2::find_value(root, kspan(b2))) == v4);
+      std::vector<uint32_t> m{55, 9};   // routes to leafA, not a stem there
+      REQUIRE(w2::find_value(root, kspan(m)).data() == nullptr);
+
+      w2::node2_free(root);
+      w2::node2_free(leafA);
+      w2::node2_free(leafB);
+   }
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

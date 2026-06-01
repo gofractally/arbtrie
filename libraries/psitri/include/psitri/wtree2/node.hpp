@@ -149,9 +149,9 @@ struct node2 : public psitri::node
     const ptr_address* children() const noexcept { return reinterpret_cast<const ptr_address*>(base() + children_off()); }
     std::span<const ptr_address> child_span() const noexcept { return {children(), n_slots()}; }
 
-    // Compute the byte size a node would need for (prefix_len, num_stems) — used
-    // by the (Phase 2) bulk constructor to size the allocation before writing.
-    static uint32_t size_for(uint16_t n_stems, uint8_t prefix_len) noexcept
+    // Offset where the value-region tail begins (right after the cl-aligned
+    // children region) = the index-only size. LOCAL slots address into [this, end).
+    static uint32_t tail_off_for(uint16_t n_stems, uint8_t prefix_len) noexcept
     {
         const uint32_t hdr   = uint32_t(kFixedHeaderBytes) + uint32_t(prefix_len) * 4u;
         const uint32_t s_off = uint32_t(ucc::round_up_multiple<kCacheLine>(hdr));
@@ -159,6 +159,14 @@ struct node2 : public psitri::node
                              + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems) * 4u));
         return c_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems + 1) * 4u));
     }
+    // Total byte size for (prefix_len, num_stems, value-tail). tail_bytes = 0 for
+    // an inner (no LOCAL records); a leaf passes the packed value-region bytes.
+    static uint32_t size_for(uint16_t n_stems, uint8_t prefix_len, uint32_t tail_bytes = 0) noexcept
+    {
+        return tail_off_for(n_stems, prefix_len)
+             + uint32_t(ucc::round_up_multiple<kCacheLine>(tail_bytes));
+    }
+    uint32_t tail_off() const noexcept { return tail_off_for(num_stems, prefix_len); }
 
     // ── SAL alloc contract ────────────────────────────────────────────
     // session.alloc<node2>(hint, shp, n_stems, prefix_len) forwards these to
@@ -166,12 +174,14 @@ struct node2 : public psitri::node
     // bulk constructor then fills prefix/stems/children. cow_size/compact_size/
     // copy_to/destroy/visit_children use the alloc_header defaults for now
     // (real lifecycle = Phase 6).
-    static uint32_t alloc_size(shape, uint16_t n_stems, uint8_t prefix_len) noexcept
+    static uint32_t alloc_size(shape, uint16_t n_stems, uint8_t prefix_len,
+                               uint32_t tail_bytes = 0) noexcept
     {
-        return size_for(n_stems, prefix_len);
+        return size_for(n_stems, prefix_len, tail_bytes);
     }
     node2(uint32_t asize, ptr_address_seq seq,
-          shape shp, uint16_t n_stems_, uint8_t prefix_len_) noexcept
+          shape shp, uint16_t n_stems_, uint8_t prefix_len_,
+          uint32_t /*tail_bytes*/ = 0) noexcept
         : psitri::node(asize, type_id, seq)
     {
         num_stems  = n_stems_;
@@ -277,6 +287,133 @@ inline node2* find_leaf(node2* nd, std::span<const uint32_t> key, uint16_t depth
         if (c == kNoChild)
             return nullptr;                           // empty slot → absent
         nd = w2deref(c);                              // §5.3 depth NOT advanced by the stem match
+    }
+}
+
+// ── Leaf value record (DIRECT inline; big/tree are EXT slots) ─────────
+// An inline entry under a leaf stem: the key suffix past the stem + the value.
+// Suffix is compared as bytes (kHdr=2 isn't u32-aligned), which matches equality
+// on the encoded key words. (type tag / MVCC versions are a later phase.)
+struct value_region
+{
+    uint8_t suffix_words;   // +0  key words after the stem
+    uint8_t value_len;      // +1  inline value bytes (0..255)
+
+    static constexpr uint16_t kHdr = 2;
+    const uint8_t* suffix_bytes() const noexcept { return reinterpret_cast<const uint8_t*>(this) + kHdr; }
+    uint8_t*       suffix_bytes()       noexcept { return reinterpret_cast<uint8_t*>(this) + kHdr; }
+    const uint8_t* value() const noexcept { return suffix_bytes() + size_t(suffix_words) * 4u; }
+    uint8_t*       value()       noexcept { return suffix_bytes() + size_t(suffix_words) * 4u; }
+    std::span<const uint8_t> value_span() const noexcept { return {value(), value_len}; }
+    static uint16_t size_bytes(uint8_t sw, uint8_t vl) noexcept
+    {
+        return uint16_t(kHdr + uint16_t(sw) * 4u + vl);
+    }
+    uint16_t total() const noexcept { return size_bytes(suffix_words, value_len); }
+};
+
+struct leaf_entry
+{
+    std::span<const uint32_t> key;
+    std::span<const uint8_t>  value;
+};
+
+// ── Bulk-build a LEAF (algo §9.1, leaf case) ──────────────────────────
+// PHASE 3b: DIRECT inline values only, with DISTINCT first-words at this depth
+// (no collisions → EXT, no terminal). Each entry's first un-prefix word is a
+// stem; its (suffix,value) is an inline value_region in the tail, addressed by a
+// LOCAL slot. slot[0] = empty (terminal handling lands with terminals; the full
+// recursive builder — collisions→EXT, big values — lands later).
+inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
+                         ptr_address hint = kNoChild) noexcept
+{
+    assert(!ents.empty());
+    const uint8_t pfx = uint8_t(longest_common_prefix(
+        ents.front().key.subspan(depth), ents.back().key.subspan(depth)));
+    const uint16_t base_depth = uint16_t(depth + pfx);
+    const uint16_t n          = uint16_t(ents.size());
+
+    // Plan the value-tail (4-byte-aligned regions).
+    uint32_t tail = 0;
+    for (const auto& e : ents)
+    {
+        assert(e.key.size() > base_depth);   // Phase 3b: no terminal (key extends past prefix)
+        const uint16_t sw = uint16_t(e.key.size() - base_depth - 1);
+        tail += uint32_t(ucc::round_up_multiple<4>(
+            value_region::size_bytes(uint8_t(sw), uint8_t(e.value.size()))));
+    }
+
+    const ptr_address a =
+        (hint == kNoChild)
+            ? w2session().alloc<node2>(alloc_hint{}, shape::leaf, n, pfx, tail)
+            : w2session().alloc<node2>(alloc_hint{&hint, 1}, shape::leaf, n, pfx, tail);
+    node2* nd = w2deref(a);
+
+    if (pfx) std::memcpy(nd->prefix(), ents.front().key.data() + depth, size_t(pfx) * 4u);
+    uint32_t*    st = nd->stems();
+    ptr_address* ch = nd->children();
+    ch[0] = kNoChild;                                  // slot 0 = terminal/empty
+    uint32_t off        = nd->tail_off();              // forward offset of the value-tail
+    uint32_t prev_first = 0;
+    for (uint16_t j = 0; j < n; ++j)
+    {
+        const auto&    e     = ents[j];
+        const uint32_t first = e.key[base_depth];
+        assert(j == 0 || first > prev_first);          // distinct, ascending
+        prev_first = first;
+        st[j] = first;
+        const uint16_t sw = uint16_t(e.key.size() - base_depth - 1);
+        auto* vr = reinterpret_cast<value_region*>(nd->base() + off);
+        vr->suffix_words = uint8_t(sw);
+        vr->value_len    = uint8_t(e.value.size());
+        if (sw)              std::memcpy(vr->suffix_bytes(),
+                                         reinterpret_cast<const uint8_t*>(e.key.data() + base_depth + 1),
+                                         size_t(sw) * 4u);
+        if (!e.value.empty()) std::memcpy(vr->value(), e.value.data(), e.value.size());
+        ch[j + 1] = make_local_slot(off);
+        off += uint32_t(ucc::round_up_multiple<4>(vr->total()));
+    }
+    return nd;
+}
+
+// ── find (descent + in-leaf lookup) — completes find over wtree2 ──────
+// Returns the value span on hit; an empty span with .data()==nullptr on absent
+// (so a present zero-length value is distinguishable from absent).
+inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> key) noexcept
+{
+    uint16_t depth = 0;
+    for (;;)
+    {
+        const uint16_t  pl  = nd->prefix_len;
+        const uint32_t* pfx = nd->prefix();
+        for (uint16_t i = 0; i < pl; ++i)
+            if (size_t(depth) + i >= key.size() || key[depth + i] != pfx[i]) return {};
+        depth = uint16_t(depth + pl);
+
+        if (nd->is_leaf())
+        {
+            if (depth >= key.size())
+                return {};                                  // terminal (slot 0) — not yet stored
+            const uint32_t q = key[depth];
+            const uint16_t i = stem_upper_bound(nd->stems(), nd->num_stems, q);
+            if (i == 0 || nd->stems()[i - 1] != q) return {};   // q not a stem → absent
+            const ptr_address s = nd->children()[i];
+            if (!is_local_slot(s)) return {};               // empty / EXT (Phase 3b: DIRECT only)
+            auto* vr = reinterpret_cast<const value_region*>(nd->base() + local_tail_off(s));
+            const uint16_t sw = vr->suffix_words;
+            if (size_t(depth) + 1 + sw != key.size()) return {};
+            if (sw && std::memcmp(vr->suffix_bytes(),
+                                  reinterpret_cast<const uint8_t*>(key.data() + depth + 1),
+                                  size_t(sw) * 4u) != 0) return {};
+            return vr->value_span();
+        }
+
+        const uint16_t i = (depth >= key.size())
+                               ? uint16_t(0)
+                               : stem_upper_bound(nd->stems(), nd->num_stems, key[depth]);
+        const ptr_address c = nd->children()[i];
+        if (!is_ext_slot(c)) return {};                     // empty slot → absent
+        nd = w2deref(c);
     }
 }
 
