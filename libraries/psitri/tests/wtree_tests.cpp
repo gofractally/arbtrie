@@ -1704,6 +1704,55 @@ TEST_CASE("wtree2 leaf build + find (end-to-end DIRECT)", "[wtree2][find]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — recursive bulk_build correctness at scale ─────────────────
+
+TEST_CASE("wtree2 bulk_build + find correctness (100K)", "[wtree2][bulk]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-bulk");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   struct Ent { std::array<uint32_t, 6> key; uint64_t val; };
+   const uint32_t N = 100'000;
+   std::vector<Ent> ents(N);
+   for (uint32_t i = 0; i < N; ++i)
+   {
+      uint8_t k[24]; make_key24(i, k);
+      std::memcpy(ents[i].key.data(), k, 24);
+      ents[i].val = uint64_t(i) * 10 + 1;
+   }
+   std::sort(ents.begin(), ents.end(), [](const Ent& a, const Ent& b) { return a.key < b.key; });
+   ents.erase(std::unique(ents.begin(), ents.end(),
+                          [](const Ent& a, const Ent& b) { return a.key == b.key; }),
+              ents.end());
+
+   std::vector<w2::leaf_entry> le;
+   le.reserve(ents.size());
+   for (auto& e : ents)
+      le.push_back({{e.key.data(), 6},
+                    {reinterpret_cast<const uint8_t*>(&e.val), 8}});
+
+   w2::node2* root = w2::w2deref(w2::bulk_build({le.data(), le.size()}, 0));
+
+   size_t miss = 0, mism = 0;
+   for (auto& e : ents)
+   {
+      auto v = w2::find_value(root, {e.key.data(), 6});
+      if (v.data() == nullptr) { ++miss; continue; }
+      uint64_t got = 0; std::memcpy(&got, v.data(), std::min<size_t>(v.size(), 8));
+      if (v.size() != 8 || got != e.val) ++mism;
+   }
+   INFO("N=" << ents.size() << " miss=" << miss << " mism=" << mism);
+   REQUIRE(miss == 0);
+   REQUIRE(mism == 0);
+
+   w2::free_subtree(root);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

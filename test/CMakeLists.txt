@@ -198,6 +198,11 @@ target_link_libraries(bench_wtree_sal PRIVATE psitri)
 target_include_directories(bench_wtree_sal PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
 set_target_properties(bench_wtree_sal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(bench_wtree2 ../libraries/psitri/tests/bench_wtree2.cpp)
+target_link_libraries(bench_wtree2 PRIVATE psitri)
+target_include_directories(bench_wtree2 PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+set_target_properties(bench_wtree2 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 add_executable(bench_wtree_staged ../libraries/psitri/tests/bench_wtree_staged.cpp)
 target_link_libraries(bench_wtree_staged PRIVATE psitri)
 target_include_directories(bench_wtree_staged PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)

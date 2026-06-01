@@ -22,8 +22,10 @@
 #include <sal/allocator_session.hpp>
 #include <sal/allocator_session_impl.hpp>
 #include <ucc/round.hpp>                 // ucc::round_up_multiple<N>
+#include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <vector>
 
 namespace psitri::wtree2 {
 
@@ -210,15 +212,37 @@ inline T* w2deref(ptr_address a) noexcept { return w2session().template get_ptr<
 
 inline void node2_free(node2* p) noexcept { w2session().release(p->address()); }
 
+// Recursively release a subtree (EXT children first, then self). LOCAL/named
+// slots own no node. This is the basis for the Phase-6 lifecycle destroy(); for
+// now it's an explicit free used by tests/teardown since node2::destroy is the
+// alloc_header no-op default.
+inline void free_subtree(node2* nd) noexcept
+{
+    const uint16_t     ns = nd->n_slots();
+    const ptr_address* ch = nd->children();
+    for (uint16_t i = 0; i < ns; ++i)
+        if (is_ext_slot(ch[i])) free_subtree(w2session().get_ptr<node2>(ch[i]));
+    node2_free(nd);
+}
+
 // ── Stem search (algo §6) ─────────────────────────────────────────────
 // upper_bound slot index: count of stems ≤ q, in [0, n]. slots[0] handles
 // key ≤ stems[0] AND key-ends-here; slots[n] handles key > stems[n-1].
 // Scalar for Phase 2 (SIMD/predictor are later search-mode work).
 inline uint16_t stem_upper_bound(const uint32_t* stems, uint16_t n, uint32_t q) noexcept
 {
-    uint16_t i = 0;
-    while (i < n && stems[i] <= q) ++i;
-    return i;
+    // Binary search (O(log n)) for the slot index = count of stems ≤ q. The
+    // SIMD-linear scan (small nodes) + APGM predictor (big nodes) of algo §6 are
+    // the future search modes; binary search is the correct interim that avoids
+    // an O(n) scan on wide inners.
+    uint16_t lo = 0, hi = n;
+    while (lo < hi)
+    {
+        const uint16_t mid = uint16_t(lo + ((hi - lo) >> 1));
+        if (stems[mid] <= q) lo = uint16_t(mid + 1);
+        else                 hi = mid;
+    }
+    return lo;
 }
 
 // ── Prefix absorption (algo §9.2) ─────────────────────────────────────
@@ -328,8 +352,16 @@ inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
                          ptr_address hint = kNoChild) noexcept
 {
     assert(!ents.empty());
-    const uint8_t pfx = uint8_t(longest_common_prefix(
-        ents.front().key.subspan(depth), ents.back().key.subspan(depth)));
+    uint16_t lcp = longest_common_prefix(
+        ents.front().key.subspan(depth), ents.back().key.subspan(depth));
+    // §9.2 exception: never absorb the FULL remaining key into the prefix — leave
+    // ≥1 word as the stem, so every entry has a stem (no terminal/underflow). For
+    // a 1-entry chunk lcp == remaining, so this caps it to remaining-1.
+    uint16_t min_rem = 0xFFFFu;
+    for (const auto& e : ents)
+        min_rem = std::min<uint16_t>(min_rem, uint16_t(e.key.size() - depth));
+    if (lcp >= min_rem) lcp = uint16_t(min_rem - 1);
+    const uint8_t  pfx        = uint8_t(lcp);
     const uint16_t base_depth = uint16_t(depth + pfx);
     const uint16_t n          = uint16_t(ents.size());
 
@@ -415,6 +447,108 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
         if (!is_ext_slot(c)) return {};                     // empty slot → absent
         nd = w2deref(c);
     }
+}
+
+// ── Recursive bulk constructor (algo §9.1, full) ──────────────────────
+// Builds a whole subtree from a SORTED entry stream. Handles prefix absorption
+// (Case 2), collisions (a same-first-word bucket recurses one radix level
+// deeper → EXT child), leaf packing (distinct singletons chunked into leaves),
+// and B-tree-ing the radix children when they exceed one inner. Correct by
+// construction (no in-place mutation / split-during-insert). For FIXED-length
+// distinct keys (no entry is a prefix of another) so terminals don't arise.
+inline constexpr uint32_t kLeafTailBudget = 3072;   // value-tail bytes per leaf
+inline constexpr uint32_t kLeafCountCap   = 200;    // entries per leaf
+inline constexpr uint32_t kInnerStemCap   = 4096;   // dividers per inner (~32 KB)
+
+// B-tree the (divs, kids) radix children into inner(s); prefix goes on the top.
+inline ptr_address build_inner_tree(std::span<const uint32_t> prefix,
+                                    std::vector<uint32_t>     divs,
+                                    std::vector<ptr_address>  kids) noexcept
+{
+    assert(kids.size() == divs.size() + 1);
+    for (;;)
+    {
+        const size_t D = divs.size();
+        if (D <= kInnerStemCap)
+            return build_inner(prefix, {divs.data(), D}, {kids.data(), D + 1})->address();
+        std::vector<uint32_t>    nd;
+        std::vector<ptr_address> nk;
+        size_t a = 0;
+        for (;;)
+        {
+            const size_t b = std::min(a + (kInnerStemCap + 1), D + 1);   // ≤ cap+1 kids
+            nk.push_back(build_inner({}, {divs.data() + a, b - 1 - a},
+                                     {kids.data() + a, b - a})->address());
+            if (b <= D) { nd.push_back(divs[b - 1]); a = b; }            // promote separator
+            else break;
+        }
+        divs.swap(nd);
+        kids.swap(nk);
+    }
+}
+
+inline ptr_address bulk_build(std::span<const leaf_entry> E, uint16_t depth) noexcept
+{
+    assert(!E.empty());
+    const uint8_t  pfx  = uint8_t(longest_common_prefix(
+        E.front().key.subspan(depth), E.back().key.subspan(depth)));
+    const uint16_t base = uint16_t(depth + pfx);
+    auto word_at = [&](const leaf_entry& e) { return e.key[base]; };
+    auto round4  = [](uint16_t x) { return uint32_t(ucc::round_up_multiple<4>(x)); };
+
+    // Single-leaf fast path: all distinct at `base` and fits one leaf.
+    {
+        bool     distinct = true;
+        uint32_t tail     = 0;
+        for (size_t i = 0; i < E.size(); ++i)
+        {
+            if (i && word_at(E[i]) == word_at(E[i - 1])) { distinct = false; break; }
+            tail += round4(value_region::size_bytes(
+                uint8_t(E[i].key.size() - base - 1), uint8_t(E[i].value.size())));
+        }
+        if (distinct && tail <= kLeafTailBudget && E.size() <= kLeafCountCap)
+            return build_leaf(E, depth)->address();
+    }
+
+    // Otherwise: emit radix children at `base`, then B-tree them under prefix=pfx.
+    std::vector<uint32_t>    divs;
+    std::vector<ptr_address> kids;
+    size_t i = 0;
+    while (i < E.size())
+    {
+        size_t j = i + 1;
+        while (j < E.size() && word_at(E[j]) == word_at(E[i])) ++j;   // bucket = same word[base]
+        ptr_address child;
+        size_t      next;
+        if (j - i > 1)
+        {
+            child = bulk_build(E.subspan(i, j - i), base);            // collision → recurse deeper
+            next  = j;
+        }
+        else
+        {
+            // run of distinct singletons → one leaf chunk (≤ budget, stop before a collision)
+            size_t   k = i;
+            uint32_t t = 0, n = 0;
+            while (k < E.size())
+            {
+                size_t kk = k + 1;
+                while (kk < E.size() && word_at(E[kk]) == word_at(E[k])) ++kk;
+                if (kk - k > 1) break;                                // collision ahead → flush
+                const uint32_t rs = round4(value_region::size_bytes(
+                    uint8_t(E[k].key.size() - base - 1), uint8_t(E[k].value.size())));
+                if (n > 0 && (t + rs > kLeafTailBudget || n >= kLeafCountCap)) break;
+                t += rs; ++n; ++k;
+            }
+            child = build_leaf(E.subspan(i, k - i), base)->address();
+            next  = k;
+        }
+        if (!kids.empty()) divs.push_back(word_at(E[i]));
+        kids.push_back(child);
+        i = next;
+    }
+    std::span<const uint32_t> pfx_words(E.front().key.data() + depth, pfx);
+    return build_inner_tree(pfx_words, std::move(divs), std::move(kids));
 }
 
 }  // namespace psitri::wtree2
