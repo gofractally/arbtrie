@@ -242,6 +242,73 @@ into.
 
 ---
 
+## 4. Next: typed-smart_ref descent + remove-as-mode (planned)
+
+Two coupled refactors the descent should converge on, matching the legacy
+`tree_ops` model (which threads `smart_ref<…>&` and carries upsert/remove in one
+`upsert_mode`-templated infrastructure).
+
+### 4a. Thread a typed `smart_ref&` (drop raw `psitri::node*` + on-demand fetch)
+
+Today the upsert descent passes raw `psitri::node*`, casts with
+`as_inner`/`as_leaf`, and fetches a `smart_ref` *on demand* inside
+`cow_inner`/`cow_leaf`. The per-step `ref()>1` demotion I added builds **another**
+throwaway `smart_ref` per node. Legacy instead threads ONE typed `smart_ref`:
+
+```
+node_modify_<mode>(smart_ref<inner_node>& in, key, depth, value)   // inner level
+leaf_modify_<mode>(smart_ref<leaf_node>&  lf, key, depth, value)   // leaf level
+```
+
+- `in.ref()` serves the demotion check — no separate fetch.
+- `in.modify()` reuses the SAME ref for the COW — no `cow_*` re-fetch.
+- The type is carried statically (`smart_ref<inner_node>` / `<leaf_node>`), so
+  `as_inner`/`as_leaf` and the manual `node->type()` dispatch collapse into typed
+  overloads — the compiler enforces correctness.
+- Child fetched once as `smart_ref<alloc_header>` (or `<node>`), dispatched on
+  `type()`, then `.as<inner_node>()` / `.as<leaf_node>()` and threaded down.
+- **find stays on raw pointers** — read-only, no refcount/modify, hot read path
+  preserved.
+
+Cost note: this fetches a `smart_ref` per node descended (vs the old raw descent
+that fetched none until the leaf COW). But per-step ref-checking is mandatory for
+MVCC anyway, so we pay a per-node control-block read regardless; the legacy model
+just makes it a typed ref reused for the modify rather than a throwaway + refetch.
+
+### 4b. Fold `node_remove_` into the descent as a `remove` mode
+
+`upsert_mode` already has `insert | update | upsert | remove` bits. Legacy runs
+remove through the SAME `upsert<mode>` descent — one lookup path down, branched by
+`if constexpr` at the leaf and on the way back up. wtree should match:
+
+```
+node_modify_<mode>(...) {
+   ... shared descent (demote, eager-clone if shared, recurse) ...
+   if constexpr (mode.is_remove()) { ...leaf_remove / tombstone-slot / merge / collapse... }
+   else                            { ...leaf insert/update / split-absorb... }
+}
+```
+
+This removes the duplicate `node_remove_` descent (no second lookup-on-the-way-
+down) and unifies the return contract (`upsert_result` already encodes "no
+right/extra" — remove outcomes map onto it; the `rm` enum's `removed_empty` ⇒ the
+slot tombstones, which the parent handles like a structural change).
+
+**MVCC convergence:** once §5 tombstones land, `remove` becomes literally
+`upsert(key, tomb)` — a value write down the *identical* path, with old snapshots
+still reading the prior value and the structural merge/collapse deferred to
+compaction below the read-lock horizon. So 4b's structural-remove-as-mode is the
+pre-MVCC form; the tombstone form is the same descent with a `tomb` value_region
+instead of merge/collapse. The eager-clone shared path composes unchanged: a
+shared remove forks the node, then removes/tombstones on the private copy.
+
+### Suggested order
+1. 4a on the upsert descent (`node_upsert_`→`node_modify_<mode>` threading
+   `smart_ref`, unique path unchanged, snapshot/leak tests green).
+2. 4b fold remove in as `mode.is_remove()` (delete `node_remove_`; `remove()`
+   calls `node_modify_<remove>`); re-verify `[remove]`/`[collapse]` + snapshot.
+3. (later, §5) remove → tombstone-upsert; merge/collapse moves to compaction.
+
 ### Source map
 
 Core: `tree_ops.hpp:1060` (demote), `1206` (merge_branches unique/shared), `1385`
