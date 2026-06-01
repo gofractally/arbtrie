@@ -1568,6 +1568,55 @@ TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — Phase 3a: find descent (routing) ──────────────────────────
+
+TEST_CASE("wtree2 find descent routes + rejects out-of-range", "[wtree2][find]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-find");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   // Three leaves, each self-asserting a 1-word prefix for its range.
+   auto mk_leaf = [&](uint32_t pfx_word) {
+      auto a = w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf,
+                                                /*n_stems=*/0, /*prefix_len=*/1);
+      auto* nd = w2::w2deref(a);
+      nd->prefix()[0] = pfx_word;
+      return a;
+   };
+   const w2::ptr_address lA = mk_leaf(50), lB = mk_leaf(150), lC = mk_leaf(250);
+
+   uint32_t        stems[]    = {100u, 200u};
+   w2::ptr_address children[] = {lA, lB, lC};
+   w2::node2*      root = w2::build_inner({}, {stems, 2}, {children, 3});
+
+   auto reaches = [&](std::initializer_list<uint32_t> k, w2::ptr_address want) {
+      std::vector<uint32_t> kv(k);
+      w2::node2* leaf = w2::find_leaf(root, {kv.data(), kv.size()});
+      return leaf && leaf->address() == want;
+   };
+
+   REQUIRE(reaches({50},  lA));
+   REQUIRE(reaches({150}, lB));
+   REQUIRE(reaches({250}, lC));
+   REQUIRE(reaches({150, 999}, lB));   // extra word is for leaf-internal lookup
+
+   // Out-of-range: 175 routes to lB's slot, but lB's prefix (150) rejects it →
+   // absent (the no-sentinel "child rejects" model, algo §7.3).
+   { std::vector<uint32_t> k{175}; REQUIRE(w2::find_leaf(root, {k.data(), k.size()}) == nullptr); }
+   // Key shorter than a matched prefix → absent.
+   { std::vector<uint32_t> k{}; REQUIRE(w2::find_leaf(root, {k.data(), k.size()}) == nullptr); }
+
+   w2::node2_free(root);
+   w2::w2session().release(lA);
+   w2::w2session().release(lB);
+   w2::w2session().release(lC);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");

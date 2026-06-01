@@ -219,4 +219,36 @@ inline node2* build_inner(std::span<const uint32_t>    prefix,
     return nd;
 }
 
+// ── find DESCENT (algo §5; Phase 3a — routing only) ───────────────────
+// Descend from `nd` matching each node's Patricia prefix (the only step that
+// consumes key words) and routing by stems (which do NOT consume a word).
+// Returns the LEAF reached for `key`, or nullptr if the key is absent (prefix
+// mismatch — the "child rejects out-of-range" model, no sentinels — or an empty
+// slot). Leaf-internal value retrieval is Phase 3b (needs the value model).
+inline node2* find_leaf(node2* nd, std::span<const uint32_t> key, uint16_t depth = 0) noexcept
+{
+    for (;;)
+    {
+        // §5.1 prefix match — the ONLY consumer of key words.
+        const uint16_t  pl  = nd->prefix_len;
+        const uint32_t* pfx = nd->prefix();
+        for (uint16_t i = 0; i < pl; ++i)
+            if (size_t(depth) + i >= key.size() || key[depth + i] != pfx[i])
+                return nullptr;                       // mismatch / key too short → absent
+        depth = uint16_t(depth + pl);
+
+        if (nd->is_leaf())
+            return nd;                                // reached the leaf hosting (or not) the key
+
+        // §5.2 stem search — terminal (key ends here) routes to slot 0.
+        const uint16_t i = (depth >= key.size())
+                               ? uint16_t(0)
+                               : stem_upper_bound(nd->stems(), nd->num_stems, key[depth]);
+        const ptr_address c = nd->children()[i];
+        if (c == kNoChild)
+            return nullptr;                           // empty slot → absent
+        nd = w2deref(c);                              // §5.3 depth NOT advanced by the stem match
+    }
+}
+
 }  // namespace psitri::wtree2
