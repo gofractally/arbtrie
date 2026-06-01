@@ -19,15 +19,22 @@
 #include <span>
 
 #include <psitri/node/node.hpp>          // psitri::node (12-B SAL header base), node_type, ptr_address
+#include <sal/allocator_session.hpp>
+#include <sal/allocator_session_impl.hpp>
 #include <ucc/round.hpp>                 // ucc::round_up_multiple<N>
+#include <cassert>
+#include <cstring>
 
 namespace psitri::wtree2 {
 
 // Apple Silicon / x86 fetch unit (64-B lines paired). Regions align to this.
 inline constexpr std::size_t kCacheLine = 128;
 
-using node_type   = psitri::node_type;
-using ptr_address = sal::ptr_address;
+using node_type       = psitri::node_type;
+using ptr_address     = sal::ptr_address;
+using ptr_address_seq = sal::ptr_address_seq;
+using alloc_hint      = sal::alloc_hint;
+using session_t       = sal::allocator_session;
 
 inline constexpr ptr_address kNoChild = sal::null_ptr_address;
 
@@ -123,6 +130,27 @@ struct node2 : public psitri::node
                              + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems) * 4u));
         return c_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems + 1) * 4u));
     }
+
+    // ── SAL alloc contract ────────────────────────────────────────────
+    // session.alloc<node2>(hint, shp, n_stems, prefix_len) forwards these to
+    // alloc_size (for the byte size) and the placement ctor (header init). The
+    // bulk constructor then fills prefix/stems/children. cow_size/compact_size/
+    // copy_to/destroy/visit_children use the alloc_header defaults for now
+    // (real lifecycle = Phase 6).
+    static uint32_t alloc_size(shape, uint16_t n_stems, uint8_t prefix_len) noexcept
+    {
+        return size_for(n_stems, prefix_len);
+    }
+    node2(uint32_t asize, ptr_address_seq seq,
+          shape shp, uint16_t n_stems_, uint8_t prefix_len_) noexcept
+        : psitri::node(asize, type_id, seq)
+    {
+        num_stems  = n_stems_;
+        shape_     = uint8_t(shp);
+        prefix_len = prefix_len_;
+        flags      = 0;
+        _pad[0] = _pad[1] = _pad[2] = 0;
+    }
 };
 
 // ── Compile-time layout verification (PHASE 1 "test") ─────────────────
@@ -133,5 +161,62 @@ static_assert(offsetof(node2, prefix_len) == 15, "prefix_len at byte 15");
 static_assert(offsetof(node2, flags)      == 16, "flags at byte 16");
 static_assert(sizeof(node2) == 20, "wtree2 fixed header must be 20 B");
 static_assert(node2::kFixedHeaderBytes == 20);
+
+// ── SAL session bridge (per-thread, mirrors wtree's pattern) ──────────
+inline thread_local session_t* g_wtree2_session = nullptr;
+inline session_t& w2session() noexcept { return *g_wtree2_session; }
+
+template <typename T = node2>
+inline T* w2deref(ptr_address a) noexcept { return w2session().template get_ptr<T>(a); }
+
+inline void node2_free(node2* p) noexcept { w2session().release(p->address()); }
+
+// ── Stem search (algo §6) ─────────────────────────────────────────────
+// upper_bound slot index: count of stems ≤ q, in [0, n]. slots[0] handles
+// key ≤ stems[0] AND key-ends-here; slots[n] handles key > stems[n-1].
+// Scalar for Phase 2 (SIMD/predictor are later search-mode work).
+inline uint16_t stem_upper_bound(const uint32_t* stems, uint16_t n, uint32_t q) noexcept
+{
+    uint16_t i = 0;
+    while (i < n && stems[i] <= q) ++i;
+    return i;
+}
+
+// ── Prefix absorption (algo §9.2) ─────────────────────────────────────
+// Longest common prefix (in u32 words) over a sorted set of key-word spans.
+// Because the set is sorted, the LCP of the whole set == LCP(first, last).
+inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
+                                      std::span<const uint32_t> last) noexcept
+{
+    const size_t lim = std::min(first.size(), last.size());
+    uint16_t     i   = 0;
+    while (i < lim && first[i] == last[i]) ++i;
+    return i;
+}
+
+// ── Bulk-in-order constructor: INNER (algo §9.1, inner case) ──────────
+// Build a fresh inner node2 from a prefix and a sorted (stems, children) pair
+// with children.size() == stems.size()+1 (btree-page semantics). Children are
+// stored as-is (EXT ptr_addresses); the builder does NOT retain — the caller
+// transfers ownership of one ref per child (matches unique-mode construction).
+inline node2* build_inner(std::span<const uint32_t>    prefix,
+                          std::span<const uint32_t>    stems,
+                          std::span<const ptr_address> children,
+                          ptr_address                  hint = kNoChild) noexcept
+{
+    assert(children.size() == stems.size() + 1);
+    assert(prefix.size() <= 255 && stems.size() <= 0xFFFFu);
+    const uint16_t n   = uint16_t(stems.size());
+    const uint8_t  pfx = uint8_t(prefix.size());
+    const ptr_address a =
+        (hint == kNoChild)
+            ? w2session().alloc<node2>(alloc_hint{}, shape::inner, n, pfx)
+            : w2session().alloc<node2>(alloc_hint{&hint, 1}, shape::inner, n, pfx);
+    node2* nd = w2deref(a);
+    if (pfx) std::memcpy(nd->prefix(), prefix.data(), size_t(pfx) * 4u);
+    if (n)   std::memcpy(nd->stems(), stems.data(), size_t(n) * 4u);
+    std::memcpy(nd->children(), children.data(), children.size() * sizeof(ptr_address));
+    return nd;
+}
 
 }  // namespace psitri::wtree2

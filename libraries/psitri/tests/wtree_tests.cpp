@@ -1491,6 +1491,83 @@ TEST_CASE("wtree2 node layout + sizing", "[wtree2][layout]")
    check(6000, 0);   // ~max inner fanout
 }
 
+// ── wtree2 — Phase 2: bulk-inner constructor + prefix absorption + search ──
+
+TEST_CASE("wtree2 prefix absorption + stem search", "[wtree2][build]")
+{
+   namespace w2 = psitri::wtree2;
+
+   // longest_common_prefix over sorted key-word spans = LCP(first, last).
+   {
+      uint32_t a[] = {1, 2, 3}, b[] = {1, 2, 9};
+      REQUIRE(w2::longest_common_prefix({a, 3}, {b, 3}) == 2);
+      uint32_t c[] = {5}, d[] = {7};
+      REQUIRE(w2::longest_common_prefix({c, 1}, {d, 1}) == 0);
+      uint32_t e[] = {1, 2}, f[] = {1, 2};
+      REQUIRE(w2::longest_common_prefix({e, 2}, {f, 2}) == 2);
+   }
+
+   // stem_upper_bound: slots[0] for q<stems[0]; q==stem routes right.
+   {
+      uint32_t st[] = {100, 200};
+      REQUIRE(w2::stem_upper_bound(st, 2, 50)  == 0);
+      REQUIRE(w2::stem_upper_bound(st, 2, 100) == 1);   // == divider → right side
+      REQUIRE(w2::stem_upper_bound(st, 2, 150) == 1);
+      REQUIRE(w2::stem_upper_bound(st, 2, 200) == 2);
+      REQUIRE(w2::stem_upper_bound(st, 2, 300) == 2);
+   }
+}
+
+TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-build");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   // Three child node2s (leaf-shaped, empty) to point at.
+   auto mk_child = [&] {
+      return w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf,
+                                              /*n_stems=*/0, /*prefix_len=*/0);
+   };
+   const w2::ptr_address cA = mk_child(), cB = mk_child(), cC = mk_child();
+
+   uint32_t       prefix[]   = {0xAAAAu};
+   uint32_t       stems[]    = {100u, 200u};
+   w2::ptr_address children[] = {cA, cB, cC};
+   w2::node2* in = w2::build_inner({prefix, 1}, {stems, 2}, {children, 3});
+
+   // Structure read-back.
+   REQUIRE(in->is_inner());
+   REQUIRE(in->num_stems == 2);
+   REQUIRE(in->prefix_len == 1);
+   REQUIRE(in->prefix()[0] == 0xAAAAu);
+   REQUIRE(in->stems()[0] == 100u);
+   REQUIRE(in->stems()[1] == 200u);
+   REQUIRE(in->children()[0] == cA);
+   REQUIRE(in->children()[1] == cB);
+   REQUIRE(in->children()[2] == cC);
+   REQUIRE(in->total_bytes() == w2::node2::size_for(2, 1));
+
+   // Routing matches stem_upper_bound semantics.
+   auto route = [&](uint32_t q) { return in->children()[w2::stem_upper_bound(in->stems(), in->num_stems, q)]; };
+   REQUIRE(route(50)  == cA);
+   REQUIRE(route(100) == cB);
+   REQUIRE(route(150) == cB);
+   REQUIRE(route(200) == cC);
+   REQUIRE(route(999) == cC);
+
+   // node2's destroy is a no-op default (Phase 6 adds EXT release), so free the
+   // inner AND the children explicitly; the set must balance.
+   w2::node2_free(in);
+   w2::w2session().release(cA);
+   w2::w2session().release(cB);
+   w2::w2session().release(cC);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")
 {
    sal_fixture fx("leak-repeat");
