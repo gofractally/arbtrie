@@ -566,7 +566,22 @@ private:
     // single-insert grow-or-fail interface, so there's no concept of a
     // mid-sequence split or routing.
     //
+    // Retain every real child of `in` EXCEPT slot `pos` (the one being replaced /
+    // descended-into). Used at the SHARED fork point: the carried-forward
+    // siblings end up referenced by both the snapshot's old node and the new
+    // forked node, so each needs +1. The replaced slot's old child is NOT
+    // retained — it stays owned solely by the snapshot.
+    void retain_off_path_(const inner_node* in, uint16_t pos) noexcept {
+        const uint16_t nch = uint16_t(in->num_keys + 1);
+        for (uint16_t i = 0; i < nch; ++i) {
+            if (i == pos) continue;
+            const ptr_address ca = inner_child_addr(in, i);
+            if (ca != kNoChild && ca != kSentinelChildAddr) _session->retain(ca);
+        }
+    }
+
     // Returns upsert_inplace(in_or_grown) or upsert_split(L, up_div, R).
+    template <upsert_mode mode>
     upsert_result replace_slot_(inner_node* in,
                                   uint16_t pos,
                                   uint16_t n_stems,
@@ -574,6 +589,11 @@ private:
                                   psitri::node* const* repl_children) noexcept {
         const uint16_t K     = in->num_keys;
         const uint16_t K_new = uint16_t(K + n_stems);
+        // SHARED: fork. Retain the siblings carried into the new node(s); the
+        // fits-path apply<shared> and the split-path write_half_ both copy them
+        // forward from `in` (which stays live for the snapshot).
+        if constexpr (mode.is_shared())
+            retain_off_path_(in, pos);
 
         // ── Pick destination cap: smallest cls that fits K_new + 1 children.
         // inner_cap_in_cls_for() clamps to kInnerMaxPageCls, so verify the
@@ -592,13 +612,16 @@ private:
             op.repl_stems    = repl_stems;
             op.repl_children = repl_children;
             auto              ref = wsession().get_ref<inner_node>(in->address());
-            const ptr_address r   = apply<upsert_mode::unique_upsert>(ref, op);
+            const ptr_address r   = apply<mode>(ref, op);   // shared → fused fresh alloc
             return upsert_inplace(wderef<inner_node>(r));
         }
 
-        // ── Split: K_new exceeds max page.  `in` is freed (inner_free_moved)
-        // after its children move to L/R → make it writable first.
-        in = cow_inner(in);
+        // ── Split: K_new exceeds max page. UNIQUE: `in` is freed
+        // (inner_free_moved) after its children move to L/R → make it writable
+        // first. SHARED: `in` stays live for the snapshot — read from it, write
+        // L/R, and DON'T free it (the carried children were retained above).
+        if constexpr (mode.is_unique())
+            in = cow_inner(in);
         const uint32_t* in_st = inner_stems(in);
         auto mst = [&](uint16_t mk) noexcept -> uint32_t {
             if (mk < pos)            return in_st[mk];
@@ -651,7 +674,8 @@ private:
         (void)inner_rebuild_corrections(L);
         (void)inner_rebuild_corrections(R);
         ++g_inner_btree_split;
-        inner_free_moved(in);
+        if constexpr (mode.is_unique())
+            inner_free_moved(in);   // shared: snapshot still owns `in` — leave it
         return upsert_split(L, up_div, R);
     }
 
@@ -958,19 +982,24 @@ private:
     }
 
     // ─── upsert: dispatch + recursive ─────────────────────────────
-    // Make `in` writable for in-place mutation. UNIQUE: modify() through the
-    // THREADED smart_ref — reuses the fetch (CB-move keeps the address, updates
-    // nref). SHARED: `in` is already a fresh private clone (eager-clone), so
-    // there's nothing to do. The dead branch is if-constexpr'd away.
+    // Make `in` writable to set a SINGLE child slot at `pos` (sentinel-fill,
+    // child-repoint, container-wrap). UNIQUE: modify() through the THREADED
+    // smart_ref — reuses the fetch, in place, address kept. SHARED: FORK to a
+    // fresh clone and retain the carried siblings (all except `pos`) so the
+    // snapshot's old node stays valid. This is the per-site replacement for the
+    // old eager-clone: we clone only AFTER we know it's a cheap single-slot set
+    // (O(1) edit on a necessary copy — no clone-then-splice double work).
     template <upsert_mode mode>
     inner_node* writable_inner_(sal::smart_ref<sal::alloc_header>& nref,
-                                inner_node* in) noexcept {
+                                inner_node* in, uint16_t pos) noexcept {
         if constexpr (mode.is_unique()) {
             inner_node* w = in;
             nref.as<inner_node>().modify([&](inner_node* n) { w = n; });
             return w;
         } else {
-            return in;
+            inner_node* c = clone_inner_fresh(in);
+            retain_off_path_(c, pos);
+            return c;
         }
     }
 
@@ -1019,25 +1048,10 @@ private:
                 delta1 = true;
             }
         }
-        // First shared node on this path: FORK `in` to a private, uniquely-owned
-        // copy (new address) and retain the OFF-PATH siblings so they live in
-        // BOTH the snapshot's old `in` and this new one. The on-path child at
-        // `pos` is deliberately NOT retained — the recursion path-copies it and
-        // the old child stays owned by the snapshot. After this the rest of the
-        // body runs the UNCHANGED unique logic on the private copy: every
-        // cow_inner(in) is a no-op (fresh+unique), and the child always relocates
-        // (new address) so the existing repoint fires. (`child`/its address are
-        // unchanged — the fork copies the child pointers, the child node itself
-        // is untouched.)
-        if constexpr (mode.is_shared()) {
-            in = clone_inner_fresh(in);
-            const uint16_t nk = in->num_keys;
-            for (uint16_t i = 0; i <= nk; ++i) {
-                if (i == pos) continue;
-                const ptr_address ca = inner_child_addr(in, i);
-                if (ca != kNoChild && ca != kSentinelChildAddr) _session->retain(ca);
-            }
-        }
+        // No eager-clone here: shared forking happens lazily AT each mutation
+        // site (writable_inner_ for single-slot sets; replace_slot_<shared> for
+        // splice/split), so a shared op fuses the copy with the edit (one pass)
+        // and never wastes a clone on a split.
         if (!child) {
             // Sentinel slot from a prior K=1 split — empty range, no
             // child yet.  Allocate a fresh leaf here and insert.
@@ -1050,7 +1064,7 @@ private:
                 leaf_free(lf);
                 return { nullptr, nullptr, 0, 0 };
             }
-            in = writable_inner_<mode>(nref, in);   // about to mutate in place → make writable
+            in = writable_inner_<mode>(nref, in, pos);   // about to mutate in place → make writable
             inner_set_child(in, pos, as_header(lf));
             return upsert_inplace(in);
         }
@@ -1123,7 +1137,7 @@ private:
             container->prefix_len  = child_prefix_len;
             container->prefix_data = child_prefix_data;
             (void)inner_rebuild_corrections(container);
-            in = writable_inner_<mode>(nref, in);   // repointing child[pos] → make `in` writable
+            in = writable_inner_<mode>(nref, in, pos);   // repointing child[pos] → make `in` writable
             inner_set_child(in, pos, as_header(container));
             return upsert_inplace(in);
         }
@@ -1191,7 +1205,7 @@ private:
             assert(size_t(ch_p - ch_buf) == n_stems + 1u);
 
             delete cr.extra;
-            const upsert_result r = replace_slot_(in, pos, n_stems, st_buf, ch_buf);
+            const upsert_result r = replace_slot_<mode>(in, pos, n_stems, st_buf, ch_buf);
             // Enforce delta=1 invariants at every position the operation
             // touched: pos, pos+1, ..., pos+n_stems (n_stems+1 positions).
             // The X↔X+1 pair is intentionally delta=1 and the enforcer
@@ -1239,7 +1253,7 @@ private:
             // already correct: skip the COW + write entirely (the win). Only if
             // the child actually relocated do we COW `in` and repoint the slot.
             if (cr.left->address() != child_addr) [[unlikely]] {
-                in = writable_inner_<mode>(nref, in);
+                in = writable_inner_<mode>(nref, in, pos);
                 inner_set_child(in, pos, cr.left);
                 // A changed address with no split means the child FORKED — it was
                 // shared with a snapshot (ref>1) and path-copied to a new node.
@@ -1274,7 +1288,7 @@ private:
             delete cr.extra;
         }
         const uint16_t n_stems = si;
-        const upsert_result r = replace_slot_(in, pos, n_stems, st_buf, ch_buf);
+        const upsert_result r = replace_slot_<mode>(in, pos, n_stems, st_buf, ch_buf);
         // Enforce delta=1 invariant at every touched position.
         const uint16_t vl = value_len_;
         if (!r.right) {
