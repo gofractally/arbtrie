@@ -8,6 +8,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <psitri/wtree/wtree.hpp>
+#include <psitri/wtree2/node.hpp>   // wtree2 rewrite (Phase 1: node record + layout)
 
 #include <sal/allocator.hpp>
 #include <sal/allocator_impl.hpp>
@@ -1443,6 +1444,51 @@ TEST_CASE("wtree snapshot isolation under removes", "[wtree][snapshot][shared][r
    }   // snap (old full set) then t (odds) drop
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
+}
+
+// ── wtree2 rewrite — Phase 1: node record + region layout + sizing ──────
+//
+// The header's static_asserts verify the fixed-header layout at compile time
+// (this TU including the header IS that check). Here we verify the runtime
+// region math: cl-aligned (128 B) offsets, monotonic regions, and size_for()
+// matching an instance's total_bytes().
+
+TEST_CASE("wtree2 node layout + sizing", "[wtree2][layout]")
+{
+   namespace w2 = psitri::wtree2;
+   constexpr std::size_t CL = w2::kCacheLine;   // 128
+
+   auto check = [&](uint16_t n, uint8_t pfx) {
+      // size_for must equal what an instance with these dims reports, and must
+      // be cacheline-aligned with strictly-ordered, cl-aligned regions.
+      const uint32_t sz = w2::node2::size_for(n, pfx);
+      REQUIRE(sz % CL == 0);
+
+      // Stamp a buffer as a node2 and check its accessors agree with size_for.
+      alignas(CL) static thread_local uint8_t buf[1 << 20];
+      REQUIRE(sz <= sizeof(buf));
+      auto* nd = reinterpret_cast<w2::node2*>(buf);
+      nd->num_stems  = n;
+      nd->prefix_len = pfx;
+      nd->shape_     = uint8_t(w2::shape::inner);
+      nd->flags      = 0;
+
+      REQUIRE(nd->stems_off()    % CL == 0);
+      REQUIRE(nd->children_off() % CL == 0);
+      REQUIRE(nd->stems_off()    >= w2::node2::kFixedHeaderBytes + uint32_t(pfx) * 4u);
+      REQUIRE(nd->children_off() >= nd->stems_off() + uint32_t(n) * 4u);
+      REQUIRE(nd->total_bytes()  == sz);
+      // n_slots = n+1 children
+      REQUIRE(nd->n_slots() == uint16_t(n + 1));
+   };
+
+   check(0, 0);
+   check(1, 0);
+   check(15, 1);
+   check(16, 1);     // stems cross into a 2nd region cl
+   check(255, 3);
+   check(2000, 8);
+   check(6000, 0);   // ~max inner fanout
 }
 
 TEST_CASE("wtree no leak across repeated build/destroy", "[wtree][leak]")

@@ -56,12 +56,16 @@ namespace psitri
       // with APGM predictor. See psitri/wtree/.
       wtree_leaf,
       wtree_inner,
+      // wtree2 (rewrite): one unified node record (shape flag picks leaf/inner).
+      // See psitri/wtree2/ and doc/wtree2.md.
+      wtree2_node,
    };
    inline std::ostream& operator<<(std::ostream& os, node_type t)
    {
       static const char* names[] = {"inner",      "inner_prefix", "leaf",       "value",
-                                    "value_index", "wtree_leaf",  "wtree_inner", "unknown"};
-      constexpr size_t   n_named  = 7;
+                                    "value_index", "wtree_leaf",  "wtree_inner",
+                                    "wtree2_node", "unknown"};
+      constexpr size_t   n_named  = 8;
       auto               idx      = static_cast<size_t>(t) - static_cast<size_t>(node_type::inner);
       os << (idx < n_named ? names[idx] : names[n_named]);
       return os;
