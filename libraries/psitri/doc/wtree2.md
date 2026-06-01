@@ -95,14 +95,22 @@ layout, picked at build time per algo §6, not separate types).
 ## 3. Slots — the SAL simplification
 
 The algo has DIRECT / SUBRN / T234 / EXT / LOCAL with a low-bit pointer tag.
-SAL can't bit-tag a 32-bit ptr_address (scarce + reserved range), so:
+SAL can't bit-tag a 32-bit ptr_address (scarce + reserved range) — but it has a
+better mechanism: **encode the slot kind in the value range of the single u32
+child column**, using the (enlarged) SAL reserved range as inline-offset
+sentinels. No parallel column; **branch memory is identical to a pure inner.**
 
-- **Two parallel columns when inline is enabled** (`N < 64`):
-  - `children[]` : u32 `ptr_address` (EXT) — refcounted external child.
-  - `local_offs[]` : u16 offset into THIS node addressing an inline record;
-    `0` (or a sentinel) = "not local, use the EXT column".
-  Cost: **+2 bytes per child for the optionality**, paid only while `N < 64`.
-- **Above 64 branches: no inline column** — all children are EXT.
+- The SAL reserved range is the **top 2^16** (`first_reserved_ptr_address =
+  0xFFFF0000`; the allocator never hands these out, the alloc-hint/deref paths
+  already skip them). One u32 slot `c` decodes by range:
+  - `!is_reserved(c)` → **EXT**: a real ptr_address (child / `big` / `tree`).
+  - `is_reserved(c) && c < 0xFFFFFFF0` → **LOCAL**: a 4-byte-aligned tail-relative
+    offset `(c - first_reserved)*4` to an inline record in THIS node.
+  - `c ≥ 0xFFFFFFF0` → **named** (top-16: `kNoChild`/empty, tombstone, …).
+- A **leaf is just an inner that stores LOCAL slots** (inline value_regions in
+  its tail) where there is space, and EXT slots otherwise. Same record, same
+  column. (`wtree2/node.hpp`: `is_ext_slot` / `is_local_slot` / `local_tail_off`
+  / `make_local_slot`; `kMaxLocalTailOff` ≈ 256 KB — far more than any leaf.)
 - **Inline only `DIRECT` records ≤ 64 B, and only if the node has space**;
   otherwise externalize. **Drop `SUBRN` and `T234`** (no inline multi-entry
   sub-structures). This avoids radix-in-radix for the pathological "var-length
@@ -112,10 +120,11 @@ SAL can't bit-tag a 32-bit ptr_address (scarce + reserved range), so:
 **Lifecycle consequence (transfers from `wtree_shared_mode.md` §lifecycle):**
 - A **LOCAL/DIRECT** record is **byte-copied when the node clones** — no
   refcount, no retain. The lifecycle walk (`retain_off_path_` / `visit_children`
-  / `destroy`) covers **EXT children only** (the `children[]` ptr_address
-  column). The `local_offs[]` column is *not* a column of ptr_addresses and is
-  excluded by construction. So inlining is both address-cheap (no CB) and
-  COW-cheap (no retain).
+  / `destroy`) filters on **`is_ext_slot(c)` = `!is_reserved(c)`** — it touches
+  only real addresses (children / big / tree). LOCAL and named sentinels are all
+  reserved → all skipped, automatically. This *generalizes* the current inner
+  filter (`c != kNoChild && c != kSentinelChildAddr`) to one predicate. So
+  inlining is both address-cheap (no CB) and COW-cheap (no retain).
 
 **Address-space angle:** the 32-bit ptr_address space is a hard ceiling (≤4 B
 live nodes) and each node costs a CB. Inlining isn't only a cache win — it

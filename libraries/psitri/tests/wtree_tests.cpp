@@ -1568,6 +1568,34 @@ TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — slot encoding (EXT / LOCAL / named via reserved range) ─────
+
+TEST_CASE("wtree2 slot encoding", "[wtree2][slot]")
+{
+   namespace w2 = psitri::wtree2;
+
+   // EXT — real allocatable addresses.
+   REQUIRE(w2::is_ext_slot(w2::ptr_address(0)));
+   REQUIRE(w2::is_ext_slot(w2::ptr_address(1'000'000)));
+   REQUIRE_FALSE(w2::is_local_slot(w2::ptr_address(1'000'000)));
+
+   // Named sentinels — neither EXT nor LOCAL.
+   REQUIRE_FALSE(w2::is_ext_slot(w2::kNoChild));
+   REQUIRE_FALSE(w2::is_local_slot(w2::kNoChild));
+
+   // LOCAL — round-trips a 4-byte-aligned tail offset; never EXT; reserved
+   // (so the SAL allocator never hands it out as a real address).
+   for (uint32_t off : {0u, 4u, 64u, 4092u, w2::kMaxLocalTailOff})
+   {
+      auto s = w2::make_local_slot(off);
+      REQUIRE(w2::is_local_slot(s));
+      REQUIRE_FALSE(w2::is_ext_slot(s));
+      REQUIRE(w2::local_tail_off(s) == off);
+      REQUIRE(sal::is_reserved_ptr_address(s));
+   }
+   REQUIRE(w2::kMaxLocalTailOff >= 4096u);   // covers a full 4 KB leaf tail
+}
+
 // ── wtree2 — Phase 3a: find descent (routing) ──────────────────────────
 
 TEST_CASE("wtree2 find descent routes + rejects out-of-range", "[wtree2][find]")

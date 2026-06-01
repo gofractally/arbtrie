@@ -38,6 +38,35 @@ using session_t       = sal::allocator_session;
 
 inline constexpr ptr_address kNoChild = sal::null_ptr_address;
 
+// ── Slot encoding (doc/wtree2.md §3) ──────────────────────────────────
+// One u32 child column carries every slot kind, discriminated by value range:
+//   EXT   : a real allocatable ptr_address (child node / big value / subtree).
+//   LOCAL : a reserved-range value encoding a 4-byte-aligned tail-relative
+//           offset to an inline record in THIS node (no parallel offset column).
+//   named : the top-16 reserved values (kNoChild / tombstone / …) → empty etc.
+// LOCAL records are byte-copied on COW (no refcount); the lifecycle walk filters
+// on is_ext_slot() so it touches only real addresses.
+inline bool is_ext_slot(ptr_address c) noexcept
+{
+    return !sal::is_reserved_ptr_address(c);
+}
+inline bool is_local_slot(ptr_address c) noexcept
+{
+    return sal::is_reserved_ptr_address(c)
+        && *c < *sal::first_named_sentinel_ptr_address;
+}
+inline uint32_t local_tail_off(ptr_address c) noexcept    // bytes from node end
+{
+    return (*c - *sal::first_reserved_ptr_address) * 4u;
+}
+inline ptr_address make_local_slot(uint32_t tail_off) noexcept
+{
+    return ptr_address(*sal::first_reserved_ptr_address + (tail_off >> 2));
+}
+// Largest tail offset a LOCAL slot can encode (4-byte units below the named band).
+inline constexpr uint32_t kMaxLocalTailOff =
+    (*sal::first_named_sentinel_ptr_address - *sal::first_reserved_ptr_address - 1u) * 4u;
+
 enum class shape : uint8_t { leaf = 0, inner = 1 };
 
 // ── Header flags ──────────────────────────────────────────────────────
