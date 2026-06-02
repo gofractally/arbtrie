@@ -80,12 +80,22 @@ start from here. References below point at the wt1 implementation.
     decrements). A single release at a subtree root tears down the uniquely-owned
     subtree.
 
-11. **`free` vs `free_moved`.** `free` = release (deep, destroy releases children).
-    `free_moved` = NEUTER first (num_keys=0, child0=null) so destroy releases NOTHING
-    — the moved children keep their single owning ref in the destination. Use
-    `free_moved` ONLY on a WRITABLE node whose children were transferred. **Do NOT**
-    `retain_children + DEFERRED release` a node whose children are shared with a live
-    clone (the deferred destroy races later mutations → orphan/leak).
+11. **`release_node(p)` = `session.release(p->address())` is the ONLY free primitive.**
+    The refcount drops; when it hits 0 SAL's deferred `destroy` releases each EXT child
+    → recursive, refcount-aware teardown (a snapshot-shared child just decrements). A
+    single `release_node` at a subtree root tears down the uniquely-owned subtree.
+    To **replace / grow / move-children** a node, **REMAKE IT IN PLACE via `realloc`**
+    (keeps the ptr_address; the ctor builds the new bytes from src+op; the old bytes are
+    reclaimed via `record_freed_space` WITHOUT running destroy, so children transfer with
+    zero retain/release). A split remakes one half in place (reuse id) + `alloc`s the
+    other (fresh id). The parent of a remade node skips the repoint (id unchanged).
+    **ANTI-PATTERN — `free`/`free_moved`/neuter** (zero num_keys so destroy releases
+    nothing): it writes the node to skip the destructor — fragile (faults on a
+    read-only / sync-finalized node) and *unnecessary*, because remaking in place
+    removes the separate shallow-free entirely. wt1 carried `inner_free_moved`; do NOT
+    bring it into a new node. Likewise do NOT `retain_children + DEFERRED release` a
+    node whose children a live clone shares (the deferred destroy races later mutations
+    → orphan/leak — the wtree2 varlen-insert bug). Remake-in-place is the answer.
 
 12. **`cow_X(p)` = make writable via `get_ref().modify()`** — in-place when unique &
     writable, else `copy_on_write` to fresh writable bytes, KEEPING the ptr_address
