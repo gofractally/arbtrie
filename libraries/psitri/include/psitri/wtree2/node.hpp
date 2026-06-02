@@ -117,6 +117,12 @@ struct node2 : public psitri::node
     uint8_t  fx_val_len;   // 18       LEAF_FIXED: value bytes per entry
     uint8_t  fx_cap;       // 19       LEAF_FIXED: stem CAPACITY (≥ num_stems; slack for
                            //          in-place grow). Region offsets use it, not num_stems.
+    uint8_t  leaf_split;   // 20       LEAF_FIXED central-gap: head-group entry count `h`.
+                           //          entries [0,h) packed at the column head, [h,n) packed
+                           //          at the column tail (cap-based), free gap between, so an
+                           //          insert shifts only the nearer side (~n/4) and a read
+                           //          scans one group (head_max < tail_min). 0 ≤ h ≤ num_stems.
+    uint8_t  _pad[3];      // 21..23   align the estimator (next) to a 4-byte boundary
 
     // ── Trivial accessors ─────────────────────────────────────────────
     shape    get_shape()      const noexcept { return shape(shape_); }
@@ -140,10 +146,9 @@ struct node2 : public psitri::node
     const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
 
     // ── Region math ───────────────────────────────────────────────────
-    // The fixed header ends at byte 20. `header_content_bytes()` is the single
-    // SEAM where later phases add the terminal value and (inner) estimator
-    // BEFORE the inline prefix; everything downstream is derived from it.
-    static constexpr uint16_t kFixedHeaderBytes = 20;
+    // The fixed header ends at byte 24 (incl. leaf_split + 4-byte-align pad). The
+    // estimator follows; header_content_bytes() is the SEAM everything derives from.
+    static constexpr uint16_t kFixedHeaderBytes = 24;
 
     // Every node carries an APGM estimator right after the fixed header, before
     // the prefix — inners route stems by it, leaves search their stems by it. The
@@ -281,10 +286,29 @@ struct node2 : public psitri::node
         fx_rem_words = sw;
         fx_val_len   = vl;
         fx_cap       = uint8_t(cap);
+        leaf_split   = uint8_t(n);     // central-gap: start all-head (contiguous); the
+                                       // insert path rebalances to a middle gap.
         // Leaves never carry a predictor (cap < kApgmMinStems); mark it absent so
         // node_stem_ub takes the linear-scan path. Set once here — no finish_estimator.
         estimator()->segment_count = 0;
     }
+
+    // ── LEAF_FIXED central-gap accessors ──────────────────────────────
+    // Physical slot of sorted entry i: head group [0,leaf_split) sits at [0,h);
+    // tail group [leaf_split,num_stems) sits packed at the column end (cap-based).
+    uint16_t fx_phys(uint16_t i) const noexcept
+    {
+        return (i < leaf_split) ? i : uint16_t(fx_cap - num_stems + i);
+    }
+    const uint8_t* fx_record(uint16_t sorted_i) const noexcept
+    {
+        return records() + size_t(fx_phys(sorted_i)) * fx_stride();
+    }
+    uint8_t* fx_record(uint16_t sorted_i) noexcept
+    {
+        return records() + size_t(fx_phys(sorted_i)) * fx_stride();
+    }
+    uint32_t fx_stem(uint16_t sorted_i) const noexcept { return stems()[fx_phys(sorted_i)]; }
 
     // ── Compactor contract (algo: overalloc on COW, compactor shrinks) ─────
     // A LEAF_FIXED is constructed roomy (slack capacity) for in-place insert; the
@@ -315,10 +339,19 @@ struct node2 : public psitri::node
         d->fx_rem_words = fx_rem_words;
         d->fx_val_len   = fx_val_len;
         d->fx_cap       = uint8_t(num_stems);                 // CONTRACT: no slack
+        d->leaf_split   = uint8_t(num_stems);                 // and DE-GAP (contiguous)
         d->estimator()->segment_count = 0;
         if (prefix_len) std::memcpy(d->prefix(), prefix(), size_t(prefix_len) * 4u);
-        std::memcpy(d->stems(), stems(), size_t(num_stems) * 4u);
-        std::memcpy(d->records(), records(), size_t(num_stems) * fx_stride());
+        // Copy in SORTED order (source may have a central gap) into the contiguous
+        // contracted dst.
+        const uint16_t stride = fx_stride();
+        uint32_t*      dst_st = d->stems();
+        uint8_t*       dst_rc = d->records();
+        for (uint16_t i = 0; i < num_stems; ++i)
+        {
+            dst_st[i] = fx_stem(i);
+            std::memcpy(dst_rc + size_t(i) * stride, fx_record(i), stride);
+        }
     }
     // COW size: re-expand a (possibly contracted) leaf to roomy capacity on modify.
     // (Unique-mode insert reallocs explicitly; this is for the SAL COW path / MVCC.)
@@ -333,8 +366,10 @@ static_assert(offsetof(node2, prefix_len) == 15, "prefix_len at byte 15");
 static_assert(offsetof(node2, flags)        == 16, "flags at byte 16");
 static_assert(offsetof(node2, fx_rem_words) == 17, "fx_rem_words at byte 17");
 static_assert(offsetof(node2, fx_val_len)   == 18, "fx_val_len at byte 18");
-static_assert(sizeof(node2) == 20, "wtree2 fixed header must be 20 B");
-static_assert(node2::kFixedHeaderBytes == 20);
+static_assert(offsetof(node2, fx_cap)       == 19, "fx_cap at byte 19");
+static_assert(offsetof(node2, leaf_split)   == 20, "leaf_split at byte 20");
+static_assert(sizeof(node2) == 24, "wtree2 fixed header must be 24 B");
+static_assert(node2::kFixedHeaderBytes == 24);
 
 // ── SAL session bridge (per-thread, mirrors wtree's pattern) ──────────
 inline thread_local session_t* g_wtree2_session = nullptr;
@@ -407,6 +442,22 @@ inline uint16_t node_stem_ub(const node2* nd, uint32_t q) noexcept
     if (h->segment_count)
         return stem_upper_bound_apgm(h, nd->stems(), nd->num_stems, q);
     return stem_upper_bound(nd->stems(), nd->num_stems, q);
+}
+
+// LEAF_FIXED central-gap upper_bound → SORTED index in [0,num_stems]. The head
+// group (stems[0,h)) and tail group (stems[cap-(n-h),cap)) are each sorted and
+// head_max < tail_min, so one comparison picks the group and we scan just it.
+inline uint16_t leaf_stem_ub(const node2* leaf, uint32_t q) noexcept
+{
+    const uint16_t  h  = leaf->leaf_split;
+    const uint16_t  n  = leaf->num_stems;
+    const uint32_t* st = leaf->stems();
+    if (h == n)                                            // contiguous (no tail group)
+        return stem_upper_bound(st, n, q);
+    if (h > 0 && q <= st[h - 1])                           // in the head group
+        return stem_upper_bound(st, h, q);
+    const uint16_t tbase = uint16_t(leaf->fx_cap - (n - h));
+    return uint16_t(h + stem_upper_bound(st + tbase, uint16_t(n - h), q));   // tail group
 }
 
 // ── Prefix absorption (algo §9.2) ─────────────────────────────────────
@@ -678,15 +729,14 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
 
             if (nd->is_leaf_fixed())
             {
-                // LEAF_FIXED: record j = records_base + j·stride, computed directly
-                // — no children[] indirection. Prefetch the record column so its
-                // cold miss overlaps the stem scan.
+                // LEAF_FIXED central-gap: gap-aware upper_bound → sorted index;
+                // fx_record maps it to the physical (head- or tail-group) slot.
                 __builtin_prefetch(nd->records(), 0, 1);
-                const uint16_t c = node_stem_ub(nd, q);
-                if (c == 0 || nd->stems()[c - 1] != q) return {};   // q not a stem → absent
-                const uint8_t  sw  = nd->fx_rem_words;
+                const uint16_t c = leaf_stem_ub(nd, q);
+                if (c == 0 || nd->fx_stem(uint16_t(c - 1)) != q) return {};   // not a stem
+                const uint8_t  sw = nd->fx_rem_words;
                 if (size_t(depth) + 1 + sw != key.size()) return {};
-                const uint8_t* r = nd->record(uint16_t(c - 1));
+                const uint8_t* r = nd->fx_record(uint16_t(c - 1));
                 if (sw && std::memcmp(r, reinterpret_cast<const uint8_t*>(key.data() + depth + 1),
                                       size_t(sw) * 4u) != 0) return {};
                 return {r + size_t(sw) * 4u, nd->fx_val_len};
