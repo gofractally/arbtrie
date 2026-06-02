@@ -80,6 +80,21 @@ start from here.
 
 ## C0. Ownership state-transitions (split / merge — correct-by-construction)
 
+> **The indirection: `ptr_address` → control_block (a shared_ptr) → node memory.** The
+> CB is the level of indirection. **`remake` = alloc new node memory via SAL, point the
+> CB at it, `record_freed` the old memory.** The parent's `ptr_address` NEVER changes —
+> so a remake needs **no parent repoint and no retain/release of the id** (the id and
+> its children-ptrs ride along). You may reuse (redirect) a ptr_address only when
+> **`ref==1` AND the path is unique**; if the CB is held (snapshot/shared) you must
+> `alloc` a NEW id instead. A remake can **resize AND re-type** the node (the CB just
+> points at whatever new memory) — leaf→inner, grid→explicit, grow, split-left, all the
+> same primitive. **COW is exactly this** (redirect the CB to fresh writable memory on a
+> read-only hit); and `modify` should **hook the pre-COW copy to transform-on-write** —
+> build the new memory from `src + op` in ONE pass (the (src,op) ctor / `splice`),
+> never copy-then-transform. ptr_address release is SEPARATE from memory free: remake
+> frees *memory* and keeps the *id*; only a genuinely-discarded node releases its *id*.
+
+
 **unique vs shared is a property of the DESCENT, not of the node.** The mode is
 threaded down from the root (template param): start `unique`, and the instant a node
 on the path has `ref>1` flip to `shared` and STAY shared for the whole subtree below.
