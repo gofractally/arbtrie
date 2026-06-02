@@ -87,7 +87,8 @@ int main(int argc, char** argv)
     setvbuf(stdout, nullptr, _IOLBF, 0);
     namespace w2          = psitri::wtree2;
     const uint64_t N      = (argc > 1) ? std::stoull(argv[1]) : 10'000'000ULL;
-    bool insert_mode = false, nocompact = false, u32_mode = false, grid_mode = false;
+    bool insert_mode = false, nocompact = false, u32_mode = false, grid_mode = false,
+         stream_mode = false;
     for (int a = 2; a < argc; ++a)
     {
         std::string s(argv[a]);
@@ -95,6 +96,7 @@ int main(int argc, char** argv)
         if (s == "nocompact") nocompact   = true;
         if (s == "u32")       u32_mode    = true;   // 1-word (4-B) keys instead of 24-B
         if (s == "grid")      grid_mode   = true;   // experimental grid builder (implies u32)
+        if (s == "stream")    stream_mode = true;   // stateless incremental upsert + commit/1M
     }
     if (grid_mode) u32_mode = true;                 // grid builder is u32-only
     const uint16_t KW = u32_mode ? 1 : 6;           // key words
@@ -118,6 +120,74 @@ int main(int argc, char** argv)
     salloc.register_type_ops<w2::node2>();
     auto ses                  = salloc.get_session();
     w2::g_wtree2_session      = ses.get();
+
+    // ─── Stateless INCREMENTAL upsert + commit/1M (no generator arrays) ────
+    // wt1/psitri pattern: read_lock PER OP + ses->sync() every STEP (finalize
+    // segments → read-only → compactable). wtree2 insert now copy-on-writes off
+    // read-only nodes (smart_ref threaded by ref), so post-commit upserts don't fault.
+    if (stream_mode)
+    {
+        if (N > (1ull << 32)) { std::printf("stream: N must be <= 2^32\n"); return 2; }
+        std::printf("=== stream (stateless INCREMENTAL upsert, commit/1M): N=%llu u32, 8-B val ===\n",
+                    (unsigned long long)N);
+        auto scramble = [N](uint64_t c) -> uint64_t {
+            return uint64_t(static_cast<__uint128_t>(c) * 2654435761ull % N);
+        };
+        const uint64_t STEP = 1'000'000;
+        double         t0   = now_s();
+        w2::ptr_address root = w2::kNoChild;
+        for (uint64_t c = 0; c < N; ++c)
+        {
+            const uint64_t i = scramble(c);
+            const uint32_t k = uint32_t(i);
+            uint64_t       v = splitmix64(i);
+            { sal::read_lock lk = ses->lock();
+              root = w2::insert(root, {&k, 1}, {reinterpret_cast<const uint8_t*>(&v), 8}); }
+            if ((c + 1) % STEP == 0) ses->sync(sal::sync_type::msync_async);
+        }
+        ses->sync(sal::sync_type::msync_async);
+        const double bs = now_s() - t0;
+        std::printf("[insert] %llu in %.2fs (%.2f Mops/s, %.0f ns/key) — commit/1M msync_async\n",
+                    (unsigned long long)N, bs, N / bs / 1e6, bs / N * 1e9);
+        if (threads) { std::printf("[settle] compactor...\n");
+                       std::this_thread::sleep_for(std::chrono::seconds(5)); }
+        size_t miss = 0, mism = 0;
+        {   // find/hot — sorted (tree) order
+            sal::read_lock lk = ses->lock();
+            w2::node2*     r  = w2::w2deref(root);
+            const double   th = now_s();
+            for (uint64_t j = 0; j < N; ++j)
+            {
+                const uint32_t k = uint32_t(j);
+                auto v = w2::find_value(r, {&k, 1});
+                if (!v.data()) { ++miss; continue; }
+                uint64_t g; std::memcpy(&g, v.data(), 8);
+                if (g != splitmix64(j)) ++mism;
+            }
+            const double hs = now_s() - th;
+            std::printf("[find/hot] %llu sorted in %.2fs (%.0f ns, %.1f M qps) miss=%zu mism=%zu\n",
+                        (unsigned long long)N, hs, hs / N * 1e9, N / hs / 1e6, miss, mism);
+        }
+        {   // find/rnd — random order
+            sal::read_lock lk = ses->lock();
+            w2::node2*     r  = w2::w2deref(root);
+            const double   tc = now_s();
+            for (uint64_t c = 0; c < N; ++c)
+            {
+                const uint64_t idx = splitmix64(c ^ 0x5151515151515151ULL) % N;
+                const uint32_t k   = uint32_t(idx);
+                auto v = w2::find_value(r, {&k, 1});
+                if (!v.data()) { ++miss; continue; }
+                uint64_t g; std::memcpy(&g, v.data(), 8);
+                if (g != splitmix64(idx)) ++mism;
+            }
+            const double cs = now_s() - tc;
+            std::printf("[find/rnd] %llu random in %.2fs (%.0f ns, %.1f M qps) miss=%zu mism=%zu\n",
+                        (unsigned long long)N, cs, cs / N * 1e9, N / cs / 1e6, miss, mism);
+        }
+        std::filesystem::remove_all(dbdir);
+        return (miss || mism) ? 1 : 0;
+    }
 
     // ─── Generate + sort the entry stream ─────────────────────
     struct Ent { std::array<uint32_t, 6> key; uint64_t val; };

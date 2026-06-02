@@ -73,7 +73,14 @@ inline uint16_t leaf_capacity(uint16_t stride) noexcept
 }
 
 // ── Generic descent / dispatch ────────────────────────────────────────
-inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
+// The node is carried as a smart_ref fetched at dispatch and threaded BY REFERENCE
+// down the recursion (the psitri tree_ops / wt1 node_modify_ pattern). In-place
+// mutations go through `nref.modify()`, which copy-on-writes a sync()-finalized
+// (read-only) node into the writable segment, KEEPS its ptr_address, and updates
+// the ref — so the post-COW pointer is consistent and parent links stay valid.
+// Read-only descent uses nref.obj(); only the actual mutation site COWs.
+inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
+                             std::span<const uint32_t> key,
                              std::span<const uint8_t> val, uint16_t depth) noexcept;
 
 // A rebuilt subtree is flattened into the parent when it is a pl0 inner (same
@@ -463,12 +470,26 @@ inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib) noexcept
     return r;
 }
 
-inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
+// Make the node writable (COW if it sits in a sync()-finalized read-only segment)
+// THROUGH the threaded ref, so the ref tracks the new location. Returns the
+// writable node2*; the ptr_address (nref.address()) is unchanged.
+inline node2* writable(sal::smart_ref<sal::alloc_header>& nref) noexcept
+{
+    node2* w = nullptr;
+    nref.as<node2>().modify([&](node2* n) { w = n; });
+    return w;
+}
+
+inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
+                             std::span<const uint32_t> key,
                              std::span<const uint8_t> val, uint16_t depth) noexcept
 {
+    node2* nd = const_cast<node2*>(static_cast<const node2*>(nref.obj()));
     // Prefix match. On divergence: an INNER is a true Patricia split (case2,
     // binary — it's a routing node); a LEAF must RE-PACK (drop/shorten its prefix
     // and add the new key as a stem) so it doesn't degenerate into a binary trie.
+    // (case2_split / leaf_rebuild_arena only READ `nd` then build new + free it, so
+    // a read-only node is fine — no COW needed.)
     const bool      leaf = nd->is_leaf();
     const uint16_t  pl   = nd->prefix_len;
     const uint32_t* pfx  = nd->prefix();
@@ -479,28 +500,31 @@ inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
     const uint16_t leaf_depth = depth;            // depth before this node's prefix
     depth = uint16_t(depth + pl);
 
-    if (nd->is_leaf())
-        return leaf_insert(nd, key, val, key.subspan(0, leaf_depth), leaf_depth, depth);
+    if (leaf)                                      // mutate the leaf → COW via the ref
+        return leaf_insert(writable(nref), key, val, key.subspan(0, leaf_depth), leaf_depth, depth);
 
     assert(depth < key.size());                   // terminal keys: later phase
     const uint16_t    i = node_stem_ub(nd, key[depth]);
     const ptr_address c = nd->children()[i];
-    if (!is_ext_slot(c))
+    if (!is_ext_slot(c))                          // empty slot → fill with a fresh leaf
     {
-        leaf_entry e{key, val};
-        nd->children()[i] = build_leaf({&e, 1}, depth)->address();
-        return in_place(nd->address());
+        leaf_entry        e{key, val};
+        const ptr_address nl = build_leaf({&e, 1}, depth)->address();
+        writable(nref)->children()[i] = nl;
+        return in_place(nref.address());
     }
 
-    ins_result r = insert_rec(w2deref(c), key, val, depth);
+    auto       cref = w2session().template get_ref<sal::alloc_header>(c);
+    ins_result r    = insert_rec(cref, key, val, depth);   // child ref threaded down
     if (r.flatten)                                // absorb the child's siblings (widen, don't nest)
-        return inner_flatten(nd, i, w2deref(r.addr));
+        return inner_flatten(writable(nref), i, w2deref(r.addr));
     if (!r.split)
     {
-        nd->children()[i] = r.addr;               // in-place pointer update
-        return in_place(nd->address());
+        if (r.addr != c)                          // child relocated/rebuilt → repoint
+            writable(nref)->children()[i] = r.addr;
+        return in_place(nref.address());          // unchanged child → no write, no COW
     }
-    return inner_splice(nd, i, r.div, r.left, r.right);
+    return inner_splice(writable(nref), i, r.div, r.left, r.right);
 }
 
 // ── insert ────────────────────────────────────────────────────────────
@@ -512,7 +536,8 @@ inline ptr_address insert(ptr_address root, std::span<const uint32_t> key,
         leaf_entry e{key, val};
         return build_leaf({&e, 1}, 0)->address();
     }
-    ins_result r = insert_rec(w2deref(root), key, val, 0);
+    auto       nref = w2session().template get_ref<sal::alloc_header>(root);   // ref at dispatch
+    ins_result r    = insert_rec(nref, key, val, 0);
     if (r.flatten || !r.split)
         return r.addr;   // flatten at root: the pl0 inner is itself the new root
     ptr_address kids[2] = {r.left, r.right};
