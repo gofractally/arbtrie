@@ -440,7 +440,8 @@ inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
 template <umode M>
 inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_stems,
                                uint16_t ni, const ptr_address* ins_kids,
-                               alloc_hint phint) noexcept
+                               alloc_hint phint,
+                               sal::smart_ref<sal::alloc_header>* self = nullptr) noexcept
 {
     const uint16_t     n  = inner->num_stems;
     const uint8_t      pl = inner->prefix_len;
@@ -483,6 +484,13 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
 
     if (m <= kInnerStemCap)
     {
+        if constexpr (M == umode::unique)
+            if (self)   // REMAKE: realloc through the ref → keeps this inner's id, so
+            {           // the parent keeps pointing at it (no repoint). No free needed:
+                        // remake frees the old bytes WITHOUT destroy (children transfer).
+                remake_inner(*self, {P, pl}, {ms, m}, {mk, size_t(m) + 1});
+                return in_place(self->address());
+            }
         node2* ni2 = build_inner({P, pl}, {ms, m}, {mk, size_t(m) + 1}, phint);
         if constexpr (M == umode::unique) node2_free_moved(inner);   // children moved to new node
         return in_place(ni2->address());
@@ -505,19 +513,21 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
 // Binary child split → absorb one divider + two children.
 template <umode M>
 inline ins_result inner_splice(node2* inner, uint16_t i, uint32_t div, ptr_address left,
-                               ptr_address right, alloc_hint phint) noexcept
+                               ptr_address right, alloc_hint phint,
+                               sal::smart_ref<sal::alloc_header>* self = nullptr) noexcept
 {
     ptr_address kids[2] = {left, right};
-    return inner_absorb<M>(inner, i, &div, 1, kids, phint);
+    return inner_absorb<M>(inner, i, &div, 1, kids, phint, self);
 }
 
 // Flatten a pl0 sub-inner `sib` into `inner` at slot i (merge its dividers +
 // children). `sib` is always a fresh/forked node (from the child's rebuild) → freed
 // in both modes; `inner` is freed only in unique mode (snapshot keeps it in shared).
 template <umode M>
-inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib, alloc_hint phint) noexcept
+inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib, alloc_hint phint,
+                                sal::smart_ref<sal::alloc_header>* self = nullptr) noexcept
 {
-    ins_result r = inner_absorb<M>(inner, i, sib->stems(), sib->num_stems, sib->children(), phint);
+    ins_result r = inner_absorb<M>(inner, i, sib->stems(), sib->num_stems, sib->children(), phint, self);
     node2_free_moved(sib);   // sib is always FRESH (born writable) → neuter, no COW needed
     return r;
 }
@@ -596,7 +606,8 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
     auto       cref = w2session().template get_ref<sal::alloc_header>(c);
     ins_result r    = insert_rec<M>(cref, key, val, depth, mybr);   // child's phint = THIS node's span
     if (r.flatten)                                // absorb the child's siblings (widen, don't nest)
-        return inner_flatten<M>(uniq ? writable(nref) : nd, i, w2deref(r.addr), phint);
+        return inner_flatten<M>(uniq ? writable(nref) : nd, i, w2deref(r.addr), phint,
+                                uniq ? &nref : nullptr);
     if (!r.split)
     {
         if constexpr (M == umode::unique)
@@ -608,7 +619,8 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
         else                                      // shared: child always forked → fork + repoint
             return inner_absorb<umode::shared>(nd, i, nullptr, 0, &r.addr, phint);
     }
-    return inner_splice<M>(uniq ? writable(nref) : nd, i, r.div, r.left, r.right, phint);
+    return inner_splice<M>(uniq ? writable(nref) : nd, i, r.div, r.left, r.right, phint,
+                           uniq ? &nref : nullptr);
 }
 
 // ── insert ────────────────────────────────────────────────────────────
