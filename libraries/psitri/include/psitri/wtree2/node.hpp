@@ -583,6 +583,32 @@ inline grid_fit detect_grid(const uint32_t* stems, uint16_t n) noexcept
     return {true, stems[0] - stride, uint8_t(__builtin_ctz(stride))};        // base = origin
 }
 
+// A grid inner stores ONLY base+shift (segment_count == kBinarySentinel) and routes
+// by shift — its stems region is NOT maintained (we skip the copy at build time). Any
+// path that needs the explicit stems regenerates them: stems[i] = base + (i+1)·2^shift.
+// (The find/route hot path never needs them — that's the whole point.)
+inline bool is_grid(const node2* nd) noexcept
+{
+    return nd->estimator()->segment_count == kBinarySentinel;
+}
+inline uint32_t grid_stem(const apgm_header* h, uint16_t i) noexcept
+{
+    return h->segment_keys[0] + (uint32_t(i + 1) << h->sample_step);
+}
+// Regenerate this inner's logical stems into dst[0..num_stems): copy if explicit,
+// recompute from base+shift if a grid (whose stems region is unwritten).
+inline void read_stems(const node2* nd, uint32_t* dst) noexcept
+{
+    const uint16_t n = nd->num_stems;
+    if (is_grid(nd))
+    {
+        const apgm_header* h = nd->estimator();
+        for (uint16_t i = 0; i < n; ++i) dst[i] = grid_stem(h, i);
+    }
+    else
+        std::memcpy(dst, nd->stems(), size_t(n) * 4u);
+}
+
 // Instrumentation: count inners and how many are exact grids (read/reset by bench).
 inline uint64_t g_inner_total = 0;
 inline uint64_t g_inner_grid  = 0;
@@ -735,26 +761,30 @@ inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
     return i;
 }
 
-// Build the APGM estimator over an inner's (already-written) stems. Shared by both
-// inner ctors. §6: build a predictor only for inners wide enough to beat binary
-// search; an exact constant-stride grid routes by a single shift (segment_count =
-// kBinarySentinel) and skips the stems line entirely — the constant-stride proof
-// here is the ONE-TIME creation-time assertion (doc §6a/§13). A failed APGM fit
-// leaves segment_count==0 → the lookup path falls back to binary search.
-inline void build_inner_estimator(node2* nd, uint16_t n) noexcept
+// Set nd's estimator from src_stems[0..n) and RETURN whether it's an exact grid —
+// in which case the caller may SKIP storing the stems (routing uses base+shift; the
+// stems line is never read on the find path). §6: an exact constant-stride power-of-2
+// grid routes by a single shift (segment_count = kBinarySentinel); the constant-
+// stride proof here is the ONE-TIME creation-time assertion (doc §6a/§13). Otherwise
+// build an APGM predictor for wide inners; a failed fit leaves segment_count==0 →
+// binary-search fallback. Either way the caller must have stored (or will store) the
+// stems for the non-grid path.
+inline bool set_inner_estimator(node2* nd, const uint32_t* src_stems, uint16_t n) noexcept
 {
     apgm_header* est   = nd->estimator();
     est->segment_count = 0;
-    const grid_fit gf = detect_grid(nd->stems(), n);
+    const grid_fit gf = detect_grid(src_stems, n);
+    if (n >= 2) { ++g_inner_total; if (gf.ok) ++g_inner_grid; }
     if (gf.ok)
     {
         est->segment_count   = kBinarySentinel;
         est->segment_keys[0] = gf.base;
         est->sample_step     = gf.shift;
+        return true;                                 // grid → stems not needed
     }
-    else if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
+    if (n >= kApgmMinStems && apgm_build_adaptive(est, src_stems, n) == 0)
         est->segment_count = 0;
-    if (n >= 2) { ++g_inner_total; if (gf.ok) ++g_inner_grid; }
+    return false;
 }
 
 // ── INNER ctors (do ALL the work) ─────────────────────────────────────
@@ -784,9 +814,11 @@ inline node2::node2(uint32_t asize, ptr_address_seq seq,
     prefix_len = uint8_t(prefix.size());
     flags      = 0;
     std::memcpy(this->prefix(), prefix.data(), size_t(prefix_len) * 4u);
-    std::memcpy(this->stems(),  stems.data(),  size_t(n) * 4u);
+    // Skip the stems copy for an exact grid — routing uses base+shift, so the stems
+    // line is dead weight. Non-grid: store the stems (the predictor / scan reads them).
+    if (!set_inner_estimator(this, stems.data(), n))
+        std::memcpy(this->stems(), stems.data(), size_t(n) * 4u);
     std::memcpy(this->children(), children.data(), children.size() * sizeof(ptr_address));
-    build_inner_estimator(this, n);
 }
 
 // (2) From `src` + an absorb op — copy src→dst in ONE pass, splicing the edit in:
@@ -809,17 +841,31 @@ inline node2::node2(uint32_t asize, ptr_address_seq seq,
     prefix_len = src.prefix_len;
     flags      = 0;
     std::memcpy(prefix(), src.prefix(), size_t(prefix_len) * 4u);
-    // stems: head [0,i) | insert ni | tail [i,n)
-    uint32_t* ds = stems(); const uint32_t* ss = src.stems();
-    std::memcpy(ds,          ss,            size_t(i) * 4u);
-    std::memcpy(ds + i,      op.ins_stems,  size_t(ni) * 4u);
-    std::memcpy(ds + i + ni, ss + i,        size_t(n - i) * 4u);
+    // stems: head [0,i) | insert ni | tail [i,n). A grid src has NO stored stems →
+    // regenerate the head/tail from its base+shift; an explicit src is copied. (We
+    // always materialize the merged stems here: the inserted divider usually breaks
+    // the grid, so the result downgrades to explicit and needs them stored. If it
+    // stays a grid, set_inner_estimator below skips reading them and they're unused.)
+    uint32_t* ds = stems();
+    if (is_grid(&src))
+    {
+        const apgm_header* sh = src.estimator();
+        for (uint16_t j = 0; j < i; ++j) ds[j]      = grid_stem(sh, j);
+        for (uint16_t j = i; j < n; ++j) ds[j + ni] = grid_stem(sh, j);
+    }
+    else
+    {
+        const uint32_t* ss = src.stems();
+        std::memcpy(ds,          ss,     size_t(i) * 4u);
+        std::memcpy(ds + i + ni, ss + i, size_t(n - i) * 4u);
+    }
+    std::memcpy(ds + i, op.ins_stems, size_t(ni) * 4u);
     // children: head [0,i) | insert ni+1 (replaces slot i) | tail [i+1,n+1)
     ptr_address* dc = children(); const ptr_address* sc = src.children();
     std::memcpy(dc,              sc,           size_t(i) * sizeof(ptr_address));
     std::memcpy(dc + i,          op.ins_kids,  size_t(ni + 1) * sizeof(ptr_address));
     std::memcpy(dc + i + ni + 1, sc + i + 1,   size_t(n - i) * sizeof(ptr_address));
-    build_inner_estimator(this, num_stems);
+    (void)set_inner_estimator(this, ds, num_stems);   // re-detect: stay grid OR downgrade
 }
 
 inline node2* build_inner(std::span<const uint32_t>    prefix,

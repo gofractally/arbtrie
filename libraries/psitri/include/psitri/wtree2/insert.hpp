@@ -244,7 +244,12 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
     }
     else  // inner (or varlen leaf, which also has stems/children)
     {
-        trunc = build_inner({P + j, size_t(pl - j)}, node->stem_span(), node->child_span(), phint);
+        // node may be a grid (stems not stored) → regenerate them for the re-prefixed
+        // clone. build_inner re-detects, so trunc stays a grid if the stems still fit.
+        scratch_mark mark;
+        uint32_t* nst = scratch_alloc<uint32_t>(node->num_stems ? node->num_stems : 1);
+        read_stems(node, nst);
+        trunc = build_inner({P + j, size_t(pl - j)}, {nst, node->num_stems}, node->child_span(), phint);
     }
 
     leaf_entry e{key, val};
@@ -454,14 +459,18 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     const uint16_t m = uint16_t(n + ni);               // merged stem count
     const op_inner_absorb op{i, ni, ins_stems, ins_kids};
 
+    // A grid inner stores no stems (routing is base+shift), so it can't be mutated in
+    // place — fall through to the relocate, whose op-ctor regenerates the stems and
+    // re-detects (the insert almost always breaks the grid → downgrade to explicit).
     if constexpr (M == umode::unique)
     {
         // In-place grow using cacheline-rounding slack (children_off unchanged) —
-        // one-pass splice into the SAME buffer (no realloc, no copy).
+        // one-pass splice into the SAME buffer (no realloc, no copy). Skipped for a
+        // grid inner (no stored stems to memmove).
         const uint16_t stem_cap = uint16_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u) / 4u);
         const uint16_t slot_cap = uint16_t(
             ucc::round_up_multiple<kCacheLine>(uint32_t(n + 1) * 4u) / 4u);
-        if (m <= stem_cap && uint16_t(m + 1) <= slot_cap)
+        if (!is_grid(inner) && m <= stem_cap && uint16_t(m + 1) <= slot_cap)
         {
             uint32_t*    ws = inner->stems();
             ptr_address* wk = inner->children();
@@ -500,9 +509,10 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     // SPLIT (rare: m > cap) — materialize the merged sequence once, partition.
     const uint8_t      pl = inner->prefix_len;
     const uint32_t*    P  = inner->prefix();
-    const uint32_t*    st = inner->stems();
     const ptr_address* ch = inner->children();
     scratch_mark mark;
+    uint32_t*    st = scratch_alloc<uint32_t>(n ? n : 1);   // inner's stems (regen if grid)
+    read_stems(inner, st);
     uint32_t*    ms = scratch_alloc<uint32_t>(m);
     ptr_address* mk = scratch_alloc<ptr_address>(uint32_t(m) + 1);
     std::memcpy(ms, st, size_t(i) * 4u);
@@ -544,7 +554,12 @@ template <umode M>
 inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib, alloc_hint phint,
                                 sal::smart_ref<sal::alloc_header>* self = nullptr) noexcept
 {
-    ins_result r = inner_absorb<M>(inner, i, sib->stems(), sib->num_stems, sib->children(), phint, self);
+    // sib may itself be a grid (its stems aren't stored) → regenerate them into scratch
+    // before splicing. sib's children are always stored.
+    scratch_mark mark;
+    uint32_t* sst = scratch_alloc<uint32_t>(sib->num_stems ? sib->num_stems : 1);
+    read_stems(sib, sst);
+    ins_result r = inner_absorb<M>(inner, i, sst, sib->num_stems, sib->children(), phint, self);
     release_node_moved(sib);   // sib is always FRESH (born writable) → neuter, no COW needed
     return r;
 }
