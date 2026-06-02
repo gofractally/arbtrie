@@ -949,18 +949,19 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
             if (size_t(depth) + i >= key.size() || key[depth + i] != pfx[i]) return {};
         depth = uint16_t(depth + pl);
 
-        if (nd->is_leaf())
+        const uint8_t shp = nd->shape_;                     // read shape ONCE, dispatch on it
+        if (shp != uint8_t(shape::inner))
         {
             if (depth >= key.size())
                 return {};                                  // terminal (slot 0) — not yet stored
             const uint32_t q = key[depth];
 
-            if (nd->is_leaf_fixed() || nd->is_leaf_u16())
+            if (shp != uint8_t(shape::leaf))                // fixed (u32) or u16
             {
                 // LEAF_FIXED: central-gap u32 stems. LEAF_FIXED_U16: contiguous u16
                 // range-encoded stems (Tiny16/Medium16). Same record column either way.
-                const uint8_t* r = nd->is_leaf_u16() ? u16_find_record(nd, q)
-                                                     : fx_find_record(nd, q);
+                const uint8_t* r = (shp == uint8_t(shape::leaf_fixed_u16)) ? u16_find_record(nd, q)
+                                                                          : fx_find_record(nd, q);
                 if (!r) return {};
                 const uint8_t sw = nd->fx_rem_words;
                 if (size_t(depth) + 1 + sw != key.size()) return {};

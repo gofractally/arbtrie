@@ -571,11 +571,13 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
     }
 
     // This inner's branch span — the hint for its own children + the descent.
-    const alloc_hint mybr{nd->children(), nd->n_slots()};
+    // Resolve children() ONCE (children_off recompute is not free) and reuse.
+    const ptr_address* ch   = nd->children();
+    const alloc_hint   mybr{ch, nd->n_slots()};
 
     assert(depth < key.size());                   // terminal keys: later phase
     const uint16_t    i = node_stem_ub(nd, key[depth]);
-    const ptr_address c = nd->children()[i];
+    const ptr_address c = ch[i];
     if (!is_ext_slot(c))                          // empty slot → fill with a fresh leaf
     {
         leaf_entry        e{key, val};
