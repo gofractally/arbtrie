@@ -9,6 +9,7 @@
 
 #include <psitri/wtree/wtree.hpp>
 #include <psitri/wtree2/node.hpp>   // wtree2 rewrite (Phase 1: node record + layout)
+#include <psitri/wtree2/insert.hpp> // wtree2 incremental insert (Phase 4)
 
 #include <sal/allocator.hpp>
 #include <sal/allocator_impl.hpp>
@@ -1798,6 +1799,159 @@ TEST_CASE("wtree2 leaf_fixed build + find", "[wtree2][find]")
    REQUIRE(w2::find_value(leaf, {miss_len.data(), 2}).data()  == nullptr);
 
    w2::node2_free(leaf);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
+// ── wtree2 — incremental insert, Increment A (in-place leaf + duplicate) ───
+// Keys share a 5-word prefix and vary in the 6th word, so every key routes to a
+// single leaf (no Patricia split, no overflow) — exercising descent, gathered
+// rebuild, in-place growth, duplicate update, and miss.
+TEST_CASE("wtree2 insert leaf in-place + duplicate", "[wtree2][insert]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-insert-a");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   constexpr uint16_t N = 50;
+   auto mk_key = [](uint16_t i) {
+      return std::array<uint32_t, 6>{7, 7, 7, 7, 7, uint32_t(i) * 3u + 1u};
+   };
+
+   w2::ptr_address root = w2::kNoChild;
+   {
+      sal::read_lock lk = fx.ses->lock();
+      for (uint16_t i = 0; i < N; ++i)
+      {
+         auto    k = mk_key(i);
+         uint8_t v = uint8_t(i);
+         root = w2::insert(root, {k.data(), 6}, {&v, 1});
+      }
+   }
+
+   auto find1 = [&](std::array<uint32_t, 6> k) {
+      sal::read_lock lk = fx.ses->lock();
+      return w2::find_value(w2::w2deref(root), {k.data(), 6});
+   };
+
+   // All present with the right value.
+   for (uint16_t i = 0; i < N; ++i)
+   {
+      auto v = find1(mk_key(i));
+      REQUIRE(v.size() == 1);
+      REQUIRE(v[0] == uint8_t(i));
+   }
+   // Duplicate → update in place.
+   {
+      sal::read_lock lk = fx.ses->lock();
+      auto    k = mk_key(1);
+      uint8_t v = 99;
+      root = w2::insert(root, {k.data(), 6}, {&v, 1});
+   }
+   {
+      auto v = find1(mk_key(1));
+      REQUIRE(v.size() == 1);
+      REQUIRE(v[0] == 99);
+   }
+   // Miss.
+   REQUIRE(find1({7, 7, 7, 7, 7, 99999}).data() == nullptr);
+
+   {
+      sal::read_lock lk = fx.ses->lock();
+      w2::free_subtree(w2::w2deref(root));
+   }
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
+// ── wtree2 — incremental insert integration (random keys, all cases) ───
+// Inserts random 24-B keys one at a time into an empty tree, exercising Patricia
+// split (§7.2), overflow fanout split (§7.1), and collisions. Verifies every key
+// is findable with the right value, updates are honored, and absent keys miss.
+TEST_CASE("wtree2 insert random integration", "[wtree2][insert]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-insert-rnd");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   auto splitmix = [](uint64_t x) {
+      x += 0x9E3779B97F4A7C15ULL;
+      x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+      x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+      return x ^ (x >> 31);
+   };
+   auto mk_key = [&](uint64_t i) {
+      std::array<uint32_t, 6> k;
+      uint64_t h0 = splitmix(i ^ 0xA1B2C3D4ULL), h1 = splitmix(i ^ 0xDEADBEEFULL),
+               h2 = splitmix(i ^ 0x12345678ULL);
+      std::memcpy(k.data() + 0, &h0, 8);
+      std::memcpy(k.data() + 2, &h1, 8);
+      std::memcpy(k.data() + 4, &h2, 8);
+      return k;
+   };
+
+   constexpr uint64_t N = 40000;
+   w2::ptr_address    root = w2::kNoChild;
+   {
+      sal::read_lock lk = fx.ses->lock();
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         auto     k = mk_key(i);
+         uint64_t v = i + 1;
+         root = w2::insert(root, {k.data(), 6},
+                           {reinterpret_cast<const uint8_t*>(&v), 8});
+      }
+   }
+
+   {
+      sal::read_lock lk   = fx.ses->lock();
+      w2::node2*     r    = w2::w2deref(root);
+      size_t         miss = 0, mism = 0;
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         auto k = mk_key(i);
+         auto v = w2::find_value(r, {k.data(), 6});
+         if (v.data() == nullptr) { ++miss; continue; }
+         uint64_t got = 0;
+         std::memcpy(&got, v.data(), 8);
+         if (v.size() != 8 || got != i + 1) ++mism;
+      }
+      REQUIRE(miss == 0);
+      REQUIRE(mism == 0);
+      // absent key
+      auto k = mk_key(N + 12345);
+      REQUIRE(w2::find_value(r, {k.data(), 6}).data() == nullptr);
+   }
+
+   // Update a sample of keys, re-find.
+   {
+      sal::read_lock lk = fx.ses->lock();
+      for (uint64_t i = 0; i < N; i += 1000)
+      {
+         auto     k = mk_key(i);
+         uint64_t v = 0xF00D0000ULL + i;
+         root = w2::insert(root, {k.data(), 6},
+                           {reinterpret_cast<const uint8_t*>(&v), 8});
+      }
+      w2::node2* r = w2::w2deref(root);
+      for (uint64_t i = 0; i < N; i += 1000)
+      {
+         auto     k   = mk_key(i);
+         auto     v   = w2::find_value(r, {k.data(), 6});
+         uint64_t got = 0;
+         std::memcpy(&got, v.data(), 8);
+         REQUIRE(got == 0xF00D0000ULL + i);
+      }
+   }
+
+   {
+      sal::read_lock lk = fx.ses->lock();
+      w2::free_subtree(w2::w2deref(root));
+   }
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }

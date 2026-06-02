@@ -6,6 +6,7 @@
 // Same 24-B splitmix workload as bench_wtree_sal for comparability.
 
 #include <psitri/wtree2/node.hpp>
+#include <psitri/wtree2/insert.hpp>
 
 #include <sal/allocator.hpp>
 #include <sal/allocator_impl.hpp>
@@ -53,7 +54,11 @@ int main(int argc, char** argv)
     setvbuf(stdout, nullptr, _IOLBF, 0);
     namespace w2          = psitri::wtree2;
     const uint64_t N      = (argc > 1) ? std::stoull(argv[1]) : 10'000'000ULL;
-    const bool     threads = !(argc > 2 && std::string(argv[2]) == "nocompact");
+    const std::string mode = (argc > 2) ? std::string(argv[2]) : std::string();
+    const bool     insert_mode = (mode == "insert");
+    // Compactor ON by default (insert needs it to reclaim per-op garbage). In-place
+    // mutation is safe under the per-insert read_lock (it pins nodes during the op).
+    const bool     threads = (mode != "nocompact");
 
     const auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
     std::filesystem::path dbdir =
@@ -91,13 +96,36 @@ int main(int argc, char** argv)
     for (auto& e : ents)
         le.push_back({{e.key.data(), 6}, {reinterpret_cast<const uint8_t*>(&e.val), 8}});
 
-    // ─── Bulk build ───────────────────────────────────────────
+    // ─── Build: bulk constructor OR incremental insert ────────
     t0 = now_s();
     w2::ptr_address root;
-    { sal::read_lock lk = ses->lock(); root = w2::bulk_build({le.data(), M}, 0); }
-    const double build_s = now_s() - t0;
-    std::printf("[build] bulk-build %llu in %.2fs (%.2f Mops/s, %.0f ns/key)\n",
-                (unsigned long long)M, build_s, M / build_s / 1e6, build_s / M * 1e9);
+    if (insert_mode)
+    {
+        // Lock per insert so the background compactor can reclaim the garbage each
+        // insert produces (freed leaves/inners) — holding one lock for the whole
+        // run would starve reclamation and exhaust segment space.
+        root = w2::kNoChild;
+        for (uint64_t i = 0; i < N; ++i)   // random (hash) order, value i+1
+        {
+            std::array<uint32_t, 6> k;
+            make_key24(i, reinterpret_cast<uint8_t*>(k.data()));
+            uint64_t       v  = i + 1;
+            sal::read_lock lk = ses->lock();
+            root = w2::insert(root, {k.data(), 6},
+                              {reinterpret_cast<const uint8_t*>(&v), 8});
+        }
+    }
+    else
+    {
+        sal::read_lock lk = ses->lock();
+        root = w2::bulk_build({le.data(), M}, 0);
+    }
+    const double   build_s = now_s() - t0;
+    const uint64_t built   = insert_mode ? N : M;
+    std::printf("[%s] %llu in %.2fs (%.2f Mops/s, %.0f ns/key)\n",
+                insert_mode ? "insert" : "build ",
+                (unsigned long long)built, build_s, built / build_s / 1e6,
+                build_s / built * 1e9);
 
     // ─── Structure stats ──────────────────────────────────────
     {
