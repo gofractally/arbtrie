@@ -46,6 +46,15 @@ namespace sal
        */
       uint32_t cow_size() const noexcept { return size(); }
 
+      /**
+       * Whether the object's must-read header region spans past the first 64-B
+       * cacheline, so get_ref should prefetch the 2nd cacheline alongside the
+       * first. Default false (single-cacheline header); types whose routing
+       * metadata (e.g. an inline estimator or long prefix) crosses CL0 override.
+       * Read once at alloc time and recorded as a control-block flag.
+       */
+      bool pf_second_cl() const noexcept { return false; }
+
       const alloc_header* next() const noexcept
       {
          return reinterpret_cast<const alloc_header*>(((char*)this) + size());

@@ -126,6 +126,13 @@ struct node2 : public psitri::node
     uint16_t n_slots()        const noexcept { return uint16_t(num_stems + 1); }
     uint16_t fx_stride()      const noexcept { return uint16_t(uint16_t(fx_rem_words) * 4u + fx_val_len); }
 
+    // SAL pf2 hint: prefetch the 2nd cacheline on get_ref when our must-read
+    // routing header crosses byte 64. Inners read the APGM estimator (recips /
+    // intercepts at bytes 60-113 → CL1); any node with a prefix reads it at
+    // byte 116+ (CL1). Leaves with no prefix touch only CL0 here (stems/records
+    // are separate regions, prefetched on their own), so they opt out.
+    bool pf_second_cl() const noexcept { return is_inner() || prefix_len > 0; }
+
     uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
     const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
 

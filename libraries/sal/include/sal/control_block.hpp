@@ -29,8 +29,14 @@ namespace sal
        */
       struct control_block_data
       {
-         /// reference count, up to 2M shared references
-         uint64_t ref : 21;
+         /// reference count, up to 1M shared references (bit 20 reclaimed for pf2)
+         uint64_t ref : 20;
+         /// prefetch-2nd-cacheline hint: when set, get_ref prefetches the node's
+         /// 2nd 64-B cacheline alongside the first (for objects whose must-read
+         /// header — e.g. an inline estimator or long prefix — spills past CL0).
+         /// Set once at alloc from the object's pf_second_cl(); the optimistic
+         /// fetch_add/sub refcount path never carries into it (max_ref_count guard).
+         uint64_t pf2 : 1;
          /// index to the cacheline of up to 128 TB of memory with 64 bytes per cacheline
          /// this is the maximum addressable by mapped memory on modern systems.
          uint64_t cacheline_offset : 41;
@@ -41,7 +47,7 @@ namespace sal
          /// when reference count goes to 0 along with the active bit.
          uint64_t pending_cache : 1;
 
-         control_block_data() noexcept : ref(0), cacheline_offset(0), active(0), pending_cache(0) {}
+         control_block_data() noexcept : ref(0), pf2(0), cacheline_offset(0), active(0), pending_cache(0) {}
          control_block_data(uint64_t value) noexcept { from_int(value); }
          uint64_t to_int() const noexcept { return std::bit_cast<uint64_t>(*this); }
          void     from_int(uint64_t value) noexcept
@@ -71,6 +77,11 @@ namespace sal
             pending_cache = p;
             return *this;
          }
+         control_block_data& set_pf2(bool p) noexcept
+         {
+            pf2 = p;
+            return *this;
+         }
          friend std::ostream& operator<<(std::ostream& os, const control_block_data& data)
          {
             os << "{ref:" << data.ref << " loc:" << data.loc() << " active:" << data.active
@@ -79,15 +90,16 @@ namespace sal
          }
       };
 
-      /** there are only 19 bits for the reference count, and the algorithm utilizes an
-       * optimistic approach to reference counting by using fetch_add instead of 
+      /** there are 20 bits for the reference count (bit 20 reclaimed for the pf2
+       * prefetch hint), and the algorithm utilizes an
+       * optimistic approach to reference counting by using fetch_add instead of
        * the slower compare_exchange, this means that we need handle the overflow case
-       * by using fetch_sub to decrement the reference count; therefore, the maximum 
+       * by using fetch_sub to decrement the reference count; therefore, the maximum
        * ref count must allow for a certain number of threads to over-shoot the count
        * without causing problems.  This is why we subtract the number of threads from
        * the maximum possible ref count.
        */
-      static constexpr uint64_t max_ref_count = (1ULL << 21) - sal::max_threads;
+      static constexpr uint64_t max_ref_count = (1ULL << 20) - sal::max_threads;
 
       int use_count() const noexcept
       {

@@ -102,7 +102,9 @@ namespace sal
       auto [loc, node_ptr] =
           alloc_data<T>(size, palloc.addr_seq, std::forward<decltype(args)>(args)...);
 
-      palloc.ptr->store(control_block_data().set_loc(loc).set_ref(1), std::memory_order_release);
+      palloc.ptr->store(
+          control_block_data().set_loc(loc).set_ref(1).set_pf2(node_ptr->pf_second_cl()),
+          std::memory_order_release);
 
       return palloc.addr_seq.address;
    }
@@ -229,6 +231,10 @@ namespace sal
       auto  cread = cb.load(std::memory_order_acquire);
       auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
       __builtin_prefetch(ptr, 0, 3);
+      // pf2: object's must-read header spills past CL0 → pull the 2nd cacheline
+      // now so it overlaps the first miss instead of serializing behind it.
+      if (cread.pf2)
+         __builtin_prefetch(reinterpret_cast<const char*>(ptr) + 64, 0, 3);
       return ptr;
    }
 
@@ -244,6 +250,8 @@ namespace sal
       auto  cread = cb.load(std::memory_order_relaxed);
       auto  ptr   = _block_base_ptr + *cread.loc().offset();
       __builtin_prefetch(ptr, 0, 3);
+      if (cread.pf2)
+         __builtin_prefetch(ptr + 64, 0, 3);
    }
 
    inline bool allocator_session::is_read_only(ptr_address adr) const noexcept
