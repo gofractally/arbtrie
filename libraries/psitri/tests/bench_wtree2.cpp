@@ -225,6 +225,24 @@ int main(int argc, char** argv)
                         (unsigned long long)w2::g_inner_total);
     }
 
+    // ─── Find (sorted / tree order — HOT, compute-bound) ──────────
+    // Probe keys in sorted order (le is sorted) so the inners stay cache-hot and
+    // the leaves stream under the HW prefetcher → cold-cl latency is hidden and the
+    // per-lookup CPU work (route) is the bottleneck. This is where shift-routing
+    // (one shift) should beat the apgm path (9-SIMD select + correction walk). The
+    // sorted key-array read is sequential (streamed), NOT the random-320MB artifact.
+    {
+        sal::read_lock lk = ses->lock();
+        w2::node2*     r  = w2::w2deref(root);
+        double         th = now_s();
+        size_t         missh = 0;
+        for (uint64_t i = 0; i < M; ++i)
+            if (w2::find_value(r, le[i].key).data() == nullptr) ++missh;
+        const double hs = now_s() - th;
+        std::printf("[find/hot] %llu sorted-order lookups in %.2fs (%.0f ns/lookup), miss=%zu\n",
+                    (unsigned long long)M, hs, hs / M * 1e9, missh);
+    }
+
     // The tree now owns copies of every key+value (build_leaf memcpy'd them), so
     // the generator arrays are dead weight. Drop them BEFORE timing find so there
     // is no large array to accidentally touch — the probe key for index i is just
