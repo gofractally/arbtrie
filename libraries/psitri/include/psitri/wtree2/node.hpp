@@ -734,12 +734,17 @@ inline const uint8_t* u16_find_record(const node2* leaf, uint32_t q) noexcept
 // inner pays on a descent (algo §3.4 slot prefetch).
 inline ptr_address inner_route(const node2* nd, uint32_t q) noexcept
 {
-    const ptr_address* ch = nd->children();
-    const uint16_t     n  = nd->num_stems;
-    const apgm_header* h  = nd->estimator();
-    if (h->segment_count == kBinarySentinel)         // exact grid: shift → child, NO stems read
-        return ch[grid_ub(h, n, q)];
-    const uint32_t*    st = nd->stems();
+    const uint16_t     n    = nd->num_stems;
+    const apgm_header* h    = nd->estimator();
+    const uint8_t*     base = nd->base();
+    const uint32_t     soff = nd->stems_off();        // stems region (== children for a grid)
+    // Read the grid sentinel ONCE and derive the children pointer per branch — no
+    // children() call (which would re-test grid_layout on the same condition).
+    if (h->segment_count == kBinarySentinel)          // exact grid: children AT soff, NO stems read
+        return reinterpret_cast<const ptr_address*>(base + soff)[grid_ub(h, n, q)];
+    const uint32_t*    st = reinterpret_cast<const uint32_t*>(base + soff);
+    const ptr_address* ch = reinterpret_cast<const ptr_address*>(
+        base + soff + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u)));
     uint16_t           i;
     if (h->segment_count)
     {
