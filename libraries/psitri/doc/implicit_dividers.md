@@ -348,3 +348,31 @@ constant-stride proof (the binary fraction), plus find ns. No query-time mismatc
 — a flagged node cannot mismatch by construction. Low passed-fraction → the snap/partition
 isn't producing exact grids; high fraction → the find delta vs the 109/144 baseline is the
 result. No header layout change, no new node shape, fully reversible.
+
+## 14. Experimental results (2026-06-02, 10M random u32 / 8-B values)
+
+Implemented as the `grid` bench mode (standalone byte-radix grid builder; production
+`bulk_build` untouched) + `detect_grid` + sentinel shift-routing. 261/261 inners detect
+as exact grids, miss=0, build 5 ns/key.
+
+| route | find/hot (sorted, compute-bound) | find/rnd (random, latency-bound) |
+|---|---|---|
+| **grid — shift** | **12 ns** | 116 ns |
+| bulk — apgm (9-SIMD + walk) | 20 ns | 122 ns |
+| grid — 255-wide linear scan | — | 198 ns |
+
+Findings:
+- **The win is a compute win.** Hot (sorted-order, misses hidden by the HW prefetcher):
+  grid 12 ns vs apgm 20 ns — **40% faster**, and the grid wins despite being depth-4 (3
+  inner hops) vs bulk depth-3 (2 hops); the per-hop saving (one shift vs 9-SIMD select +
+  correction walk + multiply) more than pays for the extra hop.
+- **In the random/latency-bound regime the gap collapses** (116 vs 122, ~5%): both are
+  bottlenecked on the same cold cachelines (line 0 = header+estimator, + children), not
+  CPU. On Apple Silicon's 128-B lines the estimator lives in line 0 (loaded with the
+  header) and pf2 prefetches the stems line, so apgm's stems read was already mostly
+  hidden — skipping it saves compute, not a miss.
+- **On 64-B-line hardware the grid should also win the random regime**: there the apgm
+  `recips[]`/`intercepts[]` start at byte 64 = a *second* estimator cacheline that the
+  grid's `(segment_keys[0], sample_step)` (both in line 0) never reads.
+- shift-routing beats the 255-wide linear scan by ~2× (106–113 vs 198) — the headline
+  improvement over a non-predicted node.
