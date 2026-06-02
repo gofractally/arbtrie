@@ -460,6 +460,29 @@ inline uint16_t leaf_stem_ub(const node2* leaf, uint32_t q) noexcept
     return uint16_t(h + stem_upper_bound(st + tbase, uint16_t(n - h), q));   // tail group
 }
 
+// LEAF_FIXED point lookup: pick the group from one split compare, prefetch THAT
+// group's record cluster (the value we're about to fetch — the other group is one
+// cl we never touch), scan only that group, return the record pointer or nullptr.
+inline const uint8_t* fx_find_record(const node2* leaf, uint32_t q) noexcept
+{
+    const uint16_t  h      = leaf->leaf_split;
+    const uint16_t  n      = leaf->num_stems;
+    const uint32_t* st     = leaf->stems();
+    const uint16_t  stride = leaf->fx_stride();
+    const uint8_t*  rc     = leaf->records();
+    if (h == n || (h > 0 && q <= st[h - 1]))              // head group / contiguous
+    {
+        __builtin_prefetch(rc, 0, 1);
+        const uint16_t hn = (h == n) ? n : h;
+        const uint16_t k  = stem_upper_bound(st, hn, q);
+        return (k && st[k - 1] == q) ? rc + size_t(k - 1) * stride : nullptr;
+    }
+    const uint16_t tb = uint16_t(leaf->fx_cap - (n - h));  // tail group
+    __builtin_prefetch(rc + size_t(tb) * stride, 0, 1);
+    const uint16_t k = stem_upper_bound(st + tb, uint16_t(n - h), q);
+    return (k && st[tb + k - 1] == q) ? rc + size_t(tb + k - 1) * stride : nullptr;
+}
+
 // ── Prefix absorption (algo §9.2) ─────────────────────────────────────
 // Longest common prefix (in u32 words) over a sorted set of key-word spans.
 // Because the set is sorted, the LCP of the whole set == LCP(first, last).
@@ -729,14 +752,12 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
 
             if (nd->is_leaf_fixed())
             {
-                // LEAF_FIXED central-gap: gap-aware upper_bound → sorted index;
-                // fx_record maps it to the physical (head- or tail-group) slot.
-                __builtin_prefetch(nd->records(), 0, 1);
-                const uint16_t c = leaf_stem_ub(nd, q);
-                if (c == 0 || nd->fx_stem(uint16_t(c - 1)) != q) return {};   // not a stem
-                const uint8_t  sw = nd->fx_rem_words;
+                // LEAF_FIXED central-gap: one split compare picks the group, then we
+                // prefetch+scan only that group and fetch its record.
+                const uint8_t* r = fx_find_record(nd, q);
+                if (!r) return {};
+                const uint8_t sw = nd->fx_rem_words;
                 if (size_t(depth) + 1 + sw != key.size()) return {};
-                const uint8_t* r = nd->fx_record(uint16_t(c - 1));
                 if (sw && std::memcmp(r, reinterpret_cast<const uint8_t*>(key.data() + depth + 1),
                                       size_t(sw) * 4u) != 0) return {};
                 return {r + size_t(sw) * 4u, nd->fx_val_len};
