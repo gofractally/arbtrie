@@ -476,6 +476,7 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
     uint16_t depth = 0;
     for (;;)
     {
+        __builtin_prefetch(nd->stems(), 0, 1);   // overlap stem-region miss w/ prefix compare
         const uint16_t  pl  = nd->prefix_len;
         const uint32_t* pfx = nd->prefix();
         for (uint16_t i = 0; i < pl; ++i)
@@ -487,6 +488,10 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
             if (depth >= key.size())
                 return {};                                  // terminal (slot 0) — not yet stored
             const uint32_t q = key[depth];
+            // Prefetch the children (slot) region so its cold miss overlaps the
+            // stem scan below — by the time the scan yields slot i, children[i]
+            // has (mostly) arrived, collapsing one serial cold miss in the leaf.
+            __builtin_prefetch(nd->children(), 0, 1);
             const uint16_t i = node_stem_ub(nd, q);
             if (i == 0 || nd->stems()[i - 1] != q) return {};   // q not a stem → absent
             const ptr_address s = nd->children()[i];
