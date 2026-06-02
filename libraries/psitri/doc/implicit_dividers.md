@@ -376,3 +376,20 @@ Findings:
   grid's `(segment_keys[0], sample_step)` (both in line 0) never reads.
 - shift-routing beats the 255-wide linear scan by ~2× (106–113 vs 198) — the headline
   improvement over a non-predicted node.
+
+**Coverage — the snap is required (uniform density ≠ grid dividers):**
+
+| construction | grid inners detected |
+|---|---|
+| grid builder (snaps dividers to cell boundaries) | 261/261 = **100%** |
+| production `bulk_build` u32 (raw first-key dividers) | 0/14 = **0%** |
+| production `bulk_build` 24-byte | 0/31 = **0%** |
+
+Production `bulk_build` uses each child's first key as the divider — random values,
+never exactly constant-stride — so `detect_grid` (which demands an exact power-of-2
+stride) fires on **0%** of natural inners *despite perfectly uniform data*. The benefit
+is not free from uniformity: the construction must **snap** each divider onto its grid
+boundary (§6; the divider may differ from any real key as long as it separates
+left-max < d ≤ right-min). With snapping → ~100%; without → 0%. So the open work to take
+this to production is the snap in `bulk_build` + the incremental split, not anything in
+the detect/route path (those are done and proven).
