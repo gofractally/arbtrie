@@ -291,6 +291,19 @@ struct node2 : public psitri::node
         flags      = 0;
     }
 
+    // INNER build/remake contract (wt1 alloc_size+ctor pattern): the ctor does
+    // ALL the work — header + prefix + stems + children + estimator — in one pass.
+    // build_inner (fresh alloc) and remake_inner (realloc, SAME ptr_address) both
+    // go through it, so growing an inner reuses its id and the parent never repoints.
+    // Defined out-of-line below, where detect_grid / apgm_* are visible.
+    static uint32_t alloc_size(std::span<const uint32_t>    prefix,
+                               std::span<const uint32_t>    stems,
+                               std::span<const ptr_address> children) noexcept;
+    node2(uint32_t asize, ptr_address_seq seq,
+          std::span<const uint32_t>    prefix,
+          std::span<const uint32_t>    stems,
+          std::span<const ptr_address> children) noexcept;
+
     // LEAF_FIXED alloc + ctor: regions sized for stem CAPACITY `cap`, `n` live
     // entries, fixed stride (sw key-suffix words + vl value bytes). Every header
     // field is set ONCE here — callers fill prefix/stems/records and do not
@@ -702,39 +715,73 @@ inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
 // with children.size() == stems.size()+1 (btree-page semantics). Children are
 // stored as-is (EXT ptr_addresses); the builder does NOT retain — the caller
 // transfers ownership of one ref per child (matches unique-mode construction).
-inline node2* build_inner(std::span<const uint32_t>    prefix,
-                          std::span<const uint32_t>    stems,
-                          std::span<const ptr_address> children,
-                          alloc_hint                   hint = {}) noexcept
+// INNER ctor (does ALL the work): header + prefix + stems + children + estimator.
+// Defined here (not in the struct) so detect_grid / apgm_build_adaptive are visible.
+// Children are stored as-is (EXT ptr_addresses); does NOT retain — the caller
+// transfers one ref per child (matches unique-mode construction).
+inline uint32_t node2::alloc_size(std::span<const uint32_t>    prefix,
+                                  std::span<const uint32_t>    stems,
+                                  std::span<const ptr_address> /*children*/) noexcept
+{
+    return size_for(uint16_t(stems.size()), uint8_t(prefix.size()), 0);
+}
+inline node2::node2(uint32_t asize, ptr_address_seq seq,
+                    std::span<const uint32_t>    prefix,
+                    std::span<const uint32_t>    stems,
+                    std::span<const ptr_address> children) noexcept
+    : psitri::node(asize, type_id, seq)
 {
     assert(children.size() == stems.size() + 1);
     assert(prefix.size() <= 255 && stems.size() <= 0xFFFFu);
-    const uint16_t n   = uint16_t(stems.size());
-    const uint8_t  pfx = uint8_t(prefix.size());
-    const ptr_address a = w2session().alloc<node2>(hint, shape::inner, n, pfx);
-    node2* nd = w2deref(a);
-    if (pfx) std::memcpy(nd->prefix(), prefix.data(), size_t(pfx) * 4u);
-    if (n)   std::memcpy(nd->stems(), stems.data(), size_t(n) * 4u);
-    std::memcpy(nd->children(), children.data(), children.size() * sizeof(ptr_address));
+    const uint16_t n = uint16_t(stems.size());
+    num_stems  = n;                       // set FIRST: prefix()/stems()/children() offsets depend on it
+    shape_     = uint8_t(shape::inner);
+    prefix_len = uint8_t(prefix.size());
+    flags      = 0;
+    if (prefix_len) std::memcpy(this->prefix(), prefix.data(), size_t(prefix_len) * 4u);
+    if (n)          std::memcpy(this->stems(),  stems.data(),  size_t(n) * 4u);
+    std::memcpy(this->children(), children.data(), children.size() * sizeof(ptr_address));
     // APGM estimator (§6): build only for inners wide enough to beat binary search;
     // a failed fit (too irregular for ≤9 segments) leaves segment_count==0 → the
     // lookup path falls back to binary search.
-    apgm_header*   est = nd->estimator();
+    apgm_header* est   = this->estimator();
     est->segment_count = 0;
     // Phase 2: an exact grid routes by a single shift (skip the stems line). The
     // constant-stride proof here is the ONE-TIME creation-time assertion — query
     // time then trusts the sentinel with no checking (doc §6a/§13).
-    const grid_fit gf = detect_grid(nd->stems(), n);
+    const grid_fit gf = detect_grid(this->stems(), n);
     if (gf.ok)
     {
         est->segment_count   = kBinarySentinel;
         est->segment_keys[0] = gf.base;
         est->sample_step     = gf.shift;
     }
-    else if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
+    else if (n >= kApgmMinStems && apgm_build_adaptive(est, this->stems(), n) == 0)
         est->segment_count = 0;
     if (n >= 2) { ++g_inner_total; if (gf.ok) ++g_inner_grid; }
-    return nd;
+}
+
+inline node2* build_inner(std::span<const uint32_t>    prefix,
+                          std::span<const uint32_t>    stems,
+                          std::span<const ptr_address> children,
+                          alloc_hint                   hint = {}) noexcept
+{
+    return w2deref(w2session().alloc<node2>(hint, prefix, stems, children));
+}
+
+// Remake an inner THROUGH its smart_ref, REUSING its ptr_address: realloc to fit
+// (prefix, stems, children) — the ctor above repopulates fresh bytes, the control
+// block moves to them (id unchanged), and the old bytes are freed WITHOUT destroy
+// (children transfer, no release). The parent never repoints. UNIQUE-mode only
+// (ref==1). Read-only-safe: the old node is never written (no neuter). nref is
+// updated in place to the new bytes.
+inline node2* remake_inner(sal::smart_ref<sal::alloc_header>& nref,
+                           std::span<const uint32_t>    prefix,
+                           std::span<const uint32_t>    stems,
+                           std::span<const ptr_address> children) noexcept
+{
+    const uint32_t sz = node2::alloc_size(prefix, stems, children);
+    return w2session().remake_inplace<node2>(nref, sz, prefix, stems, children);
 }
 
 // ── find DESCENT (algo §5; Phase 3a — routing only) ───────────────────
