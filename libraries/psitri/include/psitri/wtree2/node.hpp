@@ -285,6 +285,44 @@ struct node2 : public psitri::node
         // node_stem_ub takes the linear-scan path. Set once here — no finish_estimator.
         estimator()->segment_count = 0;
     }
+
+    // ── Compactor contract (algo: overalloc on COW, compactor shrinks) ─────
+    // A LEAF_FIXED is constructed roomy (slack capacity) for in-place insert; the
+    // background compactor rewrites a SETTLED leaf at its exact occupancy so the
+    // read working set stays dense. A later modify re-expands it. Inner / varlen
+    // copy as-is (their slack is just cacheline rounding).
+    uint32_t compact_size() const noexcept
+    {
+        if (shape_ == uint8_t(shape::leaf_fixed))
+            return fixed_size_for(num_stems, prefix_len, uint32_t(num_stems) * fx_stride());
+        return size();
+    }
+    void compact_to(sal::alloc_header* dst_) const noexcept
+    {
+        if (shape_ != uint8_t(shape::leaf_fixed))
+        {
+            ucc::memcpy_aligned_64byte(dst_, this, size());   // same-size copy
+            return;
+        }
+        // dst's 12-B base (size=compact_size, type, address) is already constructed
+        // by the compactor's alloc_data; write the contracted node2 body (fx_cap =
+        // num_stems → compact region offsets) without touching the base.
+        node2* d        = static_cast<node2*>(dst_);
+        d->num_stems    = num_stems;
+        d->shape_       = shape_;
+        d->prefix_len   = prefix_len;
+        d->flags        = flags;
+        d->fx_rem_words = fx_rem_words;
+        d->fx_val_len   = fx_val_len;
+        d->fx_cap       = uint8_t(num_stems);                 // CONTRACT: no slack
+        d->estimator()->segment_count = 0;
+        if (prefix_len) std::memcpy(d->prefix(), prefix(), size_t(prefix_len) * 4u);
+        std::memcpy(d->stems(), stems(), size_t(num_stems) * 4u);
+        std::memcpy(d->records(), records(), size_t(num_stems) * fx_stride());
+    }
+    // COW size: re-expand a (possibly contracted) leaf to roomy capacity on modify.
+    // (Unique-mode insert reallocs explicitly; this is for the SAL COW path / MVCC.)
+    uint32_t cow_size() const noexcept { return size(); }
 };
 
 // ── Compile-time layout verification (PHASE 1 "test") ─────────────────

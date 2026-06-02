@@ -58,13 +58,17 @@ inline node2* alloc_leaf_fixed(uint16_t n, uint16_t cap, uint8_t pl, uint8_t sw,
     return w2deref(w2session().alloc<node2>(alloc_hint{}, n, cap, pl, sw, vl));
 }
 
-// Slack capacity for a leaf of this stride: as many entries as the tail budget
-// allows (kept < kApgmMinStems so leaves never carry a predictor). A leaf is
-// allocated at this capacity, grown in place, and split when it would exceed it.
+// Active-leaf capacity: a LEAF_FIXED is constructed roomy — sized to ~a 4 KB page
+// — so inserts grow it in place; the compactor later contracts a settled leaf to
+// its exact occupancy (node2::compact_to) and a modify re-expands it. Capacity is
+// the entries that fit 4 KB (stem 4 B + record `stride` B each, after the header),
+// capped < kApgmMinStems so a leaf never carries a predictor (and fits fx_cap u8).
+inline constexpr uint32_t kLeafPageBytes = 4096;
 inline uint16_t leaf_capacity(uint16_t stride) noexcept
 {
-    uint32_t c = kLeafTailBudget / stride;
-    if (c > kLeafCountCap) c = kLeafCountCap;
+    const uint32_t usable = kLeafPageBytes - 128u;   // header + estimator + pad
+    uint32_t       c      = usable / (4u + stride);   // 4 B stem + record
+    if (c > kApgmMinStems - 1) c = kApgmMinStems - 1;
     return uint16_t(c ? c : 1);
 }
 

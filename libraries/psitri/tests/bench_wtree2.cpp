@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <span>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -127,15 +128,23 @@ int main(int argc, char** argv)
                 (unsigned long long)built, build_s, built / build_s / 1e6,
                 build_s / built * 1e9);
 
+    // Let the background compactor settle (it contracts roomy 4 KB leaves to their
+    // exact occupancy once they stop changing) so find measures steady state.
+    if (insert_mode && threads)
+    {
+        std::printf("[settle] letting compactor contract leaves...\n");
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+
     // ─── Structure stats ──────────────────────────────────────
     {
         sal::read_lock lk = ses->lock();
-        struct St { uint64_t leaves=0, inners=0, leaf_entries=0, inner_fan=0,
+        struct St { uint64_t leaves=0, inners=0, leaf_entries=0, leaf_bytes=0, inner_fan=0,
                     inner_pfx=0, fan_le3=0, fan_ge256=0; uint16_t maxd=0, maxfan=0; } st;
         auto walk = [&](auto&& self, w2::ptr_address a, uint16_t d) -> void {
             w2::node2* nd = w2::w2deref(a);
             if (nd->is_leaf()) {
-                ++st.leaves; st.leaf_entries += nd->num_stems;
+                ++st.leaves; st.leaf_entries += nd->num_stems; st.leaf_bytes += nd->size();
                 if (d > st.maxd) st.maxd = d;
                 return;
             }
@@ -150,9 +159,11 @@ int main(int argc, char** argv)
                 if (w2::is_ext_slot(c)) self(self, c, uint16_t(d + 1));
         };
         walk(walk, root, 1);
-        std::printf("[shape] %llu leaves + %llu inners, depth=%u, avg leaf=%.1f entries\n",
+        std::printf("[shape] %llu leaves + %llu inners, depth=%u, avg leaf=%.1f entries, "
+                    "leaf bytes/entry=%.1f\n",
                     (unsigned long long)st.leaves, (unsigned long long)st.inners, st.maxd,
-                    st.leaves ? double(st.leaf_entries) / st.leaves : 0.0);
+                    st.leaves ? double(st.leaf_entries) / st.leaves : 0.0,
+                    st.leaf_entries ? double(st.leaf_bytes) / st.leaf_entries : 0.0);
         std::printf("[inner] avg fanout=%.1f max=%u | with-prefix=%llu | fanout<=3: %llu  >=256: %llu\n",
                     st.inners ? double(st.inner_fan) / st.inners : 0.0, st.maxfan,
                     (unsigned long long)st.inner_pfx, (unsigned long long)st.fan_le3,
