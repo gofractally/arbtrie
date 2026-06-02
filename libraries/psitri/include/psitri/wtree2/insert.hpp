@@ -366,6 +366,26 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     const ptr_address* ch = inner->children();
     const uint16_t     m  = uint16_t(n + ni);          // merged stem count
 
+    // In-place grow using cacheline-rounding slack: if the new stems/children stay
+    // within the regions already allocated (same cl-block), children_off is
+    // unchanged, so we memmove the tail in place instead of realloc + free. Saves
+    // the allocation churn and copies only [i..n) rather than the whole node.
+    const uint16_t stem_cap = uint16_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u) / 4u);
+    const uint16_t slot_cap = uint16_t(
+        ucc::round_up_multiple<kCacheLine>(uint32_t(n + 1) * 4u) / 4u);
+    if (m <= stem_cap && uint16_t(m + 1) <= slot_cap)
+    {
+        uint32_t*    ws = inner->stems();           // children_off stable → safe in place
+        ptr_address* wk = inner->children();
+        std::memmove(wk + i + ni + 1, wk + i + 1, size_t(n - i) * sizeof(ptr_address));
+        std::memcpy(wk + i, ins_kids, size_t(ni + 1) * sizeof(ptr_address));
+        std::memmove(ws + i + ni, ws + i, size_t(n - i) * 4u);
+        std::memcpy(ws + i, ins_stems, size_t(ni) * 4u);
+        inner->num_stems = m;
+        if (m >= kApgmMinStems) finish_estimator(inner);   // wide: refresh predictor
+        return in_place(inner->address());
+    }
+
     scratch_mark mark;
     uint32_t*    ms = scratch_alloc<uint32_t>(m);
     ptr_address* mk = scratch_alloc<ptr_address>(uint32_t(m) + 1);
