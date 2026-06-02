@@ -58,6 +58,7 @@ inline constexpr uint16_t kApgmMinStems = 256;
 // here so the layout math (children_off / size) can key off it.
 inline constexpr uint8_t kBinarySentinel = 0xFF;
 
+
 inline constexpr ptr_address kNoChild = sal::null_ptr_address;
 
 // ── Slot encoding (doc/wtree2.md §3) ──────────────────────────────────
@@ -543,19 +544,6 @@ inline void release_node_moved(node2* p) noexcept
         p->children()[0] = kNoChild;   // n_slots()==1 → destroy() releases nothing
     }
     release_node(p);
-}
-
-// Release a node whose children were CLONED 1:1 into a replacement (re-prefix /
-// Patricia split — no slot is consumed, so every child ptr is still valid). This
-// is psitri's transfer primitive (tree_ops retain_children + release): retain each
-// child (+1) so it survives p's deep destroy (−1) → net zero, the clone owns them.
-// READ-ONLY-SAFE: p is never written, so p may sit in a sync-finalized segment with
-// no COW. (Unlike release_node_moved, which neuters a writable node — used only where
-// a slot is consumed/dangling and a 1:1 retain would touch a freed address.)
-inline void release_node_cloned(node2* p) noexcept
-{
-    p->retain_children(w2session());   // +1 each → survives p's destroy, owned by the clone
-    release_node(p);                  // release p → destroy releases each child (−1) → net 0
 }
 
 // Subtree teardown == release_node now (destroy recurses). Kept as named aliases.

@@ -210,69 +210,62 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
     return rebuilt_result(sub);   // pl0 inner → flattened into parent (e.g. collision)
 }
 
-// §7.2 Patricia split: key matches node->prefix[0..j) then diverges. Works for
-// inner (trunc = build_inner) and leaf (trunc = leaf re-prefixed) alike.
-// SHARED forks: the new `trunc` copies `node`'s children, so they become shared
-// (snapshot + trunc) and are retained; `node` is left for the snapshot. UNIQUE
-// releases `node` (its children were cloned 1:1 into trunc → clone-transfer, no neuter).
+// §7.2 Patricia split: key matches node->prefix[0..j) then diverges → wrap node in a
+// new inner `small` (prefix P[0..j), one divider) over the re-prefixed `trunc`
+// (prefix P[j..pl)) and a fresh leaf `nl` for the diverging key. case2 only ever sees
+// INNER nodes (insert_rec routes a diverging LEAF to leaf_rebuild_arena).
+//
+// UNIQUE: REMAKE node in place into trunc via realloc — it keeps node's id and
+// transfers its children (old bytes freed WITHOUT destroy), so there is no clone
+// sharing children with a deferred-destroy node. (That clone+retain+deferred-release
+// window is what orphaned a child → the varlen teardown leak.) SHARED: clone trunc +
+// retain the now-shared children; node stays live for the snapshot.
 template <umode M>
-inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
+inline ins_result case2_split(sal::smart_ref<sal::alloc_header>& nref,
+                              std::span<const uint32_t> key,
                               std::span<const uint8_t> val, uint16_t depth, uint16_t j,
                               alloc_hint phint = {}) noexcept
 {
+    node2*          node       = const_cast<node2*>(static_cast<const node2*>(nref.obj()));
     const uint32_t* P          = node->prefix();
     const uint16_t  pl         = node->prefix_len;
+    const uint16_t  n          = node->num_stems;
     const uint32_t  node_pivot = P[j];
     const uint32_t  key_pivot  = key[depth + j];
-
-    node2* trunc;
-    if (node->is_leaf_fixed())
-    {
-        // Re-prefix the leaf: same entries, prefix P[j..pl). Copy in SORTED order
-        // (source may have a central gap) into the contiguous clone.
-        const uint16_t n      = node->num_stems;
-        const uint16_t stride = node->fx_stride();
-        trunc = alloc_leaf_fixed(n, n, uint8_t(pl - j), node->fx_rem_words, node->fx_val_len, phint);
-        std::memcpy(trunc->prefix(), P + j, size_t(pl - j) * 4u);
-        uint32_t* ts = trunc->stems();
-        uint8_t*  tr = trunc->records();
-        for (uint16_t i = 0; i < n; ++i)
-        {
-            ts[i] = node->fx_stem(i);
-            std::memcpy(tr + size_t(i) * stride, node->fx_record(i), stride);
-        }
-    }
-    else  // inner (or varlen leaf, which also has stems/children)
-    {
-        // node may be a grid (stems not stored) → regenerate them for the re-prefixed
-        // clone. build_inner re-detects, so trunc stays a grid if the stems still fit.
-        scratch_mark mark;
-        uint32_t* nst = scratch_alloc<uint32_t>(node->num_stems ? node->num_stems : 1);
-        read_stems(node, nst);
-        trunc = build_inner({P + j, size_t(pl - j)}, {nst, node->num_stems}, node->child_span(), phint);
-    }
+    assert(node->is_inner());
 
     leaf_entry e{key, val};
-    node2*     nl = build_leaf({&e, 1}, uint16_t(depth + j), phint);
+    node2*     nl = build_leaf({&e, 1}, uint16_t(depth + j), phint);   // diverging key
 
-    // Divider = the RIGHT child's pivot (the larger): node_stem_ub routes q==div
-    // to the right slot (upper_bound).
+    // node may be a grid (stems not stored) → regenerate them for the re-prefixed trunc.
+    scratch_mark mark;
+    uint32_t*    nst = scratch_alloc<uint32_t>(n ? n : 1);
+    read_stems(node, nst);
+    const std::span<const uint32_t> tpfx{P + j, size_t(pl - j)};
+
+    ptr_address trunc_addr;
+    if constexpr (M == umode::unique)
+        // Remake node → trunc IN PLACE (same id, children transferred via realloc).
+        trunc_addr = w2session()
+                         .realloc<node2>(nref, tpfx, std::span<const uint32_t>{nst, n},
+                                         node->child_span())
+                         .address();
+    else
+    {
+        node2* trunc = build_inner(tpfx, {nst, n}, node->child_span(), phint);
+        retain_all_children(node);     // trunc + snapshot both reference node's children
+        trunc_addr = trunc->address();
+    }
+
+    // Divider = the RIGHT child's pivot (the larger): node_stem_ub routes q==div right.
+    // small's prefix = the matched words P[0..j) == key[depth..depth+j) (use the stable
+    // key span; P points into node, whose bytes the unique realloc above has freed).
     uint32_t    div;
     ptr_address k0, k1;
-    if (node_pivot < key_pivot) { div = key_pivot;  k0 = trunc->address(); k1 = nl->address(); }
-    else                        { div = node_pivot; k0 = nl->address();    k1 = trunc->address(); }
+    if (node_pivot < key_pivot) { div = key_pivot;  k0 = trunc_addr;    k1 = nl->address(); }
+    else                        { div = node_pivot; k0 = nl->address(); k1 = trunc_addr; }
     ptr_address kids[2] = {k0, k1};
-    node2*      small   = build_inner({P, j}, {&div, 1}, {kids, 2}, phint);
-    if constexpr (M == umode::shared)
-    {
-        if (node->is_inner())
-            retain_all_children(node);   // trunc copied node's children → now shared with snapshot
-    }
-    // trunc cloned ALL of node's children 1:1 (no consumed slot) → psitri clone
-    // transfer: retain + deep-release, no neuter, no COW (read-only-safe).
-    else
-        release_node_cloned(node);
-    return in_place(small->address());
+    return in_place(build_inner(key.subspan(depth, j), {&div, 1}, {kids, 2}, phint)->address());
 }
 
 // Build a LEAF_FIXED holding merged entries [a,b) of (old leaf + new entry at
@@ -600,7 +593,7 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
     for (uint16_t i = 0; i < pl; ++i)
         if (size_t(depth) + i >= key.size() || key[depth + i] != pfx[i])
             return leaf ? leaf_rebuild_arena<M>(nd, key.subspan(0, depth), depth, key, val, phint)
-                        : case2_split<M>(nd, key, val, depth, i, phint);
+                        : case2_split<M>(nref, key, val, depth, i, phint);
     const uint16_t leaf_depth = depth;            // depth before this node's prefix
     depth = uint16_t(depth + pl);
 

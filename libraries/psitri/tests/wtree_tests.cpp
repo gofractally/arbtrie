@@ -1877,16 +1877,10 @@ TEST_CASE("wtree2 system dictionary load + query", "[wtree2][dict]")
    query(rnd, "random ");
    query_lb(rnd, "random ");
 
-   // Teardown accounting is informational here, not a hard gate: the varlen INSERT
-   // path (exercised at scale for the first time by this test) currently leaks a
-   // small CONSTANT number of objects (~25, independent of N and of grid detection —
-   // a pre-existing Phase-4 varlen bug, see bench_wtree2 header). The bench's job is
-   // load/query measurement + lookup correctness (miss/mism above), which DO assert.
+   // Refcount-clean teardown: release_subtree recurses and every node is freed.
    w2::release_subtree(root);
    fx.wait_for_compactor();
-   const uint64_t leaked = fx.live_objects() - base_objs;
-   if (leaked) WARN("wtree2 dict teardown leaked " << leaked
-                    << " objects (known varlen-insert Phase-4 leak)");
+   REQUIRE(fx.live_objects() == base_objs);
 }
 
 // ── wtree2 — slot encoding (EXT / LOCAL / named via reserved range) ─────
