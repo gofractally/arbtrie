@@ -110,6 +110,18 @@ inline constexpr uint8_t kFlagHasTerminal = 0x01;   // a key ends at prefix-end 
 //   children_off: children[num_stems+1] ptr_address (u32), cl-aligned
 //   (SEAM: local_offs[num_stems+1] u16 when inline-radix enabled; versions; history tail)
 // ─────────────────────────────────────────────────────────────────────
+// Absorb work-ticket (wt1 op pattern): splice `ni` dividers + `ni+1` children into
+// an inner at slot `pos`, REPLACING the child at pos (a split child becomes left+
+// right; a fill replaces an empty slot). The (src, op) ctor below copies src→dst in
+// ONE pass with this edit spliced in — no scratch buffer, no copy-then-move.
+struct op_inner_absorb
+{
+    uint16_t                  pos;         // slot index to splice at
+    uint16_t                  ni;          // # dividers inserted (children = ni+1)
+    const uint32_t*           ins_stems;   // ni dividers
+    const sal::ptr_address*   ins_kids;    // ni+1 children (replace slot pos, insert ni more)
+};
+
 struct node2 : public psitri::node
 {
     static constexpr node_type type_id = node_type::wtree2_node;
@@ -303,6 +315,13 @@ struct node2 : public psitri::node
           std::span<const uint32_t>    prefix,
           std::span<const uint32_t>    stems,
           std::span<const ptr_address> children) noexcept;
+
+    // INNER absorb contract: build a new inner = `src` with op spliced in, copying
+    // src→dst in ONE pass (head [0,pos) + insert + tail). No scratch, no copy-then-
+    // move. Used by both the grow (realloc, same id) and build-new (fresh id) paths.
+    static uint32_t alloc_size(const node2& src, const op_inner_absorb& op) noexcept;
+    node2(uint32_t asize, ptr_address_seq seq,
+          const node2& src, const op_inner_absorb& op) noexcept;
 
     // LEAF_FIXED alloc + ctor: regions sized for stem CAPACITY `cap`, `n` live
     // entries, fixed stride (sw key-suffix words + vl value bytes). Every header
@@ -710,15 +729,35 @@ inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
     return i;
 }
 
-// ── Bulk-in-order constructor: INNER (algo §9.1, inner case) ──────────
-// Build a fresh inner node2 from a prefix and a sorted (stems, children) pair
-// with children.size() == stems.size()+1 (btree-page semantics). Children are
-// stored as-is (EXT ptr_addresses); the builder does NOT retain — the caller
-// transfers ownership of one ref per child (matches unique-mode construction).
-// INNER ctor (does ALL the work): header + prefix + stems + children + estimator.
+// Build the APGM estimator over an inner's (already-written) stems. Shared by both
+// inner ctors. §6: build a predictor only for inners wide enough to beat binary
+// search; an exact constant-stride grid routes by a single shift (segment_count =
+// kBinarySentinel) and skips the stems line entirely — the constant-stride proof
+// here is the ONE-TIME creation-time assertion (doc §6a/§13). A failed APGM fit
+// leaves segment_count==0 → the lookup path falls back to binary search.
+inline void build_inner_estimator(node2* nd, uint16_t n) noexcept
+{
+    apgm_header* est   = nd->estimator();
+    est->segment_count = 0;
+    const grid_fit gf = detect_grid(nd->stems(), n);
+    if (gf.ok)
+    {
+        est->segment_count   = kBinarySentinel;
+        est->segment_keys[0] = gf.base;
+        est->sample_step     = gf.shift;
+    }
+    else if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
+        est->segment_count = 0;
+    if (n >= 2) { ++g_inner_total; if (gf.ok) ++g_inner_grid; }
+}
+
+// ── INNER ctors (do ALL the work) ─────────────────────────────────────
 // Defined here (not in the struct) so detect_grid / apgm_build_adaptive are visible.
-// Children are stored as-is (EXT ptr_addresses); does NOT retain — the caller
+// Children are stored as-is (EXT ptr_addresses); ctors do NOT retain — the caller
 // transfers one ref per child (matches unique-mode construction).
+//
+// (1) From a (prefix, stems, children) triple — a sorted page with
+//     children.size()==stems.size()+1. Used to build from full/subrange spans.
 inline uint32_t node2::alloc_size(std::span<const uint32_t>    prefix,
                                   std::span<const uint32_t>    stems,
                                   std::span<const ptr_address> /*children*/) noexcept
@@ -738,27 +777,43 @@ inline node2::node2(uint32_t asize, ptr_address_seq seq,
     shape_     = uint8_t(shape::inner);
     prefix_len = uint8_t(prefix.size());
     flags      = 0;
-    if (prefix_len) std::memcpy(this->prefix(), prefix.data(), size_t(prefix_len) * 4u);
-    if (n)          std::memcpy(this->stems(),  stems.data(),  size_t(n) * 4u);
+    std::memcpy(this->prefix(), prefix.data(), size_t(prefix_len) * 4u);
+    std::memcpy(this->stems(),  stems.data(),  size_t(n) * 4u);
     std::memcpy(this->children(), children.data(), children.size() * sizeof(ptr_address));
-    // APGM estimator (§6): build only for inners wide enough to beat binary search;
-    // a failed fit (too irregular for ≤9 segments) leaves segment_count==0 → the
-    // lookup path falls back to binary search.
-    apgm_header* est   = this->estimator();
-    est->segment_count = 0;
-    // Phase 2: an exact grid routes by a single shift (skip the stems line). The
-    // constant-stride proof here is the ONE-TIME creation-time assertion — query
-    // time then trusts the sentinel with no checking (doc §6a/§13).
-    const grid_fit gf = detect_grid(this->stems(), n);
-    if (gf.ok)
-    {
-        est->segment_count   = kBinarySentinel;
-        est->segment_keys[0] = gf.base;
-        est->sample_step     = gf.shift;
-    }
-    else if (n >= kApgmMinStems && apgm_build_adaptive(est, this->stems(), n) == 0)
-        est->segment_count = 0;
-    if (n >= 2) { ++g_inner_total; if (gf.ok) ++g_inner_grid; }
+    build_inner_estimator(this, n);
+}
+
+// (2) From `src` + an absorb op — copy src→dst in ONE pass, splicing the edit in:
+//     stems   = src[0,pos) + op.ins_stems[0,ni)        + src[pos,n)
+//     children= src[0,pos) + op.ins_kids[0,ni+1)       + src[pos+1,n+1)   (slot pos replaced)
+// No scratch, no copy-then-move. Same prefix as src.
+inline uint32_t node2::alloc_size(const node2& src, const op_inner_absorb& op) noexcept
+{
+    return size_for(uint16_t(src.num_stems + op.ni), src.prefix_len, 0);
+}
+inline node2::node2(uint32_t asize, ptr_address_seq seq,
+                    const node2& src, const op_inner_absorb& op) noexcept
+    : psitri::node(asize, type_id, seq)
+{
+    const uint16_t n  = src.num_stems;
+    const uint16_t i  = op.pos;
+    const uint16_t ni = op.ni;
+    num_stems  = uint16_t(n + ni);        // set FIRST: offsets depend on it
+    shape_     = uint8_t(shape::inner);
+    prefix_len = src.prefix_len;
+    flags      = 0;
+    std::memcpy(prefix(), src.prefix(), size_t(prefix_len) * 4u);
+    // stems: head [0,i) | insert ni | tail [i,n)
+    uint32_t* ds = stems(); const uint32_t* ss = src.stems();
+    std::memcpy(ds,          ss,            size_t(i) * 4u);
+    std::memcpy(ds + i,      op.ins_stems,  size_t(ni) * 4u);
+    std::memcpy(ds + i + ni, ss + i,        size_t(n - i) * 4u);
+    // children: head [0,i) | insert ni+1 (replaces slot i) | tail [i+1,n+1)
+    ptr_address* dc = children(); const ptr_address* sc = src.children();
+    std::memcpy(dc,              sc,           size_t(i) * sizeof(ptr_address));
+    std::memcpy(dc + i,          op.ins_kids,  size_t(ni + 1) * sizeof(ptr_address));
+    std::memcpy(dc + i + ni + 1, sc + i + 1,   size_t(n - i) * sizeof(ptr_address));
+    build_inner_estimator(this, num_stems);
 }
 
 inline node2* build_inner(std::span<const uint32_t>    prefix,
@@ -769,20 +824,6 @@ inline node2* build_inner(std::span<const uint32_t>    prefix,
     return w2deref(w2session().alloc<node2>(hint, prefix, stems, children));
 }
 
-// Remake an inner THROUGH its smart_ref, REUSING its ptr_address: realloc to fit
-// (prefix, stems, children) — the ctor above repopulates fresh bytes, the control
-// block moves to them (id unchanged), and the old bytes are freed WITHOUT destroy
-// (children transfer, no release). The parent never repoints. UNIQUE-mode only
-// (ref==1). Read-only-safe: the old node is never written (no neuter). nref is
-// updated in place to the new bytes.
-inline node2* remake_inner(sal::smart_ref<sal::alloc_header>& nref,
-                           std::span<const uint32_t>    prefix,
-                           std::span<const uint32_t>    stems,
-                           std::span<const ptr_address> children) noexcept
-{
-    const uint32_t sz = node2::alloc_size(prefix, stems, children);
-    return w2session().remake_inplace<node2>(nref, sz, prefix, stems, children);
-}
 
 // ── find DESCENT (algo §5; Phase 3a — routing only) ───────────────────
 // Descend from `nd` matching each node's Patricia prefix (the only step that

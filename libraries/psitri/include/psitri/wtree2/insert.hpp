@@ -443,16 +443,14 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
                                alloc_hint phint,
                                sal::smart_ref<sal::alloc_header>* self = nullptr) noexcept
 {
-    const uint16_t     n  = inner->num_stems;
-    const uint8_t      pl = inner->prefix_len;
-    const uint32_t*    P  = inner->prefix();
-    const uint32_t*    st = inner->stems();
-    const ptr_address* ch = inner->children();
-    const uint16_t     m  = uint16_t(n + ni);          // merged stem count
+    const uint16_t n = inner->num_stems;
+    const uint16_t m = uint16_t(n + ni);               // merged stem count
+    const op_inner_absorb op{i, ni, ins_stems, ins_kids};
 
     if constexpr (M == umode::unique)
     {
-        // In-place grow using cacheline-rounding slack (children_off unchanged).
+        // In-place grow using cacheline-rounding slack (children_off unchanged) —
+        // one-pass splice into the SAME buffer (no realloc, no copy).
         const uint16_t stem_cap = uint16_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u) / 4u);
         const uint16_t slot_cap = uint16_t(
             ucc::round_up_multiple<kCacheLine>(uint32_t(n + 1) * 4u) / 4u);
@@ -469,9 +467,32 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
             return in_place(inner->address());
         }
     }
-    if constexpr (M == umode::shared)
+    else  // shared
         retain_off_path(inner, i);          // siblings now shared by snapshot + fork
 
+    // NON-SPLIT relocate: the (src, op) ctor splices src→fresh-bytes in ONE pass
+    // (no scratch, no copy-then-move).
+    if (m <= kInnerStemCap)
+    {
+        if constexpr (M == umode::unique)
+        {
+            // GROW: realloc THROUGH the ref → keeps this inner's id (parent never
+            // repoints). No free: remake frees the old bytes without destroy
+            // (children transfer). self is always set in unique (caller invariant).
+            assert(self);
+            node2* g = w2session().remake_inplace<node2>(
+                *self, node2::alloc_size(*inner, op), *inner, op);
+            return in_place(g->address());
+        }
+        else  // shared FORK: fresh id, snapshot keeps `inner`
+            return in_place(w2deref(w2session().alloc<node2>(phint, *inner, op))->address());
+    }
+
+    // SPLIT (rare: m > cap) — materialize the merged sequence once, partition.
+    const uint8_t      pl = inner->prefix_len;
+    const uint32_t*    P  = inner->prefix();
+    const uint32_t*    st = inner->stems();
+    const ptr_address* ch = inner->children();
     scratch_mark mark;
     uint32_t*    ms = scratch_alloc<uint32_t>(m);
     ptr_address* mk = scratch_alloc<ptr_address>(uint32_t(m) + 1);
@@ -482,19 +503,6 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     std::memcpy(mk + i, ins_kids, size_t(ni + 1) * sizeof(ptr_address));
     std::memcpy(mk + i + ni + 1, ch + i + 1, size_t(n - i) * sizeof(ptr_address));
 
-    if (m <= kInnerStemCap)
-    {
-        if constexpr (M == umode::unique)
-            if (self)   // REMAKE: realloc through the ref → keeps this inner's id, so
-            {           // the parent keeps pointing at it (no repoint). No free needed:
-                        // remake frees the old bytes WITHOUT destroy (children transfer).
-                remake_inner(*self, {P, pl}, {ms, m}, {mk, size_t(m) + 1});
-                return in_place(self->address());
-            }
-        node2* ni2 = build_inner({P, pl}, {ms, m}, {mk, size_t(m) + 1}, phint);
-        if constexpr (M == umode::unique) node2_free_moved(inner);   // children moved to new node
-        return in_place(ni2->address());
-    }
     const uint16_t k    = uint16_t(m / 2);
     const uint32_t pdiv = ms[k];                                   // promoted divider
     node2* Lc = build_inner({}, {ms, k}, {mk, size_t(k) + 1}, phint);
@@ -606,8 +614,12 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
     auto       cref = w2session().template get_ref<sal::alloc_header>(c);
     ins_result r    = insert_rec<M>(cref, key, val, depth, mybr);   // child's phint = THIS node's span
     if (r.flatten)                                // absorb the child's siblings (widen, don't nest)
-        return inner_flatten<M>(uniq ? writable(nref) : nd, i, w2deref(r.addr), phint,
-                                uniq ? &nref : nullptr);
+    {
+        if constexpr (M == umode::unique)
+            return inner_flatten<M>(writable(nref), i, w2deref(r.addr), phint, &nref);
+        else
+            return inner_flatten<M>(nd, i, w2deref(r.addr), phint);
+    }
     if (!r.split)
     {
         if constexpr (M == umode::unique)
@@ -619,8 +631,10 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
         else                                      // shared: child always forked → fork + repoint
             return inner_absorb<umode::shared>(nd, i, nullptr, 0, &r.addr, phint);
     }
-    return inner_splice<M>(uniq ? writable(nref) : nd, i, r.div, r.left, r.right, phint,
-                           uniq ? &nref : nullptr);
+    if constexpr (M == umode::unique)
+        return inner_splice<M>(writable(nref), i, r.div, r.left, r.right, phint, &nref);
+    else
+        return inner_splice<M>(nd, i, r.div, r.left, r.right, phint);
 }
 
 // ── insert ────────────────────────────────────────────────────────────
