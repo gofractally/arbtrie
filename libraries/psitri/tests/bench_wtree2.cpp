@@ -137,17 +137,16 @@ int main(int argc, char** argv)
         auto scramble = [N](uint64_t c) -> uint64_t {     // bijection over [0,N)
             return uint64_t(static_cast<__uint128_t>(c) * 2654435761ull % N);
         };
-        const uint64_t  STEP  = 1'000'000;
+        const uint64_t  STEP  = 10'000'000;       // commit (sync) + status row every 10M
         const uint64_t  QSTEP = 100'000;
         w2::ptr_address root  = w2::kNoChild;
         size_t          tot_miss = 0;
         const double    t_all = now_s();
-        for (uint64_t base = 0; base < N; base += STEP)
+        for (uint64_t pbase = 0; pbase < N; pbase += STEP)
         {
-            const uint64_t end = std::min(base + STEP, N);
-            // insert this round
-            const double ti = now_s();
-            for (uint64_t c = base; c < end; ++c)
+            const uint64_t pend = std::min(pbase + STEP, N);
+            const double   ti   = now_s();
+            for (uint64_t c = pbase; c < pend; ++c)
             {
                 const uint64_t i = scramble(c);
                 const uint32_t k = uint32_t(i);
@@ -155,9 +154,9 @@ int main(int argc, char** argv)
                 { sal::read_lock lk = ses->lock();
                   root = w2::insert(root, {&k, 1}, {reinterpret_cast<const uint8_t*>(&v), 8}); }
             }
-            ses->sync(sal::sync_type::none);
-            const double ins_ns = (now_s() - ti) / double(end - base) * 1e9;
-            // query QSTEP random keys from the inserted-so-far set [0,end)
+            ses->sync(sal::sync_type::none);          // commit every 10M
+            const double ins_ns = (now_s() - ti) / double(pend - pbase) * 1e9;
+            // query QSTEP random keys from the inserted-so-far set [0,pend)
             size_t       miss = 0;
             const double tq   = now_s();
             {
@@ -165,7 +164,7 @@ int main(int argc, char** argv)
                 w2::node2*     r  = w2::w2deref(root);
                 for (uint64_t q = 0; q < QSTEP; ++q)
                 {
-                    const uint64_t c2 = splitmix64(q ^ (base * 0x9E37ULL + 1)) % end;
+                    const uint64_t c2 = splitmix64(q ^ (pbase * 0x9E37ULL + 1)) % pend;
                     const uint64_t i2 = scramble(c2);
                     const uint32_t k2 = uint32_t(i2);
                     auto v = w2::find_value(r, {&k2, 1});
@@ -177,7 +176,7 @@ int main(int argc, char** argv)
             const double q_ns = (now_s() - tq) / double(QSTEP) * 1e9;
             tot_miss += miss;
             std::printf("   %4lluM   %11llu   %12.0f   %8.0f   %4zu\n",
-                        (unsigned long long)(end / 1'000'000), (unsigned long long)end,
+                        (unsigned long long)(pend / 1'000'000), (unsigned long long)pend,
                         ins_ns, q_ns, miss);
         }
         std::printf("=== total %.1fs, miss=%zu ===\n", now_s() - t_all, tot_miss);
