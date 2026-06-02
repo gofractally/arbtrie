@@ -1242,16 +1242,31 @@ inline std::span<const uint8_t> leaf_value_at(const node2* leaf, uint16_t idx) n
 }
 // First sorted index whose key (from `depth`) is ≥ q, or num_stems if none. Leaf
 // stems are distinct, so order is by stem; a single suffix compare resolves the
-// equal-stem boundary (entry ≥ q iff its suffix ≥ q's suffix).
+// equal-stem boundary (entry ≥ q iff its suffix ≥ q's suffix). Uses the SAME
+// vectorized per-shape upper_bound the find path uses (dispatched ONCE), then one
+// O(1) adjust — not a per-element scan.
 inline uint16_t leaf_first_ge(const node2* leaf, std::span<const uint32_t> q, uint16_t depth) noexcept
 {
-    const uint16_t n = leaf->num_stems;
-    const uint32_t qs = q[depth];
-    uint16_t       ge = 0;
-    while (ge < n && leaf_stem_at(leaf, ge) < qs) ++ge;             // first stem ≥ q stem
+    const uint16_t n   = leaf->num_stems;
+    const uint32_t qs  = q[depth];
+    const uint8_t  shp = leaf->shape_;
+    // k = count of stems ≤ qs (vectorized upper_bound; central-gap aware for fixed,
+    // range-clamped for u16, estimator/SIMD for varlen).
+    uint16_t k;
+    if (shp == uint8_t(shape::leaf_fixed))
+        k = leaf_stem_ub(leaf, qs);
+    else if (shp == uint8_t(shape::leaf_fixed_u16))
+    {
+        const uint32_t b = leaf->fx_base();
+        k = (qs < b) ? 0 : (qs - b > 0xFFFFu) ? n
+                                              : u16_upper_bound(leaf->u16_stems(), n, uint16_t(qs - b));
+    }
+    else
+        k = node_stem_ub(leaf, qs);
+    // First stem ≥ qs: the equal stem (k-1) if present, else the first greater (k).
+    uint16_t ge = (k > 0 && leaf_stem_at(leaf, k - 1) == qs) ? uint16_t(k - 1) : k;
     if (ge == n || leaf_stem_at(leaf, ge) > qs) return ge;          // none / strictly greater
     // Equal stem → compare the suffix (bytes, matching find_value's memcmp).
-    const uint8_t  shp = leaf->shape_;
     const uint16_t esw = leaf->fx_rem_words;
     const uint8_t* esfx;
     uint16_t       evw  = esw;
