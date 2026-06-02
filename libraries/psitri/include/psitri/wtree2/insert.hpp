@@ -23,16 +23,21 @@ namespace psitri::wtree2 {
 // so no dynamic arrays are needed.
 struct ins_result
 {
-    bool        split = false;
-    ptr_address addr  = kNoChild;   // InPlace
-    uint32_t    div   = 0;          // Split divider (right group's first word)
-    ptr_address left  = kNoChild;   // Split children
-    ptr_address right = kNoChild;
+    bool        split   = false;
+    bool        flatten = false;    // addr is a pl0 inner whose children/dividers the
+    ptr_address addr    = kNoChild; //   parent should ABSORB at the slot (not nest)
+    uint32_t    div     = 0;        // Split divider (right group's first word)
+    ptr_address left    = kNoChild; // Split children
+    ptr_address right   = kNoChild;
 };
-inline ins_result in_place(ptr_address a) noexcept { return {false, a, 0, kNoChild, kNoChild}; }
+inline ins_result in_place(ptr_address a) noexcept { return {false, false, a, 0, kNoChild, kNoChild}; }
 inline ins_result split_at(uint32_t d, ptr_address l, ptr_address r) noexcept
 {
-    return {true, kNoChild, d, l, r};
+    return {true, false, kNoChild, d, l, r};
+}
+inline ins_result flatten_into(ptr_address inner) noexcept
+{
+    return {false, true, inner, 0, kNoChild, kNoChild};
 }
 
 // ── Low-level node builders (SAL alloc + memcpy; no heap) ─────────────
@@ -66,6 +71,16 @@ inline uint16_t leaf_capacity(uint16_t stride) noexcept
 // ── Generic descent / dispatch ────────────────────────────────────────
 inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
                              std::span<const uint8_t> val, uint16_t depth) noexcept;
+
+// A rebuilt subtree is flattened into the parent when it is a pl0 inner (same
+// radix level — its children/dividers belong directly in the parent, not nested);
+// a single leaf or a deeper (prefixed) subtree replaces the slot in place.
+inline ins_result rebuilt_result(ptr_address sub) noexcept
+{
+    node2* ns = w2deref(sub);
+    if (ns->is_inner() && ns->prefix_len == 0) return flatten_into(sub);
+    return in_place(sub);
+}
 
 // Rare fallback (collision: same stem different suffix; or a non-uniform-size
 // entry that breaks LEAF_FIXED): gather this leaf's entries + the new one into
@@ -131,7 +146,7 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
             ents[ip].value = {vb, val.size()};
             const ptr_address sub = bulk_build({ents, cnt}, depth);
             node2_free(leaf);
-            return in_place(sub);
+            return rebuilt_result(sub);
         }
         if (std::lexicographical_compare(key.begin(), key.end(), k.begin(), k.end())) break;
     }
@@ -147,7 +162,7 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
 
     const ptr_address sub = bulk_build({ents, cnt}, depth);
     node2_free(leaf);
-    return in_place(sub);   // collision → deeper subtree (pl>0); nests one level (rare)
+    return rebuilt_result(sub);   // pl0 inner → flattened into parent (e.g. collision)
 }
 
 // §7.2 Patricia split: key matches node->prefix[0..j) then diverges. Works for
@@ -336,53 +351,37 @@ inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
                           reinterpret_cast<const uint8_t*>(key.data() + sdepth + 1), val);
 }
 
-// Splice a child Split into an inner at slot i: children[i]→left, insert
-// (div,right) after. Rebuild +1, or Case-1 split when over the stem cap.
-inline ins_result inner_splice(node2* inner, uint16_t i, uint32_t div, ptr_address left,
-                               ptr_address right) noexcept
+// Absorb `ni` new dividers + `ni`+1 new children into `inner` at slot i (the old
+// child[i] is replaced by the new run). Rebuild if it fits the stem cap, else
+// Case-1 split (prefixless → promote to parent; prefixed → re-root). The merged
+// arrays live in the arena. This is the one path for both a binary child split
+// (ni==1) and a flatten (ni == a pl0 sub-inner's stem count).
+inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_stems,
+                               uint16_t ni, const ptr_address* ins_kids) noexcept
 {
-    const uint16_t  n  = inner->num_stems;
-    const uint8_t   pl = inner->prefix_len;
-    const uint32_t* P  = inner->prefix();
+    const uint16_t     n  = inner->num_stems;
+    const uint8_t      pl = inner->prefix_len;
+    const uint32_t*    P  = inner->prefix();
     const uint32_t*    st = inner->stems();
     const ptr_address* ch = inner->children();
+    const uint16_t     m  = uint16_t(n + ni);          // merged stem count
 
-    if (uint32_t(n + 1) <= kInnerStemCap)
-    {
-        node2*       nd  = nullptr;
-        // build inner with n+1 stems
-        {
-            ptr_address a = w2session().alloc<node2>(alloc_hint{}, shape::inner,
-                                                     uint16_t(n + 1), pl);
-            nd = w2deref(a);
-        }
-        if (pl) std::memcpy(nd->prefix(), P, size_t(pl) * 4u);
-        uint32_t*    ns = nd->stems();
-        ptr_address* nk = nd->children();
-        std::memcpy(ns, st, size_t(i) * 4u);
-        ns[i] = div;
-        std::memcpy(ns + i + 1, st + i, size_t(n - i) * 4u);
-        std::memcpy(nk, ch, size_t(i) * sizeof(ptr_address));
-        nk[i]     = left;
-        nk[i + 1] = right;
-        std::memcpy(nk + i + 2, ch + i + 1, size_t(n - i) * sizeof(ptr_address));
-        finish_estimator(nd);
-        node2_free(inner);
-        return in_place(nd->address());
-    }
-
-    // Case-1 split: materialise merged (n+1 stems / n+2 children) in the arena.
     scratch_mark mark;
-    const uint16_t m  = uint16_t(n + 1);
-    uint32_t*      ms = scratch_alloc<uint32_t>(m);
-    ptr_address*   mk = scratch_alloc<ptr_address>(uint32_t(m) + 1);
+    uint32_t*    ms = scratch_alloc<uint32_t>(m);
+    ptr_address* mk = scratch_alloc<ptr_address>(uint32_t(m) + 1);
     std::memcpy(ms, st, size_t(i) * 4u);
-    ms[i] = div;
-    std::memcpy(ms + i + 1, st + i, size_t(n - i) * 4u);
+    std::memcpy(ms + i, ins_stems, size_t(ni) * 4u);
+    std::memcpy(ms + i + ni, st + i, size_t(n - i) * 4u);
     std::memcpy(mk, ch, size_t(i) * sizeof(ptr_address));
-    mk[i] = left; mk[i + 1] = right;
-    std::memcpy(mk + i + 2, ch + i + 1, size_t(n - i) * sizeof(ptr_address));
+    std::memcpy(mk + i, ins_kids, size_t(ni + 1) * sizeof(ptr_address));
+    std::memcpy(mk + i + ni + 1, ch + i + 1, size_t(n - i) * sizeof(ptr_address));
 
+    if (m <= kInnerStemCap)
+    {
+        node2* ni2 = build_inner({P, pl}, {ms, m}, {mk, size_t(m) + 1});
+        node2_free(inner);
+        return in_place(ni2->address());
+    }
     const uint16_t k    = uint16_t(m / 2);
     const uint32_t pdiv = ms[k];                                   // promoted divider
     node2* Lc = build_inner({}, {ms, k}, {mk, size_t(k) + 1});
@@ -396,6 +395,24 @@ inline ins_result inner_splice(node2* inner, uint16_t i, uint32_t div, ptr_addre
     }
     node2_free(inner);
     return split_at(pdiv, Lc->address(), Rc->address());
+}
+
+// Binary child split → absorb one divider + two children.
+inline ins_result inner_splice(node2* inner, uint16_t i, uint32_t div, ptr_address left,
+                               ptr_address right) noexcept
+{
+    ptr_address kids[2] = {left, right};
+    return inner_absorb(inner, i, &div, 1, kids);
+}
+
+// Flatten a pl0 sub-inner `sib` into `inner` at slot i (merge its dividers +
+// children, instead of nesting it). Used for collisions / re-pack results so the
+// tree stays wide. Frees the sub-inner shell (its children move to `inner`).
+inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib) noexcept
+{
+    ins_result r = inner_absorb(inner, i, sib->stems(), sib->num_stems, sib->children());
+    node2_free(sib);
+    return r;
 }
 
 inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
@@ -428,6 +445,8 @@ inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
     }
 
     ins_result r = insert_rec(w2deref(c), key, val, depth);
+    if (r.flatten)                                // absorb the child's siblings (widen, don't nest)
+        return inner_flatten(nd, i, w2deref(r.addr));
     if (!r.split)
     {
         nd->children()[i] = r.addr;               // in-place pointer update
@@ -446,8 +465,8 @@ inline ptr_address insert(ptr_address root, std::span<const uint32_t> key,
         return build_leaf({&e, 1}, 0)->address();
     }
     ins_result r = insert_rec(w2deref(root), key, val, 0);
-    if (!r.split)
-        return r.addr;
+    if (r.flatten || !r.split)
+        return r.addr;   // flatten at root: the pl0 inner is itself the new root
     ptr_address kids[2] = {r.left, r.right};
     return build_inner({}, {&r.div, 1}, {kids, 2})->address();   // new root over the split
 }

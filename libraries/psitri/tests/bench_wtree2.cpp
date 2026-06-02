@@ -130,7 +130,8 @@ int main(int argc, char** argv)
     // ─── Structure stats ──────────────────────────────────────
     {
         sal::read_lock lk = ses->lock();
-        struct St { uint64_t leaves=0, inners=0, leaf_entries=0; uint16_t maxd=0; } st;
+        struct St { uint64_t leaves=0, inners=0, leaf_entries=0, inner_fan=0,
+                    inner_pfx=0, fan_le3=0, fan_ge256=0; uint16_t maxd=0, maxfan=0; } st;
         auto walk = [&](auto&& self, w2::ptr_address a, uint16_t d) -> void {
             w2::node2* nd = w2::w2deref(a);
             if (nd->is_leaf()) {
@@ -139,6 +140,12 @@ int main(int argc, char** argv)
                 return;
             }
             ++st.inners;
+            const uint16_t fan = nd->n_slots();
+            st.inner_fan += fan;
+            if (nd->prefix_len) ++st.inner_pfx;
+            if (fan <= 3) ++st.fan_le3;
+            if (fan >= 256) ++st.fan_ge256;
+            if (fan > st.maxfan) st.maxfan = fan;
             for (auto c : nd->child_span())
                 if (w2::is_ext_slot(c)) self(self, c, uint16_t(d + 1));
         };
@@ -146,6 +153,10 @@ int main(int argc, char** argv)
         std::printf("[shape] %llu leaves + %llu inners, depth=%u, avg leaf=%.1f entries\n",
                     (unsigned long long)st.leaves, (unsigned long long)st.inners, st.maxd,
                     st.leaves ? double(st.leaf_entries) / st.leaves : 0.0);
+        std::printf("[inner] avg fanout=%.1f max=%u | with-prefix=%llu | fanout<=3: %llu  >=256: %llu\n",
+                    st.inners ? double(st.inner_fan) / st.inners : 0.0, st.maxfan,
+                    (unsigned long long)st.inner_pfx, (unsigned long long)st.fan_le3,
+                    (unsigned long long)st.fan_ge256);
     }
 
     // The tree now owns copies of every key+value (build_leaf memcpy'd them), so
