@@ -128,7 +128,7 @@ inline ins_result rebuilt_result(ptr_address sub) noexcept
 // the arena and rebuild via bulk_build. Heap-free (arena + SAL). depth is BEFORE
 // the leaf's own prefix.
 // SHARED mode forks (build the new leaf, leave `leaf` for the snapshot); UNIQUE
-// frees the old leaf. Leaves are inline-value → no child refs to retain.
+// releases the old leaf. Leaves are inline-value → no child refs to retain.
 template <umode M>
 inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head,
                                      uint16_t depth, std::span<const uint32_t> key,
@@ -190,7 +190,7 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
             std::memcpy(vb, val.data(), val.size());
             ents[ip].value = {vb, val.size()};
             const ptr_address sub = bulk_build({ents, cnt}, depth, phint);
-            if constexpr (M == umode::unique) node2_free(leaf);
+            if constexpr (M == umode::unique) release_node(leaf);
             return rebuilt_result(sub);
         }
         if (std::lexicographical_compare(key.begin(), key.end(), k.begin(), k.end())) break;
@@ -206,15 +206,15 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
     ++cnt;
 
     const ptr_address sub = bulk_build({ents, cnt}, depth, phint);
-    if constexpr (M == umode::unique) node2_free(leaf);
+    if constexpr (M == umode::unique) release_node(leaf);
     return rebuilt_result(sub);   // pl0 inner → flattened into parent (e.g. collision)
 }
 
 // §7.2 Patricia split: key matches node->prefix[0..j) then diverges. Works for
 // inner (trunc = build_inner) and leaf (trunc = leaf re-prefixed) alike.
 // SHARED forks: the new `trunc` copies `node`'s children, so they become shared
-// (snapshot + trunc) and are retained; `node` is left for the snapshot. UNIQUE frees
-// `node` (its children were cloned 1:1 into trunc → clone-transfer, no neuter).
+// (snapshot + trunc) and are retained; `node` is left for the snapshot. UNIQUE
+// releases `node` (its children were cloned 1:1 into trunc → clone-transfer, no neuter).
 template <umode M>
 inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
                               std::span<const uint8_t> val, uint16_t depth, uint16_t j,
@@ -266,7 +266,7 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
     // trunc cloned ALL of node's children 1:1 (no consumed slot) → psitri clone
     // transfer: retain + deep-release, no neuter, no COW (read-only-safe).
     else
-        node2_free_cloned(node);
+        release_node_cloned(node);
     return in_place(small->address());
 }
 
@@ -372,7 +372,7 @@ inline ins_result leaf_fixed_add(node2* leaf, uint16_t pos, uint32_t qstem,
         // rebuilding with the new entry + a fresh central gap (gap-aware read).
         node2* nl = build_fixed_range(leaf, pos, qstem, qsuffix, qval, 0, uint16_t(n + 1),
                                       leaf->prefix(), pl, bcap, phint);
-        node2_free(leaf);
+        release_node(leaf);
         return in_place(nl->address());
     }
 
@@ -389,12 +389,12 @@ inline ins_result leaf_fixed_add(node2* leaf, uint16_t pos, uint32_t qstem,
 
     if (pl == 0)
     {
-        node2_free(leaf);
+        release_node(leaf);
         return split_at(div, L->address(), R->address());
     }
     ptr_address kids[2] = {L->address(), R->address()};
     node2*      top     = build_inner({leaf->prefix(), pl}, {&div, 1}, {kids, 2}, phint);
-    node2_free(leaf);
+    release_node(leaf);
     return in_place(top->address());
 }
 
@@ -441,9 +441,9 @@ inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
 // arrays live in the arena. This is the one path for both a binary child split
 // (ni==1) and a flatten (ni == a pl0 sub-inner's stem count).
 // `inner` is WRITABLE in unique mode (the caller COW'd it) and the snapshot-shared
-// OLD node in shared mode. UNIQUE: grow in place / realloc, free the old. SHARED:
+// OLD node in shared mode. UNIQUE: grow in place / realloc, release the old. SHARED:
 // never mutate `inner` — retain the off-path siblings (now shared by snapshot +
-// fork), build the new node(s), and DON'T free `inner` (the snapshot keeps it).
+// fork), build the new node(s), and DON'T release `inner` (the snapshot keeps it).
 template <umode M>
 inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_stems,
                                uint16_t ni, const ptr_address* ins_kids,
@@ -520,10 +520,10 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     {
         ptr_address kids[2] = {Lc->address(), Rc->address()};
         node2*      top     = build_inner({P, pl}, {&pdiv, 1}, {kids, 2}, phint);
-        if constexpr (M == umode::unique) node2_free_moved(inner);   // children moved to new node
+        if constexpr (M == umode::unique) release_node_moved(inner);   // children moved to new node
         return in_place(top->address());
     }
-    if constexpr (M == umode::unique) node2_free_moved(inner);   // children moved to Lc/Rc
+    if constexpr (M == umode::unique) release_node_moved(inner);   // children moved to Lc/Rc
     return split_at(pdiv, Lc->address(), Rc->address());
 }
 
@@ -538,14 +538,14 @@ inline ins_result inner_splice(node2* inner, uint16_t i, uint32_t div, ptr_addre
 }
 
 // Flatten a pl0 sub-inner `sib` into `inner` at slot i (merge its dividers +
-// children). `sib` is always a fresh/forked node (from the child's rebuild) → freed
-// in both modes; `inner` is freed only in unique mode (snapshot keeps it in shared).
+// children). `sib` is always a fresh/forked node (from the child's rebuild) → released
+// in both modes; `inner` is released only in unique mode (snapshot keeps it in shared).
 template <umode M>
 inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib, alloc_hint phint,
                                 sal::smart_ref<sal::alloc_header>* self = nullptr) noexcept
 {
     ins_result r = inner_absorb<M>(inner, i, sib->stems(), sib->num_stems, sib->children(), phint, self);
-    node2_free_moved(sib);   // sib is always FRESH (born writable) → neuter, no COW needed
+    release_node_moved(sib);   // sib is always FRESH (born writable) → neuter, no COW needed
     return r;
 }
 

@@ -1559,8 +1559,8 @@ TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
    REQUIRE(route(200) == cC);
    REQUIRE(route(999) == cC);
 
-   // node2_free recurses via destroy() → frees the inner AND its EXT children.
-   w2::node2_free(in);
+   // release_node recurses via destroy() → frees the inner AND its EXT children.
+   w2::release_node(in);
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
@@ -1613,7 +1613,7 @@ TEST_CASE("wtree2 inner predictor matches binary search", "[wtree2][predictor]")
    }
    check_q(0xFFFFFFFFu);
 
-   w2::node2_free(in);   // recurses via destroy() → frees the children too
+   w2::release_node(in);   // recurses via destroy() → frees the children too
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
@@ -1687,7 +1687,7 @@ TEST_CASE("wtree2 find descent routes + rejects out-of-range", "[wtree2][find]")
    // Key shorter than a matched prefix → absent.
    { std::vector<uint32_t> k{}; REQUIRE(w2::find_leaf(root, {k.data(), k.size()}) == nullptr); }
 
-   w2::node2_free(root);   // recurses via destroy() → frees lA/lB/lC
+   w2::release_node(root);   // recurses via destroy() → frees lA/lB/lC
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
@@ -1721,7 +1721,7 @@ TEST_CASE("wtree2 leaf build + find (end-to-end DIRECT)", "[wtree2][find]")
       REQUIRE(w2::find_value(leaf, kspan(m1)).data() == nullptr);   // suffix mismatch
       REQUIRE(w2::find_value(leaf, kspan(m2)).data() == nullptr);   // not a stem
       REQUIRE(w2::find_value(leaf, kspan(m3)).data() == nullptr);   // suffix length
-      w2::node2_free(leaf);
+      w2::release_node(leaf);
    }
 
    // ── 2-level: inner routing over two leaves ──
@@ -1743,7 +1743,7 @@ TEST_CASE("wtree2 leaf build + find (end-to-end DIRECT)", "[wtree2][find]")
       std::vector<uint32_t> m{55, 9};   // routes to leafA, not a stem there
       REQUIRE(w2::find_value(root, kspan(m)).data() == nullptr);
 
-      w2::node2_free(root);   // recurses via destroy() → frees leafA/leafB
+      w2::release_node(root);   // recurses via destroy() → frees leafA/leafB
    }
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
@@ -1788,7 +1788,7 @@ TEST_CASE("wtree2 leaf_fixed build + find", "[wtree2][find]")
    REQUIRE(w2::find_value(leaf, {miss_suf.data(), 3}).data()  == nullptr);
    REQUIRE(w2::find_value(leaf, {miss_len.data(), 2}).data()  == nullptr);
 
-   w2::node2_free(leaf);
+   w2::release_node(leaf);
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
@@ -1852,7 +1852,7 @@ TEST_CASE("wtree2 leaf_fixed_u16 build + find (substitutable)", "[wtree2][find][
    REQUIRE(det32->is_leaf_fixed());                      // toggle off → u32
    REQUIRE(rd(w2::find_value(det, {&keys[2], 1})) == rd(w2::find_value(det32, {&keys[2], 1})));
 
-   w2::node2_free(u16); w2::node2_free(u32); w2::node2_free(det); w2::node2_free(det32);
+   w2::release_node(u16); w2::release_node(u32); w2::release_node(det); w2::release_node(det32);
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base_objs);
 }
@@ -1972,7 +1972,7 @@ TEST_CASE("wtree2 insert leaf in-place + duplicate", "[wtree2][insert]")
 
    {
       sal::read_lock lk = fx.ses->lock();
-      w2::free_subtree(w2::w2deref(root));
+      w2::release_subtree(w2::w2deref(root));
    }
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
@@ -2032,7 +2032,7 @@ TEST_CASE("wtree2 leaf upgrades fixed->dynamic on size change", "[wtree2][insert
    }
    {
       sal::read_lock lk = fx.ses->lock();
-      w2::free_subtree(w2::w2deref(root));
+      w2::release_subtree(w2::w2deref(root));
    }
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
@@ -2122,7 +2122,7 @@ TEST_CASE("wtree2 insert random integration", "[wtree2][insert]")
 
    {
       sal::read_lock lk = fx.ses->lock();
-      w2::free_subtree(w2::w2deref(root));
+      w2::release_subtree(w2::w2deref(root));
    }
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
@@ -2172,7 +2172,7 @@ TEST_CASE("wtree2 bulk_build + find correctness (100K)", "[wtree2][bulk]")
    REQUIRE(miss == 0);
    REQUIRE(mism == 0);
 
-   w2::free_subtree(root);
+   w2::release_subtree(root);
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
