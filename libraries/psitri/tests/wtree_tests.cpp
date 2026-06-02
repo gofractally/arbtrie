@@ -1758,6 +1758,50 @@ TEST_CASE("wtree2 leaf build + find (end-to-end DIRECT)", "[wtree2][find]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — LEAF_FIXED: uniform sizes pick the SoA path ───────────────
+TEST_CASE("wtree2 leaf_fixed build + find", "[wtree2][find]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-leaffixed");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   auto rd = [](std::span<const uint8_t> s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+
+   // Uniform: every key 3 words, every value 4 bytes → LEAF_FIXED (stride 12).
+   std::vector<std::array<uint32_t, 3>> keys = {
+       {10, 1, 2}, {20, 3, 4}, {30, 5, 6}, {40, 7, 8}};
+   std::vector<std::array<uint8_t, 4>>  vals = {
+       {1, 1, 1, 1}, {2, 2, 2, 2}, {3, 3, 3, 3}, {4, 4, 4, 4}};
+   std::vector<w2::leaf_entry> ents;
+   for (size_t i = 0; i < keys.size(); ++i)
+      ents.push_back({{keys[i].data(), 3}, {vals[i].data(), 4}});
+
+   w2::node2* leaf = w2::build_leaf({ents.data(), ents.size()}, 0);
+   REQUIRE(leaf->is_leaf());
+   REQUIRE(leaf->is_leaf_fixed());                // uniform → fixed path
+   REQUIRE(leaf->num_stems == 4);
+   REQUIRE(leaf->fx_rem_words == 2);              // 3 key words - 1 stem word
+   REQUIRE(leaf->fx_val_len == 4);
+
+   for (size_t i = 0; i < keys.size(); ++i)
+      REQUIRE(rd(w2::find_value(leaf, {keys[i].data(), 3})) ==
+              std::vector<uint8_t>(vals[i].begin(), vals[i].end()));
+
+   // Misses: wrong stem, wrong suffix, wrong length.
+   std::array<uint32_t, 3> miss_stem{25, 3, 4};
+   std::array<uint32_t, 3> miss_suf {20, 9, 9};
+   std::array<uint32_t, 2> miss_len {20, 3};
+   REQUIRE(w2::find_value(leaf, {miss_stem.data(), 3}).data() == nullptr);
+   REQUIRE(w2::find_value(leaf, {miss_suf.data(), 3}).data()  == nullptr);
+   REQUIRE(w2::find_value(leaf, {miss_len.data(), 2}).data()  == nullptr);
+
+   w2::node2_free(leaf);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 // ── wtree2 — recursive bulk_build correctness at scale ─────────────────
 
 TEST_CASE("wtree2 bulk_build + find correctness (100K)", "[wtree2][bulk]")

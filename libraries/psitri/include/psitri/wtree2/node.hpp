@@ -83,7 +83,11 @@ inline ptr_address make_local_slot(uint32_t tail_off) noexcept
 inline constexpr uint32_t kMaxLocalTailOff =
     (*sal::first_named_sentinel_ptr_address - *sal::first_reserved_ptr_address - 1u) * 4u;
 
-enum class shape : uint8_t { leaf = 0, inner = 1 };
+// Three shapes (algo §3.1). leaf == LEAF_VARLEN (sub-radix + value_region heap,
+// for mixed entry sizes / big values); leaf_fixed == LEAF_FIXED (SoA columns,
+// no offset table / no heap — every entry shares a stride, so record j is at a
+// computed offset). inner routes. is_leaf() covers both leaf kinds.
+enum class shape : uint8_t { leaf = 0, inner = 1, leaf_fixed = 2 };
 
 // ── Header flags ──────────────────────────────────────────────────────
 inline constexpr uint8_t kFlagHasTerminal = 0x01;   // a key ends at prefix-end → terminal value present
@@ -106,17 +110,21 @@ struct node2 : public psitri::node
     static constexpr node_type type_id = node_type::wtree2_node;
 
     uint16_t num_stems;    // 12..13   N dividers → N+1 slots
-    uint8_t  shape_;       // 14       shape::{leaf,inner}
+    uint8_t  shape_;       // 14       shape::{leaf,inner,leaf_fixed}
     uint8_t  prefix_len;   // 15       Patricia prefix length, in u32 words
     uint8_t  flags;        // 16       kFlag* bits
-    uint8_t  _pad[3];      // 17..19   reserved (future header fields)
+    uint8_t  fx_rem_words; // 17       LEAF_FIXED: key suffix words per entry
+    uint8_t  fx_val_len;   // 18       LEAF_FIXED: value bytes per entry
+    uint8_t  _pad;         // 19       reserved
 
     // ── Trivial accessors ─────────────────────────────────────────────
-    shape    get_shape()    const noexcept { return shape(shape_); }
-    bool     is_leaf()      const noexcept { return shape_ == uint8_t(shape::leaf); }
-    bool     is_inner()     const noexcept { return shape_ == uint8_t(shape::inner); }
-    bool     has_terminal() const noexcept { return (flags & kFlagHasTerminal) != 0; }
-    uint16_t n_slots()      const noexcept { return uint16_t(num_stems + 1); }
+    shape    get_shape()      const noexcept { return shape(shape_); }
+    bool     is_inner()       const noexcept { return shape_ == uint8_t(shape::inner); }
+    bool     is_leaf()        const noexcept { return shape_ != uint8_t(shape::inner); }   // varlen OR fixed
+    bool     is_leaf_fixed()  const noexcept { return shape_ == uint8_t(shape::leaf_fixed); }
+    bool     has_terminal()   const noexcept { return (flags & kFlagHasTerminal) != 0; }
+    uint16_t n_slots()        const noexcept { return uint16_t(num_stems + 1); }
+    uint16_t fx_stride()      const noexcept { return uint16_t(uint16_t(fx_rem_words) * 4u + fx_val_len); }
 
     uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
     const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
@@ -190,27 +198,56 @@ struct node2 : public psitri::node
     }
     uint32_t tail_off() const noexcept { return tail_off_for(num_stems, prefix_len); }
 
+    // ── LEAF_FIXED region math (algo §3.1) ────────────────────────────
+    // No children region, no value heap: stems then a packed record column of
+    // fixed stride. record j = records_base + j·stride. Header carries stride
+    // (fx_rem_words / fx_val_len) so records need no per-entry header.
+    static uint32_t fixed_records_off(uint16_t n_stems, uint8_t prefix_len) noexcept
+    {
+        const uint32_t hdr   = uint32_t(kFixedHeaderBytes) + est_bytes()
+                             + uint32_t(prefix_len) * 4u;
+        const uint32_t s_off = uint32_t(ucc::round_up_multiple<kCacheLine>(hdr));
+        return s_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems) * 4u));
+    }
+    static uint32_t fixed_size_for(uint16_t n_stems, uint8_t prefix_len,
+                                   uint32_t record_bytes) noexcept
+    {
+        return fixed_records_off(n_stems, prefix_len)
+             + uint32_t(ucc::round_up_multiple<kCacheLine>(record_bytes));
+    }
+    uint32_t       records_off() const noexcept { return fixed_records_off(num_stems, prefix_len); }
+    uint8_t*       records()       noexcept { return base() + records_off(); }
+    const uint8_t* records() const noexcept { return base() + records_off(); }
+    const uint8_t* record(uint16_t j) const noexcept { return records() + size_t(j) * fx_stride(); }
+    uint8_t*       record(uint16_t j)       noexcept { return records() + size_t(j) * fx_stride(); }
+
     // ── SAL alloc contract ────────────────────────────────────────────
     // session.alloc<node2>(hint, shp, n_stems, prefix_len) forwards these to
     // alloc_size (for the byte size) and the placement ctor (header init). The
     // bulk constructor then fills prefix/stems/children. cow_size/compact_size/
     // copy_to/destroy/visit_children use the alloc_header defaults for now
     // (real lifecycle = Phase 6).
-    static uint32_t alloc_size(shape, uint16_t n_stems, uint8_t prefix_len,
+    // For LEAF_FIXED, tail_bytes is the packed record-column size and there is no
+    // children region; for inner / LEAF_VARLEN it's the value-tail past children.
+    static uint32_t alloc_size(shape shp, uint16_t n_stems, uint8_t prefix_len,
                                uint32_t tail_bytes = 0) noexcept
     {
-        return size_for(n_stems, prefix_len, tail_bytes);
+        return shp == shape::leaf_fixed
+                   ? fixed_size_for(n_stems, prefix_len, tail_bytes)
+                   : size_for(n_stems, prefix_len, tail_bytes);
     }
     node2(uint32_t asize, ptr_address_seq seq,
           shape shp, uint16_t n_stems_, uint8_t prefix_len_,
           uint32_t /*tail_bytes*/ = 0) noexcept
         : psitri::node(asize, type_id, seq)
     {
-        num_stems  = n_stems_;
-        shape_     = uint8_t(shp);
-        prefix_len = prefix_len_;
-        flags      = 0;
-        _pad[0] = _pad[1] = _pad[2] = 0;
+        num_stems    = n_stems_;
+        shape_       = uint8_t(shp);
+        prefix_len   = prefix_len_;
+        flags        = 0;
+        fx_rem_words = 0;
+        fx_val_len   = 0;
+        _pad         = 0;
     }
 };
 
@@ -219,7 +256,9 @@ static_assert(sizeof(psitri::node) == 12, "SAL node header must be 12 B");
 static_assert(offsetof(node2, num_stems)  == 12, "num_stems at byte 12");
 static_assert(offsetof(node2, shape_)     == 14, "shape at byte 14");
 static_assert(offsetof(node2, prefix_len) == 15, "prefix_len at byte 15");
-static_assert(offsetof(node2, flags)      == 16, "flags at byte 16");
+static_assert(offsetof(node2, flags)        == 16, "flags at byte 16");
+static_assert(offsetof(node2, fx_rem_words) == 17, "fx_rem_words at byte 17");
+static_assert(offsetof(node2, fx_val_len)   == 18, "fx_val_len at byte 18");
 static_assert(sizeof(node2) == 20, "wtree2 fixed header must be 20 B");
 static_assert(node2::kFixedHeaderBytes == 20);
 
@@ -238,10 +277,14 @@ inline void node2_free(node2* p) noexcept { w2session().release(p->address()); }
 // alloc_header no-op default.
 inline void free_subtree(node2* nd) noexcept
 {
-    const uint16_t     ns = nd->n_slots();
-    const ptr_address* ch = nd->children();
-    for (uint16_t i = 0; i < ns; ++i)
-        if (is_ext_slot(ch[i])) free_subtree(w2session().get_ptr<node2>(ch[i]));
+    // LEAF_FIXED has no children region (inline records only) → nothing to recurse.
+    if (!nd->is_leaf_fixed())
+    {
+        const uint16_t     ns = nd->n_slots();
+        const ptr_address* ch = nd->children();
+        for (uint16_t i = 0; i < ns; ++i)
+            if (is_ext_slot(ch[i])) free_subtree(w2session().get_ptr<node2>(ch[i]));
+    }
     node2_free(nd);
 }
 
@@ -396,14 +439,15 @@ struct leaf_entry
     std::span<const uint8_t>  value;
 };
 
-// ── Bulk-build a LEAF (algo §9.1, leaf case) ──────────────────────────
-// PHASE 3b: DIRECT inline values only, with DISTINCT first-words at this depth
-// (no collisions → EXT, no terminal). Each entry's first un-prefix word is a
-// stem; its (suffix,value) is an inline value_region in the tail, addressed by a
-// LOCAL slot. slot[0] = empty (terminal handling lands with terminals; the full
-// recursive builder — collisions→EXT, big values — lands later).
-inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
-                         ptr_address hint = kNoChild) noexcept
+// ── Bulk-build a LEAF_VARLEN (algo §9.1, leaf case) ───────────────────
+// DIRECT inline values, DISTINCT first-words at this depth (no collisions → EXT,
+// no terminal). Each entry's first un-prefix word is a stem; its (suffix,value)
+// is an inline value_region in the tail, addressed by a LOCAL slot. slot[0] =
+// empty. Used when entry sizes vary (mixed suffix or value lengths) or big values
+// are present; uniform-size leaves go to build_leaf_fixed via the build_leaf
+// dispatcher. (Big values → EXT slots land in a later phase.)
+inline node2* build_leaf_varlen(std::span<const leaf_entry> ents, uint16_t depth,
+                                ptr_address hint = kNoChild) noexcept
 {
     assert(!ents.empty());
     uint16_t lcp = longest_common_prefix(
@@ -468,6 +512,79 @@ inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
     return nd;
 }
 
+// ── Bulk-build a LEAF_FIXED (algo §3.1) ───────────────────────────────
+// Every entry shares the same suffix-word count (sw) and value length (vl), so
+// there is no offset table and no per-record header: [stems][record column],
+// record j = records_base + j·(sw·4 + vl) = suffix(sw words) ++ value(vl bytes).
+// Caller (build_leaf) has verified uniformity and computed pfx/base_depth/sw/vl.
+inline node2* build_leaf_fixed(std::span<const leaf_entry> ents, uint16_t depth,
+                               uint8_t pfx, uint16_t base_depth, uint8_t sw, uint8_t vl,
+                               ptr_address hint) noexcept
+{
+    const uint16_t n      = uint16_t(ents.size());
+    const uint16_t stride = uint16_t(uint16_t(sw) * 4u + vl);
+    const uint32_t recs   = uint32_t(n) * stride;
+
+    const ptr_address a =
+        (hint == kNoChild)
+            ? w2session().alloc<node2>(alloc_hint{}, shape::leaf_fixed, n, pfx, recs)
+            : w2session().alloc<node2>(alloc_hint{&hint, 1}, shape::leaf_fixed, n, pfx, recs);
+    node2* nd        = w2deref(a);
+    nd->fx_rem_words = sw;
+    nd->fx_val_len   = vl;
+
+    if (pfx) std::memcpy(nd->prefix(), ents.front().key.data() + depth, size_t(pfx) * 4u);
+    uint32_t* st  = nd->stems();
+    uint8_t*  rec = nd->records();
+    uint32_t  prev_first = 0;
+    for (uint16_t j = 0; j < n; ++j)
+    {
+        const auto&    e     = ents[j];
+        const uint32_t first = e.key[base_depth];
+        assert(j == 0 || first > prev_first);          // distinct, ascending
+        assert(uint16_t(e.key.size() - base_depth - 1) == sw && e.value.size() == vl);
+        prev_first = first;
+        st[j] = first;
+        uint8_t* r = rec + size_t(j) * stride;
+        if (sw) std::memcpy(r, reinterpret_cast<const uint8_t*>(e.key.data() + base_depth + 1),
+                            size_t(sw) * 4u);
+        if (vl) std::memcpy(r + size_t(sw) * 4u, e.value.data(), vl);
+    }
+    apgm_header* est   = nd->estimator();
+    est->segment_count = 0;
+    if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
+        est->segment_count = 0;
+    return nd;
+}
+
+// ── LEAF dispatcher: pick FIXED (uniform sizes) or VARLEN ─────────────
+// Computes the shared Patricia prefix (§9.2 cap) and base depth, then routes to
+// the fixed builder when every entry has identical suffix-word count and value
+// length (and both fit a byte) — else the varlen builder.
+inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
+                         ptr_address hint = kNoChild) noexcept
+{
+    assert(!ents.empty());
+    uint16_t lcp = longest_common_prefix(
+        ents.front().key.subspan(depth), ents.back().key.subspan(depth));
+    uint16_t min_rem = 0xFFFFu;
+    for (const auto& e : ents)
+        min_rem = std::min<uint16_t>(min_rem, uint16_t(e.key.size() - depth));
+    if (lcp >= min_rem) lcp = uint16_t(min_rem - 1);
+    const uint8_t  pfx        = uint8_t(lcp);
+    const uint16_t base_depth = uint16_t(depth + pfx);
+
+    const size_t sw0 = ents.front().key.size() - base_depth - 1;
+    const size_t vl0 = ents.front().value.size();
+    bool uniform = (sw0 <= 0xFF && vl0 <= 0xFF);
+    for (const auto& e : ents)
+        if (e.key.size() - base_depth - 1 != sw0 || e.value.size() != vl0) { uniform = false; break; }
+
+    if (uniform)
+        return build_leaf_fixed(ents, depth, pfx, base_depth, uint8_t(sw0), uint8_t(vl0), hint);
+    return build_leaf_varlen(ents, depth, hint);
+}
+
 // ── find (descent + in-leaf lookup) — completes find over wtree2 ──────
 // Returns the value span on hit; an empty span with .data()==nullptr on absent
 // (so a present zero-length value is distinguishable from absent).
@@ -488,9 +605,25 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
             if (depth >= key.size())
                 return {};                                  // terminal (slot 0) — not yet stored
             const uint32_t q = key[depth];
-            // Prefetch the children (slot) region so its cold miss overlaps the
-            // stem scan below — by the time the scan yields slot i, children[i]
-            // has (mostly) arrived, collapsing one serial cold miss in the leaf.
+
+            if (nd->is_leaf_fixed())
+            {
+                // LEAF_FIXED: record j = records_base + j·stride, computed directly
+                // — no children[] indirection. Prefetch the record column so its
+                // cold miss overlaps the stem scan.
+                __builtin_prefetch(nd->records(), 0, 1);
+                const uint16_t c = node_stem_ub(nd, q);
+                if (c == 0 || nd->stems()[c - 1] != q) return {};   // q not a stem → absent
+                const uint8_t  sw  = nd->fx_rem_words;
+                if (size_t(depth) + 1 + sw != key.size()) return {};
+                const uint8_t* r = nd->record(uint16_t(c - 1));
+                if (sw && std::memcmp(r, reinterpret_cast<const uint8_t*>(key.data() + depth + 1),
+                                      size_t(sw) * 4u) != 0) return {};
+                return {r + size_t(sw) * 4u, nd->fx_val_len};
+            }
+
+            // LEAF_VARLEN: prefetch the children (slot) region so its cold miss
+            // overlaps the stem scan; the slot's offset locates the value_region.
             __builtin_prefetch(nd->children(), 0, 1);
             const uint16_t i = node_stem_ub(nd, q);
             if (i == 0 || nd->stems()[i - 1] != q) return {};   // q not a stem → absent
