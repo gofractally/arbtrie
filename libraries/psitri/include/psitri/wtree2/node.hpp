@@ -416,6 +416,30 @@ inline uint16_t stem_upper_bound(const uint32_t* stems, uint16_t n, uint32_t q) 
     return c;
 }
 
+// ── Implicit-divider grid detection (doc/implicit_dividers.md §13) ────
+// An inner whose stems are an exact constant-stride power-of-2 grid can be
+// routed by a single shift instead of a stem search — the prediction is exact,
+// so the stems line is never read. detect_grid verifies (one pass, ALL stems)
+// that stems[i] = base + (i+1)·2^shift; on success upper_bound(q) is exactly
+// clamp((q-base)>>shift, 0, n). This is the one-time creation-time assertion;
+// query time then trusts the flag with no verification.
+inline constexpr uint8_t kBinarySentinel = 0xFF;   // apgm_header.segment_count marker
+
+struct grid_fit { bool ok; uint32_t base; uint8_t shift; };
+inline grid_fit detect_grid(const uint32_t* stems, uint16_t n) noexcept
+{
+    if (n < 2) return {false, 0, 0};
+    const uint32_t stride = stems[1] - stems[0];
+    if (stride == 0 || (stride & (stride - 1)) != 0) return {false, 0, 0};   // not a power of 2
+    for (uint16_t i = 2; i < n; ++i)
+        if (stems[i] - stems[i - 1] != stride) return {false, 0, 0};         // not constant stride
+    return {true, stems[0] - stride, uint8_t(__builtin_ctz(stride))};        // base = origin
+}
+
+// Instrumentation: count inners and how many are exact grids (read/reset by bench).
+inline uint64_t g_inner_total = 0;
+inline uint64_t g_inner_grid  = 0;
+
 // Predictor-seeded upper_bound (algo §6, wide-node mode). The APGM estimator maps
 // q → an approximate stem position in ~1 cacheline touch; a short branchless
 // correction walk lands on the EXACT upper_bound, so the result is identical to a
@@ -439,6 +463,11 @@ inline uint16_t stem_upper_bound_apgm(const apgm_header* h, const uint32_t* stem
 inline uint16_t node_stem_ub(const node2* nd, uint32_t q) noexcept
 {
     const apgm_header* h = nd->estimator();
+    if (h->segment_count == kBinarySentinel)         // exact grid: shift, skip stems
+    {
+        const uint32_t idx = (q - h->segment_keys[0]) >> h->sample_step;
+        return (idx > nd->num_stems) ? nd->num_stems : uint16_t(idx);
+    }
     if (h->segment_count)
         return stem_upper_bound_apgm(h, nd->stems(), nd->num_stems, q);
     return stem_upper_bound(nd->stems(), nd->num_stems, q);
@@ -489,10 +518,17 @@ inline const uint8_t* fx_find_record(const node2* leaf, uint32_t q) noexcept
 // inner pays on a descent (algo §3.4 slot prefetch).
 inline ptr_address inner_route(const node2* nd, uint32_t q) noexcept
 {
-    const uint32_t*    st = nd->stems();
     const ptr_address* ch = nd->children();
     const uint16_t     n  = nd->num_stems;
     const apgm_header* h  = nd->estimator();
+    if (h->segment_count == kBinarySentinel)         // exact grid: shift → child, NO stems read
+    {
+        const uint32_t idx = (q - h->segment_keys[0]) >> h->sample_step;
+        const uint16_t i   = (idx > n) ? n : uint16_t(idx);     // clamp (q above last cell)
+        assert(i == stem_upper_bound(nd->stems(), n, q));       // creation proved exactness
+        return ch[i];
+    }
+    const uint32_t*    st = nd->stems();
     uint16_t           i;
     if (h->segment_count)
     {
@@ -522,31 +558,6 @@ inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
     return i;
 }
 
-// ── Implicit-divider grid detection (doc/implicit_dividers.md §13) ────
-// An inner whose stems are an exact constant-stride power-of-2 grid can be
-// routed by a single shift instead of a stem search — the prediction is exact,
-// so the stems line is never read. detect_grid verifies (one pass, ALL stems)
-// that stems[i] = base + (i+1)·2^shift; on success upper_bound(q) is exactly
-// clamp((q-base)>>shift, 0, n). This is the one-time creation-time assertion;
-// query time then trusts the flag with no verification.
-inline constexpr uint8_t kBinarySentinel = 0xFF;   // apgm_header.segment_count marker
-
-struct grid_fit { bool ok; uint32_t base; uint8_t shift; };
-inline grid_fit detect_grid(const uint32_t* stems, uint16_t n) noexcept
-{
-    if (n < 2) return {false, 0, 0};
-    const uint32_t stride = stems[1] - stems[0];
-    if (stride == 0 || (stride & (stride - 1)) != 0) return {false, 0, 0};   // not a power of 2
-    for (uint16_t i = 2; i < n; ++i)
-        if (stems[i] - stems[i - 1] != stride) return {false, 0, 0};         // not constant stride
-    return {true, stems[0] - stride, uint8_t(__builtin_ctz(stride))};        // base = origin
-}
-
-// Phase-1 instrumentation: count inners and how many are exact grids. Pure
-// measurement — no behavior change. Read/reset by the bench.
-inline uint64_t g_inner_total = 0;
-inline uint64_t g_inner_grid  = 0;
-
 // ── Bulk-in-order constructor: INNER (algo §9.1, inner case) ──────────
 // Build a fresh inner node2 from a prefix and a sorted (stems, children) pair
 // with children.size() == stems.size()+1 (btree-page semantics). Children are
@@ -572,12 +583,21 @@ inline node2* build_inner(std::span<const uint32_t>    prefix,
     // APGM estimator (§6): build only for inners wide enough to beat binary search;
     // a failed fit (too irregular for ≤9 segments) leaves segment_count==0 → the
     // lookup path falls back to binary search.
-    apgm_header* est   = nd->estimator();
+    apgm_header*   est = nd->estimator();
     est->segment_count = 0;
-    if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
+    // Phase 2: an exact grid routes by a single shift (skip the stems line). The
+    // constant-stride proof here is the ONE-TIME creation-time assertion — query
+    // time then trusts the sentinel with no checking (doc §6a/§13).
+    const grid_fit gf = detect_grid(nd->stems(), n);
+    if (gf.ok)
+    {
+        est->segment_count   = kBinarySentinel;
+        est->segment_keys[0] = gf.base;
+        est->sample_step     = gf.shift;
+    }
+    else if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
         est->segment_count = 0;
-    // Phase-1 instrumentation: is this inner an exact grid? (counter only)
-    if (n >= 2) { ++g_inner_total; if (detect_grid(nd->stems(), n).ok) ++g_inner_grid; }
+    if (n >= 2) { ++g_inner_total; if (gf.ok) ++g_inner_grid; }
     return nd;
 }
 
