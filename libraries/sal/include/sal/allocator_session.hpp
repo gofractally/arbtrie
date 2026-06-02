@@ -219,6 +219,10 @@ namespace sal
          return false;
       }  //_update_checksum_on_modify; }
 
+      // Hint-traversal diagnostics (see control_block_alloc::kHintTraceStats).
+      hint_trace_stats hint_stats() const noexcept { return _ptr_alloc.hint_stats(); }
+      void             reset_hint_stats() noexcept { _ptr_alloc.reset_hint_stats(); }
+
      private:
       friend class transaction;
       smart_ptr<alloc_header> transaction_commit(root_object_number      ro,

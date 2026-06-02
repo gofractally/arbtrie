@@ -133,7 +133,7 @@ int main(int argc, char** argv)
         if (N > (1ull << 32)) { std::printf("stream: N must be <= 2^32\n"); return 2; }
         std::printf("=== stream (staged INCREMENTAL, sync::none): N=%llu u32, 8-B val, lu16=%d ===\n",
                     (unsigned long long)N, int(w2::g_leaf_u16));
-        std::printf("   round      inserted   insert ns/key   query ns   miss\n");
+        std::printf("   round      inserted   insert ns/key   query ns   miss   hint(avg fb%%)\n");
         auto scramble = [N](uint64_t c) -> uint64_t {     // bijection over [0,N)
             return uint64_t(static_cast<__uint128_t>(c) * 2654435761ull % N);
         };
@@ -145,6 +145,7 @@ int main(int argc, char** argv)
         for (uint64_t pbase = 0; pbase < N; pbase += STEP)
         {
             const uint64_t pend = std::min(pbase + STEP, N);
+            ses->reset_hint_stats();              // hint-traversal diagnostic, this window
             const double   ti   = now_s();
             for (uint64_t c = pbase; c < pend; ++c)
             {
@@ -175,9 +176,12 @@ int main(int argc, char** argv)
             }
             const double q_ns = (now_s() - tq) / double(QSTEP) * 1e9;
             tot_miss += miss;
-            std::printf("   %4lluM   %11llu   %12.0f   %8.0f   %4zu\n",
+            const auto   h   = ses->hint_stats();   // {calls, addrs traversed, fallbacks}
+            const double havg = h.calls ? double(h.addrs) / double(h.calls) : 0.0;
+            const double hfb  = h.calls ? 100.0 * double(h.fallbacks) / double(h.calls) : 0.0;
+            std::printf("   %4lluM   %11llu   %12.0f   %8.0f   %4zu   %.2f %.1f%%\n",
                         (unsigned long long)(pend / 1'000'000), (unsigned long long)pend,
-                        ins_ns, q_ns, miss);
+                        ins_ns, q_ns, miss, havg, hfb);
         }
         std::printf("=== total %.1fs, miss=%zu ===\n", now_s() - t_all, tot_miss);
         std::filesystem::remove_all(dbdir);

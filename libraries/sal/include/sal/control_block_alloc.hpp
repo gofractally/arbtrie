@@ -175,6 +175,13 @@ namespace sal
     * offset into the datafile and the bitmap file which makes alloc/free/get operations
     * very fast.
     */
+   // Diagnostic (OFF by default → zero cost): how many hint branch addresses the
+   // allocator traverses before it finds a free control-block slot, and how often
+   // the hint misses entirely (falls back to a no-hint alloc). Flip to true and
+   // rebuild to enable; read via control_block_alloc::hint_stats().
+   inline constexpr bool kHintTraceStats = false;
+   struct hint_trace_stats { uint64_t calls = 0, addrs = 0, fallbacks = 0; };
+
    class control_block_alloc
    {
      public:
@@ -365,14 +372,45 @@ namespace sal
        */
       std::optional<allocation> try_alloc(const alloc_hint& hint)
       {
+         uint32_t tried = 0;                      // real branch addresses traversed
          for (auto addr : hint)
          {
             if (is_reserved_ptr_address(addr))   // null / tombstone / sentinel — not a hint
                continue;
+            if constexpr (kHintTraceStats) ++tried;
             if (auto alloc = try_alloc(addr))
+            {
+               if constexpr (kHintTraceStats)
+               {
+                  _hint_calls.fetch_add(1, std::memory_order_relaxed);
+                  _hint_addrs.fetch_add(tried, std::memory_order_relaxed);
+               }
                return alloc;
+            }
          }
+         if constexpr (kHintTraceStats)
+            if (tried)                            // had real branches but none had a free slot
+            {
+               _hint_calls.fetch_add(1, std::memory_order_relaxed);
+               _hint_addrs.fetch_add(tried, std::memory_order_relaxed);
+               _hint_fallbacks.fetch_add(1, std::memory_order_relaxed);
+            }
          return std::nullopt;
+      }
+
+      // Diagnostic readout (see kHintTraceStats): {calls, total addrs traversed,
+      // fallbacks}. avg traversal = addrs/calls; fallback rate = fallbacks/calls.
+      hint_trace_stats hint_stats() const noexcept
+      {
+         return {_hint_calls.load(std::memory_order_relaxed),
+                 _hint_addrs.load(std::memory_order_relaxed),
+                 _hint_fallbacks.load(std::memory_order_relaxed)};
+      }
+      void reset_hint_stats() noexcept
+      {
+         _hint_calls.store(0, std::memory_order_relaxed);
+         _hint_addrs.store(0, std::memory_order_relaxed);
+         _hint_fallbacks.store(0, std::memory_order_relaxed);
       }
 
       /// @pre address is a valid pointer address
@@ -560,5 +598,9 @@ namespace sal
       control_block*                   _ptr_base       = nullptr;
       std::atomic<uint64_t>*           _free_list_base = nullptr;
       std::mutex                       _grow_mutex;
+      // Hint-traversal diagnostics (only touched when kHintTraceStats is true).
+      std::atomic<uint64_t>            _hint_calls{0};
+      std::atomic<uint64_t>            _hint_addrs{0};
+      std::atomic<uint64_t>            _hint_fallbacks{0};
    };
 }  // namespace sal
