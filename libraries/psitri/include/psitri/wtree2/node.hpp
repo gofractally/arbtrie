@@ -40,10 +40,17 @@ using alloc_hint      = sal::alloc_hint;
 using session_t       = sal::allocator_session;
 using apgm_header     = psitri::wtree::apgm_header;
 
-// Every INNER carries an APGM estimator (96 B) right after the fixed header,
-// before the prefix; leaves carry none. (Tiny inners waste it but it's harmless,
-// and the descent's cost is dominated by the wide inners that need it.)
+// Every node2 carries an APGM estimator (96 B) right after the fixed header,
+// before the prefix — inners route stems by it, leaves search their stems by it.
+// (Tiny nodes skip the build and fall back to binary search; the 96 B is cheap
+// next to the cold cacheline the predictor removes from each level's search.)
 inline constexpr uint32_t kEstimatorBytes = uint32_t(sizeof(apgm_header));   // 96
+
+// Build the estimator only for nodes wide enough that the predicted-hit + short
+// correction walk beats a binary search. Below this, binary search over the few
+// (cacheline-local, HW-prefetch-friendly) stems is cheaper than the predictor's
+// segment math + walk — measured: leaf-width (~80) nodes regress with it on.
+inline constexpr uint16_t kApgmMinStems = 256;
 
 inline constexpr ptr_address kNoChild = sal::null_ptr_address;
 
@@ -120,18 +127,20 @@ struct node2 : public psitri::node
     // BEFORE the inline prefix; everything downstream is derived from it.
     static constexpr uint16_t kFixedHeaderBytes = 20;
 
-    // Estimator (inner only) sits right after the fixed header, before the prefix.
+    // Every node carries an APGM estimator right after the fixed header, before
+    // the prefix — inners route stems by it, leaves search their stems by it. The
+    // 96 B is negligible vs the cold cacheline it removes from the search.
     apgm_header*       estimator()       noexcept { return reinterpret_cast<apgm_header*>(base() + kFixedHeaderBytes); }
     const apgm_header* estimator() const noexcept { return reinterpret_cast<const apgm_header*>(base() + kFixedHeaderBytes); }
-    static uint32_t    est_bytes(bool is_inner) noexcept { return is_inner ? kEstimatorBytes : 0u; }
+    static constexpr uint32_t est_bytes() noexcept { return kEstimatorBytes; }
 
     uint32_t header_content_bytes() const noexcept
     {
-        return uint32_t(kFixedHeaderBytes) + est_bytes(is_inner()) + uint32_t(prefix_len) * 4u;
+        return uint32_t(kFixedHeaderBytes) + est_bytes() + uint32_t(prefix_len) * 4u;
     }
 
-    // Inline Patricia prefix (u32 words), after the (inner) estimator.
-    uint32_t prefix_off() const noexcept { return uint32_t(kFixedHeaderBytes) + est_bytes(is_inner()); }
+    // Inline Patricia prefix (u32 words), after the estimator.
+    uint32_t prefix_off() const noexcept { return uint32_t(kFixedHeaderBytes) + est_bytes(); }
     uint32_t*       prefix()       noexcept { return reinterpret_cast<uint32_t*>(base() + prefix_off()); }
     const uint32_t* prefix() const noexcept { return reinterpret_cast<const uint32_t*>(base() + prefix_off()); }
     std::span<const uint32_t> prefix_words() const noexcept { return {prefix(), prefix_len}; }
@@ -162,24 +171,24 @@ struct node2 : public psitri::node
 
     // Offset where the value-region tail begins (right after the cl-aligned
     // children region) = the index-only size. LOCAL slots address into [this, end).
-    static uint32_t tail_off_for(uint16_t n_stems, uint8_t prefix_len, bool is_inner) noexcept
+    static uint32_t tail_off_for(uint16_t n_stems, uint8_t prefix_len) noexcept
     {
-        const uint32_t hdr   = uint32_t(kFixedHeaderBytes) + est_bytes(is_inner)
+        const uint32_t hdr   = uint32_t(kFixedHeaderBytes) + est_bytes()
                              + uint32_t(prefix_len) * 4u;
         const uint32_t s_off = uint32_t(ucc::round_up_multiple<kCacheLine>(hdr));
         const uint32_t c_off = s_off
                              + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems) * 4u));
         return c_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems + 1) * 4u));
     }
-    // Total byte size for (prefix_len, num_stems, value-tail). Inner: includes the
-    // estimator, no tail. Leaf: no estimator, passes the packed value-region tail.
+    // Total byte size for (prefix_len, num_stems, value-tail). Inner: tail_bytes==0.
+    // Leaf: passes the packed value-region tail. Both carry the estimator.
     static uint32_t size_for(uint16_t n_stems, uint8_t prefix_len,
-                             uint32_t tail_bytes = 0, bool is_inner = false) noexcept
+                             uint32_t tail_bytes = 0) noexcept
     {
-        return tail_off_for(n_stems, prefix_len, is_inner)
+        return tail_off_for(n_stems, prefix_len)
              + uint32_t(ucc::round_up_multiple<kCacheLine>(tail_bytes));
     }
-    uint32_t tail_off() const noexcept { return tail_off_for(num_stems, prefix_len, is_inner()); }
+    uint32_t tail_off() const noexcept { return tail_off_for(num_stems, prefix_len); }
 
     // ── SAL alloc contract ────────────────────────────────────────────
     // session.alloc<node2>(hint, shp, n_stems, prefix_len) forwards these to
@@ -187,10 +196,10 @@ struct node2 : public psitri::node
     // bulk constructor then fills prefix/stems/children. cow_size/compact_size/
     // copy_to/destroy/visit_children use the alloc_header defaults for now
     // (real lifecycle = Phase 6).
-    static uint32_t alloc_size(shape shp, uint16_t n_stems, uint8_t prefix_len,
+    static uint32_t alloc_size(shape, uint16_t n_stems, uint8_t prefix_len,
                                uint32_t tail_bytes = 0) noexcept
     {
-        return size_for(n_stems, prefix_len, tail_bytes, shp == shape::inner);
+        return size_for(n_stems, prefix_len, tail_bytes);
     }
     node2(uint32_t asize, ptr_address_seq seq,
           shape shp, uint16_t n_stems_, uint8_t prefix_len_,
@@ -239,28 +248,27 @@ inline void free_subtree(node2* nd) noexcept
 // ── Stem search (algo §6) ─────────────────────────────────────────────
 // upper_bound slot index: count of stems ≤ q, in [0, n]. slots[0] handles
 // key ≤ stems[0] AND key-ends-here; slots[n] handles key > stems[n-1].
-// Scalar for Phase 2 (SIMD/predictor are later search-mode work).
+//
+// BRANCHLESS LINEAR SCAN (algo §6, small-node mode). Counts how many stems are
+// ≤ q with no data-dependent branches: the per-element body is a compare folded
+// into an accumulator, so the compiler vectorizes it (NEON/AVX compare + add)
+// and it streams the stems region in order — HW-prefetch-friendly. This beats
+// binary search at the small widths it runs on: binary search mispredicts a
+// branch per step and probes cachelines in a random, un-prefetchable order. We
+// never binary-search; wide nodes use the predictor (below) instead.
 inline uint16_t stem_upper_bound(const uint32_t* stems, uint16_t n, uint32_t q) noexcept
 {
-    // Binary search (O(log n)) for the slot index = count of stems ≤ q. The
-    // SIMD-linear scan (small nodes) + APGM predictor (big nodes) of algo §6 are
-    // the future search modes; binary search is the correct interim that avoids
-    // an O(n) scan on wide inners.
-    uint16_t lo = 0, hi = n;
-    while (lo < hi)
-    {
-        const uint16_t mid = uint16_t(lo + ((hi - lo) >> 1));
-        if (stems[mid] <= q) lo = uint16_t(mid + 1);
-        else                 hi = mid;
-    }
-    return lo;
+    uint16_t c = 0;
+    for (uint16_t j = 0; j < n; ++j)
+        c = uint16_t(c + (stems[j] <= q));   // 0/1, no branch → vectorizes
+    return c;
 }
 
-// Predictor-seeded upper_bound (algo §6). The APGM estimator maps q → an
-// approximate stem position; a short bidirectional correction walk lands on the
-// EXACT upper_bound, so the result is identical to stem_upper_bound regardless of
-// predictor accuracy — only the number of cachelines touched differs (≈1 vs
-// log2(n) for a wide inner). Caller guarantees h->segment_count != 0.
+// Predictor-seeded upper_bound (algo §6, wide-node mode). The APGM estimator maps
+// q → an approximate stem position in ~1 cacheline touch; a short branchless
+// correction walk lands on the EXACT upper_bound, so the result is identical to a
+// full scan regardless of predictor accuracy — only the cachelines touched differ
+// (≈1 + a few vs ⌈n·4/128⌉ for a full scan). Caller guarantees segment_count != 0.
 inline uint16_t stem_upper_bound_apgm(const apgm_header* h, const uint32_t* stems,
                                       uint16_t n, uint32_t q) noexcept
 {
@@ -271,10 +279,12 @@ inline uint16_t stem_upper_bound_apgm(const apgm_header* h, const uint32_t* stem
     return i;
 }
 
-// Inner stem search dispatch: use the predictor when one was built (wide inners),
-// else binary search (tiny inners skip the estimator build). INNER only — leaves
-// carry no estimator.
-inline uint16_t inner_stem_ub(const node2* nd, uint32_t q) noexcept
+// Stem search dispatch (inner routing AND leaf lookup), NO binary search:
+//   wide node  (estimator built) → predictor + short correction walk
+//   small node (no estimator)    → branchless linear scan
+// Every node2 carries the estimator slot; the build threshold (kApgmMinStems)
+// decides which mode each node uses.
+inline uint16_t node_stem_ub(const node2* nd, uint32_t q) noexcept
 {
     const apgm_header* h = nd->estimator();
     if (h->segment_count)
@@ -321,7 +331,7 @@ inline node2* build_inner(std::span<const uint32_t>    prefix,
     // lookup path falls back to binary search.
     apgm_header* est   = nd->estimator();
     est->segment_count = 0;
-    if (n >= 16 && apgm_build_adaptive(est, nd->stems(), n) == 0)
+    if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
         est->segment_count = 0;
     return nd;
 }
@@ -350,7 +360,7 @@ inline node2* find_leaf(node2* nd, std::span<const uint32_t> key, uint16_t depth
         // §5.2 stem search — terminal (key ends here) routes to slot 0.
         const uint16_t i = (depth >= key.size())
                                ? uint16_t(0)
-                               : inner_stem_ub(nd, key[depth]);
+                               : node_stem_ub(nd, key[depth]);
         const ptr_address c = nd->children()[i];
         if (c == kNoChild)
             return nullptr;                           // empty slot → absent
@@ -449,6 +459,12 @@ inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
         ch[j + 1] = make_local_slot(off);
         off += uint32_t(ucc::round_up_multiple<4>(vr->total()));
     }
+    // APGM estimator (§6) over the leaf stems — turns the in-leaf upper_bound from
+    // a multi-cacheline binary search into a predicted hit + short correction walk.
+    apgm_header* est   = nd->estimator();
+    est->segment_count = 0;
+    if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
+        est->segment_count = 0;
     return nd;
 }
 
@@ -471,7 +487,7 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
             if (depth >= key.size())
                 return {};                                  // terminal (slot 0) — not yet stored
             const uint32_t q = key[depth];
-            const uint16_t i = stem_upper_bound(nd->stems(), nd->num_stems, q);
+            const uint16_t i = node_stem_ub(nd, q);
             if (i == 0 || nd->stems()[i - 1] != q) return {};   // q not a stem → absent
             const ptr_address s = nd->children()[i];
             if (!is_local_slot(s)) return {};               // empty / EXT (Phase 3b: DIRECT only)
@@ -486,7 +502,7 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
 
         const uint16_t i = (depth >= key.size())
                                ? uint16_t(0)
-                               : inner_stem_ub(nd, key[depth]);
+                               : node_stem_ub(nd, key[depth]);
         const ptr_address c = nd->children()[i];
         if (!is_ext_slot(c)) return {};                     // empty slot → absent
         nd = w2deref(c);

@@ -21,7 +21,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <random>
 #include <span>
 #include <string>
 #include <unistd.h>
@@ -100,47 +99,83 @@ int main(int argc, char** argv)
     std::printf("[build] bulk-build %llu in %.2fs (%.2f Mops/s, %.0f ns/key)\n",
                 (unsigned long long)M, build_s, M / build_s / 1e6, build_s / M * 1e9);
 
-    // ─── Find ─────────────────────────────────────────────────
+    // ─── Structure stats ──────────────────────────────────────
+    {
+        sal::read_lock lk = ses->lock();
+        struct St { uint64_t leaves=0, inners=0, leaf_entries=0; uint16_t maxd=0; } st;
+        auto walk = [&](auto&& self, w2::ptr_address a, uint16_t d) -> void {
+            w2::node2* nd = w2::w2deref(a);
+            if (nd->is_leaf()) {
+                ++st.leaves; st.leaf_entries += nd->num_stems;
+                if (d > st.maxd) st.maxd = d;
+                return;
+            }
+            ++st.inners;
+            for (auto c : nd->child_span())
+                if (w2::is_ext_slot(c)) self(self, c, uint16_t(d + 1));
+        };
+        walk(walk, root, 1);
+        std::printf("[shape] %llu leaves + %llu inners, depth=%u, avg leaf=%.1f entries\n",
+                    (unsigned long long)st.leaves, (unsigned long long)st.inners, st.maxd,
+                    st.leaves ? double(st.leaf_entries) / st.leaves : 0.0);
+    }
+
+    // The tree now owns copies of every key+value (build_leaf memcpy'd them), so
+    // the generator arrays are dead weight. Drop them BEFORE timing find so there
+    // is no large array to accidentally touch — the probe key for index i is just
+    // make_key24(i) and its expected value is i+1 (the splitmix hashes are 192-bit,
+    // so for these N there are no collisions: M == N and i↦key↦value is a bijection).
+    const bool bijective = (M == N);
+    ents.clear(); ents.shrink_to_fit();
+    le.clear();   le.shrink_to_fit();
+    if (!bijective)
+        std::printf("[warn]  %llu hash collisions — value check disabled\n",
+                    (unsigned long long)(N - M));
+
+    // ─── Find (sequential index) ──────────────────────────────
+    // Key + expected value are regenerated from the loop counter — no value array.
     t0 = now_s();
     size_t miss = 0, mism = 0;
     {
         sal::read_lock lk = ses->lock();
         w2::node2*     r  = w2::w2deref(root);
-        for (auto& e : ents)
+        std::array<uint32_t, 6> key;
+        for (uint64_t i = 0; i < N; ++i)
         {
-            auto v = w2::find_value(r, {e.key.data(), 6});
-            if (v.data() == nullptr) {
-                if (miss < 8)
-                    std::printf("[miss]  key = %08x %08x %08x %08x %08x %08x\n",
-                                e.key[0], e.key[1], e.key[2], e.key[3], e.key[4], e.key[5]);
-                ++miss; continue;
-            }
+            make_key24(i, reinterpret_cast<uint8_t*>(key.data()));
+            auto v = w2::find_value(r, {key.data(), 6});
+            if (v.data() == nullptr)         { ++miss; continue; }
             uint64_t got = 0; std::memcpy(&got, v.data(), 8);
-            if (v.size() != 8 || got != e.val) ++mism;
+            if (v.size() != 8 || (bijective && got != i + 1)) ++mism;
         }
     }
     const double find_s = now_s() - t0;
     std::printf("[find/seq] %llu lookups in %.2fs (%.0f ns/lookup), miss=%zu mismatch=%zu\n",
-                (unsigned long long)M, find_s, find_s / M * 1e9, miss, mism);
+                (unsigned long long)N, find_s, find_s / N * 1e9, miss, mism);
 
-    // Random-order find — the fair comparison (the seq pass above benefits from
-    // sorted-order tree locality; this hits the tree in scrambled order).
-    std::vector<uint32_t> order(M);
-    for (uint32_t i = 0; i < M; ++i) order[i] = i;
-    std::mt19937_64 rng(12345);
-    std::shuffle(order.begin(), order.end(), rng);
+    // ─── Find (random index) ──────────────────────────────────
+    // r = splitmix64(k) % N selects a pseudo-random EXISTING key on the fly (with
+    // replacement) — scrambled tree access with no order[]/probe[] array at all.
     t0 = now_s();
-    size_t miss2 = 0;
+    size_t miss2 = 0, mism2 = 0;
     {
         sal::read_lock lk = ses->lock();
         w2::node2*     r  = w2::w2deref(root);
-        for (uint32_t idx : order)
-            if (w2::find_value(r, {ents[idx].key.data(), 6}).data() == nullptr) ++miss2;
+        std::array<uint32_t, 6> key;
+        for (uint64_t k = 0; k < N; ++k)
+        {
+            const uint64_t idx = splitmix64(k ^ 0x5151515151515151ULL) % N;
+            make_key24(idx, reinterpret_cast<uint8_t*>(key.data()));
+            auto v = w2::find_value(r, {key.data(), 6});
+            if (v.data() == nullptr)         { ++miss2; continue; }
+            uint64_t got = 0; std::memcpy(&got, v.data(), 8);
+            if (v.size() != 8 || (bijective && got != idx + 1)) ++mism2;
+        }
     }
     const double rfind_s = now_s() - t0;
-    std::printf("[find/rnd] %llu lookups in %.2fs (%.0f ns/lookup), miss=%zu\n",
-                (unsigned long long)M, rfind_s, rfind_s / M * 1e9, miss2);
+    std::printf("[find/rnd] %llu lookups in %.2fs (%.0f ns/lookup), miss=%zu mismatch=%zu\n",
+                (unsigned long long)N, rfind_s, rfind_s / N * 1e9, miss2, mism2);
 
     std::filesystem::remove_all(dbdir);
-    return (miss || mism) ? 1 : 0;
+    return (miss || mism || miss2 || mism2) ? 1 : 0;
 }
