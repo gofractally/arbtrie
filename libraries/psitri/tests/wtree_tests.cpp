@@ -1866,6 +1866,66 @@ TEST_CASE("wtree2 insert leaf in-place + duplicate", "[wtree2][insert]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — adaptive leaf: uniform→FIXED, size change UPGRADES to dynamic ──
+// A leaf of equal-sized values is LEAF_FIXED (strided, fast read). Inserting a
+// differently-sized value must upgrade the leaf to the dynamic (heap+slot) form
+// and keep every entry (old uniform + new odd-sized) correct.
+TEST_CASE("wtree2 leaf upgrades fixed->dynamic on size change", "[wtree2][insert]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-upgrade");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base = fx.live_objects();
+
+   auto mk = [](uint32_t last) { return std::array<uint32_t, 6>{9, 9, 9, 9, 9, last}; };
+   auto rd = [](std::span<const uint8_t> s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+
+   constexpr uint16_t N = 30;
+   w2::ptr_address    root = w2::kNoChild;
+   {
+      sal::read_lock lk = fx.ses->lock();
+      for (uint16_t i = 0; i < N; ++i)                 // uniform 8-byte values → FIXED
+      {
+         auto     k = mk(uint32_t(i) * 2u + 1u);
+         uint64_t v = 0x1000u + i;
+         root = w2::insert(root, {k.data(), 6}, {reinterpret_cast<const uint8_t*>(&v), 8});
+      }
+   }
+   REQUIRE(w2::w2deref(root)->is_leaf_fixed());        // uniform → fixed form
+
+   // Insert a 3-byte value into the same leaf → must upgrade to dynamic.
+   {
+      sal::read_lock lk = fx.ses->lock();
+      auto    k = mk(777);
+      uint8_t v3[3] = {0xAA, 0xBB, 0xCC};
+      root = w2::insert(root, {k.data(), 6}, {v3, 3});
+   }
+   REQUIRE(!w2::w2deref(root)->is_leaf_fixed());       // upgraded to dynamic (varlen)
+
+   // All originals (8 B) still correct, plus the odd 3-B entry.
+   {
+      sal::read_lock lk = fx.ses->lock();
+      w2::node2*     r  = w2::w2deref(root);
+      for (uint16_t i = 0; i < N; ++i)
+      {
+         auto k = mk(uint32_t(i) * 2u + 1u);
+         auto v = w2::find_value(r, {k.data(), 6});
+         REQUIRE(v.size() == 8);
+         uint64_t got = 0; std::memcpy(&got, v.data(), 8);
+         REQUIRE(got == 0x1000u + i);
+      }
+      auto k = mk(777);
+      REQUIRE(rd(w2::find_value(r, {k.data(), 6})) == std::vector<uint8_t>{0xAA, 0xBB, 0xCC});
+   }
+   {
+      sal::read_lock lk = fx.ses->lock();
+      w2::free_subtree(w2::w2deref(root));
+   }
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
 // ── wtree2 — incremental insert integration (random keys, all cases) ───
 // Inserts random 24-B keys one at a time into an empty tree, exercising Patricia
 // split (§7.2), overflow fanout split (§7.1), and collisions. Verifies every key
