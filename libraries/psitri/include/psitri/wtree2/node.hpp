@@ -126,12 +126,14 @@ struct node2 : public psitri::node
     uint16_t n_slots()        const noexcept { return uint16_t(num_stems + 1); }
     uint16_t fx_stride()      const noexcept { return uint16_t(uint16_t(fx_rem_words) * 4u + fx_val_len); }
 
-    // SAL pf2 hint: prefetch the 2nd cacheline on get_ref when our must-read
-    // routing header crosses byte 64. Inners read the APGM estimator (recips /
-    // intercepts at bytes 60-113 → CL1); any node with a prefix reads it at
-    // byte 116+ (CL1). Leaves with no prefix touch only CL0 here (stems/records
-    // are separate regions, prefetched on their own), so they opt out.
-    bool pf_second_cl() const noexcept { return is_inner() || prefix_len > 0; }
+    // SAL pf2 hint: prefetch the 2nd 128-B line on get_ref. The whole header +
+    // estimator + short prefix live in line 0 (≤128 B), so line 1 is the STEMS
+    // region (stems_off rounds to 128) — which every find reads immediately after
+    // the header. So it pays for EVERY node, and most of all for tiny/cold leaves
+    // whose stems line is a guaranteed cold miss. (A query into a wide BigInner
+    // lands its predicted stem cl elsewhere, but that node is hot and the extra
+    // prefetch is cheap.) Always on.
+    bool pf_second_cl() const noexcept { return true; }
 
     uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
     const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
@@ -600,7 +602,8 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
     uint16_t depth = 0;
     for (;;)
     {
-        __builtin_prefetch(nd->stems(), 0, 1);   // overlap stem-region miss w/ prefix compare
+        // (the stems line is line 1 of the node — prefetched at get_ref via the
+        //  control-block pf2 bit, so no explicit stems prefetch is needed here.)
         const uint16_t  pl  = nd->prefix_len;
         const uint32_t* pfx = nd->prefix();
         for (uint16_t i = 0; i < pl; ++i)

@@ -231,10 +231,12 @@ namespace sal
       auto  cread = cb.load(std::memory_order_acquire);
       auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
       __builtin_prefetch(ptr, 0, 3);
-      // pf2: object's must-read header spills past CL0 → pull the 2nd cacheline
-      // now so it overlaps the first miss instead of serializing behind it.
+      // pf2: object's must-read region spills past the first cacheline → pull the
+      // 2nd line now so it overlaps the first miss instead of serializing behind
+      // it. The line is 128 B (Apple Silicon P-core / the region-alignment grain),
+      // so the 2nd line begins at +128 — that's where compact nodes keep stems.
       if (cread.pf2)
-         __builtin_prefetch(reinterpret_cast<const char*>(ptr) + 64, 0, 3);
+         __builtin_prefetch(reinterpret_cast<const char*>(ptr) + 128, 0, 3);
       return ptr;
    }
 
@@ -251,7 +253,7 @@ namespace sal
       auto  ptr   = _block_base_ptr + *cread.loc().offset();
       __builtin_prefetch(ptr, 0, 3);
       if (cread.pf2)
-         __builtin_prefetch(ptr + 64, 0, 3);
+         __builtin_prefetch(ptr + 128, 0, 3);   // 2nd 128-B line (stems for compact nodes)
    }
 
    inline bool allocator_session::is_read_only(ptr_address adr) const noexcept
