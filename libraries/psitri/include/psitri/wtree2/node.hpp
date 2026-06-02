@@ -115,7 +115,8 @@ struct node2 : public psitri::node
     uint8_t  flags;        // 16       kFlag* bits
     uint8_t  fx_rem_words; // 17       LEAF_FIXED: key suffix words per entry
     uint8_t  fx_val_len;   // 18       LEAF_FIXED: value bytes per entry
-    uint8_t  _pad;         // 19       reserved
+    uint8_t  fx_cap;       // 19       LEAF_FIXED: stem CAPACITY (≥ num_stems; slack for
+                           //          in-place grow). Region offsets use it, not num_stems.
 
     // ── Trivial accessors ─────────────────────────────────────────────
     shape    get_shape()      const noexcept { return shape(shape_); }
@@ -224,7 +225,9 @@ struct node2 : public psitri::node
         return fixed_records_off(n_stems, prefix_len)
              + uint32_t(ucc::round_up_multiple<kCacheLine>(record_bytes));
     }
-    uint32_t       records_off() const noexcept { return fixed_records_off(num_stems, prefix_len); }
+    // Capacity-based: the stems/records regions are sized for fx_cap so a grow up
+    // to capacity doesn't move them (in-place insert). num_stems ≤ fx_cap are live.
+    uint32_t       records_off() const noexcept { return fixed_records_off(fx_cap, prefix_len); }
     uint8_t*       records()       noexcept { return base() + records_off(); }
     const uint8_t* records() const noexcept { return base() + records_off(); }
     const uint8_t* record(uint16_t j) const noexcept { return records() + size_t(j) * fx_stride(); }
@@ -256,7 +259,7 @@ struct node2 : public psitri::node
         flags        = 0;
         fx_rem_words = 0;
         fx_val_len   = 0;
-        _pad         = 0;
+        fx_cap       = uint8_t(n_stems_ <= 255 ? n_stems_ : 255);   // default: exact (no slack)
     }
 };
 

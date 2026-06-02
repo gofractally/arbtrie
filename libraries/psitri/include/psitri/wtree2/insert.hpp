@@ -14,6 +14,7 @@
 
 #include <psitri/wtree2/node.hpp>
 #include <psitri/wtree2/scratch.hpp>
+#include <ucc/fast_memcpy.hpp>   // ucc::memcpy_aligned_64byte (cacheline-aligned fast copy)
 
 namespace psitri::wtree2 {
 
@@ -43,14 +44,29 @@ inline void finish_estimator(node2* nd) noexcept
         est->segment_count = 0;
 }
 
-inline node2* alloc_leaf_fixed(uint16_t n, uint8_t pl, uint8_t sw, uint8_t vl) noexcept
+// Allocate a LEAF_FIXED with `cap` stem capacity (regions sized for cap) but only
+// `n` live entries. cap≥n gives slack for in-place growth.
+inline node2* alloc_leaf_fixed(uint16_t n, uint16_t cap, uint8_t pl, uint8_t sw,
+                               uint8_t vl) noexcept
 {
-    const uint32_t recs = uint32_t(n) * (uint32_t(sw) * 4u + vl);
-    node2*         nd =
-        w2deref(w2session().alloc<node2>(alloc_hint{}, shape::leaf_fixed, n, pl, recs));
+    const uint32_t recs = uint32_t(cap) * (uint32_t(sw) * 4u + vl);
+    // alloc with n_stems=cap so the ctor sizes regions + sets fx_cap=cap.
+    node2* nd = w2deref(w2session().alloc<node2>(alloc_hint{}, shape::leaf_fixed, cap, pl, recs));
+    nd->num_stems    = n;
+    nd->fx_cap       = uint8_t(cap);
     nd->fx_rem_words = sw;
     nd->fx_val_len   = vl;
     return nd;
+}
+
+// Slack capacity for a leaf of this stride: as many entries as the tail budget
+// allows (kept < kApgmMinStems so leaves never carry a predictor). A leaf is
+// allocated at this capacity, grown in place, and split when it would exceed it.
+inline uint16_t leaf_capacity(uint16_t stride) noexcept
+{
+    uint32_t c = kLeafTailBudget / stride;
+    if (c > kLeafCountCap) c = kLeafCountCap;
+    return uint16_t(c ? c : 1);
 }
 
 // ── Generic descent / dispatch ────────────────────────────────────────
@@ -156,7 +172,7 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
         // Re-prefix the leaf: same stems/records, prefix P[j..pl). (Truncating the
         // FRONT of the prefix doesn't touch stems/records values, only offsets.)
         const uint16_t n = node->num_stems;
-        trunc = alloc_leaf_fixed(n, uint8_t(pl - j), node->fx_rem_words, node->fx_val_len);
+        trunc = alloc_leaf_fixed(n, n, uint8_t(pl - j), node->fx_rem_words, node->fx_val_len);
         std::memcpy(trunc->prefix(), P + j, size_t(pl - j) * 4u);
         std::memcpy(trunc->stems(), node->stems(), size_t(n) * 4u);
         std::memcpy(trunc->records(), node->records(), size_t(n) * node->fx_stride());
@@ -188,12 +204,12 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
 inline node2* build_fixed_range(node2* old, uint16_t pos, uint32_t qstem,
                                 const uint8_t* qsuffix, std::span<const uint8_t> qval,
                                 uint16_t a, uint16_t b, const uint32_t* prefix,
-                                uint8_t pl) noexcept
+                                uint8_t pl, uint16_t cap) noexcept
 {
     const uint8_t  sw     = old->fx_rem_words, vl = old->fx_val_len;
     const uint16_t stride = old->fx_stride();
     const uint16_t cnt    = uint16_t(b - a);
-    node2*         nd     = alloc_leaf_fixed(cnt, pl, sw, vl);
+    node2*         nd     = alloc_leaf_fixed(cnt, cap, pl, sw, vl);
     if (pl) std::memcpy(nd->prefix(), prefix, size_t(pl) * 4u);
     uint32_t* st = nd->stems();
     uint8_t*  rc = nd->records();
@@ -217,40 +233,68 @@ inline node2* build_fixed_range(node2* old, uint16_t pos, uint32_t qstem,
     return nd;
 }
 
-// Insert a new (distinct) entry into a LEAF_FIXED at sorted index `pos`, handling
-// fit (rebuild +1) vs overflow (balanced split). `pl_leaf` = the leaf's prefix
-// length (decides Splice vs re-root). depth is AFTER the leaf prefix.
-inline ins_result leaf_fixed_add(node2* leaf, uint16_t pos, uint32_t qstem,
-                                 const uint8_t* qsuffix, std::span<const uint8_t> qval,
-                                 uint16_t depth) noexcept
+// Shift the tail [pos..n) up by one slot and write the new entry in place. The
+// leaf MUST have slack (num_stems < fx_cap). O(n-pos) memmove, no alloc, no copy
+// of the whole leaf. Leaf address is unchanged.
+inline void leaf_fixed_shift_insert(node2* leaf, uint16_t pos, uint32_t qstem,
+                                    const uint8_t* qsuffix, std::span<const uint8_t> qval) noexcept
 {
-    const uint16_t n  = leaf->num_stems;
-    const uint8_t  pl = leaf->prefix_len;
+    const uint16_t n      = leaf->num_stems;
+    const uint8_t  sw     = leaf->fx_rem_words, vl = leaf->fx_val_len;
     const uint16_t stride = leaf->fx_stride();
-    const uint32_t new_tail = uint32_t(n + 1) * stride;
+    uint32_t*      st     = leaf->stems();
+    uint8_t*       rc     = leaf->records();
+    std::memmove(st + pos + 1, st + pos, size_t(n - pos) * 4u);
+    st[pos] = qstem;
+    std::memmove(rc + size_t(pos + 1) * stride, rc + size_t(pos) * stride,
+                 size_t(n - pos) * stride);
+    std::memcpy(rc + size_t(pos) * stride, qsuffix, size_t(sw) * 4u);
+    std::memcpy(rc + size_t(pos) * stride + size_t(sw) * 4u, qval.data(), vl);
+    leaf->num_stems = uint16_t(n + 1);     // (< kApgmMinStems → no estimator to rebuild)
+}
 
-    if (uint32_t(n + 1) <= kLeafCountCap && new_tail <= kLeafTailBudget)
+// Insert a new (distinct) entry into a LEAF_FIXED at sorted index `pos`:
+//   slack available → shift in place (no alloc, no full copy);
+//   capacity full but under budget → realloc to budget capacity (ucc fast copy of
+//                                    the whole live region, once) then shift;
+//   over budget → balanced split.
+inline ins_result leaf_fixed_add(node2* leaf, uint16_t pos, uint32_t qstem,
+                                 const uint8_t* qsuffix, std::span<const uint8_t> qval) noexcept
+{
+    const uint16_t n      = leaf->num_stems;
+    const uint8_t  pl     = leaf->prefix_len;
+    const uint16_t stride = leaf->fx_stride();
+    const uint16_t bcap   = leaf_capacity(stride);
+
+    if (uint32_t(n + 1) <= bcap)
     {
-        // In-place grow: rebuild with one more entry (SAL alloc + memcpy splice).
-        node2* nl = build_fixed_range(leaf, pos, qstem, qsuffix, qval, 0, uint16_t(n + 1),
-                                      leaf->prefix(), pl);
+        if (n < leaf->fx_cap)                                   // in-place shift (the hot path)
+        {
+            leaf_fixed_shift_insert(leaf, pos, qstem, qsuffix, qval);
+            return in_place(leaf->address());
+        }
+        // Capacity exhausted but still under budget → grow to budget cap once. The
+        // whole live region is copied with the cacheline-aligned fast memcpy.
+        node2* nl = alloc_leaf_fixed(n, bcap, pl, leaf->fx_rem_words, leaf->fx_val_len);
+        if (pl) std::memcpy(nl->prefix(), leaf->prefix(), size_t(pl) * 4u);
+        ucc::memcpy_aligned_64byte(nl->stems(), leaf->stems(),
+                                   ucc::round_up_multiple<64>(uint32_t(n) * 4u));
+        ucc::memcpy_aligned_64byte(nl->records(), leaf->records(),
+                                   ucc::round_up_multiple<64>(uint32_t(n) * stride));
+        leaf_fixed_shift_insert(nl, pos, qstem, qsuffix, qval);
         node2_free(leaf);
         return in_place(nl->address());
     }
 
-    // Overflow → balanced split at the stem word. The new entry sits at `pos` in
-    // the merged sequence of n+1; split index k near the middle.
+    // Overflow → balanced split. New entry at merged index `pos`; split at k.
     const uint16_t total = uint16_t(n + 1);
     const uint16_t k     = uint16_t(total / 2);
-    auto merged_stem = [&](uint16_t m) -> uint32_t {
-        return m == pos ? qstem : leaf->stems()[m < pos ? m : uint16_t(m - 1)];
-    };
-    const uint32_t div = merged_stem(k);                 // right group's first word
+    const uint32_t div   = (k == pos) ? qstem : leaf->stems()[k < pos ? k : uint16_t(k - 1)];
 
-    // Halves are PREFIXLESS pages at this radix word; the leaf's prefix (if any)
-    // moves to a new re-rooted inner above them.
-    node2* L = build_fixed_range(leaf, pos, qstem, qsuffix, qval, 0, k, nullptr, 0);
-    node2* R = build_fixed_range(leaf, pos, qstem, qsuffix, qval, k, total, nullptr, 0);
+    // Halves are PREFIXLESS pages at this radix word, allocated at budget capacity
+    // so they have slack to grow in place; the leaf's prefix (if any) re-roots.
+    node2* L = build_fixed_range(leaf, pos, qstem, qsuffix, qval, 0, k, nullptr, 0, bcap);
+    node2* R = build_fixed_range(leaf, pos, qstem, qsuffix, qval, k, total, nullptr, 0, bcap);
 
     if (pl == 0)
     {
@@ -297,7 +341,7 @@ inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
         return leaf_rebuild_arena(leaf, head, gdepth, key, val);
 
     return leaf_fixed_add(leaf, pos, q,
-                          reinterpret_cast<const uint8_t*>(key.data() + sdepth + 1), val, sdepth);
+                          reinterpret_cast<const uint8_t*>(key.data() + sdepth + 1), val);
 }
 
 // Splice a child Split into an inner at slot i: children[i]→left, insert
