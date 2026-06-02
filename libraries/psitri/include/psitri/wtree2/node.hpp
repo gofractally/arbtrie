@@ -52,6 +52,12 @@ inline constexpr uint32_t kEstimatorBytes = uint32_t(sizeof(apgm_header));   // 
 // segment math + walk — measured: leaf-width (~80) nodes regress with it on.
 inline constexpr uint16_t kApgmMinStems = 256;
 
+// apgm_header.segment_count marker for an exact constant-stride power-of-2 grid inner:
+// route by `(q-base)>>shift` (base in segment_keys[0], shift in sample_step), and the
+// node stores NO stems region (children sit where the stems would start). Declared up
+// here so the layout math (children_off / size) can key off it.
+inline constexpr uint8_t kBinarySentinel = 0xFF;
+
 inline constexpr ptr_address kNoChild = sal::null_ptr_address;
 
 // ── Slot encoding (doc/wtree2.md §3) ──────────────────────────────────
@@ -186,12 +192,18 @@ struct node2 : public psitri::node
     const uint32_t* prefix() const noexcept { return reinterpret_cast<const uint32_t*>(base() + prefix_off()); }
     std::span<const uint32_t> prefix_words() const noexcept { return {prefix(), prefix_len}; }
 
+    // A grid inner stores base+shift (segment_count == kBinarySentinel) and routes by
+    // shift — it carries NO stems region, so its children sit where the stems would
+    // start. Set before children are written, so children_off() is stable.
+    bool grid_layout() const noexcept { return estimator()->segment_count == kBinarySentinel; }
+
     uint32_t stems_off() const noexcept
     {
         return uint32_t(ucc::round_up_multiple<kCacheLine>(header_content_bytes()));
     }
     uint32_t children_off() const noexcept
     {
+        if (grid_layout()) return stems_off();          // no stems region
         return stems_off()
              + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(num_stems) * 4u));
     }
@@ -228,6 +240,15 @@ struct node2 : public psitri::node
     {
         return tail_off_for(n_stems, prefix_len)
              + uint32_t(ucc::round_up_multiple<kCacheLine>(tail_bytes));
+    }
+    // A grid inner OMITS the stems region: [header+estimator+prefix][children]. ~half
+    // the size of the explicit form for a wide (full-byte-radix) inner.
+    static uint32_t grid_size_for(uint16_t n_stems, uint8_t prefix_len) noexcept
+    {
+        const uint32_t hdr = uint32_t(kFixedHeaderBytes) + est_bytes()
+                           + uint32_t(prefix_len) * 4u;
+        const uint32_t c_off = uint32_t(ucc::round_up_multiple<kCacheLine>(hdr));
+        return c_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems + 1) * 4u));
     }
     uint32_t tail_off() const noexcept { return tail_off_for(num_stems, prefix_len); }
 
@@ -569,9 +590,8 @@ inline uint16_t stem_upper_bound(const uint32_t* stems, uint16_t n, uint32_t q) 
 // so the stems line is never read. detect_grid verifies (one pass, ALL stems)
 // that stems[i] = base + (i+1)·2^shift; on success upper_bound(q) is exactly
 // clamp((q-base)>>shift, 0, n). This is the one-time creation-time assertion;
-// query time then trusts the flag with no verification.
-inline constexpr uint8_t kBinarySentinel = 0xFF;   // apgm_header.segment_count marker
-
+// query time then trusts the flag with no verification. (kBinarySentinel declared
+// near the top so the layout math can use it.)
 struct grid_fit { bool ok; uint32_t base; uint8_t shift; };
 inline grid_fit detect_grid(const uint32_t* stems, uint16_t n) noexcept
 {
@@ -798,7 +818,12 @@ inline uint32_t node2::alloc_size(std::span<const uint32_t>    prefix,
                                   std::span<const uint32_t>    stems,
                                   std::span<const ptr_address> /*children*/) noexcept
 {
-    return size_for(uint16_t(stems.size()), uint8_t(prefix.size()), 0);
+    const uint16_t n  = uint16_t(stems.size());
+    const uint8_t  pl = uint8_t(prefix.size());
+    // A grid gets the shrunk (stems-free) layout — must agree with the ctor, which
+    // detect_grid's the SAME source and skips the stems region.
+    if (detect_grid(stems.data(), n).ok) return grid_size_for(n, pl);
+    return size_for(n, pl, 0);
 }
 inline node2::node2(uint32_t asize, ptr_address_seq seq,
                     std::span<const uint32_t>    prefix,
@@ -840,6 +865,11 @@ inline node2::node2(uint32_t asize, ptr_address_seq seq,
     shape_     = uint8_t(shape::inner);
     prefix_len = src.prefix_len;
     flags      = 0;
+    // The absorb result is allocated full (explicit) size, so it must NOT take the
+    // grid layout: clear the sentinel BEFORE writing children (children_off keys off
+    // it). An absorb almost always breaks the grid anyway; a merged sequence that
+    // happens to be a grid is stored explicit (correct, just not shrunk).
+    estimator()->segment_count = 0;
     std::memcpy(prefix(), src.prefix(), size_t(prefix_len) * 4u);
     // stems: head [0,i) | insert ni | tail [i,n). A grid src has NO stored stems →
     // regenerate the head/tail from its base+shift; an explicit src is copied. (We
@@ -865,7 +895,12 @@ inline node2::node2(uint32_t asize, ptr_address_seq seq,
     std::memcpy(dc,              sc,           size_t(i) * sizeof(ptr_address));
     std::memcpy(dc + i,          op.ins_kids,  size_t(ni + 1) * sizeof(ptr_address));
     std::memcpy(dc + i + ni + 1, sc + i + 1,   size_t(n - i) * sizeof(ptr_address));
-    (void)set_inner_estimator(this, ds, num_stems);   // re-detect: stay grid OR downgrade
+    // APGM only (no grid detect) — this node keeps the explicit layout it was sized
+    // for; segment_count stays 0 or an APGM count, never the grid sentinel.
+    apgm_header* est = estimator();
+    if (num_stems >= kApgmMinStems && apgm_build_adaptive(est, ds, num_stems) == 0)
+        est->segment_count = 0;
+    if (num_stems >= 2) ++g_inner_total;
 }
 
 inline node2* build_inner(std::span<const uint32_t>    prefix,
