@@ -869,7 +869,10 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
 // distinct keys (no entry is a prefix of another) so terminals don't arise.
 inline constexpr uint32_t kLeafTailBudget = 3072;   // value-tail bytes per leaf
 inline constexpr uint32_t kLeafCountCap   = 200;    // entries per leaf
-inline constexpr uint32_t kInnerStemCap   = 4096;   // dividers per inner (~32 KB)
+inline constexpr uint32_t kInnerStemCap   = 8191;   // 8192 cells = 13 bits/inner: two
+                                                    // inner hops span 26 bits so a u32 is
+                                                    // depth-3 across the FULL 2^32 keyspace
+                                                    // (leaf resolves the remaining ≤6 bits).
 
 // B-tree the (divs[0..D), kids[0..D+1)) radix children into inner(s) under prefix.
 // Scratch arrays come from the thread-local arena (no heap); caller holds a mark.
