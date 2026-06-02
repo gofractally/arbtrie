@@ -119,8 +119,8 @@ inline constexpr uint8_t kFlagHasTerminal = 0x01;   // a key ends at prefix-end 
 // ─────────────────────────────────────────────────────────────────────
 // Absorb work-ticket (wt1 op pattern): splice `ni` dividers + `ni+1` children into
 // an inner at slot `pos`, REPLACING the child at pos (a split child becomes left+
-// right; a fill replaces an empty slot). The (src, op) ctor below copies src→dst in
-// ONE pass with this edit spliced in — no scratch buffer, no copy-then-move.
+// right; a fill replaces an empty slot). The (src, op) ctor and the apply(op) twin
+// both run the edit through splice_absorb<splice_mode> — written once, no scratch.
 struct op_inner_absorb
 {
     uint16_t                  pos;         // slot index to splice at
@@ -128,6 +128,11 @@ struct op_inner_absorb
     const uint32_t*           ins_stems;   // ni dividers
     const sal::ptr_address*   ins_kids;    // ni+1 children (replace slot pos, insert ni more)
 };
+
+// Splice target (wt1 pattern): edit the live buffer in place (dst==src) vs. build
+// into fresh bytes (dst!=src, possibly grown). Templated so each path is branch-free
+// — no runtime src==dst test on the hot path.
+enum class splice_mode : uint8_t { in_place = 0, fresh_copy = 1 };
 
 struct node2 : public psitri::node
 {
@@ -338,12 +343,15 @@ struct node2 : public psitri::node
           std::span<const uint32_t>    stems,
           std::span<const ptr_address> children) noexcept;
 
-    // INNER absorb contract: build a new inner = `src` with op spliced in, copying
-    // src→dst in ONE pass (head [0,pos) + insert + tail). No scratch, no copy-then-
-    // move. Used by both the grow (realloc, same id) and build-new (fresh id) paths.
+    // INNER absorb contract (wt1 alloc_size↔ctor↔apply): alloc_size plans the size;
+    // the (src, op) ctor builds a fresh node = src with op spliced in (grow / fork);
+    // apply(op) does the SAME edit in place. Both delegate to splice_absorb<mode> so
+    // the splice is written once (defined out-of-line below). apply requires WRITABLE
+    // explicit (non-grid) src with cacheline slack for op — the dispatcher checks.
     static uint32_t alloc_size(const node2& src, const op_inner_absorb& op) noexcept;
     node2(uint32_t asize, ptr_address_seq seq,
           const node2& src, const op_inner_absorb& op) noexcept;
+    void apply(const op_inner_absorb& op) noexcept;
 
     // LEAF_FIXED alloc + ctor: regions sized for stem CAPACITY `cap`, `n` live
     // entries, fixed stride (sw key-suffix words + vl value bytes). Every header
@@ -839,61 +847,88 @@ inline node2::node2(uint32_t asize, ptr_address_seq seq,
     std::memcpy(this->children(), children.data(), children.size() * sizeof(ptr_address));
 }
 
-// (2) From `src` + an absorb op — copy src→dst in ONE pass, splicing the edit in:
-//     stems   = src[0,pos) + op.ins_stems[0,ni)        + src[pos,n)
-//     children= src[0,pos) + op.ins_kids[0,ni+1)       + src[pos+1,n+1)   (slot pos replaced)
-// No scratch, no copy-then-move. Same prefix as src.
+// (2) Absorb: splice op into src →
+//     stems    = src[0,pos) + op.ins_stems[0,ni)  + src[pos,n)
+//     children = src[0,pos) + op.ins_kids[0,ni+1) + src[pos+1,n+1)   (slot pos replaced)
+// ONE templated splice primitive, shared by the (src,op) ctor (fresh_copy) and the
+// apply(op) twin (in_place) — written once, branch-free per mode (wt1 splice_insert
+// pattern). Sets num_stems; offsets are stable in place (caller guarantees cacheline
+// slack) and sized for the result on a fresh copy. A grid src has no stored stems →
+// regenerate head/tail from base+shift (fresh_copy only; a grid is never edited in
+// place — it has no slack and aliases children).
+template <splice_mode M>
+inline void splice_absorb(node2* dst, const node2* src, const op_inner_absorb& op) noexcept
+{
+    const uint16_t n  = src->num_stems;
+    const uint16_t i  = op.pos;
+    const uint16_t ni = op.ni;
+    dst->num_stems = uint16_t(n + ni);
+    uint32_t*    ds = dst->stems();
+    ptr_address* dc = dst->children();
+    if constexpr (M == splice_mode::in_place)
+    {
+        // dst == src: overlapping shift (stems / children regions are disjoint).
+        std::memmove(dc + i + ni + 1, dc + i + 1,   size_t(n - i) * sizeof(ptr_address));
+        std::memcpy (dc + i,          op.ins_kids,  size_t(ni + 1) * sizeof(ptr_address));
+        std::memmove(ds + i + ni,     ds + i,       size_t(n - i) * 4u);
+        std::memcpy (ds + i,          op.ins_stems, size_t(ni) * 4u);
+    }
+    else
+    {
+        if (is_grid(src))                                       // no stored stems → regenerate
+        {
+            const apgm_header* sh = src->estimator();
+            for (uint16_t j = 0; j < i; ++j) ds[j]      = grid_stem(sh, j);
+            for (uint16_t j = i; j < n; ++j) ds[j + ni] = grid_stem(sh, j);
+        }
+        else
+        {
+            const uint32_t* ss = src->stems();
+            std::memcpy(ds,          ss,     size_t(i) * 4u);
+            std::memcpy(ds + i + ni, ss + i, size_t(n - i) * 4u);
+        }
+        std::memcpy(ds + i, op.ins_stems, size_t(ni) * 4u);
+        const ptr_address* sc = src->children();
+        std::memcpy(dc,              sc,           size_t(i) * sizeof(ptr_address));
+        std::memcpy(dc + i,          op.ins_kids,  size_t(ni + 1) * sizeof(ptr_address));
+        std::memcpy(dc + i + ni + 1, sc + i + 1,   size_t(n - i) * sizeof(ptr_address));
+    }
+}
+
+// Rebuild the APGM predictor over an explicit inner's stems (NO grid detect — an
+// absorb result keeps the explicit layout it was sized for; never the grid sentinel).
+inline void inner_finish_apgm(node2* nd) noexcept
+{
+    apgm_header* est = nd->estimator();
+    if (nd->num_stems >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), nd->num_stems) == 0)
+        est->segment_count = 0;
+}
+
 inline uint32_t node2::alloc_size(const node2& src, const op_inner_absorb& op) noexcept
 {
     return size_for(uint16_t(src.num_stems + op.ni), src.prefix_len, 0);
 }
+// (src, op) ctor — fresh node (grow / fork). Allocated full (explicit) size, so the
+// grid sentinel is cleared BEFORE the splice writes children (children_off keys off it).
 inline node2::node2(uint32_t asize, ptr_address_seq seq,
                     const node2& src, const op_inner_absorb& op) noexcept
     : psitri::node(asize, type_id, seq)
 {
-    const uint16_t n  = src.num_stems;
-    const uint16_t i  = op.pos;
-    const uint16_t ni = op.ni;
-    num_stems  = uint16_t(n + ni);        // set FIRST: offsets depend on it
     shape_     = uint8_t(shape::inner);
     prefix_len = src.prefix_len;
     flags      = 0;
-    // The absorb result is allocated full (explicit) size, so it must NOT take the
-    // grid layout: clear the sentinel BEFORE writing children (children_off keys off
-    // it). An absorb almost always breaks the grid anyway; a merged sequence that
-    // happens to be a grid is stored explicit (correct, just not shrunk).
     estimator()->segment_count = 0;
     std::memcpy(prefix(), src.prefix(), size_t(prefix_len) * 4u);
-    // stems: head [0,i) | insert ni | tail [i,n). A grid src has NO stored stems →
-    // regenerate the head/tail from its base+shift; an explicit src is copied. (We
-    // always materialize the merged stems here: the inserted divider usually breaks
-    // the grid, so the result downgrades to explicit and needs them stored. If it
-    // stays a grid, set_inner_estimator below skips reading them and they're unused.)
-    uint32_t* ds = stems();
-    if (is_grid(&src))
-    {
-        const apgm_header* sh = src.estimator();
-        for (uint16_t j = 0; j < i; ++j) ds[j]      = grid_stem(sh, j);
-        for (uint16_t j = i; j < n; ++j) ds[j + ni] = grid_stem(sh, j);
-    }
-    else
-    {
-        const uint32_t* ss = src.stems();
-        std::memcpy(ds,          ss,     size_t(i) * 4u);
-        std::memcpy(ds + i + ni, ss + i, size_t(n - i) * 4u);
-    }
-    std::memcpy(ds + i, op.ins_stems, size_t(ni) * 4u);
-    // children: head [0,i) | insert ni+1 (replaces slot i) | tail [i+1,n+1)
-    ptr_address* dc = children(); const ptr_address* sc = src.children();
-    std::memcpy(dc,              sc,           size_t(i) * sizeof(ptr_address));
-    std::memcpy(dc + i,          op.ins_kids,  size_t(ni + 1) * sizeof(ptr_address));
-    std::memcpy(dc + i + ni + 1, sc + i + 1,   size_t(n - i) * sizeof(ptr_address));
-    // APGM only (no grid detect) — this node keeps the explicit layout it was sized
-    // for; segment_count stays 0 or an APGM count, never the grid sentinel.
-    apgm_header* est = estimator();
-    if (num_stems >= kApgmMinStems && apgm_build_adaptive(est, ds, num_stems) == 0)
-        est->segment_count = 0;
+    splice_absorb<splice_mode::fresh_copy>(this, &src, op);   // sets num_stems + stems + children
+    inner_finish_apgm(this);
     if (num_stems >= 2) ++g_inner_total;
+}
+// apply(op) — the IN-PLACE twin of the (src, op) ctor (same splice). Precondition:
+// this is a WRITABLE explicit inner with cacheline slack for op (dispatcher-checked).
+inline void node2::apply(const op_inner_absorb& op) noexcept
+{
+    splice_absorb<splice_mode::in_place>(this, this, op);
+    inner_finish_apgm(this);
 }
 
 inline node2* build_inner(std::span<const uint32_t>    prefix,

@@ -67,13 +67,6 @@ inline void retain_all_children(const node2* inner) noexcept
 }
 
 // ── Low-level node builders (SAL alloc + memcpy; no heap) ─────────────
-inline void finish_estimator(node2* nd) noexcept
-{
-    apgm_header* est   = nd->estimator();
-    est->segment_count = 0;
-    if (nd->num_stems >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), nd->num_stems) == 0)
-        est->segment_count = 0;
-}
 
 // Allocate a LEAF_FIXED with `cap` stem capacity (regions sized for cap) but only
 // `n` live entries. cap≥n gives slack for in-place growth.
@@ -465,14 +458,7 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
             ucc::round_up_multiple<kCacheLine>(uint32_t(n + 1) * 4u) / 4u);
         if (!is_grid(inner) && m <= stem_cap && uint16_t(m + 1) <= slot_cap)
         {
-            uint32_t*    ws = inner->stems();
-            ptr_address* wk = inner->children();
-            std::memmove(wk + i + ni + 1, wk + i + 1, size_t(n - i) * sizeof(ptr_address));
-            std::memcpy(wk + i, ins_kids, size_t(ni + 1) * sizeof(ptr_address));
-            std::memmove(ws + i + ni, ws + i, size_t(n - i) * 4u);
-            std::memcpy(ws + i, ins_stems, size_t(ni) * 4u);
-            inner->num_stems = m;
-            if (m >= kApgmMinStems) finish_estimator(inner);
+            inner->apply(op);   // in-place splice (shares splice_absorb<> with the op ctor)
             return in_place(inner->address());
         }
     }
