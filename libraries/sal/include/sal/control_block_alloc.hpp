@@ -372,9 +372,22 @@ namespace sal
        */
       std::optional<allocation> try_alloc(const alloc_hint& hint)
       {
+         const uint32_t n = uint32_t(hint.size());
+         if (n == 0)
+            return std::nullopt;
+         // Parking-lot scan: start at a ROTATING offset and wrap, instead of always
+         // from index 0. If every alloc started at the front, the first branch's CB
+         // cacheline packs full first and later allocs scan past a run of full front
+         // cachelines (long average traversal). Rotating the start spreads the fills
+         // evenly across the hint's cachelines, so most allocs hit a non-full one
+         // immediately — same CB-cacheline clustering, far shorter average search.
+         static thread_local uint32_t s_rot = 0;
+         uint32_t idx   = s_rot++ % n;            // per-thread rotating start
          uint32_t tried = 0;                      // real branch addresses traversed
-         for (auto addr : hint)
+         for (uint32_t k = 0; k < n; ++k)
          {
+            const ptr_address addr = hint[idx];
+            if (++idx == n) idx = 0;             // wrap
             if (is_reserved_ptr_address(addr))   // null / tombstone / sentinel — not a hint
                continue;
             if constexpr (kHintTraceStats) ++tried;
