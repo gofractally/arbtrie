@@ -20,13 +20,13 @@
 
 #include <psitri/node/node.hpp>          // psitri::node (12-B SAL header base), node_type, ptr_address
 #include <psitri/wtree/apgm_predictor.hpp>   // APGM piecewise-linear stem predictor (§6)
+#include <psitri/wtree2/scratch.hpp>     // thread-local bump arena (no heap scratch)
 #include <sal/allocator_session.hpp>
 #include <sal/allocator_session_impl.hpp>
 #include <ucc/round.hpp>                 // ucc::round_up_multiple<N>
 #include <algorithm>
 #include <cassert>
 #include <cstring>
-#include <vector>
 
 namespace psitri::wtree2 {
 
@@ -668,30 +668,28 @@ inline constexpr uint32_t kLeafTailBudget = 3072;   // value-tail bytes per leaf
 inline constexpr uint32_t kLeafCountCap   = 200;    // entries per leaf
 inline constexpr uint32_t kInnerStemCap   = 4096;   // dividers per inner (~32 KB)
 
-// B-tree the (divs, kids) radix children into inner(s); prefix goes on the top.
+// B-tree the (divs[0..D), kids[0..D+1)) radix children into inner(s) under prefix.
+// Scratch arrays come from the thread-local arena (no heap); caller holds a mark.
 inline ptr_address build_inner_tree(std::span<const uint32_t> prefix,
-                                    std::vector<uint32_t>     divs,
-                                    std::vector<ptr_address>  kids) noexcept
+                                    uint32_t* divs, size_t D, ptr_address* kids) noexcept
 {
-    assert(kids.size() == divs.size() + 1);
     for (;;)
     {
-        const size_t D = divs.size();
         if (D <= kInnerStemCap)
-            return build_inner(prefix, {divs.data(), D}, {kids.data(), D + 1})->address();
-        std::vector<uint32_t>    nd;
-        std::vector<ptr_address> nk;
-        size_t a = 0;
+            return build_inner(prefix, {divs, D}, {kids, D + 1})->address();
+        uint32_t*    nd  = scratch_alloc<uint32_t>(D);
+        ptr_address* nk  = scratch_alloc<ptr_address>(D + 1);
+        size_t       ndi = 0, nki = 0, a = 0;
         for (;;)
         {
             const size_t b = std::min(a + (kInnerStemCap + 1), D + 1);   // ≤ cap+1 kids
-            nk.push_back(build_inner({}, {divs.data() + a, b - 1 - a},
-                                     {kids.data() + a, b - a})->address());
-            if (b <= D) { nd.push_back(divs[b - 1]); a = b; }            // promote separator
+            nk[nki++] = build_inner({}, {divs + a, b - 1 - a}, {kids + a, b - a})->address();
+            if (b <= D) { nd[ndi++] = divs[b - 1]; a = b; }             // promote separator
             else break;
         }
-        divs.swap(nd);
-        kids.swap(nk);
+        divs = nd;
+        D    = ndi;
+        kids = nk;
     }
 }
 
@@ -718,45 +716,46 @@ inline ptr_address bulk_build(std::span<const leaf_entry> E, uint16_t depth) noe
             return build_leaf(E, depth)->address();
     }
 
-    // Otherwise: emit radix children at `base`, then B-tree them under prefix=pfx.
-    std::vector<uint32_t>    divs;
-    std::vector<ptr_address> kids;
-    size_t i = 0;
-    while (i < E.size())
-    {
+    // One chunk starting at i → (is_collision_bucket, end_index). A collision
+    // bucket (>1 entry sharing word[base]) recurses; a singleton run packs into a
+    // leaf up to the byte/count budget. Used by both the count and build passes.
+    auto advance = [&](size_t i) -> std::pair<bool, size_t> {
         size_t j = i + 1;
-        while (j < E.size() && word_at(E[j]) == word_at(E[i])) ++j;   // bucket = same word[base]
-        ptr_address child;
-        size_t      next;
-        if (j - i > 1)
+        while (j < E.size() && word_at(E[j]) == word_at(E[i])) ++j;
+        if (j - i > 1) return {true, j};
+        size_t   k = i;
+        uint32_t t = 0, n = 0;
+        while (k < E.size())
         {
-            child = bulk_build(E.subspan(i, j - i), base);            // collision → recurse deeper
-            next  = j;
+            size_t kk = k + 1;
+            while (kk < E.size() && word_at(E[kk]) == word_at(E[k])) ++kk;
+            if (kk - k > 1) break;                                    // collision ahead → flush
+            const uint32_t rs = round4(value_region::size_bytes(
+                uint8_t(E[k].key.size() - base - 1), uint8_t(E[k].value.size())));
+            if (n > 0 && (t + rs > kLeafTailBudget || n >= kLeafCountCap)) break;
+            t += rs; ++n; ++k;
         }
-        else
-        {
-            // run of distinct singletons → one leaf chunk (≤ budget, stop before a collision)
-            size_t   k = i;
-            uint32_t t = 0, n = 0;
-            while (k < E.size())
-            {
-                size_t kk = k + 1;
-                while (kk < E.size() && word_at(E[kk]) == word_at(E[k])) ++kk;
-                if (kk - k > 1) break;                                // collision ahead → flush
-                const uint32_t rs = round4(value_region::size_bytes(
-                    uint8_t(E[k].key.size() - base - 1), uint8_t(E[k].value.size())));
-                if (n > 0 && (t + rs > kLeafTailBudget || n >= kLeafCountCap)) break;
-                t += rs; ++n; ++k;
-            }
-            child = build_leaf(E.subspan(i, k - i), base)->address();
-            next  = k;
-        }
-        if (!kids.empty()) divs.push_back(word_at(E[i]));
-        kids.push_back(child);
-        i = next;
+        return {false, k};
+    };
+
+    scratch_mark mark;
+    size_t       nb = 0;                                              // child (bucket) count
+    for (size_t i = 0; i < E.size();) { nb += 1; i = advance(i).second; }
+
+    uint32_t*    divs = scratch_alloc<uint32_t>(nb);                  // ≤ nb-1 used
+    ptr_address* kids = scratch_alloc<ptr_address>(nb);
+    size_t       nd = 0, nk = 0;
+    for (size_t i = 0; i < E.size();)
+    {
+        auto [collision, end] = advance(i);
+        const ptr_address child = collision ? bulk_build(E.subspan(i, end - i), base)
+                                            : build_leaf(E.subspan(i, end - i), base)->address();
+        if (nk > 0) divs[nd++] = word_at(E[i]);
+        kids[nk++] = child;
+        i = end;
     }
     std::span<const uint32_t> pfx_words(E.front().key.data() + depth, pfx);
-    return build_inner_tree(pfx_words, std::move(divs), std::move(kids));
+    return build_inner_tree(pfx_words, divs, nd, kids);
 }
 
 }  // namespace psitri::wtree2

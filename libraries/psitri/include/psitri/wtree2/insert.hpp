@@ -1,70 +1,91 @@
 #pragma once
 // wtree2/insert.hpp — incremental single-key insert (algo §7), UNIQUE mode.
 //
-// Phase 4 (integration test + perf). Single-writer, in-place mutation: the
-// parent's child pointer is overwritten in place and only the touched leaf is
-// rebuilt (no whole-inner clone per insert). MVCC / snapshot COW is a later
-// phase; this version assumes the caller owns the tree exclusively.
+// HARD RULE: no heap allocations. All node memory is SAL alloc (bump-pointer
+// persistent allocator); transient scratch is the thread-local arena
+// (scratch.hpp); the common paths mutate/rebuild via memcpy with NO scratch at
+// all. There is no std::vector anywhere here.
 //
-// Strategy: descend by first-word routing to the target leaf, GATHER its entries
-// + the new key, and rebuild via bulk_build (which already handles prefix
-// absorption, collisions→deeper radix, and packing). The rebuilt subtree is
-// spliced back at the parent's slot. On overflow the radix dividers are promoted
-// into the parent (flatten, not nest) so the tree stays shallow (§7.1); a prefix
-// divergence is a Patricia split (§7.2). Both reuse bulk_build over the gathered
-// set, so there is one correctness path, not five.
-//
-// INCREMENT A (this file, first cut): descent + in-place leaf add (gathered set
-// fits one leaf / small collision subtree) + duplicate update + empty-slot
-// install + empty tree. Overflow-split promotion (§7.1) and explicit Patricia
-// split (§7.2) land next.
+// Single-writer, in-place: the parent's child pointer is overwritten in place; a
+// touched leaf is rebuilt by SAL alloc + memcpy splice (no gather). Splits return
+// a Split result (always exactly one divider + two children), which the parent
+// merges. The rare collision / non-uniform-size case falls back to an
+// arena-gather + bulk_build (also heap-free). MVCC/COW snapshots are a later phase.
 
 #include <psitri/wtree2/node.hpp>
-
-#include <vector>
+#include <psitri/wtree2/scratch.hpp>
 
 namespace psitri::wtree2 {
 
-// Owned reconstruction of a leaf's entries (+ room to merge the new key). The
-// leaf_entry spans point into key_words / val_bytes, which must outlive use.
-struct gathered_entries
+// Insert result for a slot: InPlace (subtree now at addr) or Split (replace the
+// slot with [left, right] separated by divider `div`). A split is ALWAYS binary,
+// so no dynamic arrays are needed.
+struct ins_result
 {
-    std::vector<std::vector<uint32_t>> key_words;
-    std::vector<std::vector<uint8_t>>  val_bytes;
-    std::vector<leaf_entry>            ents;
-
-    void rebuild_spans() noexcept
-    {
-        ents.clear();
-        ents.reserve(key_words.size());
-        for (size_t i = 0; i < key_words.size(); ++i)
-            ents.push_back({{key_words[i].data(), key_words[i].size()},
-                            {val_bytes[i].data(), val_bytes[i].size()}});
-    }
+    bool        split = false;
+    ptr_address addr  = kNoChild;   // InPlace
+    uint32_t    div   = 0;          // Split divider (right group's first word)
+    ptr_address left  = kNoChild;   // Split children
+    ptr_address right = kNoChild;
 };
-
-// Reconstruct the FULL key of every entry in `leaf` (head ++ prefix ++ stem ++
-// suffix), where `head` = the key words consumed by ancestors before this leaf
-// (= the descending key's first `depth` words; all leaf entries share them).
-inline void gather_leaf(node2* leaf, std::span<const uint32_t> head, uint16_t depth,
-                        gathered_entries& out) noexcept
+inline ins_result in_place(ptr_address a) noexcept { return {false, a, 0, kNoChild, kNoChild}; }
+inline ins_result split_at(uint32_t d, ptr_address l, ptr_address r) noexcept
 {
-    const uint16_t  pl  = leaf->prefix_len;
+    return {true, kNoChild, d, l, r};
+}
+
+// ── Low-level node builders (SAL alloc + memcpy; no heap) ─────────────
+inline void finish_estimator(node2* nd) noexcept
+{
+    apgm_header* est   = nd->estimator();
+    est->segment_count = 0;
+    if (nd->num_stems >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), nd->num_stems) == 0)
+        est->segment_count = 0;
+}
+
+inline node2* alloc_leaf_fixed(uint16_t n, uint8_t pl, uint8_t sw, uint8_t vl) noexcept
+{
+    const uint32_t recs = uint32_t(n) * (uint32_t(sw) * 4u + vl);
+    node2*         nd =
+        w2deref(w2session().alloc<node2>(alloc_hint{}, shape::leaf_fixed, n, pl, recs));
+    nd->fx_rem_words = sw;
+    nd->fx_val_len   = vl;
+    return nd;
+}
+
+// ── Generic descent / dispatch ────────────────────────────────────────
+inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
+                             std::span<const uint8_t> val, uint16_t depth) noexcept;
+
+// Rare fallback (collision: same stem different suffix; or a non-uniform-size
+// entry that breaks LEAF_FIXED): gather this leaf's entries + the new one into
+// the arena and rebuild via bulk_build. Heap-free (arena + SAL). depth is BEFORE
+// the leaf's own prefix.
+inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head,
+                                     uint16_t depth, std::span<const uint32_t> key,
+                                     std::span<const uint8_t> val) noexcept
+{
+    scratch_mark   mark;
+    const uint16_t pl  = leaf->prefix_len;
     const uint32_t* pfx = leaf->prefix();
     const uint32_t* st  = leaf->stems();
     const uint16_t  n   = leaf->num_stems;
+    const uint16_t  cap = uint16_t(n + 1);
 
-    auto emit = [&](uint32_t stem, const uint8_t* suffix, uint16_t sw, const uint8_t* val,
+    leaf_entry* ents = scratch_alloc<leaf_entry>(cap);
+    uint16_t    cnt  = 0;
+
+    auto emit = [&](uint32_t stem, const uint8_t* suffix, uint16_t sw, const uint8_t* v,
                     uint16_t vl) {
-        std::vector<uint32_t> k;
-        k.reserve(size_t(depth) + pl + 1 + sw);
-        k.insert(k.end(), head.begin(), head.begin() + depth);   // ancestor-consumed words
-        k.insert(k.end(), pfx, pfx + pl);                        // leaf Patricia prefix
-        k.push_back(stem);                                       // the stem word
-        const uint32_t* sw_words = reinterpret_cast<const uint32_t*>(suffix);
-        k.insert(k.end(), sw_words, sw_words + sw);              // suffix words
-        out.key_words.push_back(std::move(k));
-        out.val_bytes.emplace_back(val, val + vl);
+        const uint16_t kw = uint16_t(depth + pl + 1 + sw);
+        uint32_t*      k  = scratch_alloc<uint32_t>(kw);
+        std::memcpy(k, head.data(), size_t(depth) * 4u);
+        std::memcpy(k + depth, pfx, size_t(pl) * 4u);
+        k[depth + pl] = stem;
+        std::memcpy(k + depth + pl + 1, suffix, size_t(sw) * 4u);
+        uint8_t* vb = scratch_alloc<uint8_t>(vl ? vl : 1);
+        std::memcpy(vb, v, vl);
+        ents[cnt++] = {{k, kw}, {vb, vl}};
     };
 
     if (leaf->is_leaf_fixed())
@@ -76,219 +97,292 @@ inline void gather_leaf(node2* leaf, std::span<const uint32_t> head, uint16_t de
             emit(st[j], r, sw, r + size_t(sw) * 4u, vl);
         }
     }
-    else  // LEAF_VARLEN
+    else
     {
         const ptr_address* ch = leaf->children();
         for (uint16_t j = 0; j < n; ++j)
         {
             const ptr_address s = ch[j + 1];
-            if (!is_local_slot(s)) continue;   // empty / EXT (big values: later phase)
+            if (!is_local_slot(s)) continue;
             auto* vr = reinterpret_cast<const value_region*>(leaf->base() + local_tail_off(s));
             emit(st[j], vr->suffix_bytes(), vr->suffix_words, vr->value(), vr->value_len);
         }
     }
-}
 
-// Merge the new (key,value) into a gathered set: replace value on exact-key
-// match (duplicate → update), else insert keeping ascending key order. Returns
-// true if it was a fresh insert (count grew).
-inline bool merge_entry(gathered_entries& g, std::span<const uint32_t> key,
-                        std::span<const uint8_t> val) noexcept
-{
-    // find insertion point / duplicate (keys are short; linear is fine for now)
-    size_t i = 0;
-    for (; i < g.key_words.size(); ++i)
+    // Insert the new key in ascending order (replace value on exact-key match).
+    uint16_t ip = 0;
+    for (; ip < cnt; ++ip)
     {
-        const auto& k = g.key_words[i];
-        if (k.size() == key.size() &&
-            std::equal(k.begin(), k.end(), key.begin()))
+        const auto& k = ents[ip].key;
+        if (k.size() == key.size() && std::equal(k.begin(), k.end(), key.begin()))
         {
-            g.val_bytes[i].assign(val.begin(), val.end());   // duplicate → update
-            return false;
+            uint8_t* vb = scratch_alloc<uint8_t>(val.size() ? val.size() : 1);
+            std::memcpy(vb, val.data(), val.size());
+            ents[ip].value = {vb, val.size()};
+            const ptr_address sub = bulk_build({ents, cnt}, depth);
+            node2_free(leaf);
+            return in_place(sub);
         }
-        // ascending order: stop at first key greater than the new one
-        if (std::lexicographical_compare(key.begin(), key.end(), k.begin(), k.end()))
-            break;
+        if (std::lexicographical_compare(key.begin(), key.end(), k.begin(), k.end())) break;
     }
-    g.key_words.insert(g.key_words.begin() + i,
-                       std::vector<uint32_t>(key.begin(), key.end()));
-    g.val_bytes.insert(g.val_bytes.begin() + i,
-                       std::vector<uint8_t>(val.begin(), val.end()));
-    return true;
+    for (uint16_t m = cnt; m > ip; --m) ents[m] = ents[m - 1];
+    {
+        uint32_t* k = scratch_alloc<uint32_t>(key.size());
+        std::memcpy(k, key.data(), key.size() * 4u);
+        uint8_t* vb = scratch_alloc<uint8_t>(val.size() ? val.size() : 1);
+        std::memcpy(vb, val.data(), val.size());
+        ents[ip] = {{k, key.size()}, {vb, val.size()}};
+    }
+    ++cnt;
+
+    const ptr_address sub = bulk_build({ents, cnt}, depth);
+    node2_free(leaf);
+    return in_place(sub);   // collision → deeper subtree (pl>0); nests one level (rare)
 }
 
-// Result of a recursive insert into a node's slot:
-//   InPlace  — the subtree for this slot is now at `addr` (parent overwrites its
-//              child pointer; addr may equal the input node if mutated in place).
-//   Splice   — this slot should become `kids` children with `stems` dividers
-//              between them (parent merges them into its own arrays at the slot).
-struct ins_result
-{
-    bool                     splice = false;
-    ptr_address              addr   = kNoChild;   // InPlace
-    std::vector<uint32_t>    stems;               // Splice dividers
-    std::vector<ptr_address> kids;                // Splice children (stems.size()+1)
-};
-inline ins_result in_place(ptr_address a) noexcept { return {false, a, {}, {}}; }
-
-// Max dividers per inner before a Case-1 split (matches bulk builder's cap).
-inline constexpr uint16_t kInnerSplitCap = kInnerStemCap;
-
-inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
-                             std::span<const uint8_t> val, uint16_t depth) noexcept;
-
-// §7.2 Patricia split: new key matches inner->prefix[0..j) but diverges at word j.
-inline ins_result case2_split(node2* inner, std::span<const uint32_t> key,
+// §7.2 Patricia split: key matches node->prefix[0..j) then diverges. Works for
+// inner (trunc = build_inner) and leaf (trunc = leaf re-prefixed) alike.
+inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
                               std::span<const uint8_t> val, uint16_t depth, uint16_t j) noexcept
 {
-    const uint32_t* P          = inner->prefix();
-    const uint16_t  pl         = inner->prefix_len;
+    const uint32_t* P          = node->prefix();
+    const uint16_t  pl         = node->prefix_len;
     const uint32_t  node_pivot = P[j];
     const uint32_t  key_pivot  = key[depth + j];
 
-    // trunc = the old inner re-rooted with prefix P[j..pl) (stems-don't-consume:
-    // its prefix[0] re-states the pivot word). Same stems/children (refs move).
-    node2* trunc = build_inner({P + j, size_t(pl - j)}, inner->stem_span(), inner->child_span());
-    // new leaf for the diverging key, entered at depth+j (its prefix re-states key_pivot).
+    node2* trunc;
+    if (node->is_leaf_fixed())
+    {
+        // Re-prefix the leaf: same stems/records, prefix P[j..pl). (Truncating the
+        // FRONT of the prefix doesn't touch stems/records values, only offsets.)
+        const uint16_t n = node->num_stems;
+        trunc = alloc_leaf_fixed(n, uint8_t(pl - j), node->fx_rem_words, node->fx_val_len);
+        std::memcpy(trunc->prefix(), P + j, size_t(pl - j) * 4u);
+        std::memcpy(trunc->stems(), node->stems(), size_t(n) * 4u);
+        std::memcpy(trunc->records(), node->records(), size_t(n) * node->fx_stride());
+        finish_estimator(trunc);
+    }
+    else  // inner (or varlen leaf, which also has stems/children)
+    {
+        trunc = build_inner({P + j, size_t(pl - j)}, node->stem_span(), node->child_span());
+    }
+
     leaf_entry e{key, val};
     node2*     nl = build_leaf({&e, 1}, uint16_t(depth + j));
 
+    // Divider = the RIGHT child's pivot (the larger): node_stem_ub routes q==div
+    // to the right slot (upper_bound).
     uint32_t    div;
     ptr_address k0, k1;
-    if (node_pivot < key_pivot) { div = node_pivot; k0 = trunc->address(); k1 = nl->address(); }
-    else                        { div = key_pivot;  k0 = nl->address();    k1 = trunc->address(); }
-    ptr_address kids[2]  = {k0, k1};
-    node2*      small    = build_inner({P, j}, {&div, 1}, {kids, 2});
-    node2_free(inner);   // old shell; its children now belong to trunc
+    if (node_pivot < key_pivot) { div = key_pivot;  k0 = trunc->address(); k1 = nl->address(); }
+    else                        { div = node_pivot; k0 = nl->address();    k1 = trunc->address(); }
+    ptr_address kids[2] = {k0, k1};
+    node2*      small   = build_inner({P, j}, {&div, 1}, {kids, 2});
+    node2_free(node);
     return in_place(small->address());
 }
 
-// Splice a child's Split result into `inner` at slot i; rebuild, or Case-1 split.
-inline ins_result splice_into(node2* inner, uint16_t i, ins_result& r) noexcept
+// Build a LEAF_FIXED holding merged entries [a,b) of (old leaf + new entry at
+// `pos`), with the given prefix. The merged index m maps: m<pos→old[m],
+// m==pos→new, m>pos→old[m-1].
+inline node2* build_fixed_range(node2* old, uint16_t pos, uint32_t qstem,
+                                const uint8_t* qsuffix, std::span<const uint8_t> qval,
+                                uint16_t a, uint16_t b, const uint32_t* prefix,
+                                uint8_t pl) noexcept
 {
-    const uint16_t              n  = inner->num_stems;
-    const uint32_t*             st = inner->stems();
-    const ptr_address*          ch = inner->children();
-    std::vector<uint32_t>       ns;
-    std::vector<ptr_address>    nk;
-    ns.reserve(size_t(n) + r.stems.size());
-    nk.reserve(size_t(n) + 1 + r.kids.size());
-    // children[0..i) + r.kids + children[i+1..n] ; stems[0..i) + r.stems + stems[i..n)
-    nk.insert(nk.end(), ch, ch + i);
-    nk.insert(nk.end(), r.kids.begin(), r.kids.end());
-    nk.insert(nk.end(), ch + i + 1, ch + n + 1);
-    ns.insert(ns.end(), st, st + i);
-    ns.insert(ns.end(), r.stems.begin(), r.stems.end());
-    ns.insert(ns.end(), st + i, st + n);
-
-    const uint16_t m  = uint16_t(ns.size());
-    const uint8_t  pl = inner->prefix_len;
-    const uint32_t* P = inner->prefix();
-    if (m <= kInnerSplitCap)
+    const uint8_t  sw     = old->fx_rem_words, vl = old->fx_val_len;
+    const uint16_t stride = old->fx_stride();
+    const uint16_t cnt    = uint16_t(b - a);
+    node2*         nd     = alloc_leaf_fixed(cnt, pl, sw, vl);
+    if (pl) std::memcpy(nd->prefix(), prefix, size_t(pl) * 4u);
+    uint32_t* st = nd->stems();
+    uint8_t*  rc = nd->records();
+    for (uint16_t m = a; m < b; ++m)
     {
-        node2* ni = build_inner({P, pl}, {ns.data(), m}, {nk.data(), nk.size()});
-        node2_free(inner);
-        return in_place(ni->address());
+        const uint16_t o = uint16_t(m - a);
+        if (m == pos)
+        {
+            st[o] = qstem;
+            std::memcpy(rc + size_t(o) * stride, qsuffix, size_t(sw) * 4u);
+            std::memcpy(rc + size_t(o) * stride + size_t(sw) * 4u, qval.data(), vl);
+        }
+        else
+        {
+            const uint16_t s = uint16_t(m < pos ? m : m - 1);
+            st[o] = old->stems()[s];
+            std::memcpy(rc + size_t(o) * stride, old->record(s), stride);
+        }
     }
-    // Case-1 split: promote ns[k]; left/right are PREFIXLESS btree pages at this
-    // radix word (the prefix, if any, stays above them).
-    const uint16_t k   = uint16_t(m / 2);
-    const uint32_t div = ns[k];
-    node2* left  = build_inner({}, {ns.data(), k}, {nk.data(), size_t(k) + 1});
-    node2* right = build_inner({}, {ns.data() + k + 1, size_t(m - k - 1)},
-                               {nk.data() + k + 1, size_t(m - k)});
+    finish_estimator(nd);
+    return nd;
+}
+
+// Insert a new (distinct) entry into a LEAF_FIXED at sorted index `pos`, handling
+// fit (rebuild +1) vs overflow (balanced split). `pl_leaf` = the leaf's prefix
+// length (decides Splice vs re-root). depth is AFTER the leaf prefix.
+inline ins_result leaf_fixed_add(node2* leaf, uint16_t pos, uint32_t qstem,
+                                 const uint8_t* qsuffix, std::span<const uint8_t> qval,
+                                 uint16_t depth) noexcept
+{
+    const uint16_t n  = leaf->num_stems;
+    const uint8_t  pl = leaf->prefix_len;
+    const uint16_t stride = leaf->fx_stride();
+    const uint32_t new_tail = uint32_t(n + 1) * stride;
+
+    if (uint32_t(n + 1) <= kLeafCountCap && new_tail <= kLeafTailBudget)
+    {
+        // In-place grow: rebuild with one more entry (SAL alloc + memcpy splice).
+        node2* nl = build_fixed_range(leaf, pos, qstem, qsuffix, qval, 0, uint16_t(n + 1),
+                                      leaf->prefix(), pl);
+        node2_free(leaf);
+        return in_place(nl->address());
+    }
+
+    // Overflow → balanced split at the stem word. The new entry sits at `pos` in
+    // the merged sequence of n+1; split index k near the middle.
+    const uint16_t total = uint16_t(n + 1);
+    const uint16_t k     = uint16_t(total / 2);
+    auto merged_stem = [&](uint16_t m) -> uint32_t {
+        return m == pos ? qstem : leaf->stems()[m < pos ? m : uint16_t(m - 1)];
+    };
+    const uint32_t div = merged_stem(k);                 // right group's first word
+
+    // Halves are PREFIXLESS pages at this radix word; the leaf's prefix (if any)
+    // moves to a new re-rooted inner above them.
+    node2* L = build_fixed_range(leaf, pos, qstem, qsuffix, qval, 0, k, nullptr, 0);
+    node2* R = build_fixed_range(leaf, pos, qstem, qsuffix, qval, k, total, nullptr, 0);
+
+    if (pl == 0)
+    {
+        node2_free(leaf);
+        return split_at(div, L->address(), R->address());
+    }
+    ptr_address kids[2] = {L->address(), R->address()};
+    node2*      top     = build_inner({leaf->prefix(), pl}, {&div, 1}, {kids, 2});
+    node2_free(leaf);
+    return in_place(top->address());
+}
+
+// LEAF insert. `gdepth` = depth before the leaf's prefix (for the arena gather /
+// re-build, whose keys are reconstructed from `head` = key[0..gdepth)). `sdepth` =
+// depth AFTER the leaf's prefix (the stem word position).
+inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
+                              std::span<const uint8_t> val, std::span<const uint32_t> head,
+                              uint16_t gdepth, uint16_t sdepth) noexcept
+{
+    if (!leaf->is_leaf_fixed())   // varlen leaf → arena fallback (no insert tests hit this yet)
+        return leaf_rebuild_arena(leaf, head, gdepth, key, val);
+
+    const uint32_t q   = key[sdepth];
+    const uint16_t pos = node_stem_ub(leaf, q);
+    const uint8_t  sw  = leaf->fx_rem_words, vl = leaf->fx_val_len;
+
+    if (pos > 0 && leaf->stems()[pos - 1] == q)
+    {
+        // Existing stem: duplicate (same suffix → update) or collision.
+        uint8_t* rec = leaf->record(uint16_t(pos - 1));
+        const bool same = (size_t(sdepth) + 1 + sw == key.size()) &&
+                          (sw == 0 || std::memcmp(rec, key.data() + sdepth + 1,
+                                                  size_t(sw) * 4u) == 0);
+        if (same)
+        {
+            std::memcpy(rec + size_t(sw) * 4u, val.data(), vl);   // value update in place
+            return in_place(leaf->address());
+        }
+        return leaf_rebuild_arena(leaf, head, gdepth, key, val);   // collision (rare)
+    }
+
+    // New entry — must keep the fixed stride, else convert (rare).
+    if (uint16_t(key.size() - sdepth - 1) != sw || val.size() != vl)
+        return leaf_rebuild_arena(leaf, head, gdepth, key, val);
+
+    return leaf_fixed_add(leaf, pos, q,
+                          reinterpret_cast<const uint8_t*>(key.data() + sdepth + 1), val, sdepth);
+}
+
+// Splice a child Split into an inner at slot i: children[i]→left, insert
+// (div,right) after. Rebuild +1, or Case-1 split when over the stem cap.
+inline ins_result inner_splice(node2* inner, uint16_t i, uint32_t div, ptr_address left,
+                               ptr_address right) noexcept
+{
+    const uint16_t  n  = inner->num_stems;
+    const uint8_t   pl = inner->prefix_len;
+    const uint32_t* P  = inner->prefix();
+    const uint32_t*    st = inner->stems();
+    const ptr_address* ch = inner->children();
+
+    if (uint32_t(n + 1) <= kInnerStemCap)
+    {
+        node2*       nd  = nullptr;
+        // build inner with n+1 stems
+        {
+            ptr_address a = w2session().alloc<node2>(alloc_hint{}, shape::inner,
+                                                     uint16_t(n + 1), pl);
+            nd = w2deref(a);
+        }
+        if (pl) std::memcpy(nd->prefix(), P, size_t(pl) * 4u);
+        uint32_t*    ns = nd->stems();
+        ptr_address* nk = nd->children();
+        std::memcpy(ns, st, size_t(i) * 4u);
+        ns[i] = div;
+        std::memcpy(ns + i + 1, st + i, size_t(n - i) * 4u);
+        std::memcpy(nk, ch, size_t(i) * sizeof(ptr_address));
+        nk[i]     = left;
+        nk[i + 1] = right;
+        std::memcpy(nk + i + 2, ch + i + 1, size_t(n - i) * sizeof(ptr_address));
+        finish_estimator(nd);
+        node2_free(inner);
+        return in_place(nd->address());
+    }
+
+    // Case-1 split: materialise merged (n+1 stems / n+2 children) in the arena.
+    scratch_mark mark;
+    const uint16_t m  = uint16_t(n + 1);
+    uint32_t*      ms = scratch_alloc<uint32_t>(m);
+    ptr_address*   mk = scratch_alloc<ptr_address>(uint32_t(m) + 1);
+    std::memcpy(ms, st, size_t(i) * 4u);
+    ms[i] = div;
+    std::memcpy(ms + i + 1, st + i, size_t(n - i) * 4u);
+    std::memcpy(mk, ch, size_t(i) * sizeof(ptr_address));
+    mk[i] = left; mk[i + 1] = right;
+    std::memcpy(mk + i + 2, ch + i + 1, size_t(n - i) * sizeof(ptr_address));
+
+    const uint16_t k    = uint16_t(m / 2);
+    const uint32_t pdiv = ms[k];                                   // promoted divider
+    node2* Lc = build_inner({}, {ms, k}, {mk, size_t(k) + 1});
+    node2* Rc = build_inner({}, {ms + k + 1, size_t(m - k - 1)}, {mk + k + 1, size_t(m - k)});
     if (pl)
     {
-        // Prefixed inner = the top of this radix level's btree. It can't promote
-        // to the grandparent (which routes a different word), so re-root: a new
-        // top carries the prefix + the single promoted divider over left/right.
-        ptr_address kids[2] = {left->address(), right->address()};
-        node2*      top     = build_inner({P, pl}, {&div, 1}, {kids, 2});
+        ptr_address kids[2] = {Lc->address(), Rc->address()};
+        node2*      top     = build_inner({P, pl}, {&pdiv, 1}, {kids, 2});
         node2_free(inner);
         return in_place(top->address());
     }
-    // Prefixless internal page: promote the divider to the parent btree.
     node2_free(inner);
-    ins_result out;
-    out.splice = true;
-    out.stems  = {div};
-    out.kids   = {left->address(), right->address()};
-    return out;
+    return split_at(pdiv, Lc->address(), Rc->address());
 }
 
 inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
                              std::span<const uint8_t> val, uint16_t depth) noexcept
 {
-    if (nd->is_leaf())
-    {
-        // Gather the leaf's entries (full keys from `depth`) and merge the new one.
-        gathered_entries g;
-        gather_leaf(nd, key, depth, g);
-        merge_entry(g, key, val);
-        g.rebuild_spans();
-        const size_t cnt = g.ents.size();
-
-        // Plan: does the merged set still fit ONE leaf, and is word[depth] distinct
-        // across entries (no collision at this radix level)?
-        bool     distinct = true;
-        uint32_t tail     = 0;
-        for (size_t j = 0; j < cnt; ++j)
-        {
-            const auto& k = g.key_words[j];
-            assert(k.size() > depth);            // terminal keys: later phase
-            const uint16_t sw = uint16_t(k.size() - depth - 1);
-            tail += uint32_t(ucc::round_up_multiple<4>(
-                value_region::size_bytes(uint8_t(sw), uint8_t(g.val_bytes[j].size()))));
-            if (j && k[depth] == g.key_words[j - 1][depth]) distinct = false;
-        }
-        const bool fits = cnt <= kLeafCountCap && tail <= kLeafTailBudget;
-
-        if (fits)
-        {
-            // One leaf (distinct) or a small collision subtree — replace in place.
-            const ptr_address sub = bulk_build({g.ents.data(), cnt}, depth);
-            node2_free(nd);
-            return in_place(sub);
-        }
-
-        // Overflow → BALANCED split at word[depth] (two ~equal halves, so each has
-        // room to grow — avoids the greedy [cap,1] pack that fragments to singletons).
-        size_t k = cnt / 2;
-        while (k < cnt && g.key_words[k][depth] == g.key_words[k - 1][depth]) ++k;
-        if (k >= cnt)                            // no boundary at/after mid → try before
-        {
-            k = cnt / 2;
-            while (k > 0 && g.key_words[k][depth] == g.key_words[k - 1][depth]) --k;
-        }
-        if (k == 0 || k >= cnt)                  // all share word[depth] → deep collision
-        {
-            const ptr_address sub = bulk_build({g.ents.data(), cnt}, depth);
-            node2_free(nd);
-            return in_place(sub);                // nests one radix level (rare)
-        }
-        // Divider = the RIGHT group's first word: stem search routes q==div to the
-        // right slot (upper_bound), so equal-keyed entries must sit on the right.
-        const uint32_t    div = g.key_words[k][depth];
-        const ptr_address L   = bulk_build({g.ents.data(), k}, depth);
-        const ptr_address R   = bulk_build({g.ents.data() + k, cnt - k}, depth);
-        node2_free(nd);
-        ins_result out;
-        out.splice = true;
-        out.stems  = {div};
-        out.kids   = {L, R};
-        return out;
-    }
-
-    // Inner: prefix match (Case 2 on divergence).
-    const uint16_t  pl  = nd->prefix_len;
-    const uint32_t* pfx = nd->prefix();
+    // Prefix match. On divergence: an INNER is a true Patricia split (case2,
+    // binary — it's a routing node); a LEAF must RE-PACK (drop/shorten its prefix
+    // and add the new key as a stem) so it doesn't degenerate into a binary trie.
+    const bool      leaf = nd->is_leaf();
+    const uint16_t  pl   = nd->prefix_len;
+    const uint32_t* pfx  = nd->prefix();
     for (uint16_t i = 0; i < pl; ++i)
         if (size_t(depth) + i >= key.size() || key[depth + i] != pfx[i])
-            return case2_split(nd, key, val, depth, i);
+            return leaf ? leaf_rebuild_arena(nd, key.subspan(0, depth), depth, key, val)
+                        : case2_split(nd, key, val, depth, i);
+    const uint16_t leaf_depth = depth;            // depth before this node's prefix
     depth = uint16_t(depth + pl);
 
-    assert(depth < key.size());   // terminal keys: later phase (fixed-len keys don't hit this)
-    const uint16_t i = node_stem_ub(nd, key[depth]);
+    if (nd->is_leaf())
+        return leaf_insert(nd, key, val, key.subspan(0, leaf_depth), leaf_depth, depth);
+
+    assert(depth < key.size());                   // terminal keys: later phase
+    const uint16_t    i = node_stem_ub(nd, key[depth]);
     const ptr_address c = nd->children()[i];
     if (!is_ext_slot(c))
     {
@@ -298,17 +392,15 @@ inline ins_result insert_rec(node2* nd, std::span<const uint32_t> key,
     }
 
     ins_result r = insert_rec(w2deref(c), key, val, depth);
-    if (!r.splice)
+    if (!r.split)
     {
-        nd->children()[i] = r.addr;              // in-place pointer update
+        nd->children()[i] = r.addr;               // in-place pointer update
         return in_place(nd->address());
     }
-    return splice_into(nd, i, r);
+    return inner_splice(nd, i, r.div, r.left, r.right);
 }
 
 // ── insert ────────────────────────────────────────────────────────────
-// Returns the (possibly new) root address. UNIQUE mode: mutates slots in place;
-// caller holds the lock for the duration.
 inline ptr_address insert(ptr_address root, std::span<const uint32_t> key,
                           std::span<const uint8_t> val) noexcept
 {
@@ -318,11 +410,10 @@ inline ptr_address insert(ptr_address root, std::span<const uint32_t> key,
         return build_leaf({&e, 1}, 0)->address();
     }
     ins_result r = insert_rec(w2deref(root), key, val, 0);
-    if (!r.splice)
+    if (!r.split)
         return r.addr;
-    // Root split → a fresh top inner over the promoted dividers.
-    return build_inner({}, {r.stems.data(), r.stems.size()},
-                       {r.kids.data(), r.kids.size()})->address();
+    ptr_address kids[2] = {r.left, r.right};
+    return build_inner({}, {&r.div, 1}, {kids, 2})->address();   // new root over the split
 }
 
 }  // namespace psitri::wtree2
