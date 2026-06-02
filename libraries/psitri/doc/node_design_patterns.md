@@ -3,7 +3,12 @@
 These are the patterns refined in legacy psitri (`node/inner*.hpp`, art-based) and
 `wtree` (wt1, `wtree/*.hpp`). They are the *default* structure for any SAL-backed
 node type (wtree2, wtree3, big_index, …). Do not re-derive them per experiment;
-start from here. References below point at the wt1 implementation.
+start from here.
+
+> **META-RULE — legacy beats wt1 when they disagree.** Legacy psitri (the art-based
+> `node/` + `tree_ops`) is the carefully hand-tuned reference; wt1 (`wtree/`) is a
+> later port that took some shortcuts (e.g. `get_ptr` reads, `inner_free_moved`).
+> When the two differ, **check legacy and follow it — do NOT assume wt1 is right.**
 
 ---
 
@@ -73,6 +78,30 @@ start from here. References below point at the wt1 implementation.
 
 ---
 
+## C0. Ownership state-transitions (split / merge — correct-by-construction)
+
+A double-release is NOT a race — it's `release(addr)` called too many times on one
+ptr_address (the compactor only changes *when* the assert trips). Design the ref
+moves so the counts are correct *by construction*, and **minimize retain/release**
+(each touches a cold control-block cacheline). `remake` MOVES ownership → skip
+retain/release entirely.
+
+- **Unique split** (`ref==1`): **no retain, no release.** Ownership just moves. The
+  **left half REUSES the old node's ptr_address** (remake in place → returned to the
+  parent, which therefore skips a repoint); the right half gets a fresh id. The old
+  node's children partition into left/right — they're already owned, nothing to
+  retain or release.
+- **Shared split** (`ref>1`): the old node is still held (snapshot), so its id
+  **cannot** be repurposed → BOTH left and right get **new** ids, and each must
+  **retain** every child it keeps (the old node still references them too).
+- **Unique merge / grow / re-prefix**: remake in place (reuse id), ownership moves,
+  no retain/release.
+- **Shared anything**: build fresh nodes; retain the children they keep; never touch
+  the snapshot's old node.
+- The legacy brute-force fallback (copy all to the clone, retain-what-you-keep,
+  release-everything-from-src) is *correct* but wasteful (max cold-line touches) —
+  prefer the move-by-construction transitions above.
+
 ## C. Lifecycle (refcount, COW, transfer)
 
 > **Memory model (read this first).** SAL is NOT malloc/free. Under the read lock
@@ -132,8 +161,14 @@ start from here. References below point at the wt1 implementation.
 
 14. **Per-thread session bridge** (`g_session` / `session()`), installed at the top of
     each public op so the node free-functions/methods don't thread a session param.
-15. **Reads use `wderef` = `get_ptr`** (prefetch + read-cache, NO smart_ref, NO
-    session retain); only MUTATING sites build a `get_ref().modify()`.
+15. **Reads use `get_ref` (a `smart_ref`) — like LEGACY, not wt1's `get_ptr`.**
+    `get_ref` feeds the read-cache + prefetch, which **promotes/groups hot nodes into
+    the pinned tier** (the memory grouping that cuts TLB/page misses on descent).
+    `get_ptr` is a "lean borrow" whose read-cache promotion is *deferred/skipped* — it
+    prefetches but loses the grouping; wt1 used it, legacy did not (`count_keys` /
+    descent use `session.get_ref`). `smart_ref` is non-owning, so a read `get_ref`
+    does NOT retain — you get the grouping at no refcount cost. Mutating sites use the
+    same `get_ref` + `.modify()`.
 
 ---
 
