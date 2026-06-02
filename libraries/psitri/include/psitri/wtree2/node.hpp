@@ -522,6 +522,31 @@ inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
     return i;
 }
 
+// ── Implicit-divider grid detection (doc/implicit_dividers.md §13) ────
+// An inner whose stems are an exact constant-stride power-of-2 grid can be
+// routed by a single shift instead of a stem search — the prediction is exact,
+// so the stems line is never read. detect_grid verifies (one pass, ALL stems)
+// that stems[i] = base + (i+1)·2^shift; on success upper_bound(q) is exactly
+// clamp((q-base)>>shift, 0, n). This is the one-time creation-time assertion;
+// query time then trusts the flag with no verification.
+inline constexpr uint8_t kBinarySentinel = 0xFF;   // apgm_header.segment_count marker
+
+struct grid_fit { bool ok; uint32_t base; uint8_t shift; };
+inline grid_fit detect_grid(const uint32_t* stems, uint16_t n) noexcept
+{
+    if (n < 2) return {false, 0, 0};
+    const uint32_t stride = stems[1] - stems[0];
+    if (stride == 0 || (stride & (stride - 1)) != 0) return {false, 0, 0};   // not a power of 2
+    for (uint16_t i = 2; i < n; ++i)
+        if (stems[i] - stems[i - 1] != stride) return {false, 0, 0};         // not constant stride
+    return {true, stems[0] - stride, uint8_t(__builtin_ctz(stride))};        // base = origin
+}
+
+// Phase-1 instrumentation: count inners and how many are exact grids. Pure
+// measurement — no behavior change. Read/reset by the bench.
+inline uint64_t g_inner_total = 0;
+inline uint64_t g_inner_grid  = 0;
+
 // ── Bulk-in-order constructor: INNER (algo §9.1, inner case) ──────────
 // Build a fresh inner node2 from a prefix and a sorted (stems, children) pair
 // with children.size() == stems.size()+1 (btree-page semantics). Children are
@@ -551,6 +576,8 @@ inline node2* build_inner(std::span<const uint32_t>    prefix,
     est->segment_count = 0;
     if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
         est->segment_count = 0;
+    // Phase-1 instrumentation: is this inner an exact grid? (counter only)
+    if (n >= 2) { ++g_inner_total; if (detect_grid(nd->stems(), n).ok) ++g_inner_grid; }
     return nd;
 }
 

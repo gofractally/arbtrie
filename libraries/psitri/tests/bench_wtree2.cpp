@@ -50,19 +50,53 @@ static inline void make_key24(uint64_t i, uint8_t out[24]) noexcept
     std::memcpy(out + 16, &h2, 8);
 }
 
+// ─── Experimental GRID builder (doc/implicit_dividers.md §13) ─────────
+// Standalone, u32-only: partitions the sorted entries by byte-radix CELL so the
+// inner dividers are an exact constant-stride power-of-2 grid (boundaries, not
+// first-keys). Production w2::bulk_build is left untouched (clean rollback).
+// `shift` = the current level's cell shift (24 → top byte, then 16, 8, 0).
+namespace w2bench = psitri::wtree2;
+static w2bench::ptr_address build_grid(std::span<const w2bench::leaf_entry> E, int shift)
+{
+    namespace w2 = psitri::wtree2;
+    if (E.size() <= w2::kLeafCountCap || shift < 0)
+        return w2::build_leaf(E, 0)->address();
+    const uint32_t s      = uint32_t(shift);
+    const uint32_t himask = (s + 8 >= 32) ? 0u : ~((1u << (s + 8)) - 1u);
+    const uint32_t baseR  = E.front().key[0] & himask;            // common high bits
+    const uint32_t clo    = (E.front().key[0] >> s) & 0xFFu;
+    const uint32_t chi    = (E.back().key[0]  >> s) & 0xFFu;
+    w2::ptr_address kids[256];
+    uint32_t        divs[256];
+    int             nk = 0;
+    size_t          i  = 0;
+    for (uint32_t c = clo; c <= chi; ++c)                          // dense cells [clo,chi]
+    {
+        size_t j = i;
+        while (j < E.size() && ((E[j].key[0] >> s) & 0xFFu) == c) ++j;
+        kids[nk] = (j > i) ? build_grid(E.subspan(i, j - i), shift - 8) : w2::kNoChild;
+        if (c < chi) divs[nk] = baseR + (c + 1) * (1u << s);       // boundary → constant stride
+        ++nk;
+        i = j;
+    }
+    return w2::build_inner({}, {divs, size_t(nk - 1)}, {kids, size_t(nk)})->address();
+}
+
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     namespace w2          = psitri::wtree2;
     const uint64_t N      = (argc > 1) ? std::stoull(argv[1]) : 10'000'000ULL;
-    bool insert_mode = false, nocompact = false, u32_mode = false;
+    bool insert_mode = false, nocompact = false, u32_mode = false, grid_mode = false;
     for (int a = 2; a < argc; ++a)
     {
         std::string s(argv[a]);
         if (s == "insert")    insert_mode = true;
         if (s == "nocompact") nocompact   = true;
         if (s == "u32")       u32_mode    = true;   // 1-word (4-B) keys instead of 24-B
+        if (s == "grid")      grid_mode   = true;   // experimental grid builder (implies u32)
     }
+    if (grid_mode) u32_mode = true;                 // grid builder is u32-only
     const uint16_t KW = u32_mode ? 1 : 6;           // key words
     // Compactor ON by default (insert needs it to reclaim per-op garbage). In-place
     // mutation is safe under the per-insert read_lock (it pins nodes during the op).
@@ -127,6 +161,12 @@ int main(int argc, char** argv)
                               {reinterpret_cast<const uint8_t*>(&v), 8});
         }
     }
+    else if (grid_mode)
+    {
+        w2::g_inner_total = 0; w2::g_inner_grid = 0;
+        sal::read_lock lk = ses->lock();
+        root = build_grid({le.data(), M}, 24);
+    }
     else
     {
         sal::read_lock lk = ses->lock();
@@ -135,7 +175,7 @@ int main(int argc, char** argv)
     const double   build_s = now_s() - t0;
     const uint64_t built   = insert_mode ? N : M;
     std::printf("[%s] %llu in %.2fs (%.2f Mops/s, %.0f ns/key)\n",
-                insert_mode ? "insert" : "build ",
+                insert_mode ? "insert" : (grid_mode ? "grid  " : "build "),
                 (unsigned long long)built, build_s, built / build_s / 1e6,
                 build_s / built * 1e9);
 
@@ -179,6 +219,10 @@ int main(int argc, char** argv)
                     st.inners ? double(st.inner_fan) / st.inners : 0.0, st.maxfan,
                     (unsigned long long)st.inner_pfx, (unsigned long long)st.fan_le3,
                     (unsigned long long)st.fan_ge256);
+        if (grid_mode)
+            std::printf("[grid]  %llu/%llu inners are exact power-of-2 grids\n",
+                        (unsigned long long)w2::g_inner_grid,
+                        (unsigned long long)w2::g_inner_total);
     }
 
     // The tree now owns copies of every key+value (build_leaf memcpy'd them), so
