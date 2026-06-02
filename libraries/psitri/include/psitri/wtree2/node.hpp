@@ -446,6 +446,25 @@ inline void free_subtree(node2* nd) noexcept
     node2_free(nd);
 }
 
+// Refcount-aware subtree release (MVCC teardown): release `a`; only when this was
+// its LAST ref (ref==1, about to be freed) recurse to release its children — a
+// child shared with a snapshot (ref>1) just gets its ref dropped, its subtree left
+// for the snapshot. (Plain free_subtree is not refcount-aware → unsafe on a tree
+// that shares nodes with a snapshot.)
+inline void release_subtree(ptr_address a) noexcept
+{
+    if (!is_ext_slot(a)) return;
+    node2* nd = w2deref(a);
+    if (nd->is_inner() && w2session().get_ref<node2>(a).ref() == 1)
+    {
+        const uint16_t     ns = nd->n_slots();
+        const ptr_address* ch = nd->children();
+        for (uint16_t i = 0; i < ns; ++i)
+            if (is_ext_slot(ch[i])) release_subtree(ch[i]);
+    }
+    w2session().release(a);
+}
+
 // ── Stem search (algo §6) ─────────────────────────────────────────────
 // upper_bound slot index: count of stems ≤ q, in [0, n]. slots[0] handles
 // key ≤ stems[0] AND key-ends-here; slots[n] handles key > stems[n-1].

@@ -40,6 +40,32 @@ inline ins_result flatten_into(ptr_address inner) noexcept
     return {false, true, inner, 0, kNoChild, kNoChild};
 }
 
+// Descent ownership mode (psitri upsert_mode): start `unique` (this writer solely
+// owns the spine — mutate in place); the moment a node has ref()>1 (an MVCC
+// snapshot pinned it) flip to `shared` and FORK the rest of the path so the
+// snapshot's nodes are never mutated. Compile-time so the shared branches vanish
+// from the unique fast path.
+enum class umode { unique, shared };
+
+// SHARED fork: the new (forked) node and the snapshot's old node both reference the
+// off-path children, so each needs +1. The replaced slot `skip` is NOT retained —
+// its old child stays owned solely by the snapshot; the fork points slot `skip` at
+// the freshly-forked child instead. (Inline-value leaves have no ext children.)
+inline void retain_off_path(const node2* inner, uint16_t skip) noexcept
+{
+    const ptr_address* ch = inner->children();
+    const uint16_t     ns = inner->n_slots();
+    for (uint16_t j = 0; j < ns; ++j)
+        if (j != skip && is_ext_slot(ch[j])) w2session().retain(ch[j]);
+}
+inline void retain_all_children(const node2* inner) noexcept
+{
+    const ptr_address* ch = inner->children();
+    const uint16_t     ns = inner->n_slots();
+    for (uint16_t j = 0; j < ns; ++j)
+        if (is_ext_slot(ch[j])) w2session().retain(ch[j]);
+}
+
 // ── Low-level node builders (SAL alloc + memcpy; no heap) ─────────────
 inline void finish_estimator(node2* nd) noexcept
 {
@@ -79,6 +105,7 @@ inline uint16_t leaf_capacity(uint16_t stride) noexcept
 // (read-only) node into the writable segment, KEEPS its ptr_address, and updates
 // the ref — so the post-COW pointer is consistent and parent links stay valid.
 // Read-only descent uses nref.obj(); only the actual mutation site COWs.
+template <umode M>
 inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
                              std::span<const uint32_t> key,
                              std::span<const uint8_t> val, uint16_t depth) noexcept;
@@ -97,9 +124,11 @@ inline ins_result rebuilt_result(ptr_address sub) noexcept
 // entry that breaks LEAF_FIXED): gather this leaf's entries + the new one into
 // the arena and rebuild via bulk_build. Heap-free (arena + SAL). depth is BEFORE
 // the leaf's own prefix.
+// free_old=false forks (SHARED mode): build the new leaf, leave `leaf` for the
+// snapshot. Leaves are inline-value → no child refs to retain.
 inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head,
                                      uint16_t depth, std::span<const uint32_t> key,
-                                     std::span<const uint8_t> val) noexcept
+                                     std::span<const uint8_t> val, bool free_old = true) noexcept
 {
     scratch_mark   mark;
     const uint16_t pl  = leaf->prefix_len;
@@ -156,7 +185,7 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
             std::memcpy(vb, val.data(), val.size());
             ents[ip].value = {vb, val.size()};
             const ptr_address sub = bulk_build({ents, cnt}, depth);
-            node2_free(leaf);
+            if (free_old) node2_free(leaf);
             return rebuilt_result(sub);
         }
         if (std::lexicographical_compare(key.begin(), key.end(), k.begin(), k.end())) break;
@@ -172,14 +201,17 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
     ++cnt;
 
     const ptr_address sub = bulk_build({ents, cnt}, depth);
-    node2_free(leaf);
+    if (free_old) node2_free(leaf);
     return rebuilt_result(sub);   // pl0 inner → flattened into parent (e.g. collision)
 }
 
 // §7.2 Patricia split: key matches node->prefix[0..j) then diverges. Works for
 // inner (trunc = build_inner) and leaf (trunc = leaf re-prefixed) alike.
+// free_old=false forks (SHARED): the new `trunc` copies `node`'s children, so they
+// become shared (snapshot + trunc) and are retained; `node` is left for the snapshot.
 inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
-                              std::span<const uint8_t> val, uint16_t depth, uint16_t j) noexcept
+                              std::span<const uint8_t> val, uint16_t depth, uint16_t j,
+                              bool free_old = true) noexcept
 {
     const uint32_t* P          = node->prefix();
     const uint16_t  pl         = node->prefix_len;
@@ -219,7 +251,9 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
     else                        { div = node_pivot; k0 = nl->address();    k1 = trunc->address(); }
     ptr_address kids[2] = {k0, k1};
     node2*      small   = build_inner({P, j}, {&div, 1}, {kids, 2});
-    node2_free(node);
+    if (!free_old && node->is_inner())
+        retain_all_children(node);     // trunc copied node's children → now shared with snapshot
+    if (free_old) node2_free(node);
     return in_place(small->address());
 }
 
@@ -391,6 +425,11 @@ inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
 // Case-1 split (prefixless → promote to parent; prefixed → re-root). The merged
 // arrays live in the arena. This is the one path for both a binary child split
 // (ni==1) and a flatten (ni == a pl0 sub-inner's stem count).
+// `inner` is WRITABLE in unique mode (the caller COW'd it) and the snapshot-shared
+// OLD node in shared mode. UNIQUE: grow in place / realloc, free the old. SHARED:
+// never mutate `inner` — retain the off-path siblings (now shared by snapshot +
+// fork), build the new node(s), and DON'T free `inner` (the snapshot keeps it).
+template <umode M>
 inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_stems,
                                uint16_t ni, const ptr_address* ins_kids) noexcept
 {
@@ -401,25 +440,27 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     const ptr_address* ch = inner->children();
     const uint16_t     m  = uint16_t(n + ni);          // merged stem count
 
-    // In-place grow using cacheline-rounding slack: if the new stems/children stay
-    // within the regions already allocated (same cl-block), children_off is
-    // unchanged, so we memmove the tail in place instead of realloc + free. Saves
-    // the allocation churn and copies only [i..n) rather than the whole node.
-    const uint16_t stem_cap = uint16_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u) / 4u);
-    const uint16_t slot_cap = uint16_t(
-        ucc::round_up_multiple<kCacheLine>(uint32_t(n + 1) * 4u) / 4u);
-    if (m <= stem_cap && uint16_t(m + 1) <= slot_cap)
+    if constexpr (M == umode::unique)
     {
-        uint32_t*    ws = inner->stems();           // children_off stable → safe in place
-        ptr_address* wk = inner->children();
-        std::memmove(wk + i + ni + 1, wk + i + 1, size_t(n - i) * sizeof(ptr_address));
-        std::memcpy(wk + i, ins_kids, size_t(ni + 1) * sizeof(ptr_address));
-        std::memmove(ws + i + ni, ws + i, size_t(n - i) * 4u);
-        std::memcpy(ws + i, ins_stems, size_t(ni) * 4u);
-        inner->num_stems = m;
-        if (m >= kApgmMinStems) finish_estimator(inner);   // wide: refresh predictor
-        return in_place(inner->address());
+        // In-place grow using cacheline-rounding slack (children_off unchanged).
+        const uint16_t stem_cap = uint16_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u) / 4u);
+        const uint16_t slot_cap = uint16_t(
+            ucc::round_up_multiple<kCacheLine>(uint32_t(n + 1) * 4u) / 4u);
+        if (m <= stem_cap && uint16_t(m + 1) <= slot_cap)
+        {
+            uint32_t*    ws = inner->stems();
+            ptr_address* wk = inner->children();
+            std::memmove(wk + i + ni + 1, wk + i + 1, size_t(n - i) * sizeof(ptr_address));
+            std::memcpy(wk + i, ins_kids, size_t(ni + 1) * sizeof(ptr_address));
+            std::memmove(ws + i + ni, ws + i, size_t(n - i) * 4u);
+            std::memcpy(ws + i, ins_stems, size_t(ni) * 4u);
+            inner->num_stems = m;
+            if (m >= kApgmMinStems) finish_estimator(inner);
+            return in_place(inner->address());
+        }
     }
+    if constexpr (M == umode::shared)
+        retain_off_path(inner, i);          // siblings now shared by snapshot + fork
 
     scratch_mark mark;
     uint32_t*    ms = scratch_alloc<uint32_t>(m);
@@ -434,7 +475,7 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     if (m <= kInnerStemCap)
     {
         node2* ni2 = build_inner({P, pl}, {ms, m}, {mk, size_t(m) + 1});
-        node2_free(inner);
+        if constexpr (M == umode::unique) node2_free(inner);
         return in_place(ni2->address());
     }
     const uint16_t k    = uint16_t(m / 2);
@@ -445,27 +486,29 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     {
         ptr_address kids[2] = {Lc->address(), Rc->address()};
         node2*      top     = build_inner({P, pl}, {&pdiv, 1}, {kids, 2});
-        node2_free(inner);
+        if constexpr (M == umode::unique) node2_free(inner);
         return in_place(top->address());
     }
-    node2_free(inner);
+    if constexpr (M == umode::unique) node2_free(inner);
     return split_at(pdiv, Lc->address(), Rc->address());
 }
 
 // Binary child split → absorb one divider + two children.
+template <umode M>
 inline ins_result inner_splice(node2* inner, uint16_t i, uint32_t div, ptr_address left,
                                ptr_address right) noexcept
 {
     ptr_address kids[2] = {left, right};
-    return inner_absorb(inner, i, &div, 1, kids);
+    return inner_absorb<M>(inner, i, &div, 1, kids);
 }
 
 // Flatten a pl0 sub-inner `sib` into `inner` at slot i (merge its dividers +
-// children, instead of nesting it). Used for collisions / re-pack results so the
-// tree stays wide. Frees the sub-inner shell (its children move to `inner`).
+// children). `sib` is always a fresh/forked node (from the child's rebuild) → freed
+// in both modes; `inner` is freed only in unique mode (snapshot keeps it in shared).
+template <umode M>
 inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib) noexcept
 {
-    ins_result r = inner_absorb(inner, i, sib->stems(), sib->num_stems, sib->children());
+    ins_result r = inner_absorb<M>(inner, i, sib->stems(), sib->num_stems, sib->children());
     node2_free(sib);
     return r;
 }
@@ -480,28 +523,38 @@ inline node2* writable(sal::smart_ref<sal::alloc_header>& nref) noexcept
     return w;
 }
 
+template <umode M>
 inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
                              std::span<const uint32_t> key,
                              std::span<const uint8_t> val, uint16_t depth) noexcept
 {
+    // Ownership flip (psitri pattern): a unique descent that meets a snapshot-pinned
+    // node (ref>1) re-enters in shared mode and FORKS the rest of the path.
+    if constexpr (M == umode::unique)
+        if (nref.ref() > 1)
+            return insert_rec<umode::shared>(nref, key, val, depth);
+
     node2* nd = const_cast<node2*>(static_cast<const node2*>(nref.obj()));
-    // Prefix match. On divergence: an INNER is a true Patricia split (case2,
-    // binary — it's a routing node); a LEAF must RE-PACK (drop/shorten its prefix
-    // and add the new key as a stem) so it doesn't degenerate into a binary trie.
-    // (case2_split / leaf_rebuild_arena only READ `nd` then build new + free it, so
-    // a read-only node is fine — no COW needed.)
+    // Prefix match. INNER divergence → Patricia split (case2); LEAF → re-pack. In
+    // shared mode these fork (free_old=false) and the snapshot keeps `nd`.
     const bool      leaf = nd->is_leaf();
     const uint16_t  pl   = nd->prefix_len;
     const uint32_t* pfx  = nd->prefix();
+    constexpr bool  uniq = (M == umode::unique);
     for (uint16_t i = 0; i < pl; ++i)
         if (size_t(depth) + i >= key.size() || key[depth + i] != pfx[i])
-            return leaf ? leaf_rebuild_arena(nd, key.subspan(0, depth), depth, key, val)
-                        : case2_split(nd, key, val, depth, i);
+            return leaf ? leaf_rebuild_arena(nd, key.subspan(0, depth), depth, key, val, uniq)
+                        : case2_split(nd, key, val, depth, i, uniq);
     const uint16_t leaf_depth = depth;            // depth before this node's prefix
     depth = uint16_t(depth + pl);
 
-    if (leaf)                                      // mutate the leaf → COW via the ref
-        return leaf_insert(writable(nref), key, val, key.subspan(0, leaf_depth), leaf_depth, depth);
+    if (leaf)
+    {
+        if constexpr (M == umode::unique)         // unique: mutate the leaf in place (COW via ref)
+            return leaf_insert(writable(nref), key, val, key.subspan(0, leaf_depth), leaf_depth, depth);
+        else                                      // shared: fork into a fresh leaf, keep the old
+            return leaf_rebuild_arena(nd, key.subspan(0, leaf_depth), leaf_depth, key, val, false);
+    }
 
     assert(depth < key.size());                   // terminal keys: later phase
     const uint16_t    i = node_stem_ub(nd, key[depth]);
@@ -510,21 +563,31 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
     {
         leaf_entry        e{key, val};
         const ptr_address nl = build_leaf({&e, 1}, depth)->address();
-        writable(nref)->children()[i] = nl;
-        return in_place(nref.address());
+        if constexpr (M == umode::unique)
+        {
+            writable(nref)->children()[i] = nl;
+            return in_place(nref.address());
+        }
+        else                                      // fork this inner, point slot i at the new leaf
+            return inner_absorb<umode::shared>(nd, i, nullptr, 0, &nl);
     }
 
     auto       cref = w2session().template get_ref<sal::alloc_header>(c);
-    ins_result r    = insert_rec(cref, key, val, depth);   // child ref threaded down
+    ins_result r    = insert_rec<M>(cref, key, val, depth);   // child ref threaded down
     if (r.flatten)                                // absorb the child's siblings (widen, don't nest)
-        return inner_flatten(writable(nref), i, w2deref(r.addr));
+        return inner_flatten<M>(uniq ? writable(nref) : nd, i, w2deref(r.addr));
     if (!r.split)
     {
-        if (r.addr != c)                          // child relocated/rebuilt → repoint
-            writable(nref)->children()[i] = r.addr;
-        return in_place(nref.address());          // unchanged child → no write, no COW
+        if constexpr (M == umode::unique)
+        {
+            if (r.addr != c)                      // child relocated/rebuilt → repoint
+                writable(nref)->children()[i] = r.addr;
+            return in_place(nref.address());      // unchanged child → no write, no COW
+        }
+        else                                      // shared: child always forked → fork + repoint
+            return inner_absorb<umode::shared>(nd, i, nullptr, 0, &r.addr);
     }
-    return inner_splice(writable(nref), i, r.div, r.left, r.right);
+    return inner_splice<M>(uniq ? writable(nref) : nd, i, r.div, r.left, r.right);
 }
 
 // ── insert ────────────────────────────────────────────────────────────
@@ -536,12 +599,21 @@ inline ptr_address insert(ptr_address root, std::span<const uint32_t> key,
         leaf_entry e{key, val};
         return build_leaf({&e, 1}, 0)->address();
     }
-    auto       nref = w2session().template get_ref<sal::alloc_header>(root);   // ref at dispatch
-    ins_result r    = insert_rec(nref, key, val, 0);
+    auto       nref       = w2session().template get_ref<sal::alloc_header>(root);  // ref at dispatch
+    const bool was_shared = nref.ref() > 1;       // root pinned by a snapshot → forked below
+    ins_result r          = insert_rec<umode::unique>(nref, key, val, 0);
+    ptr_address new_root;
     if (r.flatten || !r.split)
-        return r.addr;   // flatten at root: the pl0 inner is itself the new root
-    ptr_address kids[2] = {r.left, r.right};
-    return build_inner({}, {&r.div, 1}, {kids, 2})->address();   // new root over the split
+        new_root = r.addr;                        // flatten/in-place: the result is the new root
+    else
+    {
+        ptr_address kids[2] = {r.left, r.right};
+        new_root = build_inner({}, {&r.div, 1}, {kids, 2})->address();   // new root over the split
+    }
+    // Shared root: the live tree forked to new_root; drop the live ref on the old
+    // root so it survives only on the snapshot's retain (the snapshot reads it intact).
+    if (was_shared) w2session().release(root);
+    return new_root;
 }
 
 }  // namespace psitri::wtree2

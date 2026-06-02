@@ -1867,6 +1867,64 @@ TEST_CASE("wtree2 leaf_fixed_u16 build + find (substitutable)", "[wtree2][find][
    REQUIRE(fx.live_objects() == base_objs);
 }
 
+// ── wtree2 — MVCC snapshot isolation via shared-mode COW ───────────────────
+// Retain the root (a snapshot) so subsequent upserts see ref>1 and FORK the path
+// (unique→shared flip). Verify the snapshot keeps the old keys unchanged while the
+// live tree gets the new ones, and that refcount-aware teardown leaves no leak.
+TEST_CASE("wtree2 snapshot shared-mode COW isolation", "[wtree2][insert][snapshot]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-snap");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base_objs = fx.live_objects();
+
+   auto val_of = [](uint32_t x) { return uint64_t(x) * 1315423911ull + 1; };
+   auto put = [&](w2::ptr_address r, uint32_t x) {
+      uint64_t       v  = val_of(x);
+      sal::read_lock lk = fx.ses->lock();
+      return w2::insert(r, {&x, 1}, {reinterpret_cast<const uint8_t*>(&v), 8});
+   };
+   auto get = [&](w2::node2* r, uint32_t x) -> int64_t {     // -1 = absent
+      sal::read_lock lk = fx.ses->lock();
+      auto v = w2::find_value(r, {&x, 1});
+      if (!v.data()) return -1;
+      uint64_t g; std::memcpy(&g, v.data(), 8);
+      return int64_t(g);
+   };
+
+   const uint32_t M0 = 2000, ADD = 500;           // [0,M0) snapshotted; [M0,M0+ADD) live-only
+   w2::ptr_address root = w2::kNoChild;
+   for (uint32_t x = 0; x < M0; ++x) root = put(root, x);
+
+   { sal::read_lock lk = fx.ses->lock(); fx.ses->retain(root); }   // snapshot: ref → 2
+   const w2::ptr_address snap = root;
+
+   for (uint32_t x = M0; x < M0 + ADD; ++x) root = put(root, x);   // forks the path (shared)
+   REQUIRE(root != snap);                                          // live forked to a new root
+
+   {
+      sal::read_lock lk = fx.ses->lock();
+      w2::node2* snr = w2::w2deref(snap);
+      w2::node2* lvr = w2::w2deref(root);
+      for (uint32_t x = 0; x < M0; ++x)            // original keys: in BOTH, unchanged
+      {
+         REQUIRE(get(snr, x) == int64_t(val_of(x)));
+         REQUIRE(get(lvr, x) == int64_t(val_of(x)));
+      }
+      for (uint32_t x = M0; x < M0 + ADD; ++x)     // new keys: live only, snapshot isolated
+      {
+         REQUIRE(get(snr, x) == -1);
+         REQUIRE(get(lvr, x) == int64_t(val_of(x)));
+      }
+   }
+
+   { sal::read_lock lk = fx.ses->lock();           // refcount-aware teardown of both trees
+     w2::release_subtree(root); w2::release_subtree(snap); }
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base_objs);
+}
+
 // ── wtree2 — incremental insert, Increment A (in-place leaf + duplicate) ───
 // Keys share a 5-word prefix and vary in the 6th word, so every key routes to a
 // single leaf (no Patricia split, no overflow) — exercising descent, gathered
