@@ -80,20 +80,28 @@ start from here.
 
 ## C0. Ownership state-transitions (split / merge — correct-by-construction)
 
+**unique vs shared is a property of the DESCENT, not of the node.** The mode is
+threaded down from the root (template param): start `unique`, and the instant a node
+on the path has `ref>1` flip to `shared` and STAY shared for the whole subtree below.
+A node's LOCAL `ref==1` does NOT mean unique — if any ancestor (e.g. the root held by
+a snapshot, ref 2) is shared, every node beneath it is *implicitly shared* even though
+99% of them have local ref 1. So decide by the threaded mode, never by re-checking the
+current node's ref. (wtree2: `insert_rec<unique>` flips to `insert_rec<shared>` on
+`nref.ref()>1`; once shared it never flips back.)
+
 A double-release is NOT a race — it's `release(addr)` called too many times on one
 ptr_address (the compactor only changes *when* the assert trips). Design the ref
 moves so the counts are correct *by construction*, and **minimize retain/release**
 (each touches a cold control-block cacheline). `remake` MOVES ownership → skip
 retain/release entirely.
 
-- **Unique split** (`ref==1`): **no retain, no release.** Ownership just moves. The
-  **left half REUSES the old node's ptr_address** (remake in place → returned to the
-  parent, which therefore skips a repoint); the right half gets a fresh id. The old
-  node's children partition into left/right — they're already owned, nothing to
-  retain or release.
-- **Shared split** (`ref>1`): the old node is still held (snapshot), so its id
-  **cannot** be repurposed → BOTH left and right get **new** ids, and each must
-  **retain** every child it keeps (the old node still references them too).
+- **Unique-mode split**: **no retain, no release.** Ownership just moves. The **left
+  half REUSES the old node's ptr_address** (remake in place → returned to the parent,
+  which therefore skips a repoint); the right half gets a fresh id. The old node's
+  children partition into left/right — already owned, nothing to retain or release.
+- **Shared-mode split**: the old node is still held (a snapshot reaches it through the
+  shared path), so its id **cannot** be repurposed → BOTH halves get **new** ids, and
+  each must **retain** every child it keeps (the old node still references them too).
 - **Unique merge / grow / re-prefix**: remake in place (reuse id), ownership moves,
   no retain/release.
 - **Shared anything**: build fresh nodes; retain the children they keep; never touch
