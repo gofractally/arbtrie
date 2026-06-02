@@ -182,31 +182,6 @@ namespace sal
                            from.control().load(std::memory_order_relaxed));
    }
 
-   template <typename To>
-   [[nodiscard]] To* allocator_session::remake_inplace(smart_ref<alloc_header>& ptr,
-                                                       uint32_t                 size,
-                                                       auto&&... args)
-   {
-      assert(check_thread_ownership());
-      assert(ptr.ref() == 1);
-      assert(size % 64 == 0);
-      static_assert(std::is_base_of_v<alloc_header, To>, "To must derive from alloc_header");
-
-      auto [loc, node_ptr] =
-          alloc_data<To>(size, ptr->address_seq(), std::forward<decltype(args)>(args)...);
-      assert(loc != ptr.loc());
-
-      // Move the control block to the new bytes (ptr_address unchanged); free the old
-      // bytes WITHOUT destroy (relocate semantics — children are not released).
-      auto old_cached = ptr._control.move(loc);
-      record_freed_space(get<alloc_header>(old_cached.loc()), "session_remake");
-
-      // Rebind the caller's ref to the new bytes (fresh cached read → valid loc).
-      ptr._obj    = node_ptr;
-      ptr._cached = ptr._control.load(std::memory_order_relaxed);
-      return static_cast<To*>(node_ptr);
-   }
-
    template <typename T>
    [[nodiscard]] T* allocator_session::copy_on_write(smart_ref<T>& ptr)
    {

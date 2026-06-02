@@ -120,14 +120,6 @@ namespace sal
       template <typename T>
       [[nodiscard]] T* copy_on_write(smart_ref<T>& ptr);
 
-      /// Like realloc, but updates the PASSED ref IN PLACE (mirrors copy_on_write)
-      /// instead of returning a new one — the node keeps its ptr_address, fresh
-      /// `size` bytes are built via To(asize, seq, args...), and the old bytes are
-      /// freed WITHOUT destroy (children transfer, no release). Caller's ref now
-      /// points at the new bytes. ref must be unique (==1). Returns the new payload.
-      template <typename To>
-      [[nodiscard]] To* remake_inplace(smart_ref<alloc_header>& ptr, uint32_t size, auto&&... args);
-
       template <typename T = alloc_header>
       [[nodiscard]] smart_ptr<T> get_root(root_object_number ro) noexcept;
 

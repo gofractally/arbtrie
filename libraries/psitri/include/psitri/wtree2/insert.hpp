@@ -483,13 +483,15 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     {
         if constexpr (M == umode::unique)
         {
-            // GROW: realloc THROUGH the ref → keeps this inner's id (parent never
-            // repoints). No free: remake frees the old bytes without destroy
-            // (children transfer). self is always set in unique (caller invariant).
+            // GROW: realloc THROUGH the ref → the relocated inner KEEPS its id, so the
+            // parent never repoints. realloc frees the old bytes without destroy
+            // (children transfer, no release). It returns a borrowed ref to the new
+            // bytes; we only need the (unchanged) address. `self`/`inner` are left
+            // pointing at the old record_freed bytes, which stay valid for the rest of
+            // this insert under the read lock (smart_ref is non-owning) — never reread.
+            // self is always set in unique (caller invariant).
             assert(self);
-            node2* g = w2session().remake_inplace<node2>(
-                *self, node2::alloc_size(*inner, op), *inner, op);
-            return in_place(g->address());
+            return in_place(w2session().realloc<node2>(*self, *inner, op).address());
         }
         else  // shared FORK: fresh id, snapshot keeps `inner`
             return in_place(w2deref(w2session().alloc<node2>(phint, *inner, op))->address());
