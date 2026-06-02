@@ -55,13 +55,22 @@ start from here.
 
 ## B. Type system (cleanliness · type safety · correct-by-construction)
 
-6. **CRTP base + distinct types per variant.** Common machinery lives in
-   `node_base<Derived> : psitri::node`; each concrete variant is its own C++ type with
-   `static constexpr node_type type_id`. Shared code is static-dispatched through
-   `Derived` (zero overhead), variant-specific data/behavior lives on the variant.
-   (`inner_node_base<Derived>`; `inner_node`, `inner_prefix_node`.) **Distinct types
-   make "wrong shape" a COMPILE error, not a runtime branch** — e.g. a grid type has
-   no `stems()` member, so it can't be misused.
+6. **3-TIER CRTP: `inner_base` → `inner<Derived>` → `Derived`.** Three layers, on
+   purpose — to kill template bloat AND keep type safety:
+   - **`inner_base : psitri::node`** (NON-template) — all code that does NOT depend on
+     the concrete type lives here and is **compiled ONCE** (no per-Derived
+     instantiation → smaller binary, better I-cache).
+   - **`inner<Derived> : inner_base`** (CRTP middle) — ONLY the genuinely
+     type-dependent code, static-dispatched through `Derived` (zero overhead). Keep
+     this layer thin — every function here is instantiated per type.
+   - **`Derived : inner<Derived>`** (e.g. `inner_node`, `inner_prefix_node`,
+     `grid_node`, leaf variants) — the concrete data + `static constexpr node_type
+     type_id`.
+   **Distinct `Derived` types make "wrong shape" a COMPILE error** (a grid type has no
+   `stems()` member → can't be misused). Evidence: libwtree's move from 2-tier to this
+   3-tier CRTP gave **+9% perf and −988 B code size**. Default to the non-template
+   `inner_base` for anything that doesn't need `Derived`; only push to `inner<Derived>`
+   what truly varies by type.
 
 7. **Concepts gate generic code** (`is_inner_node`, `any_inner_node_type`). Template
    algorithms constrain on the concept; the compiler enforces the surface.
