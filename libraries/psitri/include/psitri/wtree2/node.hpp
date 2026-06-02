@@ -660,16 +660,13 @@ inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
 inline node2* build_inner(std::span<const uint32_t>    prefix,
                           std::span<const uint32_t>    stems,
                           std::span<const ptr_address> children,
-                          ptr_address                  hint = kNoChild) noexcept
+                          alloc_hint                   hint = {}) noexcept
 {
     assert(children.size() == stems.size() + 1);
     assert(prefix.size() <= 255 && stems.size() <= 0xFFFFu);
     const uint16_t n   = uint16_t(stems.size());
     const uint8_t  pfx = uint8_t(prefix.size());
-    const ptr_address a =
-        (hint == kNoChild)
-            ? w2session().alloc<node2>(alloc_hint{}, shape::inner, n, pfx)
-            : w2session().alloc<node2>(alloc_hint{&hint, 1}, shape::inner, n, pfx);
+    const ptr_address a = w2session().alloc<node2>(hint, shape::inner, n, pfx);
     node2* nd = w2deref(a);
     if (pfx) std::memcpy(nd->prefix(), prefix.data(), size_t(pfx) * 4u);
     if (n)   std::memcpy(nd->stems(), stems.data(), size_t(n) * 4u);
@@ -763,7 +760,7 @@ struct leaf_entry
 // are present; uniform-size leaves go to build_leaf_fixed via the build_leaf
 // dispatcher. (Big values → EXT slots land in a later phase.)
 inline node2* build_leaf_varlen(std::span<const leaf_entry> ents, uint16_t depth,
-                                ptr_address hint = kNoChild) noexcept
+                                alloc_hint hint = {}) noexcept
 {
     assert(!ents.empty());
     uint16_t lcp = longest_common_prefix(
@@ -790,9 +787,7 @@ inline node2* build_leaf_varlen(std::span<const leaf_entry> ents, uint16_t depth
     }
 
     const ptr_address a =
-        (hint == kNoChild)
-            ? w2session().alloc<node2>(alloc_hint{}, shape::leaf, n, pfx, tail)
-            : w2session().alloc<node2>(alloc_hint{&hint, 1}, shape::leaf, n, pfx, tail);
+        w2session().alloc<node2>(hint, shape::leaf, n, pfx, tail);
     node2* nd = w2deref(a);
 
     if (pfx) std::memcpy(nd->prefix(), ents.front().key.data() + depth, size_t(pfx) * 4u);
@@ -835,15 +830,13 @@ inline node2* build_leaf_varlen(std::span<const leaf_entry> ents, uint16_t depth
 // Caller (build_leaf) has verified uniformity and computed pfx/base_depth/sw/vl.
 inline node2* build_leaf_fixed(std::span<const leaf_entry> ents, uint16_t depth,
                                uint8_t pfx, uint16_t base_depth, uint8_t sw, uint8_t vl,
-                               ptr_address hint) noexcept
+                               alloc_hint hint) noexcept
 {
     const uint16_t n = uint16_t(ents.size());
     // Bulk leaves are exact (capacity == n); the leaf_fixed ctor sets every header
     // field once (num_stems / fx_cap / fx_rem_words / fx_val_len).
     const ptr_address a =
-        (hint == kNoChild)
-            ? w2session().alloc<node2>(alloc_hint{}, n, n, pfx, sw, vl)
-            : w2session().alloc<node2>(alloc_hint{&hint, 1}, n, n, pfx, sw, vl);
+        w2session().alloc<node2>(hint, n, n, pfx, sw, vl);
     node2* nd = w2deref(a);
 
     if (pfx) std::memcpy(nd->prefix(), ents.front().key.data() + depth, size_t(pfx) * 4u);
@@ -873,14 +866,12 @@ inline node2* build_leaf_fixed(std::span<const leaf_entry> ents, uint16_t depth,
 // guarantees uniformity AND that the stem range fits 16 bits (back−front < 2^16).
 inline node2* build_leaf_u16(std::span<const leaf_entry> ents, uint16_t depth,
                              uint8_t pfx, uint16_t base_depth, uint8_t sw, uint8_t vl,
-                             ptr_address hint) noexcept
+                             alloc_hint hint) noexcept
 {
     const uint16_t n    = uint16_t(ents.size());
     const uint32_t base = ents.front().key[base_depth];          // min (entries sorted)
     const ptr_address a =
-        (hint == kNoChild)
-            ? w2session().alloc<node2>(alloc_hint{}, n, n, pfx, sw, vl, base)
-            : w2session().alloc<node2>(alloc_hint{&hint, 1}, n, n, pfx, sw, vl, base);
+        w2session().alloc<node2>(hint, n, n, pfx, sw, vl, base);
     node2* nd = w2deref(a);
     if (pfx) std::memcpy(nd->prefix(), ents.front().key.data() + depth, size_t(pfx) * 4u);
     const uint16_t stride = nd->fx_stride();
@@ -913,7 +904,7 @@ inline bool g_leaf_u16 = false;
 // the fixed builder when every entry has identical suffix-word count and value
 // length (and both fit a byte) — else the varlen builder.
 inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
-                         ptr_address hint = kNoChild) noexcept
+                         alloc_hint hint = {}) noexcept
 {
     assert(!ents.empty());
     uint16_t lcp = longest_common_prefix(
@@ -1018,12 +1009,13 @@ inline constexpr uint32_t kInnerStemCap   = 8191;   // 8192 cells = 13 bits/inne
 // B-tree the (divs[0..D), kids[0..D+1)) radix children into inner(s) under prefix.
 // Scratch arrays come from the thread-local arena (no heap); caller holds a mark.
 inline ptr_address build_inner_tree(std::span<const uint32_t> prefix,
-                                    uint32_t* divs, size_t D, ptr_address* kids) noexcept
+                                    uint32_t* divs, size_t D, ptr_address* kids,
+                                    alloc_hint hint = {}) noexcept
 {
     for (;;)
     {
         if (D <= kInnerStemCap)
-            return build_inner(prefix, {divs, D}, {kids, D + 1})->address();
+            return build_inner(prefix, {divs, D}, {kids, D + 1}, hint)->address();   // top → hint
         uint32_t*    nd  = scratch_alloc<uint32_t>(D);
         ptr_address* nk  = scratch_alloc<ptr_address>(D + 1);
         size_t       ndi = 0, nki = 0, a = 0;
@@ -1040,7 +1032,8 @@ inline ptr_address build_inner_tree(std::span<const uint32_t> prefix,
     }
 }
 
-inline ptr_address bulk_build(std::span<const leaf_entry> E, uint16_t depth) noexcept
+inline ptr_address bulk_build(std::span<const leaf_entry> E, uint16_t depth,
+                              alloc_hint hint = {}) noexcept
 {
     assert(!E.empty());
     const uint8_t  pfx  = uint8_t(longest_common_prefix(
@@ -1060,7 +1053,7 @@ inline ptr_address bulk_build(std::span<const leaf_entry> E, uint16_t depth) noe
                 uint8_t(E[i].key.size() - base - 1), uint8_t(E[i].value.size())));
         }
         if (distinct && tail <= kLeafTailBudget && E.size() <= kLeafCountCap)
-            return build_leaf(E, depth)->address();
+            return build_leaf(E, depth, hint)->address();
     }
 
     // One chunk starting at i → (is_collision_bucket, end_index). A collision
@@ -1102,7 +1095,7 @@ inline ptr_address bulk_build(std::span<const leaf_entry> E, uint16_t depth) noe
         i = end;
     }
     std::span<const uint32_t> pfx_words(E.front().key.data() + depth, pfx);
-    return build_inner_tree(pfx_words, divs, nd, kids);
+    return build_inner_tree(pfx_words, divs, nd, kids, hint);
 }
 
 }  // namespace psitri::wtree2

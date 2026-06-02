@@ -1826,7 +1826,7 @@ TEST_CASE("wtree2 leaf_fixed_u16 build + find (substitutable)", "[wtree2][find][
       ents.push_back({{&keys[i], 1}, {vals[i].data(), 8}});
 
    // ── build the node directly ──
-   w2::node2* u16 = w2::build_leaf_u16({ents.data(), ents.size()}, 0, 0, 0, 0, 8, w2::kNoChild);
+   w2::node2* u16 = w2::build_leaf_u16({ents.data(), ents.size()}, 0, 0, 0, 0, 8, {});
    REQUIRE(u16->is_leaf());
    REQUIRE(u16->is_leaf_u16());
    REQUIRE_FALSE(u16->is_leaf_fixed());
@@ -1835,7 +1835,7 @@ TEST_CASE("wtree2 leaf_fixed_u16 build + find (substitutable)", "[wtree2][find][
    REQUIRE(u16->fx_val_len == 8);
 
    // ── reference u32 leaf with the same entries ──
-   w2::node2* u32 = w2::build_leaf_fixed({ents.data(), ents.size()}, 0, 0, 0, 0, 8, w2::kNoChild);
+   w2::node2* u32 = w2::build_leaf_fixed({ents.data(), ents.size()}, 0, 0, 0, 0, 8, {});
    REQUIRE(u32->is_leaf_fixed());
 
    // Substitutable: same keys → identical values from both nodes.
