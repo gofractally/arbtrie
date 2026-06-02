@@ -1691,6 +1691,72 @@ TEST_CASE("wtree2 grid inner detect + route + downgrade", "[wtree2][grid]")
    REQUIRE(fx.live_objects() == base_objs);
 }
 
+// ── wtree2 — lower_bound (floor-or-above) vs std::lower_bound reference ─────
+// Many distinct u32 keys (multi-leaf, so the inner back-track path is exercised);
+// probe every key ±1 plus the extremes and require the returned value matches the
+// smallest key ≥ q (or absent when q exceeds the max).
+TEST_CASE("wtree2 lower_bound floor-or-above", "[wtree2][lowerbound]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-lb");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base_objs = fx.live_objects();
+
+   auto splitmix = [](uint64_t x) {
+      x += 0x9E3779B97F4A7C15ULL;
+      x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+      x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+      return uint32_t(x ^ (x >> 31));
+   };
+   constexpr int         N = 3000;
+   std::vector<uint32_t> sorted;
+   sorted.reserve(N);
+   for (int i = 0; i < N; ++i) sorted.push_back(splitmix(i));
+   std::sort(sorted.begin(), sorted.end());
+   sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+   std::vector<uint32_t> ins = sorted;                    // insert in shuffled order
+   std::shuffle(ins.begin(), ins.end(), std::mt19937_64(7));
+
+   w2::ptr_address root = w2::kNoChild;
+   {
+      sal::read_lock lk = fx.ses->lock();
+      for (uint32_t k : ins)
+      {
+         const uint64_t v = k;
+         root = w2::insert(root, {&k, 1}, {reinterpret_cast<const uint8_t*>(&v), 8});
+      }
+   }
+   {
+      sal::read_lock lk = fx.ses->lock();
+      w2::node2*     r  = w2::w2deref(root);
+      auto lb = [&](uint32_t q) -> int64_t {
+         auto v = w2::lower_bound_value(r, {&q, 1});
+         if (!v.data()) return -1;
+         uint64_t g = 0;
+         std::memcpy(&g, v.data(), 8);
+         return int64_t(g);
+      };
+      auto expect = [&](uint32_t q) -> int64_t {
+         auto it = std::lower_bound(sorted.begin(), sorted.end(), q);
+         return it == sorted.end() ? -1 : int64_t(*it);
+      };
+      for (uint32_t k : sorted)
+      {
+         REQUIRE(lb(k) == expect(k));
+         if (k > 0) REQUIRE(lb(k - 1) == expect(k - 1));
+         if (k < 0xFFFFFFFFu) REQUIRE(lb(k + 1) == expect(k + 1));
+      }
+      REQUIRE(lb(0) == expect(0));
+      REQUIRE(lb(0xFFFFFFFFu) == expect(0xFFFFFFFFu));
+   }
+
+   w2::release_subtree(root);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base_objs);
+}
+
 // ── wtree2 — system-dictionary load + query (mirrors tree_context_tests) ───
 // Loads /usr/share/dict/words, inserts every word (value = an 8-B hash of the word),
 // then queries every word in FILE order and in RANDOM order. Reports words/sec +
@@ -1777,13 +1843,39 @@ TEST_CASE("wtree2 system dictionary load + query", "[wtree2][dict]")
       REQUIRE(mism == 0);
    };
 
+   // lower_bound (floor-or-above) — the apples-to-apples op vs tree_context's cursor
+   // lower_bound. Every dict key is present, so lb(key) returns that key's value.
+   auto query_lb = [&](const std::vector<uint32_t>& order, const char* label) {
+      sal::read_lock lk = fx.ses->lock();
+      w2::node2*     r  = w2::w2deref(root);
+      size_t         miss = 0, mism = 0;
+      const auto     t0 = now();
+      for (uint32_t idx : order)
+      {
+         auto v = w2::lower_bound_value(r, {keys[idx].data(), uint16_t(keys[idx].size())});
+         if (!v.data()) { ++miss; continue; }
+         uint64_t got = 0;
+         std::memcpy(&got, v.data(), 8);
+         if (got != hash8(words[idx])) ++mism;
+      }
+      const auto t1 = now();
+      std::printf("[wtree2][dict] lbound/%s %zu in %lld ms (%lld ns/lookup) miss=%zu mism=%zu\n",
+                  label, order.size(), (long long)(ns(t0, t1) / 1000000),
+                  (long long)(ns(t0, t1) / (long long)order.size()), miss, mism);
+      std::fflush(stdout);
+      REQUIRE(miss == 0);
+      REQUIRE(mism == 0);
+   };
+
    std::vector<uint32_t> inorder(N);
    for (size_t i = 0; i < N; ++i) inorder[i] = uint32_t(i);
    query(inorder, "inorder");
+   query_lb(inorder, "inorder");
 
    std::vector<uint32_t> rnd = inorder;
    std::shuffle(rnd.begin(), rnd.end(), std::mt19937_64(0x9E3779B9ull));
    query(rnd, "random ");
+   query_lb(rnd, "random ");
 
    // Teardown accounting is informational here, not a hard gate: the varlen INSERT
    // path (exercised at scale for the first time by this test) currently leaks a

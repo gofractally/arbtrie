@@ -1213,6 +1213,146 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
     }
 }
 
+// ── lower_bound (floor-or-above: smallest key ≥ q) ────────────────────
+// Mirrors a cursor seek (cf. tree_context lower_bound): descend toward q; if q runs
+// past every key in the chosen subtree (or hits an empty slot), back-track to the
+// next sibling and take its leftmost key. Returns that key's value span, or an empty
+// span (.data()==nullptr) when q is greater than every key in the tree.
+
+// Sorted-index accessors that work across all three leaf shapes.
+inline uint32_t leaf_stem_at(const node2* leaf, uint16_t idx) noexcept
+{
+    const uint8_t shp = leaf->shape_;
+    if (shp == uint8_t(shape::leaf_fixed))      return leaf->fx_stem(idx);
+    if (shp == uint8_t(shape::leaf_fixed_u16))  return leaf->fx_base() + leaf->u16_stems()[idx];
+    return leaf->stems()[idx];                                       // varlen
+}
+inline std::span<const uint8_t> leaf_value_at(const node2* leaf, uint16_t idx) noexcept
+{
+    const uint8_t shp = leaf->shape_;
+    const uint8_t sw  = leaf->fx_rem_words, vl = leaf->fx_val_len;
+    if (shp == uint8_t(shape::leaf_fixed))
+        return {leaf->fx_record(idx) + size_t(sw) * 4u, vl};
+    if (shp == uint8_t(shape::leaf_fixed_u16))
+        return {leaf->u16_record(idx) + size_t(sw) * 4u, vl};
+    const ptr_address s = leaf->children()[idx + 1];                 // varlen: slot 0 is terminal
+    if (!is_local_slot(s)) return {};
+    auto* vr = reinterpret_cast<const value_region*>(leaf->base() + local_tail_off(s));
+    return vr->value_span();
+}
+// First sorted index whose key (from `depth`) is ≥ q, or num_stems if none. Leaf
+// stems are distinct, so order is by stem; a single suffix compare resolves the
+// equal-stem boundary (entry ≥ q iff its suffix ≥ q's suffix).
+inline uint16_t leaf_first_ge(const node2* leaf, std::span<const uint32_t> q, uint16_t depth) noexcept
+{
+    const uint16_t n = leaf->num_stems;
+    const uint32_t qs = q[depth];
+    uint16_t       ge = 0;
+    while (ge < n && leaf_stem_at(leaf, ge) < qs) ++ge;             // first stem ≥ q stem
+    if (ge == n || leaf_stem_at(leaf, ge) > qs) return ge;          // none / strictly greater
+    // Equal stem → compare the suffix (bytes, matching find_value's memcmp).
+    const uint8_t  shp = leaf->shape_;
+    const uint16_t esw = leaf->fx_rem_words;
+    const uint8_t* esfx;
+    uint16_t       evw  = esw;
+    if (shp == uint8_t(shape::leaf_fixed))           esfx = leaf->fx_record(ge);
+    else if (shp == uint8_t(shape::leaf_fixed_u16))  esfx = leaf->u16_record(ge);
+    else
+    {
+        auto* vr = reinterpret_cast<const value_region*>(
+            leaf->base() + local_tail_off(leaf->children()[ge + 1]));
+        esfx = vr->suffix_bytes();
+        evw  = vr->suffix_words;
+    }
+    const uint16_t qsw = uint16_t(q.size() - depth - 1);
+    const uint16_t m   = std::min(evw, qsw);
+    const int      c   = m ? std::memcmp(esfx, reinterpret_cast<const uint8_t*>(q.data() + depth + 1),
+                                         size_t(m) * 4u)
+                           : 0;
+    if (c > 0) return ge;                                           // entry suffix > q
+    if (c < 0) return uint16_t(ge + 1);                            // entry suffix < q → next
+    return (evw >= qsw) ? ge : uint16_t(ge + 1);                   // tie → longer/equal is ≥ q
+}
+// Smallest key in nd's subtree (descend the leftmost non-empty slot).
+inline std::span<const uint8_t> subtree_leftmost_value(node2* nd) noexcept
+{
+    for (;;)
+    {
+        if (nd->shape_ != uint8_t(shape::inner)) return leaf_value_at(nd, 0);
+        const ptr_address* ch = nd->children();
+        const uint16_t     ns = nd->n_slots();
+        uint16_t           j  = 0;
+        while (j < ns && !is_ext_slot(ch[j])) ++j;
+        if (j == ns) return {};                                    // empty inner (shouldn't happen)
+        nd = w2deref(ch[j]);
+    }
+}
+inline std::span<const uint8_t> lower_bound_value(node2* root, std::span<const uint32_t> q) noexcept
+{
+    struct frame { node2* nd; uint16_t next; };                    // resume at slot `next` on backtrack
+    frame    stk[16];
+    uint16_t sp    = 0;
+    node2*   nd    = root;
+    uint16_t depth = 0;
+    bool     go_right = false;
+
+    for (;;)
+    {
+        if (!go_right)
+        {
+            // Prefix match (consumes words). A divergence resolves the whole subtree.
+            const uint16_t  pl  = nd->prefix_len;
+            const uint32_t* pfx = nd->prefix();
+            bool diverged = false;
+            for (uint16_t i = 0; i < pl; ++i)
+            {
+                if (size_t(depth) + i >= q.size() || q[depth + i] < pfx[i])
+                    return subtree_leftmost_value(nd);             // q < this subtree → its smallest
+                if (q[depth + i] > pfx[i]) { diverged = true; break; }   // q > subtree → go right
+            }
+            if (!diverged)
+            {
+                depth = uint16_t(depth + pl);
+                if (nd->shape_ != uint8_t(shape::inner))
+                {
+                    if (depth >= q.size()) return subtree_leftmost_value(nd);   // q is a prefix
+                    const uint16_t ge = leaf_first_ge(nd, q, depth);
+                    if (ge < nd->num_stems) return leaf_value_at(nd, ge);
+                    go_right = true;                                // q past this leaf → next sibling
+                }
+                else if (depth >= q.size())
+                    return subtree_leftmost_value(nd);             // q exhausted at an inner
+                else
+                {
+                    const uint16_t i = node_stem_ub(nd, q[depth]); // route slot for q
+                    if (sp < 16) stk[sp++] = {nd, uint16_t(i + 1)};
+                    const ptr_address c = nd->children()[i];
+                    if (is_ext_slot(c)) { nd = w2deref(c); continue; }
+                    go_right = true;                                // empty slot → next sibling
+                }
+            }
+            else
+                go_right = true;
+        }
+        // Back-track: take the leftmost key of the next non-empty sibling slot.
+        if (go_right)
+        {
+            go_right = false;
+            for (;;)
+            {
+                if (sp == 0) return {};                            // q > every key
+                frame&             f  = stk[sp - 1];
+                const ptr_address* ch = f.nd->children();
+                const uint16_t     ns = f.nd->n_slots();
+                uint16_t           j  = f.next;
+                while (j < ns && !is_ext_slot(ch[j])) ++j;
+                if (j < ns) { f.next = uint16_t(j + 1); return subtree_leftmost_value(w2deref(ch[j])); }
+                --sp;                                              // exhausted this node → pop
+            }
+        }
+    }
+}
+
 // ── Recursive bulk constructor (algo §9.1, full) ──────────────────────
 // Builds a whole subtree from a SORTED entry stream. Handles prefix absorption
 // (Case 2), collisions (a same-first-word bucket recurses one radix level
