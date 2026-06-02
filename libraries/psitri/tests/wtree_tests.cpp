@@ -1618,6 +1618,77 @@ TEST_CASE("wtree2 inner predictor matches binary search", "[wtree2][predictor]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — implicit-divider grid: detect, route-without-stems, downgrade ──
+// A constant-stride power-of-2 inner is stored as base+shift (segment_count ==
+// kBinarySentinel) and routed by a single shift — the stems line is never read on
+// the find path. When a leaf below splits and pushes a divider that does NOT fit the
+// grid, the node must DOWNGRADE: regenerate explicit stems (with the new divider
+// spliced in) and route by stem search. These tests pin both halves.
+TEST_CASE("wtree2 grid inner detect + route + downgrade", "[wtree2][grid]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-grid");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base_objs = fx.live_objects();
+
+   auto mk_child = [&] {
+      return w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf, 0, 0);
+   };
+
+   // A constant-stride power-of-2 grid: stems[i] = BASE + (i+1)*STRIDE.
+   constexpr uint16_t N      = 8;
+   constexpr uint32_t BASE   = 1024;
+   constexpr uint32_t STRIDE = 16;          // 2^4
+   std::vector<uint32_t>        gstems(N);
+   std::vector<w2::ptr_address> gkids;
+   for (uint16_t i = 0; i < N; ++i) gstems[i] = BASE + uint32_t(i + 1) * STRIDE;
+   for (uint16_t i = 0; i <= N; ++i) gkids.push_back(mk_child());
+
+   w2::node2* grid = w2::build_inner({}, {gstems.data(), N}, {gkids.data(), size_t(N) + 1});
+
+   // (1) Detected as an exact grid → routes by shift, EXACT vs reference stem search.
+   REQUIRE(grid->estimator()->segment_count == w2::kBinarySentinel);
+   auto sweep = [&](w2::node2* nd, const std::vector<uint32_t>& ref) {
+      auto check = [&](uint32_t q) {
+         const uint16_t want = w2::stem_upper_bound(ref.data(), uint16_t(ref.size()), q);
+         REQUIRE(w2::node_stem_ub(nd, q) == want);
+      };
+      check(0);
+      for (uint32_t s : ref) { if (s) check(s - 1); check(s); check(s + 1); }
+      check(0xFFFFFFFFu);
+   };
+   sweep(grid, gstems);
+
+   // (2) A leaf below splits at slot `pos`, pushing divider `div` that is NOT on the
+   // grid (falls strictly between two grid points → breaks constant stride). Build
+   // the post-split node through the absorb op-ctor (replaces slot pos with two
+   // children separated by div) and require it downgraded to explicit + routes right.
+   constexpr uint16_t pos = 3;
+   const uint32_t     div = gstems[pos] - STRIDE / 2;          // mid-cell → off-grid
+   w2::ptr_address    ins_kids[2] = {mk_child(), mk_child()};
+   const w2::op_inner_absorb op{pos, 1, &div, ins_kids};
+   w2::node2* down =
+       w2::w2deref(w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, *grid, op));
+
+   REQUIRE(down->num_stems == N + 1);
+   REQUIRE(down->estimator()->segment_count != w2::kBinarySentinel);   // downgraded
+
+   std::vector<uint32_t> ref = gstems;            // expected merged stems
+   ref.insert(ref.begin() + pos, div);
+   sweep(down, ref);
+
+   // Teardown mirrors the real absorb transfer: `down` cloned grid's children
+   // (unretained), so `grid` is released-MOVED (neuter → releases none of them) while
+   // `down` owns + deep-releases them. The slot-`pos` child was "split away" (replaced
+   // by ins_kids in `down`), so release it explicitly like a self-freeing split child.
+   w2::release_node(down);
+   w2::release_node_moved(grid);
+   w2::release_subtree(gkids[pos]);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base_objs);
+}
+
 // ── wtree2 — slot encoding (EXT / LOCAL / named via reserved range) ─────
 
 TEST_CASE("wtree2 slot encoding", "[wtree2][slot]")

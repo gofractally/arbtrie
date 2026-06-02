@@ -607,14 +607,23 @@ inline uint16_t stem_upper_bound_apgm(const apgm_header* h, const uint32_t* stem
 //   small node (no estimator)    → branchless linear scan
 // Every node2 carries the estimator slot; the build threshold (kApgmMinStems)
 // decides which mode each node uses.
+// Exact-grid upper_bound: count of stems ≤ q == clamp((q-base)>>shift, 0, n), with
+// NO stems read. base = stems[0]-stride, so cell 0 = [base, stems[0]); a query below
+// base (reachable at the root / wide ranges) must clamp to 0, not wrap to n — hence
+// the explicit low guard before the unsigned subtract.
+inline uint16_t grid_ub(const apgm_header* h, uint16_t n, uint32_t q) noexcept
+{
+    const uint32_t base = h->segment_keys[0];
+    if (q < base) return 0;                          // below the grid → slot 0 (no wrap)
+    const uint32_t idx = (q - base) >> h->sample_step;
+    return (idx > n) ? n : uint16_t(idx);
+}
+
 inline uint16_t node_stem_ub(const node2* nd, uint32_t q) noexcept
 {
     const apgm_header* h = nd->estimator();
     if (h->segment_count == kBinarySentinel)         // exact grid: shift, skip stems
-    {
-        const uint32_t idx = (q - h->segment_keys[0]) >> h->sample_step;
-        return (idx > nd->num_stems) ? nd->num_stems : uint16_t(idx);
-    }
+        return grid_ub(h, nd->num_stems, q);
     if (h->segment_count)
         return stem_upper_bound_apgm(h, nd->stems(), nd->num_stems, q);
     return stem_upper_bound(nd->stems(), nd->num_stems, q);
@@ -695,12 +704,7 @@ inline ptr_address inner_route(const node2* nd, uint32_t q) noexcept
     const uint16_t     n  = nd->num_stems;
     const apgm_header* h  = nd->estimator();
     if (h->segment_count == kBinarySentinel)         // exact grid: shift → child, NO stems read
-    {
-        const uint32_t idx = (q - h->segment_keys[0]) >> h->sample_step;
-        const uint16_t i   = (idx > n) ? n : uint16_t(idx);     // clamp (q above last cell)
-        assert(i == stem_upper_bound(nd->stems(), n, q));       // creation proved exactness
-        return ch[i];
-    }
+        return ch[grid_ub(h, n, q)];
     const uint32_t*    st = nd->stems();
     uint16_t           i;
     if (h->segment_count)
