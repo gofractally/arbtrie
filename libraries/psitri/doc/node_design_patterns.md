@@ -75,6 +75,18 @@ start from here. References below point at the wt1 implementation.
 
 ## C. Lifecycle (refcount, COW, transfer)
 
+> **Memory model (read this first).** SAL is NOT malloc/free. Under the read lock
+> every node is **stable and read-only**; lifetime is governed by a **shared
+> refcount** (held directly, or through the live path). `release` **defers** the
+> teardown: it posts the node to the compactor's queue and returns — the recursive
+> child-release runs on the **compactor, off the write critical path**. Only when
+> that queue is full does the caller do the recursive release inline. So: keep
+> release cost OFF the hot path (let the compactor drain it), reason about lifetime
+> as refcount *accounting* (there is no use-after-free *race* — freed bytes aren't
+> clobbered until the compactor reclaims), and treat **use-after-release as a code
+> smell** to avoid even though it doesn't crash.
+
+
 10. **`destroy` / `visit_children` / `retain_children`** release/visit/retain every
     EXT child → refcount-aware RECURSIVE teardown (a snapshot-shared child just
     decrements). A single release at a subtree root tears down the uniquely-owned
@@ -89,13 +101,19 @@ start from here. References below point at the wt1 implementation.
     reclaimed via `record_freed_space` WITHOUT running destroy, so children transfer with
     zero retain/release). A split remakes one half in place (reuse id) + `alloc`s the
     other (fresh id). The parent of a remade node skips the repoint (id unchanged).
+    For a genuine **clone-transfer** (children copied to ANOTHER node, e.g. flattening
+    a sub-inner into its parent — the source has no dangling slot), the proper move is
+    `retain_children(src)` then `release_node(src)`: the retain hands src's owning ref
+    to the clone, src's deferred destroy gives it back (net zero), src is freed. This
+    is the legacy transfer (tree_ops:1386) and is fine — the refcount accounting
+    balances regardless of when the deferred destroy drains.
     **ANTI-PATTERN — `free`/`free_moved`/neuter** (zero num_keys so destroy releases
     nothing): it writes the node to skip the destructor — fragile (faults on a
-    read-only / sync-finalized node) and *unnecessary*, because remaking in place
-    removes the separate shallow-free entirely. wt1 carried `inner_free_moved`; do NOT
-    bring it into a new node. Likewise do NOT `retain_children + DEFERRED release` a
-    node whose children a live clone shares (the deferred destroy races later mutations
-    → orphan/leak — the wtree2 varlen-insert bug). Remake-in-place is the answer.
+    read-only / sync-finalized node) and *unnecessary*. Use it for NOTHING. To replace
+    or grow, remake in place (above). The wtree2 varlen-insert leak was a neuter
+    breaking the accounting (trunc neutered+freed without releasing a child its clone
+    sibling no longer covered) — NOT a memory race; the fix was to drop the neuter and
+    remake/transfer properly. wt1 carried `inner_free_moved`; do NOT bring it forward.
 
 12. **`cow_X(p)` = make writable via `get_ref().modify()`** — in-place when unique &
     writable, else `copy_on_write` to fresh writable bytes, KEEPING the ptr_address
@@ -103,8 +121,10 @@ start from here. References below point at the wt1 implementation.
     REFERENCE down the recursion. Grow that changes size uses `realloc` (same id).
 
 13. **`smart_ref` is non-owning** (no destructor release; retain/release explicit).
-    Under the read lock, `record_freed` bytes stay valid and are never reused, so a
-    stale ref left after a relocate is safe until the op unwinds.
+    Under the read lock `record_freed` bytes stay valid (the compactor reclaims them
+    later), so a stale ref/ptr left after a relocate does NOT crash — but reading it is
+    use-after-release, a code smell: prefer to use the returned/relocated id and not
+    re-touch the old pointer.
 
 ---
 
