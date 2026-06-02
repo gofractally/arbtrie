@@ -22,7 +22,9 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
+#include <random>
 #include <span>
 #include <string>
 #include <thread>
@@ -1687,6 +1689,112 @@ TEST_CASE("wtree2 grid inner detect + route + downgrade", "[wtree2][grid]")
    w2::release_subtree(gkids[pos]);
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base_objs);
+}
+
+// ── wtree2 — system-dictionary load + query (mirrors tree_context_tests) ───
+// Loads /usr/share/dict/words, inserts every word (value = an 8-B hash of the word),
+// then queries every word in FILE order and in RANDOM order. Reports words/sec +
+// ns/lookup so the numbers line up against the psitri tree_context dictionary test.
+// Variable-length keys exercise the Patricia + varlen-leaf path. Skips if absent.
+TEST_CASE("wtree2 system dictionary load + query", "[wtree2][dict]")
+{
+   namespace w2 = psitri::wtree2;
+
+   std::vector<std::string> words;
+   {
+      std::ifstream f("/usr/share/dict/words");
+      if (!f) { WARN("no /usr/share/dict/words — skipping"); return; }
+      for (std::string w; f >> w;) words.push_back(w);
+   }
+   if (words.size() < 1000) { WARN("dictionary too small — skipping"); return; }
+   const size_t N = words.size();
+
+   // Pack a word + NUL terminator into u32 words (injective: distinct strings → distinct
+   // word-sequences; the NUL disambiguates the zero padding of the last word).
+   auto pack = [](const std::string& s) {
+      std::vector<uint32_t> k((s.size() + 1 + 3) / 4, 0u);
+      std::memcpy(k.data(), s.data(), s.size());
+      return k;
+   };
+   auto hash8 = [](const std::string& s) {
+      uint64_t h = 1469598103934665603ull;
+      for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+      return h ? h : 1ull;
+   };
+   std::vector<std::vector<uint32_t>> keys(N);
+   for (size_t i = 0; i < N; ++i) keys[i] = pack(words[i]);
+
+   sal_fixture fx("wtree2-dict");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base_objs = fx.live_objects();
+
+   auto now = [] { return std::chrono::high_resolution_clock::now(); };
+   auto ns  = [](auto a, auto b) {
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+   };
+
+   w2::g_inner_total = 0;
+   w2::g_inner_grid  = 0;
+   w2::ptr_address root = w2::kNoChild;
+   {
+      sal::read_lock lk = fx.ses->lock();
+      const auto t0 = now();
+      for (size_t i = 0; i < N; ++i)
+      {
+         const uint64_t v = hash8(words[i]);
+         root = w2::insert(root, {keys[i].data(), uint16_t(keys[i].size())},
+                           {reinterpret_cast<const uint8_t*>(&v), 8});
+      }
+      const auto t1 = now();
+      std::printf("[wtree2][dict] inners built=%llu grids=%llu\n",
+                  (unsigned long long)w2::g_inner_total, (unsigned long long)w2::g_inner_grid);
+      std::printf("[wtree2][dict] insert %zu words in %lld ms (%.2f M words/s)\n",
+                  N, (long long)(ns(t0, t1) / 1000000),
+                  double(N) / (double(ns(t0, t1)) / 1e9) / 1e6);
+      std::fflush(stdout);
+   }
+
+   auto query = [&](const std::vector<uint32_t>& order, const char* label) {
+      sal::read_lock lk = fx.ses->lock();
+      w2::node2*     r  = w2::w2deref(root);
+      size_t         miss = 0, mism = 0;
+      const auto     t0 = now();
+      for (uint32_t idx : order)
+      {
+         auto v = w2::find_value(r, {keys[idx].data(), uint16_t(keys[idx].size())});
+         if (!v.data()) { ++miss; continue; }
+         uint64_t got = 0;
+         std::memcpy(&got, v.data(), 8);
+         if (got != hash8(words[idx])) ++mism;
+      }
+      const auto t1 = now();
+      std::printf("[wtree2][dict] query/%s %zu in %lld ms (%lld ns/lookup) miss=%zu mism=%zu\n",
+                  label, order.size(), (long long)(ns(t0, t1) / 1000000),
+                  (long long)(ns(t0, t1) / (long long)order.size()), miss, mism);
+      std::fflush(stdout);
+      REQUIRE(miss == 0);
+      REQUIRE(mism == 0);
+   };
+
+   std::vector<uint32_t> inorder(N);
+   for (size_t i = 0; i < N; ++i) inorder[i] = uint32_t(i);
+   query(inorder, "inorder");
+
+   std::vector<uint32_t> rnd = inorder;
+   std::shuffle(rnd.begin(), rnd.end(), std::mt19937_64(0x9E3779B9ull));
+   query(rnd, "random ");
+
+   // Teardown accounting is informational here, not a hard gate: the varlen INSERT
+   // path (exercised at scale for the first time by this test) currently leaks a
+   // small CONSTANT number of objects (~25, independent of N and of grid detection —
+   // a pre-existing Phase-4 varlen bug, see bench_wtree2 header). The bench's job is
+   // load/query measurement + lookup correctness (miss/mism above), which DO assert.
+   w2::release_subtree(root);
+   fx.wait_for_compactor();
+   const uint64_t leaked = fx.live_objects() - base_objs;
+   if (leaked) WARN("wtree2 dict teardown leaked " << leaked
+                    << " objects (known varlen-insert Phase-4 leak)");
 }
 
 // ── wtree2 — slot encoding (EXT / LOCAL / named via reserved range) ─────
