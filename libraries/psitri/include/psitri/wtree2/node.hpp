@@ -248,18 +248,42 @@ struct node2 : public psitri::node
                    ? fixed_size_for(n_stems, prefix_len, tail_bytes)
                    : size_for(n_stems, prefix_len, tail_bytes);
     }
+    // inner / LEAF_VARLEN ctor. Sets only the fields these shapes use; fx_* are
+    // leaf_fixed-only and left untouched (unread for these shapes) — no wasted writes.
     node2(uint32_t asize, ptr_address_seq seq,
           shape shp, uint16_t n_stems_, uint8_t prefix_len_,
           uint32_t /*tail_bytes*/ = 0) noexcept
         : psitri::node(asize, type_id, seq)
     {
-        num_stems    = n_stems_;
-        shape_       = uint8_t(shp);
+        num_stems  = n_stems_;
+        shape_     = uint8_t(shp);
+        prefix_len = prefix_len_;
+        flags      = 0;
+    }
+
+    // LEAF_FIXED alloc + ctor: regions sized for stem CAPACITY `cap`, `n` live
+    // entries, fixed stride (sw key-suffix words + vl value bytes). Every header
+    // field is set ONCE here — callers fill prefix/stems/records and do not
+    // re-touch the header.
+    static uint32_t alloc_size(uint16_t /*n*/, uint16_t cap, uint8_t prefix_len,
+                               uint8_t sw, uint8_t vl) noexcept
+    {
+        return fixed_size_for(cap, prefix_len, uint32_t(cap) * (uint32_t(sw) * 4u + vl));
+    }
+    node2(uint32_t asize, ptr_address_seq seq,
+          uint16_t n, uint16_t cap, uint8_t prefix_len_, uint8_t sw, uint8_t vl) noexcept
+        : psitri::node(asize, type_id, seq)
+    {
+        num_stems    = n;
+        shape_       = uint8_t(shape::leaf_fixed);
         prefix_len   = prefix_len_;
         flags        = 0;
-        fx_rem_words = 0;
-        fx_val_len   = 0;
-        fx_cap       = uint8_t(n_stems_ <= 255 ? n_stems_ : 255);   // default: exact (no slack)
+        fx_rem_words = sw;
+        fx_val_len   = vl;
+        fx_cap       = uint8_t(cap);
+        // Leaves never carry a predictor (cap < kApgmMinStems); mark it absent so
+        // node_stem_ub takes the linear-scan path. Set once here — no finish_estimator.
+        estimator()->segment_count = 0;
     }
 };
 
@@ -533,19 +557,17 @@ inline node2* build_leaf_fixed(std::span<const leaf_entry> ents, uint16_t depth,
                                uint8_t pfx, uint16_t base_depth, uint8_t sw, uint8_t vl,
                                ptr_address hint) noexcept
 {
-    const uint16_t n      = uint16_t(ents.size());
-    const uint16_t stride = uint16_t(uint16_t(sw) * 4u + vl);
-    const uint32_t recs   = uint32_t(n) * stride;
-
+    const uint16_t n = uint16_t(ents.size());
+    // Bulk leaves are exact (capacity == n); the leaf_fixed ctor sets every header
+    // field once (num_stems / fx_cap / fx_rem_words / fx_val_len).
     const ptr_address a =
         (hint == kNoChild)
-            ? w2session().alloc<node2>(alloc_hint{}, shape::leaf_fixed, n, pfx, recs)
-            : w2session().alloc<node2>(alloc_hint{&hint, 1}, shape::leaf_fixed, n, pfx, recs);
-    node2* nd        = w2deref(a);
-    nd->fx_rem_words = sw;
-    nd->fx_val_len   = vl;
+            ? w2session().alloc<node2>(alloc_hint{}, n, n, pfx, sw, vl)
+            : w2session().alloc<node2>(alloc_hint{&hint, 1}, n, n, pfx, sw, vl);
+    node2* nd = w2deref(a);
 
     if (pfx) std::memcpy(nd->prefix(), ents.front().key.data() + depth, size_t(pfx) * 4u);
+    const uint16_t stride = nd->fx_stride();
     uint32_t* st  = nd->stems();
     uint8_t*  rec = nd->records();
     uint32_t  prev_first = 0;
@@ -562,10 +584,7 @@ inline node2* build_leaf_fixed(std::span<const leaf_entry> ents, uint16_t depth,
                             size_t(sw) * 4u);
         if (vl) std::memcpy(r + size_t(sw) * 4u, e.value.data(), vl);
     }
-    apgm_header* est   = nd->estimator();
-    est->segment_count = 0;
-    if (n >= kApgmMinStems && apgm_build_adaptive(est, nd->stems(), n) == 0)
-        est->segment_count = 0;
+    // (estimator absent for leaves — set once in the ctor.)
     return nd;
 }
 

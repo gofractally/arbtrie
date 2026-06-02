@@ -49,14 +49,8 @@ inline void finish_estimator(node2* nd) noexcept
 inline node2* alloc_leaf_fixed(uint16_t n, uint16_t cap, uint8_t pl, uint8_t sw,
                                uint8_t vl) noexcept
 {
-    const uint32_t recs = uint32_t(cap) * (uint32_t(sw) * 4u + vl);
-    // alloc with n_stems=cap so the ctor sizes regions + sets fx_cap=cap.
-    node2* nd = w2deref(w2session().alloc<node2>(alloc_hint{}, shape::leaf_fixed, cap, pl, recs));
-    nd->num_stems    = n;
-    nd->fx_cap       = uint8_t(cap);
-    nd->fx_rem_words = sw;
-    nd->fx_val_len   = vl;
-    return nd;
+    // One ctor sets every header field once (no over-init / overwrite).
+    return w2deref(w2session().alloc<node2>(alloc_hint{}, n, cap, pl, sw, vl));
 }
 
 // Slack capacity for a leaf of this stride: as many entries as the tail budget
@@ -176,7 +170,6 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
         std::memcpy(trunc->prefix(), P + j, size_t(pl - j) * 4u);
         std::memcpy(trunc->stems(), node->stems(), size_t(n) * 4u);
         std::memcpy(trunc->records(), node->records(), size_t(n) * node->fx_stride());
-        finish_estimator(trunc);
     }
     else  // inner (or varlen leaf, which also has stems/children)
     {
@@ -229,8 +222,7 @@ inline node2* build_fixed_range(node2* old, uint16_t pos, uint32_t qstem,
             std::memcpy(rc + size_t(o) * stride, old->record(s), stride);
         }
     }
-    finish_estimator(nd);
-    return nd;
+    return nd;   // (leaf estimator absent — set in ctor)
 }
 
 // Shift the tail [pos..n) up by one slot and write the new entry in place. The
