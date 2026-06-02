@@ -1803,6 +1803,70 @@ TEST_CASE("wtree2 leaf_fixed build + find", "[wtree2][find]")
    REQUIRE(fx.live_objects() == base);
 }
 
+// ── wtree2 — LEAF_FIXED_U16 (Tiny16/Medium16) node type, on its own ────────
+// Build the u16 range-encoded leaf directly, verify it is transparently
+// substitutable for a u32 leaf_fixed (same keys → same find results, same
+// misses), and that runtime detection (g_leaf_u16) produces it from build_leaf.
+TEST_CASE("wtree2 leaf_fixed_u16 build + find (substitutable)", "[wtree2][find][u16]")
+{
+   namespace w2 = psitri::wtree2;
+   sal_fixture fx("wtree2-u16");
+   fx.alloc->register_type_ops<w2::node2>();
+   w2::g_wtree2_session = fx.ses.get();
+   const uint64_t base_objs = fx.live_objects();
+   auto rd = [](std::span<const uint8_t> s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+
+   // Single-word u32 keys in a tight (<2^16) window → u16-encodable; 8-byte values.
+   const uint32_t            B    = 1'000'000;
+   std::vector<uint32_t>     keys = {B + 0, B + 7, B + 100, B + 5000, B + 60000};
+   std::vector<std::array<uint8_t, 8>> vals;
+   for (size_t i = 0; i < keys.size(); ++i) vals.push_back({uint8_t(i + 1), 2, 3, 4, 5, 6, 7, 8});
+   std::vector<w2::leaf_entry> ents;
+   for (size_t i = 0; i < keys.size(); ++i)
+      ents.push_back({{&keys[i], 1}, {vals[i].data(), 8}});
+
+   // ── build the node directly ──
+   w2::node2* u16 = w2::build_leaf_u16({ents.data(), ents.size()}, 0, 0, 0, 0, 8, w2::kNoChild);
+   REQUIRE(u16->is_leaf());
+   REQUIRE(u16->is_leaf_u16());
+   REQUIRE_FALSE(u16->is_leaf_fixed());
+   REQUIRE(u16->num_stems == 5);
+   REQUIRE(u16->fx_base() == B);                         // range base
+   REQUIRE(u16->fx_val_len == 8);
+
+   // ── reference u32 leaf with the same entries ──
+   w2::node2* u32 = w2::build_leaf_fixed({ents.data(), ents.size()}, 0, 0, 0, 0, 8, w2::kNoChild);
+   REQUIRE(u32->is_leaf_fixed());
+
+   // Substitutable: same keys → identical values from both nodes.
+   for (size_t i = 0; i < keys.size(); ++i)
+   {
+      auto a = rd(w2::find_value(u16, {&keys[i], 1}));
+      auto b = rd(w2::find_value(u32, {&keys[i], 1}));
+      REQUIRE(a == std::vector<uint8_t>(vals[i].begin(), vals[i].end()));
+      REQUIRE(a == b);
+   }
+   // Misses: in-window absent stem, below window, above window — all absent in both.
+   for (uint32_t mq : {B + 50u, B - 1u, B + 70000u})
+   {
+      REQUIRE(w2::find_value(u16, {&mq, 1}).data() == nullptr);
+      REQUIRE(w2::find_value(u32, {&mq, 1}).data() == nullptr);
+   }
+
+   // ── runtime detection via build_leaf when enabled ──
+   w2::g_leaf_u16 = true;
+   w2::node2* det = w2::build_leaf({ents.data(), ents.size()}, 0);
+   REQUIRE(det->is_leaf_u16());                          // range fits → u16 chosen
+   w2::g_leaf_u16 = false;
+   w2::node2* det32 = w2::build_leaf({ents.data(), ents.size()}, 0);
+   REQUIRE(det32->is_leaf_fixed());                      // toggle off → u32
+   REQUIRE(rd(w2::find_value(det, {&keys[2], 1})) == rd(w2::find_value(det32, {&keys[2], 1})));
+
+   w2::node2_free(u16); w2::node2_free(u32); w2::node2_free(det); w2::node2_free(det32);
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base_objs);
+}
+
 // ── wtree2 — incremental insert, Increment A (in-place leaf + duplicate) ───
 // Keys share a 5-word prefix and vary in the 6th word, so every key routes to a
 // single leaf (no Patricia split, no overflow) — exercising descent, gathered

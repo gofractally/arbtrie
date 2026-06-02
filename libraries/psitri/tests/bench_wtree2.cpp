@@ -97,6 +97,7 @@ int main(int argc, char** argv)
         if (s == "u32")       u32_mode    = true;   // 1-word (4-B) keys instead of 24-B
         if (s == "grid")      grid_mode   = true;   // experimental grid builder (implies u32)
         if (s == "stream")    stream_mode = true;   // stateless incremental upsert + commit/1M
+        if (s == "lu16")      w2::g_leaf_u16 = true; // u16 range-encoded leaves (Tiny16/Medium16)
     }
     if (grid_mode) u32_mode = true;                 // grid builder is u32-only
     const uint16_t KW = u32_mode ? 1 : 6;           // key words

@@ -87,7 +87,12 @@ inline constexpr uint32_t kMaxLocalTailOff =
 // for mixed entry sizes / big values); leaf_fixed == LEAF_FIXED (SoA columns,
 // no offset table / no heap — every entry shares a stride, so record j is at a
 // computed offset). inner routes. is_leaf() covers both leaf kinds.
-enum class shape : uint8_t { leaf = 0, inner = 1, leaf_fixed = 2 };
+// leaf_fixed_u16 (Tiny16/Medium16, from ~/libwtree): a LEAF_FIXED whose key range
+// fits 16 bits, so stems are stored RANGE-ENCODED as u16 (key - base) — half the
+// stem memory and 2× SIMD throughput (8 u16 lanes vs 4 u32). Transparently
+// substitutable: no information lost, the same keys just encoded better. base is a
+// u32 kept in the (leaf-unused) estimator slot. Built contiguous (no central gap).
+enum class shape : uint8_t { leaf = 0, inner = 1, leaf_fixed = 2, leaf_fixed_u16 = 3 };
 
 // ── Header flags ──────────────────────────────────────────────────────
 inline constexpr uint8_t kFlagHasTerminal = 0x01;   // a key ends at prefix-end → terminal value present
@@ -127,8 +132,9 @@ struct node2 : public psitri::node
     // ── Trivial accessors ─────────────────────────────────────────────
     shape    get_shape()      const noexcept { return shape(shape_); }
     bool     is_inner()       const noexcept { return shape_ == uint8_t(shape::inner); }
-    bool     is_leaf()        const noexcept { return shape_ != uint8_t(shape::inner); }   // varlen OR fixed
+    bool     is_leaf()        const noexcept { return shape_ != uint8_t(shape::inner); }   // varlen/fixed/u16
     bool     is_leaf_fixed()  const noexcept { return shape_ == uint8_t(shape::leaf_fixed); }
+    bool     is_leaf_u16()    const noexcept { return shape_ == uint8_t(shape::leaf_fixed_u16); }
     bool     has_terminal()   const noexcept { return (flags & kFlagHasTerminal) != 0; }
     uint16_t n_slots()        const noexcept { return uint16_t(num_stems + 1); }
     uint16_t fx_stride()      const noexcept { return uint16_t(uint16_t(fx_rem_words) * 4u + fx_val_len); }
@@ -238,6 +244,25 @@ struct node2 : public psitri::node
     const uint8_t* record(uint16_t j) const noexcept { return records() + size_t(j) * fx_stride(); }
     uint8_t*       record(uint16_t j)       noexcept { return records() + size_t(j) * fx_stride(); }
 
+    // ── LEAF_FIXED_U16 region math (u16 range-encoded stems) ──────────
+    // Same as LEAF_FIXED but the stems region is cap·2 (u16) instead of cap·4. The
+    // range base lives in the (leaf-unused) estimator's first key slot.
+    static uint32_t u16_records_off(uint16_t cap, uint8_t prefix_len) noexcept
+    {
+        const uint32_t hdr   = uint32_t(kFixedHeaderBytes) + est_bytes()
+                             + uint32_t(prefix_len) * 4u;
+        const uint32_t s_off = uint32_t(ucc::round_up_multiple<kCacheLine>(hdr));
+        return s_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(cap) * 2u));
+    }
+    uint32_t        fx_base()  const noexcept { return estimator()->segment_keys[0]; }
+    void            set_fx_base(uint32_t b) noexcept { estimator()->segment_keys[0] = b; }
+    uint16_t*       u16_stems()       noexcept { return reinterpret_cast<uint16_t*>(base() + stems_off()); }
+    const uint16_t* u16_stems() const noexcept { return reinterpret_cast<const uint16_t*>(base() + stems_off()); }
+    uint8_t*        u16_records()       noexcept { return base() + u16_records_off(fx_cap, prefix_len); }
+    const uint8_t*  u16_records() const noexcept { return base() + u16_records_off(fx_cap, prefix_len); }
+    const uint8_t*  u16_record(uint16_t j) const noexcept { return u16_records() + size_t(j) * fx_stride(); }
+    uint8_t*        u16_record(uint16_t j)       noexcept { return u16_records() + size_t(j) * fx_stride(); }
+
     // ── SAL alloc contract ────────────────────────────────────────────
     // session.alloc<node2>(hint, shp, n_stems, prefix_len) forwards these to
     // alloc_size (for the byte size) and the placement ctor (header init). The
@@ -291,6 +316,30 @@ struct node2 : public psitri::node
         // Leaves never carry a predictor (cap < kApgmMinStems); mark it absent so
         // node_stem_ub takes the linear-scan path. Set once here — no finish_estimator.
         estimator()->segment_count = 0;
+    }
+
+    // LEAF_FIXED_U16 alloc + ctor (distinguished by the trailing `base` arg). Stems
+    // region is cap·2 (u16); `base` is the range base, stored in the estimator slot.
+    static uint32_t alloc_size(uint16_t /*n*/, uint16_t cap, uint8_t prefix_len,
+                               uint8_t sw, uint8_t vl, uint32_t /*base*/) noexcept
+    {
+        return u16_records_off(cap, prefix_len)
+             + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(cap) * (uint32_t(sw) * 4u + vl)));
+    }
+    node2(uint32_t asize, ptr_address_seq seq, uint16_t n, uint16_t cap, uint8_t prefix_len_,
+          uint8_t sw, uint8_t vl, uint32_t base) noexcept
+        : psitri::node(asize, type_id, seq)
+    {
+        num_stems    = n;
+        shape_       = uint8_t(shape::leaf_fixed_u16);
+        prefix_len   = prefix_len_;
+        flags        = 0;
+        fx_rem_words = sw;
+        fx_val_len   = vl;
+        fx_cap       = uint8_t(cap);
+        leaf_split   = uint8_t(n);          // contiguous (read-only build; no central gap)
+        estimator()->segment_count = 0;     // no predictor
+        set_fx_base(base);                  // range base
     }
 
     // ── LEAF_FIXED central-gap accessors ──────────────────────────────
@@ -386,8 +435,8 @@ inline void node2_free(node2* p) noexcept { w2session().release(p->address()); }
 // alloc_header no-op default.
 inline void free_subtree(node2* nd) noexcept
 {
-    // LEAF_FIXED has no children region (inline records only) → nothing to recurse.
-    if (!nd->is_leaf_fixed())
+    // LEAF_FIXED / LEAF_FIXED_U16 have no children region (inline records) → no recurse.
+    if (!nd->is_leaf_fixed() && !nd->is_leaf_u16())
     {
         const uint16_t     ns = nd->n_slots();
         const ptr_address* ch = nd->children();
@@ -510,6 +559,32 @@ inline const uint8_t* fx_find_record(const node2* leaf, uint32_t q) noexcept
     __builtin_prefetch(rc + size_t(tb) * stride, 0, 1);
     const uint16_t k = stem_upper_bound(st + tb, uint16_t(n - h), q);
     return (k && st[tb + k - 1] == q) ? rc + size_t(tb + k - 1) * stride : nullptr;
+}
+
+// u16 range-encoded upper_bound: count of (u16) stems ≤ q16. Branchless → the
+// compiler vectorizes to 8-lane NEON (vcleq_u16 / vaddvq_u16) — 2× a u32 scan.
+inline uint16_t u16_upper_bound(const uint16_t* stems, uint16_t n, uint16_t q) noexcept
+{
+    uint16_t c = 0;
+    for (uint16_t j = 0; j < n; ++j)
+        c = uint16_t(c + (stems[j] <= q));
+    return c;
+}
+
+// LEAF_FIXED_U16 point lookup: subtract base, range-check (q outside the leaf's
+// 16-bit window → absent), scan the contiguous u16 stems, return the record ptr.
+inline const uint8_t* u16_find_record(const node2* leaf, uint32_t q) noexcept
+{
+    const uint32_t base = leaf->fx_base();
+    const uint32_t d    = q - base;
+    if (q < base || d > 0xFFFFu) return nullptr;          // outside this leaf's window
+    const uint16_t  q16    = uint16_t(d);
+    const uint16_t  n      = leaf->num_stems;
+    const uint16_t* st     = leaf->u16_stems();
+    const uint8_t*  rc     = leaf->u16_records();
+    __builtin_prefetch(rc, 0, 1);
+    const uint16_t k = u16_upper_bound(st, n, q16);
+    return (k && st[k - 1] == q16) ? rc + size_t(k - 1) * leaf->fx_stride() : nullptr;
 }
 
 // Inner routing for descent: predict the stem position, PREFETCH the predicted
@@ -774,6 +849,46 @@ inline node2* build_leaf_fixed(std::span<const leaf_entry> ents, uint16_t depth,
     return nd;
 }
 
+// ── Bulk-build a LEAF_FIXED_U16 (Tiny16/Medium16) ─────────────────────
+// Like build_leaf_fixed but stems are range-encoded u16 (key − base). Caller
+// guarantees uniformity AND that the stem range fits 16 bits (back−front < 2^16).
+inline node2* build_leaf_u16(std::span<const leaf_entry> ents, uint16_t depth,
+                             uint8_t pfx, uint16_t base_depth, uint8_t sw, uint8_t vl,
+                             ptr_address hint) noexcept
+{
+    const uint16_t n    = uint16_t(ents.size());
+    const uint32_t base = ents.front().key[base_depth];          // min (entries sorted)
+    const ptr_address a =
+        (hint == kNoChild)
+            ? w2session().alloc<node2>(alloc_hint{}, n, n, pfx, sw, vl, base)
+            : w2session().alloc<node2>(alloc_hint{&hint, 1}, n, n, pfx, sw, vl, base);
+    node2* nd = w2deref(a);
+    if (pfx) std::memcpy(nd->prefix(), ents.front().key.data() + depth, size_t(pfx) * 4u);
+    const uint16_t stride = nd->fx_stride();
+    uint16_t* st  = nd->u16_stems();
+    uint8_t*  rec = nd->u16_records();
+    uint32_t  prev = 0;
+    for (uint16_t j = 0; j < n; ++j)
+    {
+        const auto&    e     = ents[j];
+        const uint32_t first = e.key[base_depth];
+        assert(j == 0 || first > prev);
+        assert(uint32_t(first - base) <= 0xFFFFu);              // caller guarantees range
+        assert(uint16_t(e.key.size() - base_depth - 1) == sw && e.value.size() == vl);
+        prev  = first;
+        st[j] = uint16_t(first - base);
+        uint8_t* r = rec + size_t(j) * stride;
+        if (sw) std::memcpy(r, reinterpret_cast<const uint8_t*>(e.key.data() + base_depth + 1),
+                            size_t(sw) * 4u);
+        if (vl) std::memcpy(r + size_t(sw) * 4u, e.value.data(), vl);
+    }
+    return nd;
+}
+
+// Runtime u16-leaf toggle (off by default — read-only build paths opt in; the
+// insert path keeps producing u32 leaf_fixed since it mutates them in place).
+inline bool g_leaf_u16 = false;
+
 // ── LEAF dispatcher: pick FIXED (uniform sizes) or VARLEN ─────────────
 // Computes the shared Patricia prefix (§9.2 cap) and base depth, then routes to
 // the fixed builder when every entry has identical suffix-word count and value
@@ -798,7 +913,13 @@ inline node2* build_leaf(std::span<const leaf_entry> ents, uint16_t depth,
         if (e.key.size() - base_depth - 1 != sw0 || e.value.size() != vl0) { uniform = false; break; }
 
     if (uniform)
+    {
+        // Range-encode to u16 when enabled and the stem range fits 16 bits.
+        if (g_leaf_u16 &&
+            uint32_t(ents.back().key[base_depth] - ents.front().key[base_depth]) <= 0xFFFFu)
+            return build_leaf_u16(ents, depth, pfx, base_depth, uint8_t(sw0), uint8_t(vl0), hint);
         return build_leaf_fixed(ents, depth, pfx, base_depth, uint8_t(sw0), uint8_t(vl0), hint);
+    }
     return build_leaf_varlen(ents, depth, hint);
 }
 
@@ -824,11 +945,12 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
                 return {};                                  // terminal (slot 0) — not yet stored
             const uint32_t q = key[depth];
 
-            if (nd->is_leaf_fixed())
+            if (nd->is_leaf_fixed() || nd->is_leaf_u16())
             {
-                // LEAF_FIXED central-gap: one split compare picks the group, then we
-                // prefetch+scan only that group and fetch its record.
-                const uint8_t* r = fx_find_record(nd, q);
+                // LEAF_FIXED: central-gap u32 stems. LEAF_FIXED_U16: contiguous u16
+                // range-encoded stems (Tiny16/Medium16). Same record column either way.
+                const uint8_t* r = nd->is_leaf_u16() ? u16_find_record(nd, q)
+                                                     : fx_find_record(nd, q);
                 if (!r) return {};
                 const uint8_t sw = nd->fx_rem_words;
                 if (size_t(depth) + 1 + sw != key.size()) return {};
