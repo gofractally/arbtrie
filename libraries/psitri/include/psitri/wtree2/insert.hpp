@@ -127,11 +127,12 @@ inline ins_result rebuilt_result(ptr_address sub) noexcept
 // entry that breaks LEAF_FIXED): gather this leaf's entries + the new one into
 // the arena and rebuild via bulk_build. Heap-free (arena + SAL). depth is BEFORE
 // the leaf's own prefix.
-// free_old=false forks (SHARED mode): build the new leaf, leave `leaf` for the
-// snapshot. Leaves are inline-value → no child refs to retain.
+// SHARED mode forks (build the new leaf, leave `leaf` for the snapshot); UNIQUE
+// frees the old leaf. Leaves are inline-value → no child refs to retain.
+template <umode M>
 inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head,
                                      uint16_t depth, std::span<const uint32_t> key,
-                                     std::span<const uint8_t> val, bool free_old = true,
+                                     std::span<const uint8_t> val,
                                      alloc_hint phint = {}) noexcept
 {
     scratch_mark   mark;
@@ -189,7 +190,7 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
             std::memcpy(vb, val.data(), val.size());
             ents[ip].value = {vb, val.size()};
             const ptr_address sub = bulk_build({ents, cnt}, depth, phint);
-            if (free_old) node2_free(leaf);
+            if constexpr (M == umode::unique) node2_free(leaf);
             return rebuilt_result(sub);
         }
         if (std::lexicographical_compare(key.begin(), key.end(), k.begin(), k.end())) break;
@@ -205,17 +206,19 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
     ++cnt;
 
     const ptr_address sub = bulk_build({ents, cnt}, depth, phint);
-    if (free_old) node2_free(leaf);
+    if constexpr (M == umode::unique) node2_free(leaf);
     return rebuilt_result(sub);   // pl0 inner → flattened into parent (e.g. collision)
 }
 
 // §7.2 Patricia split: key matches node->prefix[0..j) then diverges. Works for
 // inner (trunc = build_inner) and leaf (trunc = leaf re-prefixed) alike.
-// free_old=false forks (SHARED): the new `trunc` copies `node`'s children, so they
-// become shared (snapshot + trunc) and are retained; `node` is left for the snapshot.
+// SHARED forks: the new `trunc` copies `node`'s children, so they become shared
+// (snapshot + trunc) and are retained; `node` is left for the snapshot. UNIQUE frees
+// `node` (its children were cloned 1:1 into trunc → clone-transfer, no neuter).
+template <umode M>
 inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
                               std::span<const uint8_t> val, uint16_t depth, uint16_t j,
-                              bool free_old = true, alloc_hint phint = {}) noexcept
+                              alloc_hint phint = {}) noexcept
 {
     const uint32_t* P          = node->prefix();
     const uint16_t  pl         = node->prefix_len;
@@ -255,11 +258,15 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
     else                        { div = node_pivot; k0 = nl->address();    k1 = trunc->address(); }
     ptr_address kids[2] = {k0, k1};
     node2*      small   = build_inner({P, j}, {&div, 1}, {kids, 2}, phint);
-    if (!free_old && node->is_inner())
-        retain_all_children(node);     // trunc copied node's children → now shared with snapshot
+    if constexpr (M == umode::shared)
+    {
+        if (node->is_inner())
+            retain_all_children(node);   // trunc copied node's children → now shared with snapshot
+    }
     // trunc cloned ALL of node's children 1:1 (no consumed slot) → psitri clone
     // transfer: retain + deep-release, no neuter, no COW (read-only-safe).
-    if (free_old) node2_free_cloned(node);
+    else
+        node2_free_cloned(node);
     return in_place(small->address());
 }
 
@@ -399,7 +406,7 @@ inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
                               uint16_t gdepth, uint16_t sdepth, alloc_hint phint) noexcept
 {
     if (!leaf->is_leaf_fixed())   // varlen leaf → arena fallback (no insert tests hit this yet)
-        return leaf_rebuild_arena(leaf, head, gdepth, key, val, true, phint);
+        return leaf_rebuild_arena<umode::unique>(leaf, head, gdepth, key, val, phint);
 
     const uint32_t q   = key[sdepth];
     const uint16_t pos = leaf_stem_ub(leaf, q);            // gap-aware sorted upper_bound
@@ -417,12 +424,12 @@ inline ins_result leaf_insert(node2* leaf, std::span<const uint32_t> key,
             std::memcpy(rec + size_t(sw) * 4u, val.data(), vl);   // value update in place
             return in_place(leaf->address());
         }
-        return leaf_rebuild_arena(leaf, head, gdepth, key, val, true, phint);   // collision (rare)
+        return leaf_rebuild_arena<umode::unique>(leaf, head, gdepth, key, val, phint);   // collision (rare)
     }
 
     // New entry — must keep the fixed stride, else convert (rare).
     if (uint16_t(key.size() - sdepth - 1) != sw || val.size() != vl)
-        return leaf_rebuild_arena(leaf, head, gdepth, key, val, true, phint);
+        return leaf_rebuild_arena<umode::unique>(leaf, head, gdepth, key, val, phint);
 
     return leaf_fixed_add(leaf, pos, q,
                           reinterpret_cast<const uint8_t*>(key.data() + sdepth + 1), val, phint);
@@ -573,11 +580,10 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
     const bool      leaf = nd->is_leaf();
     const uint16_t  pl   = nd->prefix_len;
     const uint32_t* pfx  = nd->prefix();
-    constexpr bool  uniq = (M == umode::unique);
     for (uint16_t i = 0; i < pl; ++i)
         if (size_t(depth) + i >= key.size() || key[depth + i] != pfx[i])
-            return leaf ? leaf_rebuild_arena(nd, key.subspan(0, depth), depth, key, val, uniq, phint)
-                        : case2_split(nd, key, val, depth, i, uniq, phint);
+            return leaf ? leaf_rebuild_arena<M>(nd, key.subspan(0, depth), depth, key, val, phint)
+                        : case2_split<M>(nd, key, val, depth, i, phint);
     const uint16_t leaf_depth = depth;            // depth before this node's prefix
     depth = uint16_t(depth + pl);
 
@@ -587,7 +593,7 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
             return leaf_insert(writable(nref), key, val, key.subspan(0, leaf_depth), leaf_depth,
                                depth, phint);
         else                                      // shared: fork into a fresh leaf, keep the old
-            return leaf_rebuild_arena(nd, key.subspan(0, leaf_depth), leaf_depth, key, val, false, phint);
+            return leaf_rebuild_arena<M>(nd, key.subspan(0, leaf_depth), leaf_depth, key, val, phint);
     }
 
     // This inner's branch span — the hint for its own children + the descent.
