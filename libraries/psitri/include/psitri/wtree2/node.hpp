@@ -483,6 +483,33 @@ inline const uint8_t* fx_find_record(const node2* leaf, uint32_t q) noexcept
     return (k && st[tb + k - 1] == q) ? rc + size_t(tb + k - 1) * stride : nullptr;
 }
 
+// Inner routing for descent: predict the stem position, PREFETCH the predicted
+// child slot so it overlaps the correction walk + the exact children read, then
+// return the routed child. Recovers the otherwise-cold children-region miss every
+// inner pays on a descent (algo §3.4 slot prefetch).
+inline ptr_address inner_route(const node2* nd, uint32_t q) noexcept
+{
+    const uint32_t*    st = nd->stems();
+    const ptr_address* ch = nd->children();
+    const uint16_t     n  = nd->num_stems;
+    const apgm_header* h  = nd->estimator();
+    uint16_t           i;
+    if (h->segment_count)
+    {
+        const uint32_t p  = apgm_lookup_stem_position(h, q);
+        uint16_t       pi = (p >= n) ? n : uint16_t(p);
+        __builtin_prefetch(&ch[pi], 0, 1);            // predicted child slot (overlaps walk)
+        while (pi > 0 && st[pi - 1] > q) --pi;
+        while (pi < n && st[pi] <= q)    ++pi;
+        i = pi;
+    }
+    else
+    {
+        i = stem_upper_bound(st, n, q);               // tiny inner: just scan
+    }
+    return ch[i];
+}
+
 // ── Prefix absorption (algo §9.2) ─────────────────────────────────────
 // Longest common prefix (in u32 words) over a sorted set of key-word spans.
 // Because the set is sorted, the LCP of the whole set == LCP(first, last).
@@ -779,10 +806,8 @@ inline std::span<const uint8_t> find_value(node2* nd, std::span<const uint32_t> 
             return vr->value_span();
         }
 
-        const uint16_t i = (depth >= key.size())
-                               ? uint16_t(0)
-                               : node_stem_ub(nd, key[depth]);
-        const ptr_address c = nd->children()[i];
+        const ptr_address c = (depth >= key.size()) ? nd->children()[0]
+                                                    : inner_route(nd, key[depth]);
         if (!is_ext_slot(c)) return {};                     // empty slot → absent
         nd = w2deref(c);
     }
