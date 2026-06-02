@@ -266,9 +266,9 @@ struct node2 : public psitri::node
     // ── SAL alloc contract ────────────────────────────────────────────
     // session.alloc<node2>(hint, shp, n_stems, prefix_len) forwards these to
     // alloc_size (for the byte size) and the placement ctor (header init). The
-    // bulk constructor then fills prefix/stems/children. cow_size/compact_size/
-    // copy_to/destroy/visit_children use the alloc_header defaults for now
-    // (real lifecycle = Phase 6).
+    // bulk constructor then fills prefix/stems/children. cow_size/copy_to use the
+    // alloc_header defaults (stored-size + flat memcpy); destroy/visit_children/
+    // retain_children are defined below (release/visit/retain the EXT children).
     // For LEAF_FIXED, tail_bytes is the packed record-column size and there is no
     // children region; for inner / LEAF_VARLEN it's the value-tail past children.
     static uint32_t alloc_size(shape shp, uint16_t n_stems, uint8_t prefix_len,
@@ -405,6 +405,41 @@ struct node2 : public psitri::node
     // COW size: re-expand a (possibly contracted) leaf to roomy capacity on modify.
     // (Unique-mode insert reallocs explicitly; this is for the SAL COW path / MVCC.)
     uint32_t cow_size() const noexcept { return size(); }
+
+    // ── SAL lifecycle (models psitri inner_node/leaf_node) ────────────────
+    // destroy(): SAL's final_release runs this when a node's refcount hits 0 —
+    // release every real (EXT) child, giving a refcount-aware RECURSIVE teardown
+    // (a child shared with a snapshot, ref>1, just decrements; it isn't freed).
+    // Inline-record leaves (leaf_fixed / leaf_fixed_u16) own no child refs → no-op.
+    // To free a node whose children were MOVED to a new node, use node2_free_moved
+    // (retain_children first → the moved-to node's ref is balanced by destroy's release).
+    bool has_child_refs() const noexcept { return !is_leaf_fixed() && !is_leaf_u16(); }
+    void destroy(const sal::allocator_session_ptr& session) const noexcept
+    {
+        if (!has_child_refs()) return;
+        const ptr_address* c = children();
+        const uint16_t     ns = n_slots();
+        for (uint16_t i = 0; i < ns; ++i)
+            if (is_ext_slot(c[i])) session->release(c[i]);
+    }
+    void visit_children(const std::function<void(ptr_address)>& v) const noexcept
+    {
+        if (!has_child_refs()) return;
+        const ptr_address* c = children();
+        const uint16_t     ns = n_slots();
+        for (uint16_t i = 0; i < ns; ++i)
+            if (is_ext_slot(c[i])) v(c[i]);
+    }
+    // Called by node2_free_moved (not SAL), so it takes the bare session_t& that
+    // w2session() hands back rather than the allocator_session_ptr destroy() needs.
+    void retain_children(session_t& session) const noexcept
+    {
+        if (!has_child_refs()) return;
+        const ptr_address* c = children();
+        const uint16_t     ns = n_slots();
+        for (uint16_t i = 0; i < ns; ++i)
+            if (is_ext_slot(c[i])) session.retain(c[i]);
+    }
 };
 
 // ── Compile-time layout verification (PHASE 1 "test") ─────────────────
@@ -427,42 +462,52 @@ inline session_t& w2session() noexcept { return *g_wtree2_session; }
 template <typename T = node2>
 inline T* w2deref(ptr_address a) noexcept { return w2session().template get_ptr<T>(a); }
 
+// Release this node. SAL final_release runs node2::destroy → which releases the
+// EXT children → recursive, refcount-aware teardown (a snapshot-shared child just
+// decrements). So a single node2_free at a subtree root tears down the whole
+// (uniquely-owned) subtree; shared nodes survive on their other refs.
 inline void node2_free(node2* p) noexcept { w2session().release(p->address()); }
 
-// Recursively release a subtree (EXT children first, then self). LOCAL/named
-// slots own no node. This is the basis for the Phase-6 lifecycle destroy(); for
-// now it's an explicit free used by tests/teardown since node2::destroy is the
-// alloc_header no-op default.
-inline void free_subtree(node2* nd) noexcept
+// Free a node whose children were MOVED to a new node (grow / split / rebuild /
+// flatten). Neuter it first (num_stems=0, slot0=empty) so the destroy() that
+// final_release runs later releases NOTHING — the moved children keep their single
+// owning ref in the destination. This is the only correct shallow-free: a split
+// child frees ITSELF and returns split_at, so the parent's slot i is already a
+// dangling address — a deep free (or a retain/release that walks the children)
+// would touch that freed slot. (Models psitri inner_free_moved.)
+//
+// PRECONDITION: p must be WRITABLE. The neuter writes two header words; callers
+// reach a node here only after writable()/copy_on_write has moved it into the
+// current (writable) segment, or on a freshly-built node — never on a sync-finalized
+// read-only node. Inline-record leaves own no child refs → the writes are skipped.
+inline void node2_free_moved(node2* p) noexcept
 {
-    // LEAF_FIXED / LEAF_FIXED_U16 have no children region (inline records) → no recurse.
-    if (!nd->is_leaf_fixed() && !nd->is_leaf_u16())
+    if (p->has_child_refs())
     {
-        const uint16_t     ns = nd->n_slots();
-        const ptr_address* ch = nd->children();
-        for (uint16_t i = 0; i < ns; ++i)
-            if (is_ext_slot(ch[i])) free_subtree(w2session().get_ptr<node2>(ch[i]));
+        p->num_stems     = 0;
+        p->children()[0] = kNoChild;   // n_slots()==1 → destroy() releases nothing
     }
-    node2_free(nd);
+    node2_free(p);
 }
 
-// Refcount-aware subtree release (MVCC teardown): release `a`; only when this was
-// its LAST ref (ref==1, about to be freed) recurse to release its children — a
-// child shared with a snapshot (ref>1) just gets its ref dropped, its subtree left
-// for the snapshot. (Plain free_subtree is not refcount-aware → unsafe on a tree
-// that shares nodes with a snapshot.)
+// Free a node whose children were CLONED 1:1 into a replacement (re-prefix /
+// Patricia split — no slot is consumed, so every child ptr is still valid). This
+// is psitri's transfer primitive (tree_ops retain_children + release): retain each
+// child (+1) so it survives p's deep destroy (−1) → net zero, the clone owns them.
+// READ-ONLY-SAFE: p is never written, so p may sit in a sync-finalized segment with
+// no COW. (Unlike node2_free_moved, which neuters a writable node — used only where
+// a slot is consumed/dangling and a 1:1 retain would touch a freed address.)
+inline void node2_free_cloned(node2* p) noexcept
+{
+    p->retain_children(w2session());   // +1 each → survives p's destroy, owned by the clone
+    node2_free(p);                     // release p → destroy releases each child (−1) → net 0
+}
+
+// Subtree teardown == node2_free now (destroy recurses). Kept as named aliases.
+inline void free_subtree(node2* nd) noexcept { node2_free(nd); }
 inline void release_subtree(ptr_address a) noexcept
 {
-    if (!is_ext_slot(a)) return;
-    node2* nd = w2deref(a);
-    if (nd->is_inner() && w2session().get_ref<node2>(a).ref() == 1)
-    {
-        const uint16_t     ns = nd->n_slots();
-        const ptr_address* ch = nd->children();
-        for (uint16_t i = 0; i < ns; ++i)
-            if (is_ext_slot(ch[i])) release_subtree(ch[i]);
-    }
-    w2session().release(a);
+    if (is_ext_slot(a)) w2session().release(a);
 }
 
 // ── Stem search (algo §6) ─────────────────────────────────────────────

@@ -257,7 +257,9 @@ inline ins_result case2_split(node2* node, std::span<const uint32_t> key,
     node2*      small   = build_inner({P, j}, {&div, 1}, {kids, 2}, phint);
     if (!free_old && node->is_inner())
         retain_all_children(node);     // trunc copied node's children → now shared with snapshot
-    if (free_old) node2_free(node);
+    // trunc cloned ALL of node's children 1:1 (no consumed slot) → psitri clone
+    // transfer: retain + deep-release, no neuter, no COW (read-only-safe).
+    if (free_old) node2_free_cloned(node);
     return in_place(small->address());
 }
 
@@ -482,7 +484,7 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     if (m <= kInnerStemCap)
     {
         node2* ni2 = build_inner({P, pl}, {ms, m}, {mk, size_t(m) + 1}, phint);
-        if constexpr (M == umode::unique) node2_free(inner);
+        if constexpr (M == umode::unique) node2_free_moved(inner);   // children moved to new node
         return in_place(ni2->address());
     }
     const uint16_t k    = uint16_t(m / 2);
@@ -493,10 +495,10 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     {
         ptr_address kids[2] = {Lc->address(), Rc->address()};
         node2*      top     = build_inner({P, pl}, {&pdiv, 1}, {kids, 2}, phint);
-        if constexpr (M == umode::unique) node2_free(inner);
+        if constexpr (M == umode::unique) node2_free_moved(inner);   // children moved to new node
         return in_place(top->address());
     }
-    if constexpr (M == umode::unique) node2_free(inner);
+    if constexpr (M == umode::unique) node2_free_moved(inner);   // children moved to Lc/Rc
     return split_at(pdiv, Lc->address(), Rc->address());
 }
 
@@ -516,7 +518,7 @@ template <umode M>
 inline ins_result inner_flatten(node2* inner, uint16_t i, node2* sib, alloc_hint phint) noexcept
 {
     ins_result r = inner_absorb<M>(inner, i, sib->stems(), sib->num_stems, sib->children(), phint);
-    node2_free(sib);
+    node2_free_moved(sib);   // sib is always FRESH (born writable) → neuter, no COW needed
     return r;
 }
 

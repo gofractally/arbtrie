@@ -1559,12 +1559,8 @@ TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
    REQUIRE(route(200) == cC);
    REQUIRE(route(999) == cC);
 
-   // node2's destroy is a no-op default (Phase 6 adds EXT release), so free the
-   // inner AND the children explicitly; the set must balance.
+   // node2_free recurses via destroy() → frees the inner AND its EXT children.
    w2::node2_free(in);
-   w2::w2session().release(cA);
-   w2::w2session().release(cB);
-   w2::w2session().release(cC);
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
@@ -1617,8 +1613,7 @@ TEST_CASE("wtree2 inner predictor matches binary search", "[wtree2][predictor]")
    }
    check_q(0xFFFFFFFFu);
 
-   w2::node2_free(in);
-   for (auto c : kids) w2::w2session().release(c);
+   w2::node2_free(in);   // recurses via destroy() → frees the children too
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
@@ -1692,10 +1687,7 @@ TEST_CASE("wtree2 find descent routes + rejects out-of-range", "[wtree2][find]")
    // Key shorter than a matched prefix → absent.
    { std::vector<uint32_t> k{}; REQUIRE(w2::find_leaf(root, {k.data(), k.size()}) == nullptr); }
 
-   w2::node2_free(root);
-   w2::w2session().release(lA);
-   w2::w2session().release(lB);
-   w2::w2session().release(lC);
+   w2::node2_free(root);   // recurses via destroy() → frees lA/lB/lC
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
@@ -1751,9 +1743,7 @@ TEST_CASE("wtree2 leaf build + find (end-to-end DIRECT)", "[wtree2][find]")
       std::vector<uint32_t> m{55, 9};   // routes to leafA, not a stem there
       REQUIRE(w2::find_value(root, kspan(m)).data() == nullptr);
 
-      w2::node2_free(root);
-      w2::node2_free(leafA);
-      w2::node2_free(leafB);
+      w2::node2_free(root);   // recurses via destroy() → frees leafA/leafB
    }
    fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
