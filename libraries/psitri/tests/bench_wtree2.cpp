@@ -143,6 +143,7 @@ int main(int argc, char** argv)
         le.push_back({{e.key.data(), KW}, {reinterpret_cast<const uint8_t*>(&e.val), 8}});
 
     // ─── Build: bulk constructor OR incremental insert ────────
+    w2::g_inner_total = 0; w2::g_inner_grid = 0;   // grid-detection counters (all modes)
     t0 = now_s();
     w2::ptr_address root;
     if (insert_mode)
@@ -163,7 +164,6 @@ int main(int argc, char** argv)
     }
     else if (grid_mode)
     {
-        w2::g_inner_total = 0; w2::g_inner_grid = 0;
         sal::read_lock lk = ses->lock();
         root = build_grid({le.data(), M}, 24);
     }
@@ -219,10 +219,10 @@ int main(int argc, char** argv)
                     st.inners ? double(st.inner_fan) / st.inners : 0.0, st.maxfan,
                     (unsigned long long)st.inner_pfx, (unsigned long long)st.fan_le3,
                     (unsigned long long)st.fan_ge256);
-        if (grid_mode)
-            std::printf("[grid]  %llu/%llu inners are exact power-of-2 grids\n",
-                        (unsigned long long)w2::g_inner_grid,
-                        (unsigned long long)w2::g_inner_total);
+        std::printf("[grid]  %llu/%llu inners are exact power-of-2 grids (%.0f%%)\n",
+                    (unsigned long long)w2::g_inner_grid,
+                    (unsigned long long)w2::g_inner_total,
+                    w2::g_inner_total ? 100.0 * double(w2::g_inner_grid) / double(w2::g_inner_total) : 0.0);
     }
 
     // ─── Find (sorted / tree order — HOT, compute-bound) ──────────
