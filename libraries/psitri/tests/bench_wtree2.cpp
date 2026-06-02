@@ -55,19 +55,30 @@ int main(int argc, char** argv)
     setvbuf(stdout, nullptr, _IOLBF, 0);
     namespace w2          = psitri::wtree2;
     const uint64_t N      = (argc > 1) ? std::stoull(argv[1]) : 10'000'000ULL;
-    const std::string mode = (argc > 2) ? std::string(argv[2]) : std::string();
-    const bool     insert_mode = (mode == "insert");
+    bool insert_mode = false, nocompact = false, u32_mode = false;
+    for (int a = 2; a < argc; ++a)
+    {
+        std::string s(argv[a]);
+        if (s == "insert")    insert_mode = true;
+        if (s == "nocompact") nocompact   = true;
+        if (s == "u32")       u32_mode    = true;   // 1-word (4-B) keys instead of 24-B
+    }
+    const uint16_t KW = u32_mode ? 1 : 6;           // key words
     // Compactor ON by default (insert needs it to reclaim per-op garbage). In-place
     // mutation is safe under the per-insert read_lock (it pins nodes during the op).
-    const bool     threads = (mode != "nocompact");
+    const bool     threads = !nocompact;
+    auto mk = [&](uint64_t i, uint32_t* out) {
+        if (u32_mode) { out[0] = uint32_t(splitmix64(i ^ 0xC0FFEEULL)); return; }
+        make_key24(i, reinterpret_cast<uint8_t*>(out));
+    };
 
     const auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
     std::filesystem::path dbdir =
         std::filesystem::temp_directory_path() /
         ("bench_wtree2-" + std::to_string(ts) + "-" + std::to_string(::getpid()));
     std::filesystem::create_directories(dbdir);
-    std::printf("=== bench_wtree2: N=%llu (24-B splitmix keys, 8-B values) ===\n",
-                (unsigned long long)N);
+    std::printf("=== bench_wtree2: N=%llu (%u-B splitmix keys, 8-B values) ===\n",
+                (unsigned long long)N, unsigned(KW) * 4u);
 
     sal::allocator salloc(dbdir, sal::runtime_config{}, threads);
     salloc.register_type_ops<w2::node2>();
@@ -80,8 +91,8 @@ int main(int argc, char** argv)
     std::vector<Ent> ents(N);
     for (uint64_t i = 0; i < N; ++i)
     {
-        uint8_t k[24]; make_key24(i, k);
-        std::memcpy(ents[i].key.data(), k, 24);
+        ents[i].key = {};               // zero unused words so the array compare works
+        mk(i, ents[i].key.data());
         ents[i].val = i + 1;
     }
     double t0 = now_s();
@@ -95,7 +106,7 @@ int main(int argc, char** argv)
     std::vector<w2::leaf_entry> le;
     le.reserve(M);
     for (auto& e : ents)
-        le.push_back({{e.key.data(), 6}, {reinterpret_cast<const uint8_t*>(&e.val), 8}});
+        le.push_back({{e.key.data(), KW}, {reinterpret_cast<const uint8_t*>(&e.val), 8}});
 
     // ─── Build: bulk constructor OR incremental insert ────────
     t0 = now_s();
@@ -109,10 +120,10 @@ int main(int argc, char** argv)
         for (uint64_t i = 0; i < N; ++i)   // random (hash) order, value i+1
         {
             std::array<uint32_t, 6> k;
-            make_key24(i, reinterpret_cast<uint8_t*>(k.data()));
+            mk(i, k.data());
             uint64_t       v  = i + 1;
             sal::read_lock lk = ses->lock();
-            root = w2::insert(root, {k.data(), 6},
+            root = w2::insert(root, {k.data(), KW},
                               {reinterpret_cast<const uint8_t*>(&v), 8});
         }
     }
@@ -192,8 +203,8 @@ int main(int argc, char** argv)
         std::array<uint32_t, 6> key;
         for (uint64_t i = 0; i < N; ++i)
         {
-            make_key24(i, reinterpret_cast<uint8_t*>(key.data()));
-            auto v = w2::find_value(r, {key.data(), 6});
+            mk(i, key.data());
+            auto v = w2::find_value(r, {key.data(), KW});
             if (v.data() == nullptr)         { ++miss; continue; }
             uint64_t got = 0; std::memcpy(&got, v.data(), 8);
             if (v.size() != 8 || (bijective && got != i + 1)) ++mism;
@@ -215,8 +226,8 @@ int main(int argc, char** argv)
         for (uint64_t k = 0; k < N; ++k)
         {
             const uint64_t idx = splitmix64(k ^ 0x5151515151515151ULL) % N;
-            make_key24(idx, reinterpret_cast<uint8_t*>(key.data()));
-            auto v = w2::find_value(r, {key.data(), 6});
+            mk(idx, key.data());
+            auto v = w2::find_value(r, {key.data(), KW});
             if (v.data() == nullptr)         { ++miss2; continue; }
             uint64_t got = 0; std::memcpy(&got, v.data(), 8);
             if (v.size() != 8 || (bijective && got != idx + 1)) ++mism2;
