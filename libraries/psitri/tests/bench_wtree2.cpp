@@ -122,72 +122,67 @@ int main(int argc, char** argv)
     auto ses                  = salloc.get_session();
     w2::g_wtree2_session      = ses.get();
 
-    // ─── Stateless INCREMENTAL upsert + commit/1M (no generator arrays) ────
-    // wt1/psitri pattern: read_lock PER OP + ses->sync() every STEP (finalize
-    // segments → read-only → compactable). wtree2 insert now copy-on-writes off
-    // read-only nodes (smart_ref threaded by ref), so post-commit upserts don't fault.
+    // ─── Stateless INCREMENTAL upsert, STAGED (no generator arrays) ────────
+    // Per round: insert STEP, then query QSTEP RANDOM keys from the inserted-so-far
+    // set, print per-round insert/query ns — line-buffered so `tail -f` shows perf
+    // over time (watch for insert/query ns climbing = compaction falling behind or
+    // the tree degrading). read_lock PER OP (psitri pattern); sync::none = finalize
+    // segments for compaction WITHOUT the msync syscall (fastest for this workload).
     if (stream_mode)
     {
         if (N > (1ull << 32)) { std::printf("stream: N must be <= 2^32\n"); return 2; }
-        std::printf("=== stream (stateless INCREMENTAL upsert, commit/1M): N=%llu u32, 8-B val ===\n",
-                    (unsigned long long)N);
-        auto scramble = [N](uint64_t c) -> uint64_t {
+        std::printf("=== stream (staged INCREMENTAL, sync::none): N=%llu u32, 8-B val, lu16=%d ===\n",
+                    (unsigned long long)N, int(w2::g_leaf_u16));
+        std::printf("   round      inserted   insert ns/key   query ns   miss\n");
+        auto scramble = [N](uint64_t c) -> uint64_t {     // bijection over [0,N)
             return uint64_t(static_cast<__uint128_t>(c) * 2654435761ull % N);
         };
-        const uint64_t STEP = 1'000'000;
-        double         t0   = now_s();
-        w2::ptr_address root = w2::kNoChild;
-        for (uint64_t c = 0; c < N; ++c)
+        const uint64_t  STEP  = 1'000'000;
+        const uint64_t  QSTEP = 100'000;
+        w2::ptr_address root  = w2::kNoChild;
+        size_t          tot_miss = 0;
+        const double    t_all = now_s();
+        for (uint64_t base = 0; base < N; base += STEP)
         {
-            const uint64_t i = scramble(c);
-            const uint32_t k = uint32_t(i);
-            uint64_t       v = splitmix64(i);
-            { sal::read_lock lk = ses->lock();
-              root = w2::insert(root, {&k, 1}, {reinterpret_cast<const uint8_t*>(&v), 8}); }
-            if ((c + 1) % STEP == 0) ses->sync(sal::sync_type::msync_async);
-        }
-        ses->sync(sal::sync_type::msync_async);
-        const double bs = now_s() - t0;
-        std::printf("[insert] %llu in %.2fs (%.2f Mops/s, %.0f ns/key) — commit/1M msync_async\n",
-                    (unsigned long long)N, bs, N / bs / 1e6, bs / N * 1e9);
-        if (threads) { std::printf("[settle] compactor...\n");
-                       std::this_thread::sleep_for(std::chrono::seconds(5)); }
-        size_t miss = 0, mism = 0;
-        {   // find/hot — sorted (tree) order
-            sal::read_lock lk = ses->lock();
-            w2::node2*     r  = w2::w2deref(root);
-            const double   th = now_s();
-            for (uint64_t j = 0; j < N; ++j)
+            const uint64_t end = std::min(base + STEP, N);
+            // insert this round
+            const double ti = now_s();
+            for (uint64_t c = base; c < end; ++c)
             {
-                const uint32_t k = uint32_t(j);
-                auto v = w2::find_value(r, {&k, 1});
-                if (!v.data()) { ++miss; continue; }
-                uint64_t g; std::memcpy(&g, v.data(), 8);
-                if (g != splitmix64(j)) ++mism;
+                const uint64_t i = scramble(c);
+                const uint32_t k = uint32_t(i);
+                uint64_t       v = splitmix64(i);
+                { sal::read_lock lk = ses->lock();
+                  root = w2::insert(root, {&k, 1}, {reinterpret_cast<const uint8_t*>(&v), 8}); }
             }
-            const double hs = now_s() - th;
-            std::printf("[find/hot] %llu sorted in %.2fs (%.0f ns, %.1f M qps) miss=%zu mism=%zu\n",
-                        (unsigned long long)N, hs, hs / N * 1e9, N / hs / 1e6, miss, mism);
-        }
-        {   // find/rnd — random order
-            sal::read_lock lk = ses->lock();
-            w2::node2*     r  = w2::w2deref(root);
-            const double   tc = now_s();
-            for (uint64_t c = 0; c < N; ++c)
+            ses->sync(sal::sync_type::none);
+            const double ins_ns = (now_s() - ti) / double(end - base) * 1e9;
+            // query QSTEP random keys from the inserted-so-far set [0,end)
+            size_t       miss = 0;
+            const double tq   = now_s();
             {
-                const uint64_t idx = splitmix64(c ^ 0x5151515151515151ULL) % N;
-                const uint32_t k   = uint32_t(idx);
-                auto v = w2::find_value(r, {&k, 1});
-                if (!v.data()) { ++miss; continue; }
-                uint64_t g; std::memcpy(&g, v.data(), 8);
-                if (g != splitmix64(idx)) ++mism;
+                sal::read_lock lk = ses->lock();
+                w2::node2*     r  = w2::w2deref(root);
+                for (uint64_t q = 0; q < QSTEP; ++q)
+                {
+                    const uint64_t c2 = splitmix64(q ^ (base * 0x9E37ULL + 1)) % end;
+                    const uint64_t i2 = scramble(c2);
+                    const uint32_t k2 = uint32_t(i2);
+                    auto v = w2::find_value(r, {&k2, 1});
+                    uint64_t g = 0;
+                    if (v.data()) std::memcpy(&g, v.data(), 8);
+                    if (!v.data() || g != splitmix64(i2)) ++miss;
+                }
             }
-            const double cs = now_s() - tc;
-            std::printf("[find/rnd] %llu random in %.2fs (%.0f ns, %.1f M qps) miss=%zu mism=%zu\n",
-                        (unsigned long long)N, cs, cs / N * 1e9, N / cs / 1e6, miss, mism);
+            const double q_ns = (now_s() - tq) / double(QSTEP) * 1e9;
+            tot_miss += miss;
+            std::printf("   %4lluM   %11llu   %12.0f   %8.0f   %4zu\n",
+                        (unsigned long long)(end / 1'000'000), (unsigned long long)end,
+                        ins_ns, q_ns, miss);
         }
+        std::printf("=== total %.1fs, miss=%zu ===\n", now_s() - t_all, tot_miss);
         std::filesystem::remove_all(dbdir);
-        return (miss || mism) ? 1 : 0;
+        return tot_miss ? 1 : 0;
     }
 
     // ─── Generate + sort the entry stream ─────────────────────
