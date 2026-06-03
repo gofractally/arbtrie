@@ -141,6 +141,15 @@ namespace psitri::wtree
 
       uint16_t count_le(uint32_t q) const noexcept { return count_le_u32(u32_stems(), num_stems_, q); }
 
+      // Leaf point lookup (u32 key → value bytes or nullptr). stems[k-1]==q ⇒ value
+      // for that key lives at slot k (slot 0 = terminal). Fixed kValueBytes record.
+      const uint8_t* find_value(uint32_t q) const noexcept
+      {
+         const uint16_t k = count_le(q);
+         if (k > 0 && u32_stems()[k - 1] == q) return value_at(k);
+         return nullptr;
+      }
+
       // ── alloc_size ↔ ctor (node_design_patterns §A) ────────────────────
       static uint32_t alloc_size(uint8_t height, uint8_t prefix_len, uint16_t n) noexcept
       {
@@ -155,6 +164,29 @@ namespace psitri::wtree
       {
          num_stems_ = n;
          // caller fills prefix / stems / slots; slots default to kNoChild for inners.
+      }
+      // LEAF fill ctor (does ALL the work — alloc_size↔ctor contract). stems = keys;
+      // slot[i+1] = vals[i] (slot 0 = terminal, unused at Stage A). prefix_len = 0 (u32).
+      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height,
+           std::span<const uint32_t> keys, std::span<const uint64_t> vals) noexcept
+          : node_form<tiny>(asize, type_id, seq, height, 0, kFlagFixedValues)
+      {
+         num_stems_ = uint16_t(keys.size());
+         uint32_t* st = u32_stems();
+         for (uint16_t i = 0; i < num_stems_; ++i) st[i] = keys[i];
+         for (uint16_t i = 0; i < num_stems_; ++i)
+            std::memcpy(value_at(uint16_t(i + 1)), &vals[i], kValueBytes);
+      }
+      // INNER fill ctor: stems = dividers; children = kids (kids.size() == divs+1).
+      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height,
+           std::span<const uint32_t> divs, std::span<const ptr_address> kids) noexcept
+          : node_form<tiny>(asize, type_id, seq, height, 0, 0)
+      {
+         num_stems_ = uint16_t(divs.size());
+         uint32_t* st = u32_stems();
+         for (uint16_t i = 0; i < num_stems_; ++i) st[i] = divs[i];
+         ptr_address* ch = children();
+         for (uint16_t i = 0; i <= num_stems_; ++i) ch[i] = kids[i];
       }
 
       // ── SAL lifecycle ──────────────────────────────────────────────────

@@ -86,21 +86,111 @@ TEST_CASE("wtree tiny leaf build + point find", "[wtree][tiny]")
 
    for (size_t i = 0; i < keys.size(); ++i)
    {
-      const uint8_t* v = w::find_in_tiny_leaf(nd, keys[i]);
+      const uint8_t* v = nd->find_value(keys[i]);
       REQUIRE(v != nullptr);
       uint64_t got = 0;
       std::memcpy(&got, v, 8);
       REQUIRE(got == vals[i]);
    }
    // misses: below, between, above
-   REQUIRE(w::find_in_tiny_leaf(nd, 5) == nullptr);
-   REQUIRE(w::find_in_tiny_leaf(nd, 25) == nullptr);
-   REQUIRE(w::find_in_tiny_leaf(nd, 99) == nullptr);
+   REQUIRE(nd->find_value(5) == nullptr);
+   REQUIRE(nd->find_value(25) == nullptr);
+   REQUIRE(nd->find_value(99) == nullptr);
 
    {
       sal::read_lock lk = fx.ses->lock();
       w::session().release(root);
    }
    fx.wait_for_compactor();                 // release is deferred to the compactor
+   REQUIRE(fx.live_objects() == base);
+}
+
+TEST_CASE("wtree two-level descent + routing", "[wtree][tiny][descent]")
+{
+   sal_fixture fx("descent");
+   const uint64_t base = fx.live_objects();
+
+   // Two leaves split at divider 100: L = [10,20,30], R = [100,200,300].
+   std::vector<uint32_t> lk = {10, 20, 30}, rk = {100, 200, 300};
+   std::vector<uint64_t> lv = {1, 2, 3}, rv = {11, 22, 33};
+   w::ptr_address root;
+   {
+      sal::read_lock lk_ = fx.ses->lock();
+      w::ptr_address L = w::build_tiny_leaf(lk, lv);
+      w::ptr_address R = w::build_tiny_leaf(rk, rv);
+      uint32_t          div  = 100;                 // R's first key
+      w::ptr_address    kids[2] = {L, R};
+      root = w::build_tiny_inner(/*height*/ 1, {&div, 1}, {kids, 2});
+   }
+   w::node_base* rn = w::deref<w::node_base>(root);
+   REQUIRE(rn->is_inner());
+   REQUIRE(rn->num_stems() == 1);
+
+   auto check = [&](uint32_t k, uint64_t want) {
+      const uint8_t* v = w::find(root, k);
+      REQUIRE(v != nullptr);
+      uint64_t got = 0; std::memcpy(&got, v, 8);
+      REQUIRE(got == want);
+   };
+   check(10, 1); check(30, 3); check(100, 11); check(300, 33);   // both halves route correctly
+   REQUIRE(w::find(root, 50) == nullptr);    // gap in L's range
+   REQUIRE(w::find(root, 5)  == nullptr);    // below all
+   REQUIRE(w::find(root, 999) == nullptr);   // above all
+
+   {
+      sal::read_lock lk_ = fx.ses->lock();
+      w::session().release(root);            // recursive: releases the two leaves too
+   }
+   fx.wait_for_compactor();
+   REQUIRE(fx.live_objects() == base);
+}
+
+TEST_CASE("wtree incremental insert: splits + multi-level round-trip", "[wtree][tiny][insert]")
+{
+   sal_fixture fx("insert");
+   const uint64_t base = fx.live_objects();
+
+   // Hash-scrambled keys so inserts arrive in random order and force leaf + inner
+   // splits (kTinyCap=256, so >256 keys → multiple leaves → an inner; >256*256 → 2
+   // levels — we use 5000 to get a few levels).
+   const uint32_t N = 5000;
+   auto scramble = [](uint32_t i) { return uint32_t(0x9E3779B1u * (i + 1)); };
+   auto val_of   = [](uint32_t k) { return uint64_t(k) * 1315423911ull + 7; };
+
+   w::ptr_address root = w::kNoChild;
+   {
+      sal::read_lock lk = fx.ses->lock();
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         const uint32_t k = scramble(i);
+         root             = w::insert(root, k, val_of(k));
+      }
+   }
+   // Every key present with the right value; a deeper tree formed.
+   w::node_base* rn = w::deref<w::node_base>(root);
+   REQUIRE(rn->is_inner());
+   size_t miss = 0, mism = 0;
+   {
+      sal::read_lock lk = fx.ses->lock();
+      for (uint32_t i = 0; i < N; ++i)
+      {
+         const uint32_t k = scramble(i);
+         const uint8_t* v = w::find(root, k);
+         if (!v) { ++miss; continue; }
+         uint64_t got = 0; std::memcpy(&got, v, 8);
+         if (got != val_of(k)) ++mism;
+      }
+      // a few keys that were never inserted must miss
+      REQUIRE(w::find(root, 0xDEADBEEFu) == nullptr);
+      REQUIRE(w::find(root, 0xFFFFFFFEu) == nullptr);
+   }
+   REQUIRE(miss == 0);
+   REQUIRE(mism == 0);
+
+   {
+      sal::read_lock lk = fx.ses->lock();
+      w::session().release(root);
+   }
+   fx.wait_for_compactor();
    REQUIRE(fx.live_objects() == base);
 }
