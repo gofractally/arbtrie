@@ -191,3 +191,8 @@ endif()
 # u32/u16, single node_type tag, height=leaf/inner) re-adds its targets here as
 # it lands (wtree-tests, bench_wtree). See doc/node_design_patterns.md +
 # .claude/plans/vast-frolicking-mist.md.
+add_executable(wtree-tests ../libraries/psitri/tests/wtree_tests.cpp)
+target_link_libraries(wtree-tests PRIVATE psitri Catch2::Catch2WithMain)
+target_include_directories(wtree-tests PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+set_target_properties(wtree-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_test(NAME wtree-tests COMMAND wtree-tests)

@@ -1,0 +1,198 @@
+#pragma once
+// psitri::wtree — the one word-tree engine (clean rewrite).
+//
+// Design (doc/node_design_patterns.md §H): ONE SAL `node_type` tag = routing-tier ×
+// stem-width matrix {tiny,medium,big}×{u32,u16}; `height` = leaf(0)/inner(>0); the
+// N+1 slot column holds child ptr_address (inner) or value-slots (leaf). Distinct SAL
+// types per tag via 3-tier CRTP (node_base / node_form<Derived> / concrete) so a
+// wrong-width stem read is a COMPILE error.
+//
+// HARD RULES (node_design_patterns.md): no heap on hot paths; ptr_address(0) is a
+// REAL address, null = kNoChild (0xFFFFFFFF) — never leave a slot 0; benchmark only
+// build/release.
+//
+// Stage A: header + CRTP + `tiny` (u32, linear count_le), leaf (fixed 8-B value) +
+// inner. tiny16/medium/big and the varlen value model land in later stages.
+
+#include <cstdint>
+#include <cstring>
+#include <span>
+
+#include <psitri/node/node.hpp>          // psitri::node (12-B SAL header), node_type, ptr_address
+#include <sal/allocator_session.hpp>
+#include <sal/allocator_session_impl.hpp>
+#include <ucc/round.hpp>
+
+namespace psitri::wtree
+{
+   using sal::ptr_address;
+   using session_t = sal::allocator_session;
+
+   // Per-thread session bridge (node_design_patterns §D): set at the top of each
+   // public op so node free-functions don't thread a session param.
+   inline thread_local session_t* g_session = nullptr;
+   inline session_t&              session() noexcept { return *g_session; }
+   template <typename T = sal::alloc_header>
+   inline T* deref(ptr_address a) noexcept { return session().template get_ptr<T>(a); }
+
+   // ptr_address(0) is a VALID allocatable address; the null/empty sentinel is the
+   // reserved 0xFFFFFFFF. Never use 0 / a default-constructed address as "absent".
+   inline constexpr ptr_address kNoChild = sal::null_ptr_address;
+   inline bool is_ext_slot(ptr_address c) noexcept { return !sal::is_reserved_ptr_address(c); }
+
+   inline constexpr std::size_t kCacheLine = 128;
+   inline uint32_t cl_round(uint32_t b) noexcept { return uint32_t(ucc::round_up_multiple<kCacheLine>(b)); }
+
+   // ── Tier 1: non-template base (form-independent header) ───────────────
+   // Layout: [psitri::node 12B][height u8][prefix_len u8][flags u8][pad u8][num_stems u16]
+   //         [prefix: prefix_len u32 words] then form-specific regions (cacheline-aligned).
+   class node_base : public psitri::node
+   {
+     public:
+      uint8_t  height_;       // 12: 0 = leaf, >0 = inner
+      uint8_t  prefix_len_;   // 13: # of u32 prefix words consumed at this node
+      uint8_t  flags_;        // 14: bit0 = fixed_values (leaf)
+      uint8_t  pad_;          // 15
+      uint16_t num_stems_;    // 16: N routing stems (N+1 slots)
+
+      static constexpr uint16_t kHeaderBytes = 18;
+      static constexpr uint8_t  kFlagFixedValues = 0x01;
+
+      bool     is_leaf()      const noexcept { return height_ == 0; }
+      bool     is_inner()     const noexcept { return height_ != 0; }
+      uint16_t num_stems()    const noexcept { return num_stems_; }
+      uint16_t n_slots()      const noexcept { return uint16_t(num_stems_ + 1); }
+      uint8_t  prefix_len()   const noexcept { return prefix_len_; }
+      bool     fixed_values() const noexcept { return flags_ & kFlagFixedValues; }
+
+      uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
+      const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
+
+      uint32_t*       prefix()       noexcept { return reinterpret_cast<uint32_t*>(base() + kHeaderBytes); }
+      const uint32_t* prefix() const noexcept { return reinterpret_cast<const uint32_t*>(base() + kHeaderBytes); }
+      std::span<const uint32_t> prefix_span() const noexcept { return {prefix(), prefix_len_}; }
+
+      // Offset where the form-specific regions (stems, then slots) begin: after the
+      // header + prefix, cacheline-aligned. (Forms with an extension override.)
+      uint32_t regions_off() const noexcept
+      {
+         return cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len_) * 4u);
+      }
+
+     protected:
+      node_base(uint32_t asize, node_type t, ptr_address_seq seq,
+                uint8_t height, uint8_t prefix_len, uint8_t flags) noexcept
+          : psitri::node(asize, t, seq),
+            height_(height), prefix_len_(prefix_len), flags_(flags), pad_(0), num_stems_(0)
+      {
+      }
+   } __attribute__((packed));
+   static_assert(sizeof(node_base) == 18, "wtree node_base header must be 18 B");
+
+   // ── Stem search (branchless SIMD-friendly; node_design_patterns §H) ───
+   // upper_bound: count of stems ≤ q, in [0,N]. NEVER binary search.
+   inline uint16_t count_le_u32(const uint32_t* stems, uint16_t n, uint32_t q) noexcept
+   {
+      uint16_t c = 0;
+      for (uint16_t j = 0; j < n; ++j) c = uint16_t(c + (stems[j] <= q));   // vectorizes
+      return c;
+   }
+
+   // ── Tier 2: CRTP middle (routing expressed once via Derived's accessors) ──
+   template <class Derived>
+   class node_form : public node_base
+   {
+     public:
+      // Derived provides: u32_stems()/u16_stems() (its width), children(), count_le(q).
+      const Derived* self() const noexcept { return static_cast<const Derived*>(this); }
+      Derived*       self()       noexcept { return static_cast<Derived*>(this); }
+
+      // Inner descent: route q to a child slot. (Leaf uses Derived's value lookup.)
+      ptr_address route(uint32_t q) const noexcept { return self()->children()[self()->count_le(q)]; }
+
+     protected:
+      using node_base::node_base;
+   } __attribute__((packed));
+
+   // ── Tier 3: concrete forms ────────────────────────────────────────────
+   // `tiny` — u32 stems, branchless linear count_le. Serves leaf (fixed 8-B value
+   // records) and inner (child ptr slots), distinguished by height. No extension.
+   class tiny : public node_form<tiny>
+   {
+     public:
+      static constexpr node_type type_id     = node_type::wtree_tiny;
+      static constexpr uint16_t  kValueBytes = 8;   // Stage A: fixed u64 value
+
+      // regions: [stems: N u32][slots: (N+1) × slot_stride]  (each cacheline-aligned)
+      uint32_t stems_off() const noexcept { return regions_off(); }
+      uint32_t slots_off() const noexcept { return stems_off() + cl_round(uint32_t(num_stems_) * 4u); }
+      static uint32_t slot_stride(bool leaf) noexcept { return leaf ? kValueBytes : uint32_t(sizeof(ptr_address)); }
+
+      uint32_t*       u32_stems()       noexcept { return reinterpret_cast<uint32_t*>(base() + stems_off()); }
+      const uint32_t* u32_stems() const noexcept { return reinterpret_cast<const uint32_t*>(base() + stems_off()); }
+      // NOTE: intentionally NO u16_stems() on this form → a u16 read here won't compile.
+
+      // inner: children are ptr_address slots.
+      ptr_address*       children()       noexcept { return reinterpret_cast<ptr_address*>(base() + slots_off()); }
+      const ptr_address* children() const noexcept { return reinterpret_cast<const ptr_address*>(base() + slots_off()); }
+      // leaf: value records are fixed kValueBytes columns (slot i = value for stem i).
+      uint8_t*       value_at(uint16_t i)       noexcept { return base() + slots_off() + size_t(i) * kValueBytes; }
+      const uint8_t* value_at(uint16_t i) const noexcept { return base() + slots_off() + size_t(i) * kValueBytes; }
+
+      uint16_t count_le(uint32_t q) const noexcept { return count_le_u32(u32_stems(), num_stems_, q); }
+
+      // ── alloc_size ↔ ctor (node_design_patterns §A) ────────────────────
+      static uint32_t alloc_size(uint8_t height, uint8_t prefix_len, uint16_t n) noexcept
+      {
+         const uint32_t s_off = cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len) * 4u);
+         const uint32_t sl_off = s_off + cl_round(uint32_t(n) * 4u);
+         const uint32_t slot_bytes = uint32_t(n + 1) * slot_stride(height == 0);
+         return sl_off + cl_round(slot_bytes);
+      }
+      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height, uint8_t prefix_len, uint16_t n) noexcept
+          : node_form<tiny>(asize, type_id, seq, height, prefix_len,
+                            height == 0 ? kFlagFixedValues : uint8_t(0))
+      {
+         num_stems_ = n;
+         // caller fills prefix / stems / slots; slots default to kNoChild for inners.
+      }
+
+      // ── SAL lifecycle ──────────────────────────────────────────────────
+      bool pf_second_cl() const noexcept { return true; }
+      uint32_t cow_size() const noexcept { return size(); }
+      void copy_to(sal::alloc_header* dst) const noexcept
+      {
+         std::memcpy(dst, this, size());
+      }
+      void compact_to(sal::alloc_header* dst) const noexcept { copy_to(dst); }
+      void destroy(const sal::allocator_session_ptr& s) const noexcept
+      {
+         if (is_leaf()) return;                       // fixed-value leaf owns no ext children
+         const ptr_address* c = children();
+         const uint16_t ns = n_slots();
+         for (uint16_t i = 0; i < ns; ++i)
+            if (is_ext_slot(c[i])) s->release(c[i]);
+      }
+      void visit_children(const std::function<void(ptr_address)>& v) const noexcept
+      {
+         if (is_leaf()) return;
+         const ptr_address* c = children();
+         const uint16_t ns = n_slots();
+         for (uint16_t i = 0; i < ns; ++i)
+            if (is_ext_slot(c[i])) v(c[i]);
+      }
+   } __attribute__((packed));
+
+   // ── Dispatch (switch on tag once → monomorphic typed call) ────────────
+   template <class F>
+   inline auto with_node(node_base* nd, F&& f)
+   {
+      switch (nd->type())
+      {
+         case node_type::wtree_tiny: return f(static_cast<tiny*>(nd));
+         // tiny16/medium/medium16/big/big16 land in later stages.
+         default: return f(static_cast<tiny*>(nd));   // Stage A: only tiny exists
+      }
+   }
+
+}  // namespace psitri::wtree

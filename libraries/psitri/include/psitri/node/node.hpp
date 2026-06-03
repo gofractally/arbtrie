@@ -57,8 +57,17 @@ namespace psitri
       wtree_leaf,
       wtree_inner,
       // wtree2 (rewrite): one unified node record (shape flag picks leaf/inner).
-      // See psitri/wtree2/ and doc/wtree2.md.
+      // SUPERSEDED — moved to reference/. Reserved-unused (don't renumber).
       wtree2_node,
+      // wtree (the one, clean rewrite): routing-tier × stem-width matrix, single
+      // node_type tag, height=leaf/inner. Scoped enum → clean unprefixed names.
+      // See psitri/wtree/ + doc/node_design_patterns.md §H.
+      wtree_tiny,
+      wtree_tiny16,
+      wtree_medium,
+      wtree_medium16,
+      wtree_big,
+      wtree_big16,
    };
    inline std::ostream& operator<<(std::ostream& os, node_type t)
    {
