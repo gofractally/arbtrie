@@ -56,25 +56,33 @@ namespace psitri::wtree
    // format is single-target. Bit budget: height needs ~3 (depth caps ~4 with 512-fanout
    // inners), is_fixed_value needs 1. prefix_len is the only one bounded by DATA (key
    // words consumed here), so it takes the whole surplus (11 bits = up to 2047 words).
+   // How a leaf stores its values (1-bit field). Inners ignore it (they hold child ptrs).
+   enum class value_layout : uint8_t
+   {
+      varlen_value    = 0,   // length-prefixed / indirected records
+      fixed_len_value = 1,   // fixed-width value column (auto-detected common case)
+   };
+
    class node_base : public psitri::node
    {
      public:
-      uint16_t height_         : 4;   // 12: 0 = leaf, >0 = inner   (low bits → cheap is_leaf)
-      uint16_t is_fixed_value_ : 1;   //     leaf stores fixed-width value records
-      uint16_t prefix_len_     : 11;  //     # of u32 prefix words consumed at this node
-      uint16_t num_stems_;            // 14: N live routing stems (N+1 slots)
-      uint16_t cap_;                  // 16: stem CAPACITY (regions sized for cap; grow ≤ cap)
+      uint16_t height_       : 4;   // 12: 0 = leaf, >0 = inner   (low bits → cheap is_leaf)
+      uint16_t value_layout_ : 1;   //     value_layout (leaf only)
+      uint16_t prefix_len_   : 11;  //     # of u32 prefix words consumed at this node
+      uint16_t num_stems_;          // 14: N live routing stems (N+1 slots)
+      uint16_t cap_;                // 16: stem CAPACITY (regions sized for cap; grow ≤ cap)
 
       static constexpr uint16_t kHeaderBytes = 18;
       uint16_t capacity() const noexcept { return cap_; }
 
-      uint8_t  height()         const noexcept { return uint8_t(height_); }
-      bool     is_leaf()        const noexcept { return height_ == 0; }
-      bool     is_inner()       const noexcept { return height_ != 0; }
-      uint16_t num_stems()      const noexcept { return num_stems_; }
-      uint16_t n_slots()        const noexcept { return uint16_t(num_stems_ + 1); }
-      uint8_t  prefix_len()     const noexcept { return uint8_t(prefix_len_); }
-      bool     is_fixed_value() const noexcept { return is_fixed_value_; }
+      uint8_t      height()       const noexcept { return uint8_t(height_); }
+      bool         is_leaf()      const noexcept { return height_ == 0; }
+      bool         is_inner()     const noexcept { return height_ != 0; }
+      uint16_t     num_stems()    const noexcept { return num_stems_; }
+      uint16_t     n_slots()      const noexcept { return uint16_t(num_stems_ + 1); }
+      uint8_t      prefix_len()   const noexcept { return uint8_t(prefix_len_); }
+      value_layout layout()       const noexcept { return value_layout(value_layout_); }
+      bool         is_fixed_value() const noexcept { return layout() == value_layout::fixed_len_value; }
 
       uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
       const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
@@ -92,9 +100,9 @@ namespace psitri::wtree
 
      protected:
       node_base(uint32_t asize, node_type t, ptr_address_seq seq,
-                uint8_t height, uint16_t prefix_len, bool is_fixed_value, uint16_t cap) noexcept
+                uint8_t height, uint16_t prefix_len, value_layout vl, uint16_t cap) noexcept
           : psitri::node(asize, t, seq),
-            height_(height), is_fixed_value_(is_fixed_value), prefix_len_(prefix_len),
+            height_(height), value_layout_(uint16_t(vl)), prefix_len_(prefix_len),
             num_stems_(0), cap_(cap)
       {
          assert(height <= 0xF && prefix_len <= 0x7FF);
@@ -216,7 +224,7 @@ namespace psitri::wtree
       // stems = keys; slot[i+1] = vals[i] (slot 0 = terminal, unused at Stage A).
       tiny(uint32_t asize, ptr_address_seq seq, uint8_t height, uint16_t cap,
            std::span<const uint32_t> keys, std::span<const uint64_t> vals) noexcept
-          : node_form<tiny>(asize, type_id, seq, height, 0, /*is_fixed_value*/ true, cap)
+          : node_form<tiny>(asize, type_id, seq, height, 0, value_layout::fixed_len_value, cap)
       {
          num_stems_ = uint16_t(keys.size());
          uint32_t* st = u32_stems();
@@ -228,7 +236,7 @@ namespace psitri::wtree
       // INNER fill ctor: regions sized for `cap`; stems = divs; children = kids (divs+1).
       tiny(uint32_t asize, ptr_address_seq seq, uint8_t height, uint16_t cap,
            std::span<const uint32_t> divs, std::span<const ptr_address> kids) noexcept
-          : node_form<tiny>(asize, type_id, seq, height, 0, /*is_fixed_value*/ false, cap)
+          : node_form<tiny>(asize, type_id, seq, height, 0, value_layout::varlen_value, cap)
       {
          num_stems_ = uint16_t(divs.size());
          uint32_t* st = u32_stems();
