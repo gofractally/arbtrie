@@ -10,6 +10,27 @@ start from here.
 > later port that took some shortcuts (e.g. `get_ptr` reads, `inner_free_moved`).
 > When the two differ, **check legacy and follow it — do NOT assume wt1 is right.**
 
+## HARD RULES (read first — each one cost a debugging session)
+
+- **NO heap allocations on hot paths.** Build/find/insert use SAL alloc + a
+  thread_local scratch arena + in-place/remake only. No `std::vector`/`new`/`malloc`/
+  `std::function` on the hot path.
+- **`ptr_address(0)` is a VALID allocatable address; null is `kNoChild` = `0xFFFFFFFF`.**
+  Never use `0` / a default-constructed `ptr_address` as null/empty/absent, and never
+  leave a slot uninitialized (it reads as 0 → released as real id 0). Initialize every
+  slot to `kNoChild`. (Cost: the `inner_route` + empty-leaf over-release of id 0.)
+- **Release by a CAPTURED id, never `staleptr->address()`.** A raw node pointer held
+  across an alloc can be relocated by the compactor → its bytes are reclaimed → reading
+  `->address()` yields a stale/zeroed id (→ `release(0)`). Capture the id before any
+  alloc; release that.
+- **The compactor is PROVEN.** A crash / leak / over-release under it is YOUR
+  retain/release/realloc/alloc/0-as-null usage, not the compactor. Suspect your code.
+- **Benchmark ONLY `build/release` (`-O3 -DNDEBUG`).** If an `assert` fires in a
+  "release" run, the build dir is mis-typed (it's Debug, `-O0`). See §G. (Cost: a 2×
+  "regression" that was just a debug binary.)
+- **A wrong-shape/width memory read must be a COMPILE error, not a runtime miss** —
+  achieved by the typed CRTP forms (§B): the u16 form has no u32 `stems()`.
+
 ---
 
 ## A. Construction & mutation contract
@@ -63,9 +84,11 @@ start from here.
    - **`inner<Derived> : inner_base`** (CRTP middle) — ONLY the genuinely
      type-dependent code, static-dispatched through `Derived` (zero overhead). Keep
      this layer thin — every function here is instantiated per type.
-   - **`Derived : inner<Derived>`** (e.g. `inner_node`, `inner_prefix_node`,
-     `grid_node`, leaf variants) — the concrete data + `static constexpr node_type
-     type_id`.
+   - **`Derived : inner<Derived>`** — the concrete data + `static constexpr node_type
+     type_id`. For the unified `wtree` engine the `Derived` set is the **routing-tier ×
+     stem-width matrix** (`tiny / medium / big × u32 / u16`), NOT a leaf/inner/grid
+     split — see §H. Each form exposes ONLY its valid stem accessor (`u16` has no u32
+     `stems()`), so a wrong-width read is a compile error.
    **Distinct `Derived` types make "wrong shape" a COMPILE error** (a grid type has no
    `stems()` member → can't be misused). Evidence: libwtree's move from 2-tier to this
    3-tier CRTP gave **+9% perf and −988 B code size**. Default to the non-template
@@ -227,7 +250,47 @@ retain/release entirely.
 
 ---
 
-## wtree2 conformance (2026-06) — migrating toward the above
+## G. Build & measure discipline
+
+20. **Two persistent build dirs; switch by dir, never reconfigure.** `build/release` =
+    Release (`-O3 -DNDEBUG`, asserts OFF) — **all perf numbers come from here**.
+    `build/debug` = Debug (`-O0 -g -UNDEBUG`, asserts ON) — correctness only. If an
+    `assert` fires in a "release" run, the dir is mis-typed.
+21. **Keep tests green every stage** — `--order decl` AND `--rng-seed N` (random order
+    surfaces order/reuse-dependent bugs); run the correctness suite in `build/debug`
+    (asserts on). Measure perf vs the committed baseline (`doc/baselines/`) at matched
+    N, per-op (insert/query ns), not wall-clock under contention.
+
+## H. Node taxonomy & routing (the `wtree` matrix)
+
+22. **ONE discriminator = the SAL `node_type` tag.** No dual shape+sentinel. The tag is
+    the **routing-tier × stem-width matrix**; `height` (separate u8) = leaf(0)/inner(>0).
+
+    | tier (routing) | u32 | u16 = `(key−base)>>shift` |
+    |---|---|---|
+    | Tiny — branchless SIMD linear `count_le` | `tiny` | `tiny16` |
+    | Medium — per-cacheline divs index (≥~128 stems) | `medium` | `medium16` |
+    | Big — APGM predict + correction walk | `big` | `big16` |
+
+    Leaves use Tiny/Medium; inners use all six. NO grid type (an exact power-of-2 inner
+    is just a fast Big/u16 case). Leaf value layout (fixed-stride SoA vs varlen
+    `value_region` + LOCAL/EXT slots) is an **auto-detected `fixed_values` flag**,
+    orthogonal to the tag — keep the fixed-width auto-detection.
+
+23. **u16 encoding**: stems stored as `(key − base) >> shift`, `shift = min ctz over
+    (stem − base)` (largest power-of-2 dividing every delta → lossless). Route:
+    `qd = (q − base) >> shift`, then branchless `count_le` over the u16 stems
+    (8-lane NEON = 2× a u32 scan, half the stems cache footprint). The **split divider
+    rule snaps to a high-ctz value** in a tight window around the median, so a parent's
+    stems share a large `shift` → u16-eligible.
+
+24. **Prefix = how keys are CONSUMED (not decoration).** The radix/Patricia descent
+    consumes key words: each inner matches its `prefix` words then routes ONE word by
+    stem → `depth += prefix_len + 1`; the leaf holds the remaining suffix. The routing
+    key at each level is the WORD `key[depth]`, never the whole key. Mis-accounting
+    depth/prefix loses or misroutes keys (a recurring bug class).
+
+## wtree (the one, 2026-06) — target conformance / migration notes
 
 - **A1 alloc_size↔ctor**: DONE — `node2::alloc_size(prefix,stems,children)` ↔
   `node2(…, prefix,stems,children)`; `alloc_size(src, op_inner_absorb)` ↔
@@ -236,10 +299,11 @@ retain/release entirely.
   progress — give the op-ctor an `apply(op)` twin sharing a `splice_absorb<mode>`
   primitive, and an `apply<umode>(nref, op)` dispatcher (in-place / realloc-same-id /
   fork).
-- **B6 CRTP + distinct types**: TODO (staged) — `node2_base<Derived>` + distinct
-  shape types (leaf_fixed / leaf_varlen / leaf_u16 / inner / inner_grid), per-type SAL
-  ops, `switch(type_id|shape)` only on the hot path. This kills the single-`node2`
-  footguns (e.g. a grid's `stems()` aliasing children; the construction-order
-  dependence of `children_off` on the estimator sentinel) by construction.
+- **B6 CRTP + distinct types**: the clean `wtree` rewrite (branch `wtree-rewrite`) does
+  this from scratch — `node_base` / `node_form<Derived>` / the **§H matrix** types
+  (`tiny/medium/big × u32/u16`), single `node_type` tag + `height`, per-type SAL ops,
+  `switch(type_id)` on the hot path. This kills the single-`node2` footguns (untyped
+  `stems()` read on the wrong form; `children_off` depending on a sentinel) by
+  construction. wtree2 (in `reference/`) is the superseded in-place attempt.
 - B8/C/D/E/F: lifecycle (destroy/visit/retain), session bridge (`w2session`/`w2deref`),
   static_asserts, reserved sentinels, and `umode` are already followed.
