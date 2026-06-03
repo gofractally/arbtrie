@@ -14,6 +14,7 @@
 // Stage A: header + CRTP + `tiny` (u32, linear count_le), leaf (fixed 8-B value) +
 // inner. tiny16/medium/big and the varlen value model land in later stages.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -40,8 +41,10 @@ namespace psitri::wtree
    inline constexpr ptr_address kNoChild = sal::null_ptr_address;
    inline bool is_ext_slot(ptr_address c) noexcept { return !sal::is_reserved_ptr_address(c); }
 
-   inline constexpr std::size_t kCacheLine = 128;
+   inline constexpr std::size_t kCacheLine   = 128;
+   inline constexpr uint16_t    kStemsPerCl  = uint16_t(kCacheLine / 4);   // 32 u32 stems / cacheline
    inline uint32_t cl_round(uint32_t b) noexcept { return uint32_t(ucc::round_up_multiple<kCacheLine>(b)); }
+   inline uint16_t ndivs(uint16_t n) noexcept { return uint16_t((n + kStemsPerCl - 1) / kStemsPerCl); }
 
    // ── Tier 1: non-template base (form-independent header) ───────────────
    // Layout: [psitri::node 12B][height u8][prefix_len u8][flags u8][pad u8][num_stems u16]
@@ -126,15 +129,30 @@ namespace psitri::wtree
       static constexpr node_type type_id     = node_type::wtree_tiny;
       static constexpr uint16_t  kValueBytes = 8;   // Stage A: fixed u64 value
 
-      // regions sized for CAPACITY (slack for in-place grow): [stems: cap u32]
-      // [slots: (cap+1) × slot_stride], each cacheline-aligned. num_stems_ are live.
-      uint32_t stems_off() const noexcept { return regions_off(); }
+      // regions sized for CAPACITY (slack for in-place grow), each cacheline-aligned:
+      //   [divs: ndivs(cap) u32 — first stem of each 32-stem group, Medium-tier index]
+      //   [stems: cap u32]  [slots: (cap+1) × slot_stride]
+      // num_stems_ are live. The divs index lets count_le touch ~2 cachelines (divs +
+      // 1 group) instead of scanning all stems (the Medium routing tier).
+      uint32_t divs_off()  const noexcept { return regions_off(); }
+      uint32_t stems_off() const noexcept { return divs_off() + cl_round(uint32_t(ndivs(cap_)) * 4u); }
       uint32_t slots_off() const noexcept { return stems_off() + cl_round(uint32_t(cap_) * 4u); }
       static uint32_t slot_stride(bool leaf) noexcept { return leaf ? kValueBytes : uint32_t(sizeof(ptr_address)); }
 
+      uint32_t*       divs_ptr()       noexcept { return reinterpret_cast<uint32_t*>(base() + divs_off()); }
+      const uint32_t* divs_ptr() const noexcept { return reinterpret_cast<const uint32_t*>(base() + divs_off()); }
       uint32_t*       u32_stems()       noexcept { return reinterpret_cast<uint32_t*>(base() + stems_off()); }
       const uint32_t* u32_stems() const noexcept { return reinterpret_cast<const uint32_t*>(base() + stems_off()); }
       // NOTE: intentionally NO u16_stems() on this form → a u16 read here won't compile.
+
+      // Rebuild the divs index from the live stems (call after any stem mutation).
+      void regen_divs() noexcept
+      {
+         const uint32_t* st = u32_stems();
+         uint32_t*       d  = divs_ptr();
+         const uint16_t  K  = ndivs(num_stems_);
+         for (uint16_t j = 0; j < K; ++j) d[j] = st[uint16_t(j * kStemsPerCl)];
+      }
 
       // inner: children are ptr_address slots.
       ptr_address*       children()       noexcept { return reinterpret_cast<ptr_address*>(base() + slots_off()); }
@@ -143,7 +161,25 @@ namespace psitri::wtree
       uint8_t*       value_at(uint16_t i)       noexcept { return base() + slots_off() + size_t(i) * kValueBytes; }
       const uint8_t* value_at(uint16_t i) const noexcept { return base() + slots_off() + size_t(i) * kValueBytes; }
 
-      uint16_t count_le(uint32_t q) const noexcept { return count_le_u32(u32_stems(), num_stems_, q); }
+      // Adaptive upper_bound: linear SIMD scan when small (≤ one cacheline of stems),
+      // else the Medium divs-index (scan ndivs dividers → the group → scan that group).
+      uint16_t count_le(uint32_t q) const noexcept
+      {
+         const uint16_t n = num_stems_;
+         if (n <= kStemsPerCl) return count_le_u32(u32_stems(), n, q);
+         const uint32_t* d  = divs_ptr();
+         const uint16_t  K  = ndivs(n);
+         uint16_t        gc = 0;
+         for (uint16_t j = 0; j < K; ++j) gc = uint16_t(gc + (d[j] <= q));   // group: first div > q
+         if (gc == 0) return 0;
+         const uint16_t  g  = uint16_t(gc - 1);
+         const uint16_t  lo = uint16_t(g * kStemsPerCl);
+         const uint16_t  hi = uint16_t(std::min<uint32_t>(uint32_t(g + 1) * kStemsPerCl, n));
+         const uint32_t* st = u32_stems();
+         uint16_t        off = 0;
+         for (uint16_t j = lo; j < hi; ++j) off = uint16_t(off + (st[j] <= q));   // scan one group
+         return uint16_t(lo + off);
+      }
 
       // Leaf point lookup (u32 key → value bytes or nullptr). stems[k-1]==q ⇒ value
       // for that key lives at slot k (slot 0 = terminal). Fixed kValueBytes record.
@@ -157,7 +193,8 @@ namespace psitri::wtree
       // ── alloc_size ↔ ctor (node_design_patterns §A). Regions sized for `cap`. ──
       static uint32_t alloc_size(uint8_t height, uint8_t prefix_len, uint16_t cap) noexcept
       {
-         const uint32_t s_off = cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len) * 4u);
+         const uint32_t d_off = cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len) * 4u);
+         const uint32_t s_off = d_off + cl_round(uint32_t(ndivs(cap)) * 4u);   // divs index
          const uint32_t sl_off = s_off + cl_round(uint32_t(cap) * 4u);
          const uint32_t slot_bytes = uint32_t(cap + 1) * slot_stride(height == 0);
          return sl_off + cl_round(slot_bytes);
@@ -173,6 +210,7 @@ namespace psitri::wtree
          for (uint16_t i = 0; i < num_stems_; ++i) st[i] = keys[i];
          for (uint16_t i = 0; i < num_stems_; ++i)
             std::memcpy(value_at(uint16_t(i + 1)), &vals[i], kValueBytes);
+         regen_divs();
       }
       // INNER fill ctor: regions sized for `cap`; stems = divs; children = kids (divs+1).
       tiny(uint32_t asize, ptr_address_seq seq, uint8_t height, uint16_t cap,
@@ -184,6 +222,7 @@ namespace psitri::wtree
          for (uint16_t i = 0; i < num_stems_; ++i) st[i] = divs[i];
          ptr_address* ch = children();
          for (uint16_t i = 0; i <= num_stems_; ++i) ch[i] = kids[i];
+         regen_divs();
       }
 
       // ── SAL lifecycle ──────────────────────────────────────────────────

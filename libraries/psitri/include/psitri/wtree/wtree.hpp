@@ -78,6 +78,7 @@ namespace psitri::wtree
                       size_t(n - pos) * tiny::kValueBytes);
          std::memcpy(leaf->value_at(uint16_t(pos + 1)), &val, tiny::kValueBytes);
          leaf->num_stems_ = uint16_t(n + 1);
+         leaf->regen_divs();
          return r_inplace(leaf->address());
       }
       // full → split. Materialize merged, rewrite THIS node = left half in place, alloc right.
@@ -96,6 +97,7 @@ namespace psitri::wtree
       for (uint16_t j = 0; j < h; ++j) st[j] = k2[j];                       // left half in place
       for (uint16_t j = 0; j < h; ++j) std::memcpy(leaf->value_at(uint16_t(j + 1)), &v2[j], tiny::kValueBytes);
       leaf->num_stems_ = h;
+      leaf->regen_divs();
       const ptr_address R = build_tiny_leaf(std::span<const uint32_t>{k2 + h, size_t(m - h)},
                                             std::span<const uint64_t>{v2 + h, size_t(m - h)});
       return r_split(leaf->address(), k2[h], R);
@@ -116,6 +118,7 @@ namespace psitri::wtree
          for (uint16_t j = uint16_t(n + 1); j > i + 1; --j) ch[j] = ch[j - 1];
          ch[i] = left; ch[uint16_t(i + 1)] = right;
          inner->num_stems_ = uint16_t(n + 1);
+         inner->regen_divs();
          return r_inplace(inner->address());
       }
       // full → split inner: promote s2[hh]; rewrite this = left in place, alloc right.
@@ -133,6 +136,7 @@ namespace psitri::wtree
       for (uint16_t j = 0; j < hh; ++j) st[j] = s2[j];                      // left stems
       for (uint16_t j = 0; j <= hh; ++j) ch[j] = c2[j];                     // left children (hh+1)
       inner->num_stems_ = hh;
+      inner->regen_divs();
       const ptr_address Rr = build_tiny_inner(height,
                                               std::span<const uint32_t>{s2 + hh + 1, size_t(sn - hh - 1)},
                                               std::span<const ptr_address>{c2 + hh + 1, size_t(cn - hh - 1)});
