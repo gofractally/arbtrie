@@ -52,14 +52,16 @@ namespace psitri::wtree
    //
    // height / prefix_len / flags share one u16 via bitfields. On little-endian (our
    // target) the first-declared field gets the LOW bits, so is_leaf is a cheap mask on
-   // bits [0,6). NOT a portable on-disk layout (endianness would flip the order) — fine,
-   // the format is single-target. (3 fields = 6+6+4 = exactly 16 bits = one u16 unit.)
+   // height_. NOT a portable on-disk layout (endianness flips field order) — fine, the
+   // format is single-target. Bit budget: height needs ~3 (depth caps ~4 with 512-fanout
+   // inners), flags needs 1 (fixed_values). prefix_len is the only one bounded by DATA
+   // (key words consumed here), so it takes the whole surplus (11 bits = up to 2047 words).
    class node_base : public psitri::node
    {
      public:
-      uint16_t height_     : 6;   // 12: 0 = leaf, >0 = inner   (low bits)
-      uint16_t prefix_len_ : 6;   //     # of u32 prefix words consumed at this node
-      uint16_t flags_      : 4;   //     bit0 = fixed_values (leaf)
+      uint16_t height_     : 4;   // 12: 0 = leaf, >0 = inner   (low bits → cheap is_leaf)
+      uint16_t flags_      : 1;   //     bit0 = fixed_values (leaf)
+      uint16_t prefix_len_ : 11;  //     # of u32 prefix words consumed at this node
       uint16_t num_stems_;        // 14: N live routing stems (N+1 slots)
       uint16_t cap_;              // 16: stem CAPACITY (regions sized for cap; grow ≤ cap)
 
@@ -91,12 +93,12 @@ namespace psitri::wtree
 
      protected:
       node_base(uint32_t asize, node_type t, ptr_address_seq seq,
-                uint8_t height, uint8_t prefix_len, uint8_t flags, uint16_t cap) noexcept
+                uint8_t height, uint16_t prefix_len, uint8_t flags, uint16_t cap) noexcept
           : psitri::node(asize, t, seq),
-            height_(height), prefix_len_(prefix_len), flags_(flags),
+            height_(height), flags_(flags), prefix_len_(prefix_len),
             num_stems_(0), cap_(cap)
       {
-         assert(height <= 0x3F && prefix_len <= 0x3F && flags <= 0xF);
+         assert(height <= 0xF && flags <= 0x1 && prefix_len <= 0x7FF);
       }
    } __attribute__((packed));
    static_assert(sizeof(node_base) == 18, "wtree node_base header must be 18 B");
@@ -203,7 +205,7 @@ namespace psitri::wtree
       }
 
       // ── alloc_size ↔ ctor (node_design_patterns §A). Regions sized for `cap`. ──
-      static uint32_t alloc_size(uint8_t height, uint8_t prefix_len, uint16_t cap) noexcept
+      static uint32_t alloc_size(uint8_t height, uint16_t prefix_len, uint16_t cap) noexcept
       {
          const uint32_t d_off = cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len) * 4u);
          const uint32_t s_off = d_off + cl_round(uint32_t(ndivs(cap)) * 4u);   // divs index
