@@ -99,11 +99,11 @@ namespace psitri
          if (!can_inline(v))
          {
             // Flat mode: header + uint32_t size + raw data
-            return ucc::round_up_multiple<64>(
+            return ucc::round_up_multiple<sal::cacheline_size>(
                 sizeof(value_node) + sizeof(uint32_t) + v.size());
          }
          // header(16) + 0 next_ptrs + 1 entry(8) + value data(2 + v.size())
-         return ucc::round_up_multiple<64>(
+         return ucc::round_up_multiple<sal::cacheline_size>(
              sizeof(value_node) + 8 + sizeof(uint16_t) + v.size());
       }
 
@@ -112,7 +112,7 @@ namespace psitri
          if (v.is_view())
             return alloc_size(v.view());
          else  // subtree — store tree_id in alloc area
-            return ucc::round_up_multiple<64>(
+            return ucc::round_up_multiple<sal::cacheline_size>(
                 sizeof(value_node) + 8 + sizeof(uint16_t) + sizeof(tree_id));
       }
 
@@ -122,7 +122,7 @@ namespace psitri
          uint32_t existing = sizeof(value_node) + src->_num_next * sizeof(value_next_ptr) +
                              src->_num_versions * 8 + src->_alloc_pos;
          uint32_t added = 8 + sizeof(uint16_t) + new_val.size();  // 1 entry + value data
-         return std::max(ucc::round_up_multiple<64>(existing + added), src->size());
+         return std::max(ucc::round_up_multiple<sal::cacheline_size>(existing + added), src->size());
       }
 
       /// Alloc size for promoting inline value to 2-entry value_node (MVCC).
@@ -131,7 +131,7 @@ namespace psitri
       {
          uint32_t data = sizeof(value_node) + 2 * 8 +  // 2 entries
                          2 * sizeof(uint16_t) + old_val.size() + new_val.size();
-         return ucc::round_up_multiple<64>(data);
+         return ucc::round_up_multiple<sal::cacheline_size>(data);
       }
 
       /// Alloc size for appending a tombstone to an existing value_node (MVCC).
@@ -140,7 +140,7 @@ namespace psitri
          uint32_t existing = sizeof(value_node) + src->_num_next * sizeof(value_next_ptr) +
                              src->_num_versions * 8 + src->_alloc_pos;
          uint32_t added = 8;  // 1 entry only, no value data for tombstone
-         return std::max(ucc::round_up_multiple<64>(existing + added), src->size());
+         return std::max(ucc::round_up_multiple<sal::cacheline_size>(existing + added), src->size());
       }
 
       // ── Overloads with dead-version snapshot (for opportunistic cleanup) ──

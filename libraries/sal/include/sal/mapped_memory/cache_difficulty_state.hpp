@@ -128,7 +128,7 @@ namespace sal
             // random = xxh32::hash((char*)&random, sizeof(random), 0);
             // convert size to a muultiple of cache size, rounding up
             // ensures that it is at least 1 so we don't divide by 0
-            uint64_t clines = ucc::round_up_multiple<64>(size_bytes + 1) / 64;
+            uint64_t clines = ucc::round_up_multiple<cacheline_size>(size_bytes + 1) / cacheline_size;
 
             uint64_t adjusted_difficulty =
                 _cache_difficulty.load(std::memory_order_relaxed) * clines;

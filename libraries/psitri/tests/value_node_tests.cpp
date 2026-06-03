@@ -224,11 +224,11 @@ TEST_CASE("value_node entry pack/unpack roundtrip", "[value_node]")
 
 TEST_CASE("value_node alloc_size", "[value_node]")
 {
-   SECTION("small value rounds to 64")
+   SECTION("small value rounds to one cacheline")
    {
       auto asize = psitri::value_node::alloc_size(psitri::value_view("hi", 2));
-      CHECK(asize == 64);
-      CHECK(asize % 64 == 0);
+      CHECK(asize == sal::cacheline_size);
+      CHECK(asize % sal::cacheline_size == 0);
    }
 
    SECTION("large value")

@@ -42,7 +42,7 @@ namespace sal
          {
             if (!user_data.empty() && not is_finalized() && not is_read_only())
             {
-               constexpr uint32_t marker_size = 64;
+               constexpr uint32_t marker_size = cacheline_size;   // grain-aligned: alloc continues after
                assert(alloc_pos + marker_size <= segment_size - segment_footer_size);
                assert(user_data.size() <= sync_header_user_data_capacity);
 
@@ -87,7 +87,7 @@ namespace sal
             if (not is_finalized() or is_read_only())
                return 0;
 
-            constexpr uint32_t terminal_size = 64;
+            constexpr uint32_t terminal_size = cacheline_size;   // grain-aligned
             assert(alloc_pos + terminal_size <= segment_size - segment_footer_size);
 
             // Lock the tracker for the entire sync_header alloc bookkeeping

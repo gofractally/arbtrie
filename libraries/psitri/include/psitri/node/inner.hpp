@@ -21,14 +21,14 @@ namespace psitri
                                         const std::array<uint8_t, 8>& cline_indices,
                                         uint64_t                      = 0) noexcept
       {
-         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+         return ucc::round_up_multiple<sal::cacheline_size>(sizeof(inner_prefix_node) + prefix.size() +
                                            2 * branches.count() - 1 +
                                            numcline * sizeof(cline_data));
       }
       static inline uint32_t alloc_size(const any_inner_node_type auto* clone,
                                         key_view                        prefix) noexcept
       {
-         return ucc::round_up_multiple<64>(clone->size() - clone->prefix_capacity() +
+         return ucc::round_up_multiple<sal::cacheline_size>(clone->size() - clone->prefix_capacity() +
                                            prefix.size());
       }
 
@@ -37,7 +37,7 @@ namespace psitri
                                         const op::replace_branch& update) noexcept
       {
          auto new_branches = clone->_num_branches + update.sub_branches.count() - 1;
-         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+         return ucc::round_up_multiple<sal::cacheline_size>(sizeof(inner_prefix_node) + prefix.size() +
                                            2 * new_branches - 1 +
                                            update.needed_clines * sizeof(cline_data));
       }
@@ -47,7 +47,7 @@ namespace psitri
                                         const cline_freq_table&         ftab,
                                         uint64_t                        = 0) noexcept
       {
-         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+         return ucc::round_up_multiple<sal::cacheline_size>(sizeof(inner_prefix_node) + prefix.size() +
                                            2 * (*range.end - *range.begin) - 1 +
                                            ftab.compressed_clines() * sizeof(cline_data));
       }
@@ -56,7 +56,7 @@ namespace psitri
                                         const op::inner_remove_branch&) noexcept
       {
          auto new_branches = clone->num_branches() - 1;
-         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+         return ucc::round_up_multiple<sal::cacheline_size>(sizeof(inner_prefix_node) + prefix.size() +
                                            2 * new_branches - 1 +
                                            clone->num_clines() * sizeof(cline_data));
       }
@@ -65,7 +65,7 @@ namespace psitri
                                         const op::inner_remove_range& rm) noexcept
       {
          auto new_branches = clone->num_branches() - (*rm.hi - *rm.lo);
-         return ucc::round_up_multiple<64>(sizeof(inner_prefix_node) + prefix.size() +
+         return ucc::round_up_multiple<sal::cacheline_size>(sizeof(inner_prefix_node) + prefix.size() +
                                            2 * new_branches - 1 +
                                            clone->num_clines() * sizeof(cline_data));
       }
@@ -346,7 +346,7 @@ namespace psitri
                                           uint64_t) noexcept
    {
       auto divider_capacity = ucc::round_up_multiple<1>(branches.count() - 1);
-      return ucc::round_up_multiple<64>(inner_node_size + numcline * sizeof(ptr_address) +
+      return ucc::round_up_multiple<sal::cacheline_size>(inner_node_size + numcline * sizeof(ptr_address) +
                                         divider_capacity + branches.count());
    }
    inline uint32_t inner_node::alloc_size(const any_inner_node_type auto* clone,
@@ -354,7 +354,7 @@ namespace psitri
    {
       auto new_branches_count = clone->num_branches() + update.sub_branches.count() - 1;
       auto divider_capacity   = new_branches_count - 1;
-      return ucc::round_up_multiple<64>(inner_node_size +
+      return ucc::round_up_multiple<sal::cacheline_size>(inner_node_size +
                                         update.needed_clines * sizeof(ptr_address) +
                                         divider_capacity + new_branches_count);
    }
@@ -402,7 +402,7 @@ namespace psitri
       auto new_branches_count = *range.end - *range.begin;
       auto divider_capacity   = ucc::round_up_multiple<1>(new_branches_count - 1);
       auto needed_clines      = ftab.compressed_clines();
-      return ucc::round_up_multiple<64>(inner_node_size + needed_clines * sizeof(ptr_address) +
+      return ucc::round_up_multiple<sal::cacheline_size>(inner_node_size + needed_clines * sizeof(ptr_address) +
                                         divider_capacity + new_branches_count);
    }
 
@@ -435,7 +435,7 @@ namespace psitri
    {
       auto new_branches_count = clone->num_branches() - 1;
       auto divider_capacity   = new_branches_count - 1;
-      return ucc::round_up_multiple<64>(inner_node_size +
+      return ucc::round_up_multiple<sal::cacheline_size>(inner_node_size +
                                         clone->num_clines() * sizeof(ptr_address) +
                                         divider_capacity + new_branches_count);
    }
@@ -455,7 +455,7 @@ namespace psitri
    {
       auto new_branches_count = clone->num_branches() - (*rm.hi - *rm.lo);
       auto divider_capacity   = new_branches_count - 1;
-      return ucc::round_up_multiple<64>(inner_node_size +
+      return ucc::round_up_multiple<sal::cacheline_size>(inner_node_size +
                                         clone->num_clines() * sizeof(ptr_address) +
                                         divider_capacity + new_branches_count);
    }

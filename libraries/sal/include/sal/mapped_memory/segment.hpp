@@ -310,9 +310,9 @@ namespace sal
          }
          bool can_alloc(uint32_t size) const
          {
-            assert(size == ucc::round_up_multiple<64>(size));
-            // leave enough room for the ending allocator header
-            return get_alloc_pos() + size <= sizeof(data) - 64;
+            assert(size == ucc::round_up_multiple<cacheline_size>(size));
+            // leave enough room for the ending allocator header (one grain)
+            return get_alloc_pos() + size <= sizeof(data) - cacheline_size;
          }
          template <typename T>
          T* alloc(uint32_t size, auto&&... args)
@@ -328,7 +328,7 @@ namespace sal
          }
          void unalloc(uint32_t size)
          {
-            assert(size == ucc::round_up_multiple<64>(size));
+            assert(size == ucc::round_up_multiple<cacheline_size>(size));
             assert(size <= get_alloc_pos());
 
             assert(_alloc_pos_LOCKED >= size);
@@ -372,7 +372,9 @@ namespace sal
          /// POD and <= 44 bytes
          uint64_t sync(sync_type st, const runtime_config& cfg, std::span<char> user_data);
 
-         char data[segment_size - segment_footer_size];
+         // grain-aligned so every bump-allocated object lands on a true 128-B line
+         // (segments are segment_size-aligned in the mapping; alignas pins data within).
+         alignas(cacheline_size) char data[segment_size - segment_footer_size];
          // the next position to allocate data, only
          // modified by the thread that owns this segment and
          // set to uint64_t max when this segment is ready

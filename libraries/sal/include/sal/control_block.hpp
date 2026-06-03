@@ -32,13 +32,13 @@ namespace sal
          /// reference count, up to 1M shared references (bit 20 reclaimed for pf2)
          uint64_t ref : 20;
          /// prefetch-2nd-cacheline hint: when set, get_ref prefetches the node's
-         /// 2nd 64-B cacheline alongside the first (for objects whose must-read
+         /// 2nd 128-B cacheline alongside the first (for objects whose must-read
          /// header — e.g. an inline estimator or long prefix — spills past CL0).
          /// Set once at alloc from the object's pf_second_cl(); the optimistic
          /// fetch_add/sub refcount path never carries into it (max_ref_count guard).
          uint64_t pf2 : 1;
-         /// index to the cacheline of up to 128 TB of memory with 64 bytes per cacheline
-         /// this is the maximum addressable by mapped memory on modern systems.
+         /// index to the cacheline of up to 256 TB of memory at 128 bytes per cacheline
+         /// (sal::cacheline_size); this is the maximum addressable by mapped memory.
          uint64_t cacheline_offset : 41;
 
          /// set this bit when object is read, clearered when ref count goes to 0

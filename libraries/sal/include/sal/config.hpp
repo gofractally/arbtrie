@@ -10,10 +10,15 @@
 
 namespace sal
 {
-   // On M2+ macs this is 128, use std::hardware_destructive_interference_size
-   // if you need the real cacheline size, we assume 64 for most x86 architectures
-   // even though Intel also fetches 128 bytes to L3 cache.
-   constexpr uint32_t cacheline_size = 64;
+   // SAL's allocation granularity AND location-encoding unit. Fixed at 128 regardless of
+   // architecture: it's the true line on Apple Silicon P-cores, and modern x86 fetches an
+   // adjacent pair (128 B) from RAM even though it tracks coherence at 64. A 128-B grain
+   // gives true hardware-line alignment for every object (no cross-object false sharing,
+   // exact pf2 prefetch) and doubles the location reach (cacheline_offset:41 → 256 TB).
+   // NOTE: this is the persistent format's grain — changing it is an on-disk format break.
+   constexpr uint32_t cacheline_size = 128;
+   static_assert((cacheline_size & (cacheline_size - 1)) == 0, "cacheline_size must be pow2");
+   constexpr uint32_t cacheline_shift = (cacheline_size == 128) ? 7 : 6;
 
    namespace system_config
    {

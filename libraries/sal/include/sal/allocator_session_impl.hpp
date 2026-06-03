@@ -44,6 +44,7 @@ namespace sal
    template <typename T>
    std::pair<location, T*> allocator_session::alloc_data(uint32_t size, auto&&... args)
    {
+      size = ucc::round_up_multiple<cacheline_size>(size);   // every object is grain-aligned
       prepare_alloc(size, get_current_time_msec());
       auto head = _alloc_seg_ptr->alloc<T>(size, std::forward<decltype(args)>(args)...);
       auto loc  = location::from_absolute_address((char*)head - _block_base_ptr);
@@ -54,6 +55,7 @@ namespace sal
                                                               msec_timestamp vage,
                                                               auto&&... args)
    {
+      size = ucc::round_up_multiple<cacheline_size>(size);   // every object is grain-aligned
       prepare_alloc(size, vage);
       auto head = _alloc_seg_ptr->alloc<T>(size, std::forward<decltype(args)>(args)...);
       auto loc  = location::from_absolute_address((char*)head - _block_base_ptr);
@@ -62,7 +64,7 @@ namespace sal
    inline void allocator_session::prepare_alloc(uint32_t size, msec_timestamp vage)
    {
       assert(size < sizeof(mapped_memory::segment::data));
-      assert(size == ucc::round_up_multiple<64>(size));
+      assert(size == ucc::round_up_multiple<cacheline_size>(size));
 
       if (not _alloc_seg_ptr) [[unlikely]]
          init_active_segment();

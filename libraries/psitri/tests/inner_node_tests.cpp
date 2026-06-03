@@ -38,7 +38,7 @@ TEST_CASE("InnerNode", "[inner_node]")
       REQUIRE(req_cline == 1);
 
       auto asize = inner_node::alloc_size(bs, req_cline, out_clines);
-      REQUIRE(asize == 64);
+      REQUIRE(asize == sal::cacheline_size);
 
       char buffer[asize];
       auto inode = new (buffer) inner_node(asize, ptr_address_seq(), bs, req_cline, out_clines, 0);
@@ -176,7 +176,11 @@ TEST_CASE("InnerNode", "[inner_node]")
          REQUIRE(inode->num_divisions() == 11);
          SAL_WARN(" free space: {}", inode->free_space());
       }
-      // REPLACE LAST BRANCH WITH 6 BRANCHES, cloning to a larger size
+      // REPLACE LAST BRANCH WITH 6 BRANCHES — applies IN PLACE.
+      // Under the 128-byte SAL grain a node is born at one full cacheline, which (with the
+      // node's ~1.25-byte/ptr cline packing) holds far more than these 17 branches, so this
+      // replace no longer needs to clone to a larger node. The clone-to-larger grow path is
+      // covered by the "branch_set divider operations" realloc test below (128 → 256).
       {
          branch_set bs2;
          bs2.set_front(ptr_address(20011));
@@ -188,40 +192,19 @@ TEST_CASE("InnerNode", "[inner_node]")
 
          std::array<uint8_t, 8> cline_indices;
          auto req_cline = inode->find_clines(branch_number(11), bs2, cline_indices);
-         REQUIRE(req_cline == 3);
-
          op::replace_branch update_op{branch_number(11), bs2, req_cline, cline_indices};
 
-         // not enough space to add these new branches..
-         REQUIRE(not inode->can_apply(update_op));
+         REQUIRE(inode->can_apply(update_op));   // fits in the one-cacheline node
+         inode->apply(update_op);
 
-         // new buffer with more space
-         auto asize2 = inner_node::alloc_size(inode, update_op);
-         assert(asize2 == 128);
-         char buffer[asize2];
-         auto inode2 = new (buffer) inner_node(128, ptr_address_seq(), inode, update_op);
-
-         REQUIRE(inode2->divs() == key_view("01234MNOPXYabcde"));
-         REQUIRE(inode2->get_branch(branch_number(0)) == ptr_address(10017));
-         REQUIRE(inode2->get_branch(branch_number(1)) == ptr_address(10012));
-         REQUIRE(inode2->get_branch(branch_number(2)) == ptr_address(10013));
-         REQUIRE(inode2->get_branch(branch_number(3)) == ptr_address(10014));
-         REQUIRE(inode2->get_branch(branch_number(4)) == ptr_address(10015));
-         REQUIRE(inode2->get_branch(branch_number(5)) == ptr_address(10016));
-         REQUIRE(inode2->get_branch(branch_number(6)) == ptr_address(10006));
-         REQUIRE(inode2->get_branch(branch_number(7)) == ptr_address(10007));
-         REQUIRE(inode2->get_branch(branch_number(8)) == ptr_address(10008));
-         REQUIRE(inode2->get_branch(branch_number(9)) == ptr_address(10009));
-         REQUIRE(inode2->get_branch(branch_number(10)) == ptr_address(10010));
-         REQUIRE(inode2->get_branch(branch_number(11)) == ptr_address(20011));
-         REQUIRE(inode2->get_branch(branch_number(12)) == ptr_address(20012));
-         REQUIRE(inode2->get_branch(branch_number(13)) == ptr_address(20013));
-         REQUIRE(inode2->get_branch(branch_number(14)) == ptr_address(20014));
-         REQUIRE(inode2->get_branch(branch_number(15)) == ptr_address(20015));
-         REQUIRE(inode2->get_branch(branch_number(16)) == ptr_address(20010));
-         REQUIRE(inode2->num_branches() == 17);
-         REQUIRE(inode2->num_divisions() == 16);
-         SAL_WARN(" free space: {}", inode2->free_space());
+         REQUIRE(inode->divs() == key_view("01234MNOPXYabcde"));
+         REQUIRE(inode->get_branch(branch_number(0)) == ptr_address(10017));
+         REQUIRE(inode->get_branch(branch_number(6)) == ptr_address(10006));
+         REQUIRE(inode->get_branch(branch_number(11)) == ptr_address(20011));
+         REQUIRE(inode->get_branch(branch_number(12)) == ptr_address(20012));
+         REQUIRE(inode->get_branch(branch_number(16)) == ptr_address(20010));
+         REQUIRE(inode->num_branches() == 17);
+         REQUIRE(inode->num_divisions() == 16);
       }
    }
    SECTION("two branches, two cacheline")
@@ -235,7 +218,7 @@ TEST_CASE("InnerNode", "[inner_node]")
       REQUIRE(req_cline == 2);
 
       auto asize = inner_node::alloc_size(bs, req_cline, out_clines);
-      REQUIRE(asize == 64);
+      REQUIRE(asize == sal::cacheline_size);
 
       char buffer[asize];
       auto inode = new (buffer) inner_node(asize, ptr_address_seq(), bs, req_cline, out_clines, 0);

@@ -82,6 +82,8 @@ namespace sal
       if (not _alloc_seg_ptr) [[unlikely]]
          return false;
 
+      size = ucc::round_up_multiple<cacheline_size>(size);   // inverse of alloc_data's grain rounding
+
       assert(reinterpret_cast<alloc_header*>(_alloc_seg_ptr->data +
                                              _alloc_seg_ptr->get_alloc_pos() - size)
                  ->size() == size);
@@ -155,9 +157,9 @@ namespace sal
 
          // If this drain pass transitioned a partial-finalized segment to
          // fully read-only via the fall-through path, the bytes past the
-         // 64-byte terminal sync_header are unallocated tail — reclaimable
-         // by the compactor, and must be recorded once.
-         constexpr uint32_t terminal_size = 64;
+         // terminal sync_header are unallocated tail — reclaimable by the
+         // compactor, and must be recorded once. (Must match segment_impl's grain.)
+         constexpr uint32_t terminal_size = sal::cacheline_size;
          const bool wrote_fall_through_terminal =
              was_partial_finalized and seg->is_read_only() and bytes_synced > 0 and
              seg->get_alloc_pos() == pos_before + terminal_size and

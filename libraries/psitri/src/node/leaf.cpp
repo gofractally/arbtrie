@@ -207,7 +207,9 @@ namespace psitri
 
    void leaf_node::compact_to(alloc_header* compact_dst) const noexcept
    {
-      assert(compact_dst->size() == compact_size());
+      // dst is allocated at compact_size() rounded up to the SAL grain → it is at least
+      // big enough; the partial copy below is tail-relative so any large-enough dst works.
+      assert(compact_dst->size() >= compact_size());
       if (compact_dst->size() == size())
       {
          // Same size: fast full copy

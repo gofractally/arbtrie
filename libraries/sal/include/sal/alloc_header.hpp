@@ -27,7 +27,7 @@ namespace sal
     * Every object has a ptr_address which is used to track its current location,
     * and is utilized when rebuilding the state from a system crash.
     *
-    * The size of the object is measured in 64 byte cachelines, and the type is
+    * The size of the object is a multiple of sal::cacheline_size (128 B), and the type is
     * used to identify the type of the object and is extended by derived types.
     *
     * The app_data field is used to store application specific metadata, and is
