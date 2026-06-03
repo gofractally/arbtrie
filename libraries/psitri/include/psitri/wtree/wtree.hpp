@@ -57,22 +57,31 @@ namespace psitri::wtree
    inline ins_result r_inplace(ptr_address a) noexcept { return {false, a, 0, kNoChild}; }
    inline ins_result r_split(ptr_address l, uint32_t d, ptr_address r) noexcept { return {true, l, d, r}; }
 
-   // Stage A descends with raw deref (no per-level atomic refcount): no MVCC/sync and
-   // single-threaded in-place mutation, so the tree is held alive by `root` alone. (The
-   // snapshot/COW model threads a smart_ref here instead.)
-   inline ins_result leaf_insert(ptr_address addr, uint32_t key, uint64_t val) noexcept
+   using node_ref = sal::smart_ref<sal::alloc_header>;
+   inline tiny* writable(node_ref& nref) noexcept
    {
-      tiny*          leaf = deref<tiny>(addr);
+      return const_cast<tiny*>(static_cast<const tiny*>(nref.obj()));   // Stage A: no sync
+   }
+
+   inline ins_result leaf_insert(node_ref& nref, uint32_t key, uint64_t val) noexcept
+   {
+      tiny*          leaf = writable(nref);
       const uint16_t n    = leaf->num_stems_;
       uint32_t*      st   = leaf->u32_stems();
       const uint16_t pos  = leaf->count_le(key);
       if (pos > 0 && st[pos - 1] == key)                       // update in place
       {
          std::memcpy(leaf->value_at(pos), &val, tiny::kValueBytes);
-         return r_inplace(addr);
+         return r_inplace(leaf->address());
       }
       if (n < leaf->cap_)                                      // in-place insert (shift)
       {
+         // The value-region shift is the bulk of the insert's COLD traffic and is NOT
+         // covered by the node's cl0/cl1 prefetch. Pull those lines (write-intent) now so
+         // they land while the cheaper stem shift runs, instead of serializing after it.
+         for (uint8_t* p = leaf->value_at(uint16_t(pos + 1)), *e = leaf->value_at(uint16_t(n + 2));
+              p < e; p += kCacheLine)
+            __builtin_prefetch(p, 1, 3);
          for (uint16_t j = n; j > pos; --j) st[j] = st[j - 1];
          st[pos] = key;
          std::memmove(leaf->value_at(uint16_t(pos + 2)), leaf->value_at(uint16_t(pos + 1)),
@@ -80,7 +89,7 @@ namespace psitri::wtree
          std::memcpy(leaf->value_at(uint16_t(pos + 1)), &val, tiny::kValueBytes);
          leaf->num_stems_ = uint16_t(n + 1);
          leaf->update_divs_from(pos);
-         return r_inplace(addr);
+         return r_inplace(leaf->address());
       }
       // full → split. Materialize merged, rewrite THIS node = left half in place, alloc right.
       uint32_t k2[kTinyCap + 2];
@@ -101,14 +110,14 @@ namespace psitri::wtree
       leaf->regen_divs();
       const ptr_address R = build_tiny_leaf(std::span<const uint32_t>{k2 + h, size_t(m - h)},
                                             std::span<const uint64_t>{v2 + h, size_t(m - h)});
-      return r_split(addr, k2[h], R);
+      return r_split(leaf->address(), k2[h], R);
    }
 
    // Absorb a child split (left==reused child id, div, right) into this inner at slot i.
-   inline ins_result inner_absorb(ptr_address addr, uint16_t i, ptr_address left,
+   inline ins_result inner_absorb(node_ref& nref, uint16_t i, ptr_address left,
                                   uint32_t div, ptr_address right) noexcept
    {
-      tiny*          inner = deref<tiny>(addr);
+      tiny*          inner = writable(nref);
       const uint16_t n     = inner->num_stems_;
       uint32_t*      st    = inner->u32_stems();
       ptr_address*   ch    = inner->children();
@@ -120,7 +129,7 @@ namespace psitri::wtree
          ch[i] = left; ch[uint16_t(i + 1)] = right;
          inner->num_stems_ = uint16_t(n + 1);
          inner->update_divs_from(i);
-         return r_inplace(addr);
+         return r_inplace(inner->address());
       }
       // full → split inner: promote s2[hh]; rewrite this = left in place, alloc right.
       uint32_t    s2[kTinyCap + 2];
@@ -141,18 +150,19 @@ namespace psitri::wtree
       const ptr_address Rr = build_tiny_inner(height,
                                               std::span<const uint32_t>{s2 + hh + 1, size_t(sn - hh - 1)},
                                               std::span<const ptr_address>{c2 + hh + 1, size_t(cn - hh - 1)});
-      return r_split(addr, s2[hh], Rr);
+      return r_split(inner->address(), s2[hh], Rr);
    }
 
-   inline ins_result insert_rec(ptr_address addr, uint32_t key, uint64_t val) noexcept
+   inline ins_result insert_rec(node_ref& nref, uint32_t key, uint64_t val) noexcept
    {
-      const tiny* nd = deref<tiny>(addr);
-      if (nd->is_leaf()) return leaf_insert(addr, key, val);
+      const tiny* nd = static_cast<const tiny*>(nref.obj());
+      if (nd->is_leaf()) return leaf_insert(nref, key, val);
       const uint16_t    i     = nd->count_le(key);
       const ptr_address child = nd->children()[i];
-      const ins_result  r     = insert_rec(child, key, val);
-      if (!r.split) return r_inplace(addr);                   // child kept its id → no repoint
-      return inner_absorb(addr, i, r.addr, r.div, r.right);
+      node_ref          cref  = session().get_ref<sal::alloc_header>(child);
+      const ins_result  r     = insert_rec(cref, key, val);
+      if (!r.split) return r_inplace(nref.address());         // child kept its id → no repoint
+      return inner_absorb(nref, i, r.addr, r.div, r.right);
    }
 
    // Insert one (u32 key, u64 value); returns the (possibly new) root.
@@ -164,7 +174,8 @@ namespace psitri::wtree
          const uint64_t v = val;
          return build_tiny_leaf(std::span<const uint32_t>{&k, 1}, std::span<const uint64_t>{&v, 1});
       }
-      const ins_result r = insert_rec(root, key, val);
+      node_ref         nref = session().get_ref<sal::alloc_header>(root);
+      const ins_result r    = insert_rec(nref, key, val);
       if (!r.split) return r.addr;                            // == root (id kept)
       const uint8_t     newh    = uint8_t(deref<node_base>(r.addr)->height_ + 1);
       const ptr_address kids[2] = {r.addr, r.right};
