@@ -50,33 +50,30 @@ namespace psitri::wtree
    // Layout: [psitri::node 12B][hpf u16][num_stems u16][cap u16]
    //         [prefix: prefix_len u32 words] then form-specific regions (cacheline-aligned).
    //
-   // `hpf_` packs height / prefix_len / flags into one u16 (height in the LOW bits so
-   //  is_leaf is a cheap mask): [height:6][prefix_len:6][flags:4].
+   // height / prefix_len / flags share one u16 via bitfields. On little-endian (our
+   // target) the first-declared field gets the LOW bits, so is_leaf is a cheap mask on
+   // bits [0,6). NOT a portable on-disk layout (endianness would flip the order) — fine,
+   // the format is single-target. (3 fields = 6+6+4 = exactly 16 bits = one u16 unit.)
    class node_base : public psitri::node
    {
      public:
-      // hpf_ field layout
-      static constexpr uint16_t kHeightBits = 6, kPrefixBits = 6, kFlagBits = 4;
-      static constexpr uint16_t kHeightMask = (1u << kHeightBits) - 1;        // bits [0,6)
-      static constexpr uint16_t kPrefixShift = kHeightBits;                   // bits [6,12)
-      static constexpr uint16_t kPrefixMask = (1u << kPrefixBits) - 1;
-      static constexpr uint16_t kFlagsShift = kHeightBits + kPrefixBits;      // bits [12,16)
-
-      uint16_t hpf_;          // 12: [height:6][prefix_len:6][flags:4]
-      uint16_t num_stems_;    // 14: N live routing stems (N+1 slots)
-      uint16_t cap_;          // 16: stem CAPACITY (regions sized for cap; in-place grow ≤ cap)
+      uint16_t height_     : 6;   // 12: 0 = leaf, >0 = inner   (low bits)
+      uint16_t prefix_len_ : 6;   //     # of u32 prefix words consumed at this node
+      uint16_t flags_      : 4;   //     bit0 = fixed_values (leaf)
+      uint16_t num_stems_;        // 14: N live routing stems (N+1 slots)
+      uint16_t cap_;              // 16: stem CAPACITY (regions sized for cap; grow ≤ cap)
 
       static constexpr uint16_t kHeaderBytes = 18;
-      static constexpr uint16_t kFlagFixedValues = 0x01;   // flag-local bit (within the 4-bit field)
+      static constexpr uint16_t kFlagFixedValues = 0x01;
       uint16_t capacity() const noexcept { return cap_; }
 
-      uint8_t  height()       const noexcept { return uint8_t(hpf_ & kHeightMask); }
-      bool     is_leaf()      const noexcept { return (hpf_ & kHeightMask) == 0; }
-      bool     is_inner()     const noexcept { return (hpf_ & kHeightMask) != 0; }
+      uint8_t  height()       const noexcept { return uint8_t(height_); }
+      bool     is_leaf()      const noexcept { return height_ == 0; }
+      bool     is_inner()     const noexcept { return height_ != 0; }
       uint16_t num_stems()    const noexcept { return num_stems_; }
       uint16_t n_slots()      const noexcept { return uint16_t(num_stems_ + 1); }
-      uint8_t  prefix_len()   const noexcept { return uint8_t((hpf_ >> kPrefixShift) & kPrefixMask); }
-      bool     fixed_values() const noexcept { return (hpf_ >> kFlagsShift) & kFlagFixedValues; }
+      uint8_t  prefix_len()   const noexcept { return uint8_t(prefix_len_); }
+      bool     fixed_values() const noexcept { return flags_ & kFlagFixedValues; }
 
       uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
       const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
@@ -96,10 +93,10 @@ namespace psitri::wtree
       node_base(uint32_t asize, node_type t, ptr_address_seq seq,
                 uint8_t height, uint8_t prefix_len, uint8_t flags, uint16_t cap) noexcept
           : psitri::node(asize, t, seq),
-            hpf_(uint16_t(height | (uint16_t(prefix_len) << kPrefixShift) | (uint16_t(flags) << kFlagsShift))),
+            height_(height), prefix_len_(prefix_len), flags_(flags),
             num_stems_(0), cap_(cap)
       {
-         assert(height <= kHeightMask && prefix_len <= kPrefixMask && flags <= 0xF);
+         assert(height <= 0x3F && prefix_len <= 0x3F && flags <= 0xF);
       }
    } __attribute__((packed));
    static_assert(sizeof(node_base) == 18, "wtree node_base header must be 18 B");
