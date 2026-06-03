@@ -74,15 +74,9 @@ namespace psitri::wtree
          std::memcpy(leaf->value_at(pos), &val, tiny::kValueBytes);
          return r_inplace(leaf->address());
       }
-      if (n < leaf->cap_)                                      // in-place insert (shift)
+      if (n < leaf->cap_)                                      // in-place insert (shift tail right by 1)
       {
-         // The value-region shift is the bulk of the insert's COLD traffic and is NOT
-         // covered by the node's cl0/cl1 prefetch. Pull those lines (write-intent) now so
-         // they land while the cheaper stem shift runs, instead of serializing after it.
-         for (uint8_t* p = leaf->value_at(uint16_t(pos + 1)), *e = leaf->value_at(uint16_t(n + 2));
-              p < e; p += kCacheLine)
-            __builtin_prefetch(p, 1, 3);
-         for (uint16_t j = n; j > pos; --j) st[j] = st[j - 1];
+         std::memmove(st + pos + 1, st + pos, size_t(n - pos) * 4u);
          st[pos] = key;
          std::memmove(leaf->value_at(uint16_t(pos + 2)), leaf->value_at(uint16_t(pos + 1)),
                       size_t(n - pos) * tiny::kValueBytes);
@@ -121,11 +115,11 @@ namespace psitri::wtree
       const uint16_t n     = inner->num_stems_;
       uint32_t*      st    = inner->u32_stems();
       ptr_address*   ch    = inner->children();
-      if (n < inner->cap_)                                     // in-place insert (shift)
+      if (n < inner->cap_)                                     // in-place insert (shift right by 1)
       {
-         for (uint16_t j = n; j > i; --j) st[j] = st[j - 1];
+         std::memmove(st + i + 1, st + i, size_t(n - i) * 4u);
          st[i] = div;
-         for (uint16_t j = uint16_t(n + 1); j > i + 1; --j) ch[j] = ch[j - 1];
+         std::memmove(ch + i + 2, ch + i + 1, size_t(n - i) * sizeof(ptr_address));
          ch[i] = left; ch[uint16_t(i + 1)] = right;
          inner->num_stems_ = uint16_t(n + 1);
          inner->update_divs_from(i);
