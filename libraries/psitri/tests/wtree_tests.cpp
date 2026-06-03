@@ -1546,15 +1546,22 @@ TEST_CASE("wtree2 build_inner materializes + routes", "[wtree2][build]")
    REQUIRE(in->num_stems == 2);
    REQUIRE(in->prefix_len == 1);
    REQUIRE(in->prefix()[0] == 0xAAAAu);
-   REQUIRE(in->stems()[0] == 100u);
-   REQUIRE(in->stems()[1] == 200u);
+   // Read logical stems via the form-agnostic accessor: an inner may store them
+   // grid (base+shift, no region) or u16-range-encoded, so a raw stems() u32 read
+   // would see the compressed bytes. (A typed-CRTP inner would make that a compile
+   // error rather than a wrong read — see node_design_patterns 3-tier CRTP.)
+   uint32_t logical_stems[2];
+   w2::read_stems(in, logical_stems);
+   REQUIRE(logical_stems[0] == 100u);
+   REQUIRE(logical_stems[1] == 200u);
    REQUIRE(in->children()[0] == cA);
    REQUIRE(in->children()[1] == cB);
    REQUIRE(in->children()[2] == cC);
    REQUIRE(in->total_bytes() == w2::node2::size_for(2, 1));
 
-   // Routing matches stem_upper_bound semantics.
-   auto route = [&](uint32_t q) { return in->children()[w2::stem_upper_bound(in->stems(), in->num_stems, q)]; };
+   // Routing matches stem_upper_bound semantics. Use the form-agnostic node_stem_ub
+   // (grid / u16 / apgm / explicit) — a raw stems() u32 read would see compressed bytes.
+   auto route = [&](uint32_t q) { return in->children()[w2::node_stem_ub(in, q)]; };
    REQUIRE(route(50)  == cA);
    REQUIRE(route(100) == cB);
    REQUIRE(route(150) == cB);
@@ -1589,7 +1596,14 @@ TEST_CASE("wtree2 inner predictor matches binary search", "[wtree2][predictor]")
    for (uint16_t i = 0; i < N; ++i)
       stems[i] = 1000u + uint32_t(i) * uint32_t(i) * 3u;   // strictly increasing, curved
    auto mk_child = [&] {
-      return w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf, 0, 0);
+      // An empty leaf (num_stems==0) still has n_slots()==1, and a varlen leaf has
+      // child refs → destroy() walks slot 0. The header-only ctor leaves it
+      // UNINITIALIZED, so it must be set to kNoChild (NOT left as 0 — ptr_address(0)
+      // is a real allocatable id, so an uninitialized 0 slot would release id 0 on
+      // teardown). See [[sal_ptr_address_zero]].
+      auto a = w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf, 0, 0);
+      w2::w2deref(a)->children()[0] = w2::kNoChild;
+      return a;
    };
    for (uint16_t i = 0; i <= N; ++i) kids.push_back(mk_child());
 
@@ -1635,7 +1649,14 @@ TEST_CASE("wtree2 grid inner detect + route + downgrade", "[wtree2][grid]")
    const uint64_t base_objs = fx.live_objects();
 
    auto mk_child = [&] {
-      return w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf, 0, 0);
+      // An empty leaf (num_stems==0) still has n_slots()==1, and a varlen leaf has
+      // child refs → destroy() walks slot 0. The header-only ctor leaves it
+      // UNINITIALIZED, so it must be set to kNoChild (NOT left as 0 — ptr_address(0)
+      // is a real allocatable id, so an uninitialized 0 slot would release id 0 on
+      // teardown). See [[sal_ptr_address_zero]].
+      auto a = w2::w2session().alloc<w2::node2>(w2::alloc_hint{}, w2::shape::leaf, 0, 0);
+      w2::w2deref(a)->children()[0] = w2::kNoChild;
+      return a;
    };
 
    // A constant-stride power-of-2 grid: stems[i] = BASE + (i+1)*STRIDE.

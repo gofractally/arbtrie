@@ -184,6 +184,12 @@ int main(int argc, char** argv)
                         ins_ns, q_ns, miss, havg, hfb);
         }
         std::printf("=== total %.1fs, miss=%zu ===\n", now_s() - t_all, tot_miss);
+        std::printf("[inner] %llu total | grid %llu (%.0f%%) | u16 %llu (%.0f%%)\n",
+                    (unsigned long long)w2::g_inner_total,
+                    (unsigned long long)w2::g_inner_grid,
+                    w2::g_inner_total ? 100.0 * double(w2::g_inner_grid) / double(w2::g_inner_total) : 0.0,
+                    (unsigned long long)w2::g_inner_u16,
+                    w2::g_inner_total ? 100.0 * double(w2::g_inner_u16) / double(w2::g_inner_total) : 0.0);
         std::filesystem::remove_all(dbdir);
         return tot_miss ? 1 : 0;
     }
@@ -292,6 +298,10 @@ int main(int argc, char** argv)
                     (unsigned long long)w2::g_inner_grid,
                     (unsigned long long)w2::g_inner_total,
                     w2::g_inner_total ? 100.0 * double(w2::g_inner_grid) / double(w2::g_inner_total) : 0.0);
+        std::printf("[u16]   %llu/%llu inners are u16-range-encoded (%.0f%%)\n",
+                    (unsigned long long)w2::g_inner_u16,
+                    (unsigned long long)w2::g_inner_total,
+                    w2::g_inner_total ? 100.0 * double(w2::g_inner_u16) / double(w2::g_inner_total) : 0.0);
     }
 
     // ─── Find (sorted / tree order — HOT, compute-bound) ──────────

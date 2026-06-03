@@ -129,6 +129,11 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
                                      alloc_hint phint = {}) noexcept
 {
     scratch_mark   mark;
+    // Capture the id BEFORE bulk_build allocates: an allocation may trigger the
+    // compactor to RELOCATE `leaf`, leaving the raw `leaf` pointer dangling at
+    // record_freed (reclaimable) bytes. release_node(leaf) would then read a
+    // reclaimed/zeroed address field → release(0). Release by the captured id.
+    const sal::ptr_address leaf_id = leaf->address();
     const uint16_t pl  = leaf->prefix_len;
     const uint32_t* pfx = leaf->prefix();
     const uint32_t* st  = leaf->stems();
@@ -183,7 +188,7 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
             std::memcpy(vb, val.data(), val.size());
             ents[ip].value = {vb, val.size()};
             const ptr_address sub = bulk_build({ents, cnt}, depth, phint);
-            if constexpr (M == umode::unique) release_node(leaf);
+            if constexpr (M == umode::unique) w2session().release(leaf_id);
             return rebuilt_result(sub);
         }
         if (std::lexicographical_compare(key.begin(), key.end(), k.begin(), k.end())) break;
@@ -199,7 +204,7 @@ inline ins_result leaf_rebuild_arena(node2* leaf, std::span<const uint32_t> head
     ++cnt;
 
     const ptr_address sub = bulk_build({ents, cnt}, depth, phint);
-    if constexpr (M == umode::unique) release_node(leaf);
+    if constexpr (M == umode::unique) w2session().release(leaf_id);
     return rebuilt_result(sub);   // pl0 inner → flattened into parent (e.g. collision)
 }
 
@@ -361,16 +366,62 @@ inline ins_result leaf_fixed_add(node2* leaf, uint16_t pos, uint32_t qstem,
         }
         // Capacity exhausted but still under budget → grow to budget cap once,
         // rebuilding with the new entry + a fresh central gap (gap-aware read).
+        const sal::ptr_address leaf_id = leaf->address();   // capture before alloc may relocate leaf
         node2* nl = build_fixed_range(leaf, pos, qstem, qsuffix, qval, 0, uint16_t(n + 1),
                                       leaf->prefix(), pl, bcap, phint);
-        release_node(leaf);
+        w2session().release(leaf_id);
         return in_place(nl->address());
     }
 
-    // Overflow → balanced split. New entry at merged index `pos`; split at k.
+    // Overflow → balanced split. New entry at merged index `pos`.
     const uint16_t total = uint16_t(n + 1);
-    const uint16_t k     = uint16_t(total / 2);
-    const uint32_t div   = (k == pos) ? qstem : leaf->fx_stem(uint16_t(k < pos ? k : k - 1));
+    // Merged sorted stem at index m (old entries + the new qstem spliced at `pos`).
+    auto mstem = [&](uint16_t m) -> uint32_t {
+        return m < pos ? leaf->fx_stem(m) : (m == pos ? qstem : leaf->fx_stem(uint16_t(m - 1)));
+    };
+    // Divider choice (libwtree aligned-divider rule): instead of the count-median,
+    // pick a value with as many trailing zero bits as possible within a ±6.25% window
+    // around the median. Aligned dividers make the PARENT inner's stems share a high
+    // ctz → its compressed range fits u16 / forms a power-of-2 grid (stem-free
+    // routing) → faster find. The window bounds the imbalance (both halves stay
+    // < bcap). Split by lower_bound(div); routing (q>=div → right) then agrees.
+    uint16_t k;
+    uint32_t div;
+    {
+        const uint16_t mid = uint16_t(total >> 1);
+        const uint16_t w   = uint16_t(total >> 4);                // 6.25% each side
+        const uint32_t a   = mstem(uint16_t(mid - w));
+        const uint32_t b   = mstem(uint16_t(mid + w));
+        if (w == 0 || a == b)                                     // tiny / duplicate run → median
+        {
+            k = mid;
+            div = mstem(k);
+        }
+        else
+        {
+            int      p    = 31 - __builtin_clz(a ^ b);            // highest differing bit
+            uint32_t cand = (b >> p) << p;                        // 2^p-aligned, in (a, b]
+            while (p < 31 && ((b >> (p + 1)) << (p + 1)) > a)     // greedily walk up for more ctz
+            {
+                ++p;
+                cand = (b >> p) << p;
+            }
+            uint16_t lb = mid;                                    // lower_bound(merged, cand)
+            while (lb > 0 && mstem(uint16_t(lb - 1)) >= cand) --lb;
+            while (lb < total && mstem(lb) < cand) ++lb;
+            if (lb == 0 || lb >= total) { k = mid; div = mstem(k); }   // degenerate → median
+            else { k = lb; div = cand; }
+        }
+    }
+
+    // Snapshot the id + prefix BEFORE building L/R: those allocations may relocate
+    // `leaf`, leaving the raw pointer dangling at reclaimable bytes. Reading
+    // leaf->prefix()/leaf->address() afterward would touch reclaimed memory (and
+    // release(stale->address()) could free the WRONG, still-live id).
+    const sal::ptr_address leaf_id = leaf->address();
+    scratch_mark           pmark;
+    uint32_t*              psave = pl ? scratch_alloc<uint32_t>(pl) : nullptr;
+    if (pl) std::memcpy(psave, leaf->prefix(), size_t(pl) * 4u);
 
     // Halves are PREFIXLESS pages at this radix word, allocated at budget capacity
     // so they have slack to grow in place; the leaf's prefix (if any) re-roots. The
@@ -380,12 +431,12 @@ inline ins_result leaf_fixed_add(node2* leaf, uint16_t pos, uint32_t qstem,
 
     if (pl == 0)
     {
-        release_node(leaf);
+        w2session().release(leaf_id);
         return split_at(div, L->address(), R->address());
     }
     ptr_address kids[2] = {L->address(), R->address()};
-    node2*      top     = build_inner({leaf->prefix(), pl}, {&div, 1}, {kids, 2}, phint);
-    release_node(leaf);
+    node2*      top     = build_inner({psave, pl}, {&div, 1}, {kids, 2}, phint);
+    w2session().release(leaf_id);
     return in_place(top->address());
 }
 
@@ -452,11 +503,12 @@ inline ins_result inner_absorb(node2* inner, uint16_t i, const uint32_t* ins_ste
     {
         // In-place grow using cacheline-rounding slack (children_off unchanged) —
         // one-pass splice into the SAME buffer (no realloc, no copy). Skipped for a
-        // grid inner (no stored stems to memmove).
+        // grid OR u16 inner (no u32 stems region to memmove → the realloc path's
+        // (src,op) ctor regenerates explicit u32 stems = auto-downgrade on mutation).
         const uint16_t stem_cap = uint16_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u) / 4u);
         const uint16_t slot_cap = uint16_t(
             ucc::round_up_multiple<kCacheLine>(uint32_t(n + 1) * 4u) / 4u);
-        if (!is_grid(inner) && m <= stem_cap && uint16_t(m + 1) <= slot_cap)
+        if (!is_grid(inner) && !is_u16_inner(inner) && m <= stem_cap && uint16_t(m + 1) <= slot_cap)
         {
             inner->apply(op);   // in-place splice (shares splice_absorb<> with the op ctor)
             return in_place(inner->address());
@@ -615,6 +667,12 @@ inline ins_result insert_rec(sal::smart_ref<sal::alloc_header>& nref,
 
     auto       cref = w2session().template get_ref<sal::alloc_header>(c);
     ins_result r    = insert_rec<M>(cref, key, val, depth, mybr);   // child's phint = THIS node's span
+    // SHARED mode reads `nd` again below (inner_absorb<shared>/inner_flatten<shared>
+    // fork FROM it). The background compactor may have RELOCATED nd during the
+    // recursion above → the raw `nd` (captured at entry) would point at reclaimed
+    // bytes and the fork would copy garbage. Re-resolve through the stable id.
+    // (Unique mode re-resolves via writable(nref) at each mutation site.)
+    if constexpr (M == umode::shared) nd = w2deref(nref.address());
     if (r.flatten)                                // absorb the child's siblings (widen, don't nest)
     {
         if constexpr (M == umode::unique)

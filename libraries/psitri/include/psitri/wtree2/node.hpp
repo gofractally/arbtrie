@@ -57,6 +57,11 @@ inline constexpr uint16_t kApgmMinStems = 256;
 // node stores NO stems region (children sit where the stems would start). Declared up
 // here so the layout math (children_off / size) can key off it.
 inline constexpr uint8_t kBinarySentinel = 0xFF;
+// An inner whose stems are u16-range-encoded ((stem-base)>>shift fits 16 bits): base
+// in segment_keys[0], shift in sample_step, stems stored as u16 (half the region, 2×
+// SIMD scan). Gated to narrow inners (< kApgmMinStems); fed by the aligned-divider
+// split rule. Marked by segment_count == kU16Sentinel.
+inline constexpr uint8_t kU16Sentinel = 0xFE;
 
 
 inline constexpr ptr_address kNoChild = sal::null_ptr_address;
@@ -202,6 +207,7 @@ struct node2 : public psitri::node
     // shift — it carries NO stems region, so its children sit where the stems would
     // start. Set before children are written, so children_off() is stable.
     bool grid_layout() const noexcept { return estimator()->segment_count == kBinarySentinel; }
+    bool u16_layout()  const noexcept { return estimator()->segment_count == kU16Sentinel; }
 
     uint32_t stems_off() const noexcept
     {
@@ -210,9 +216,13 @@ struct node2 : public psitri::node
     uint32_t children_off() const noexcept
     {
         if (grid_layout()) return stems_off();          // no stems region
-        return stems_off()
-             + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(num_stems) * 4u));
+        const uint32_t sbytes = u16_layout() ? uint32_t(num_stems) * 2u   // u16 stems
+                                             : uint32_t(num_stems) * 4u;   // explicit u32
+        return stems_off() + uint32_t(ucc::round_up_multiple<kCacheLine>(sbytes));
     }
+    // u16-range-encoded inner stems (segment_count == kU16Sentinel); base/shift in est.
+    uint16_t*       inner_u16_stems()       noexcept { return reinterpret_cast<uint16_t*>(base() + stems_off()); }
+    const uint16_t* inner_u16_stems() const noexcept { return reinterpret_cast<const uint16_t*>(base() + stems_off()); }
     // Index-only size (no value tail). Inner == size(); leaf < size() (has tail).
     uint32_t total_bytes() const noexcept
     {
@@ -254,6 +264,16 @@ struct node2 : public psitri::node
         const uint32_t hdr = uint32_t(kFixedHeaderBytes) + est_bytes()
                            + uint32_t(prefix_len) * 4u;
         const uint32_t c_off = uint32_t(ucc::round_up_multiple<kCacheLine>(hdr));
+        return c_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems + 1) * 4u));
+    }
+    // A u16 inner stores its stems region as n·2 (u16) instead of n·4 (u32 explicit).
+    static uint32_t u16_inner_size_for(uint16_t n_stems, uint8_t prefix_len) noexcept
+    {
+        const uint32_t hdr   = uint32_t(kFixedHeaderBytes) + est_bytes()
+                             + uint32_t(prefix_len) * 4u;
+        const uint32_t s_off = uint32_t(ucc::round_up_multiple<kCacheLine>(hdr));
+        const uint32_t c_off = s_off
+                             + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems) * 2u));
         return c_off + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n_stems + 1) * 4u));
     }
     uint32_t tail_off() const noexcept { return tail_off_for(num_stems, prefix_len); }
@@ -607,6 +627,25 @@ inline bool is_grid(const node2* nd) noexcept
 {
     return nd->estimator()->segment_count == kBinarySentinel;
 }
+inline bool is_u16_inner(const node2* nd) noexcept
+{
+    return nd->estimator()->segment_count == kU16Sentinel;
+}
+// A narrow inner whose stems share a high enough ctz that (max-min)>>shift fits 16
+// bits → store stems u16-range-encoded (half the region, 2× SIMD scan). shift = the
+// largest power-of-2 dividing every (stem-base); since the split rule snaps dividers
+// to high-ctz boundaries, this fires on ~all inners of random keys. (One pass.)
+struct u16_fit { bool ok; uint32_t base; uint8_t shift; };
+inline u16_fit detect_u16(const uint32_t* stems, uint16_t n) noexcept
+{
+    if (n < 2) return {false, 0, 0};
+    const uint32_t base = stems[0];
+    uint32_t orall = 0;                                       // OR of all deltas
+    for (uint16_t i = 1; i < n; ++i) orall |= (stems[i] - base);
+    const uint8_t shift = orall ? uint8_t(__builtin_ctz(orall)) : 0;   // min ctz over deltas
+    if (((stems[n - 1] - base) >> shift) > 0xFFFFu) return {false, 0, 0};
+    return {true, base, shift};
+}
 inline uint32_t grid_stem(const apgm_header* h, uint16_t i) noexcept
 {
     return h->segment_keys[0] + (uint32_t(i + 1) << h->sample_step);
@@ -621,6 +660,14 @@ inline void read_stems(const node2* nd, uint32_t* dst) noexcept
         const apgm_header* h = nd->estimator();
         for (uint16_t i = 0; i < n; ++i) dst[i] = grid_stem(h, i);
     }
+    else if (is_u16_inner(nd))
+    {
+        const apgm_header* h    = nd->estimator();
+        const uint32_t     base = h->segment_keys[0];
+        const uint8_t      sh   = uint8_t(h->sample_step);
+        const uint16_t*    su   = nd->inner_u16_stems();
+        for (uint16_t i = 0; i < n; ++i) dst[i] = base + (uint32_t(su[i]) << sh);
+    }
     else
         std::memcpy(dst, nd->stems(), size_t(n) * 4u);
 }
@@ -628,6 +675,7 @@ inline void read_stems(const node2* nd, uint32_t* dst) noexcept
 // Instrumentation: count inners and how many are exact grids (read/reset by bench).
 inline uint64_t g_inner_total = 0;
 inline uint64_t g_inner_grid  = 0;
+inline uint64_t g_inner_u16   = 0;
 
 // Predictor-seeded upper_bound (algo §6, wide-node mode). The APGM estimator maps
 // q → an approximate stem position in ~1 cacheline touch; a short branchless
@@ -661,11 +709,26 @@ inline uint16_t grid_ub(const apgm_header* h, uint16_t n, uint32_t q) noexcept
     return (idx > n) ? n : uint16_t(idx);
 }
 
+inline uint16_t u16_upper_bound(const uint16_t* stems, uint16_t n, uint16_t q) noexcept;  // fwd
+// u16 inner upper_bound: (q-base)>>shift is the exact compressed query (lossless —
+// all stems are multiples of 2^shift above base), then an 8-lane u16 SIMD scan.
+inline uint16_t inner_u16_ub(const node2* nd, uint32_t q) noexcept
+{
+    const apgm_header* h    = nd->estimator();
+    const uint32_t     base = h->segment_keys[0];
+    if (q < base) return 0;                                  // below all stems
+    const uint32_t d = (q - base) >> uint8_t(h->sample_step);
+    if (d > 0xFFFFu) return nd->num_stems;                   // above all stems
+    return u16_upper_bound(nd->inner_u16_stems(), nd->num_stems, uint16_t(d));
+}
+
 inline uint16_t node_stem_ub(const node2* nd, uint32_t q) noexcept
 {
     const apgm_header* h = nd->estimator();
     if (h->segment_count == kBinarySentinel)         // exact grid: shift, skip stems
         return grid_ub(h, nd->num_stems, q);
+    if (h->segment_count == kU16Sentinel)            // u16 range-encoded: shift + SIMD
+        return inner_u16_ub(nd, q);
     if (h->segment_count)
         return stem_upper_bound_apgm(h, nd->stems(), nd->num_stems, q);
     return stem_upper_bound(nd->stems(), nd->num_stems, q);
@@ -750,6 +813,10 @@ inline ptr_address inner_route(const node2* nd, uint32_t q) noexcept
     // children() call (which would re-test grid_layout on the same condition).
     if (h->segment_count == kBinarySentinel)          // exact grid: children AT soff, NO stems read
         return reinterpret_cast<const ptr_address*>(base + soff)[grid_ub(h, n, q)];
+    if (h->segment_count == kU16Sentinel)             // u16 range-encoded: children after n·2 stems
+        return reinterpret_cast<const ptr_address*>(
+                   base + soff + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 2u)))
+            [inner_u16_ub(nd, q)];
     const uint32_t*    st = reinterpret_cast<const uint32_t*>(base + soff);
     const ptr_address* ch = reinterpret_cast<const ptr_address*>(
         base + soff + uint32_t(ucc::round_up_multiple<kCacheLine>(uint32_t(n) * 4u)));
@@ -790,7 +857,9 @@ inline uint16_t longest_common_prefix(std::span<const uint32_t> first,
 // build an APGM predictor for wide inners; a failed fit leaves segment_count==0 →
 // binary-search fallback. Either way the caller must have stored (or will store) the
 // stems for the non-grid path.
-inline bool set_inner_estimator(node2* nd, const uint32_t* src_stems, uint16_t n) noexcept
+// How an inner stores its stems — picked at build time, drives the layout + routing.
+enum class inner_form : uint8_t { explicit_, grid, u16 };
+inline inner_form set_inner_estimator(node2* nd, const uint32_t* src_stems, uint16_t n) noexcept
 {
     apgm_header* est   = nd->estimator();
     est->segment_count = 0;
@@ -801,11 +870,23 @@ inline bool set_inner_estimator(node2* nd, const uint32_t* src_stems, uint16_t n
         est->segment_count   = kBinarySentinel;
         est->segment_keys[0] = gf.base;
         est->sample_step     = gf.shift;
-        return true;                                 // grid → stems not needed
+        return inner_form::grid;                      // grid → stems not needed
+    }
+    if (n < kApgmMinStems)                            // narrow → try u16 range-encode
+    {
+        const u16_fit uf = detect_u16(src_stems, n);
+        if (uf.ok)
+        {
+            est->segment_count   = kU16Sentinel;
+            est->segment_keys[0] = uf.base;
+            est->sample_step     = uf.shift;
+            if (n >= 2) ++g_inner_u16;
+            return inner_form::u16;
+        }
     }
     if (n >= kApgmMinStems && apgm_build_adaptive(est, src_stems, n) == 0)
         est->segment_count = 0;
-    return false;
+    return inner_form::explicit_;
 }
 
 // ── INNER ctors (do ALL the work) ─────────────────────────────────────
@@ -821,9 +902,11 @@ inline uint32_t node2::alloc_size(std::span<const uint32_t>    prefix,
 {
     const uint16_t n  = uint16_t(stems.size());
     const uint8_t  pl = uint8_t(prefix.size());
-    // A grid gets the shrunk (stems-free) layout — must agree with the ctor, which
-    // detect_grid's the SAME source and skips the stems region.
+    // A grid gets the shrunk (stems-free) layout; a narrow u16-compressible inner gets
+    // the half-stems layout — both must agree with the ctor, which re-detects the SAME
+    // source. Order matches set_inner_estimator (grid first, then u16).
     if (detect_grid(stems.data(), n).ok) return grid_size_for(n, pl);
+    if (n < kApgmMinStems && detect_u16(stems.data(), n).ok) return u16_inner_size_for(n, pl);
     return size_for(n, pl, 0);
 }
 inline node2::node2(uint32_t asize, ptr_address_seq seq,
@@ -840,10 +923,25 @@ inline node2::node2(uint32_t asize, ptr_address_seq seq,
     prefix_len = uint8_t(prefix.size());
     flags      = 0;
     std::memcpy(this->prefix(), prefix.data(), size_t(prefix_len) * 4u);
-    // Skip the stems copy for an exact grid — routing uses base+shift, so the stems
-    // line is dead weight. Non-grid: store the stems (the predictor / scan reads them).
-    if (!set_inner_estimator(this, stems.data(), n))
-        std::memcpy(this->stems(), stems.data(), size_t(n) * 4u);
+    // Grid: routing uses base+shift, stems region omitted. u16: store (stem-base)>>shift
+    // as u16 (half the region, 2× SIMD scan). explicit: store the u32 stems. The form
+    // sets the estimator sentinel BEFORE this, so children_off() is already correct.
+    switch (set_inner_estimator(this, stems.data(), n))
+    {
+        case inner_form::grid: break;                 // no stems region
+        case inner_form::u16:
+        {
+            const apgm_header* h    = estimator();
+            const uint32_t     base = h->segment_keys[0];
+            const uint8_t      sh   = uint8_t(h->sample_step);
+            uint16_t*          d    = inner_u16_stems();
+            for (uint16_t j = 0; j < n; ++j) d[j] = uint16_t((stems[j] - base) >> sh);
+            break;
+        }
+        case inner_form::explicit_:
+            std::memcpy(this->stems(), stems.data(), size_t(n) * 4u);
+            break;
+    }
     std::memcpy(this->children(), children.data(), children.size() * sizeof(ptr_address));
 }
 
@@ -880,6 +978,15 @@ inline void splice_absorb(node2* dst, const node2* src, const op_inner_absorb& o
             const apgm_header* sh = src->estimator();
             for (uint16_t j = 0; j < i; ++j) ds[j]      = grid_stem(sh, j);
             for (uint16_t j = i; j < n; ++j) ds[j + ni] = grid_stem(sh, j);
+        }
+        else if (is_u16_inner(src))                             // u16 stems → decode to u32
+        {
+            const apgm_header* sh   = src->estimator();
+            const uint32_t     base = sh->segment_keys[0];
+            const uint8_t      st   = uint8_t(sh->sample_step);
+            const uint16_t*    su   = src->inner_u16_stems();
+            for (uint16_t j = 0; j < i; ++j) ds[j]      = base + (uint32_t(su[j]) << st);
+            for (uint16_t j = i; j < n; ++j) ds[j + ni] = base + (uint32_t(su[j]) << st);
         }
         else
         {
