@@ -185,40 +185,9 @@ if(SQLite3_FOUND)
 endif()
 
 # ── wtree (word-tree): radix B-tree on SAL — the fast new engine ──────
-# Correctness suite (own Catch2 main) + SAL-backed benches. Links psitri for
-# the SAL stack; wtree itself is header-only in psitri/wtree/.
-add_executable(wtree-tests ../libraries/psitri/tests/wtree_tests.cpp)
-target_link_libraries(wtree-tests PRIVATE psitri Catch2::Catch2WithMain)
-target_include_directories(wtree-tests PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
-set_target_properties(wtree-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-add_test(NAME wtree-tests COMMAND wtree-tests)
-
-add_executable(bench_wtree_sal ../libraries/psitri/tests/bench_wtree_sal.cpp)
-target_link_libraries(bench_wtree_sal PRIVATE psitri)
-target_include_directories(bench_wtree_sal PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
-set_target_properties(bench_wtree_sal PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-add_executable(bench_wtree2 ../libraries/psitri/tests/bench_wtree2.cpp)
-target_link_libraries(bench_wtree2 PRIVATE psitri)
-target_include_directories(bench_wtree2 PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
-set_target_properties(bench_wtree2 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-add_executable(bench_wtree_staged ../libraries/psitri/tests/bench_wtree_staged.cpp)
-target_link_libraries(bench_wtree_staged PRIVATE psitri)
-target_include_directories(bench_wtree_staged PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
-set_target_properties(bench_wtree_staged PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-# bench_sal_dump_race — regression reproducer for the allocator::dump() SIGBUS
-# (dump() derefs a segment before reserve() commits its file backing).
-add_executable(bench_sal_dump_race ../libraries/psitri/tests/bench_sal_dump_race.cpp)
-target_link_libraries(bench_sal_dump_race PRIVATE psitri Threads::Threads)
-target_include_directories(bench_sal_dump_race PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
-set_target_properties(bench_sal_dump_race PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-# bench_arbtrie_vs_wtree — apples-to-apples baseline: stable arbtrie engine vs
-# wtree, same data + same query order, insert-time vs query-time.
-add_executable(bench_arbtrie_vs_wtree ../libraries/psitri/tests/bench_arbtrie_vs_wtree.cpp)
-target_link_libraries(bench_arbtrie_vs_wtree PRIVATE psitri)
-target_include_directories(bench_arbtrie_vs_wtree PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
-target_compile_definitions(bench_arbtrie_vs_wtree PUBLIC XXH_INLINE_ALL)
-set_target_properties(bench_arbtrie_vs_wtree PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+# CLEAN REWRITE in progress (branch wtree-rewrite). The legacy wtree1/wtree2
+# engines + their tests/benches were moved to reference/ (out of the build) to
+# carry no baggage. The new psitri::wtree (typed node matrix: tiny/medium/big ×
+# u32/u16, single node_type tag, height=leaf/inner) re-adds its targets here as
+# it lands (wtree-tests, bench_wtree). See doc/node_design_patterns.md +
+# .claude/plans/vast-frolicking-mist.md.
