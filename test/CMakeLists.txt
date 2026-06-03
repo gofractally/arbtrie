@@ -196,3 +196,8 @@ target_link_libraries(wtree-tests PRIVATE psitri Catch2::Catch2WithMain)
 target_include_directories(wtree-tests PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
 set_target_properties(wtree-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_test(NAME wtree-tests COMMAND wtree-tests)
+
+add_executable(bench_wtree ../libraries/psitri/tests/bench_wtree.cpp)
+target_link_libraries(bench_wtree PRIVATE psitri)
+target_include_directories(bench_wtree PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
+set_target_properties(bench_wtree PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

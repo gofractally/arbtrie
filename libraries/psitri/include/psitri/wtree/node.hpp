@@ -53,10 +53,12 @@ namespace psitri::wtree
       uint8_t  prefix_len_;   // 13: # of u32 prefix words consumed at this node
       uint8_t  flags_;        // 14: bit0 = fixed_values (leaf)
       uint8_t  pad_;          // 15
-      uint16_t num_stems_;    // 16: N routing stems (N+1 slots)
+      uint16_t num_stems_;    // 16: N live routing stems (N+1 slots)
+      uint16_t cap_;          // 18: stem CAPACITY (regions sized for cap; in-place grow ≤ cap)
 
-      static constexpr uint16_t kHeaderBytes = 18;
+      static constexpr uint16_t kHeaderBytes = 20;
       static constexpr uint8_t  kFlagFixedValues = 0x01;
+      uint16_t capacity() const noexcept { return cap_; }
 
       bool     is_leaf()      const noexcept { return height_ == 0; }
       bool     is_inner()     const noexcept { return height_ != 0; }
@@ -81,13 +83,14 @@ namespace psitri::wtree
 
      protected:
       node_base(uint32_t asize, node_type t, ptr_address_seq seq,
-                uint8_t height, uint8_t prefix_len, uint8_t flags) noexcept
+                uint8_t height, uint8_t prefix_len, uint8_t flags, uint16_t cap) noexcept
           : psitri::node(asize, t, seq),
-            height_(height), prefix_len_(prefix_len), flags_(flags), pad_(0), num_stems_(0)
+            height_(height), prefix_len_(prefix_len), flags_(flags), pad_(0),
+            num_stems_(0), cap_(cap)
       {
       }
    } __attribute__((packed));
-   static_assert(sizeof(node_base) == 18, "wtree node_base header must be 18 B");
+   static_assert(sizeof(node_base) == 20, "wtree node_base header must be 20 B");
 
    // ── Stem search (branchless SIMD-friendly; node_design_patterns §H) ───
    // upper_bound: count of stems ≤ q, in [0,N]. NEVER binary search.
@@ -123,9 +126,10 @@ namespace psitri::wtree
       static constexpr node_type type_id     = node_type::wtree_tiny;
       static constexpr uint16_t  kValueBytes = 8;   // Stage A: fixed u64 value
 
-      // regions: [stems: N u32][slots: (N+1) × slot_stride]  (each cacheline-aligned)
+      // regions sized for CAPACITY (slack for in-place grow): [stems: cap u32]
+      // [slots: (cap+1) × slot_stride], each cacheline-aligned. num_stems_ are live.
       uint32_t stems_off() const noexcept { return regions_off(); }
-      uint32_t slots_off() const noexcept { return stems_off() + cl_round(uint32_t(num_stems_) * 4u); }
+      uint32_t slots_off() const noexcept { return stems_off() + cl_round(uint32_t(cap_) * 4u); }
       static uint32_t slot_stride(bool leaf) noexcept { return leaf ? kValueBytes : uint32_t(sizeof(ptr_address)); }
 
       uint32_t*       u32_stems()       noexcept { return reinterpret_cast<uint32_t*>(base() + stems_off()); }
@@ -150,26 +154,19 @@ namespace psitri::wtree
          return nullptr;
       }
 
-      // ── alloc_size ↔ ctor (node_design_patterns §A) ────────────────────
-      static uint32_t alloc_size(uint8_t height, uint8_t prefix_len, uint16_t n) noexcept
+      // ── alloc_size ↔ ctor (node_design_patterns §A). Regions sized for `cap`. ──
+      static uint32_t alloc_size(uint8_t height, uint8_t prefix_len, uint16_t cap) noexcept
       {
          const uint32_t s_off = cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len) * 4u);
-         const uint32_t sl_off = s_off + cl_round(uint32_t(n) * 4u);
-         const uint32_t slot_bytes = uint32_t(n + 1) * slot_stride(height == 0);
+         const uint32_t sl_off = s_off + cl_round(uint32_t(cap) * 4u);
+         const uint32_t slot_bytes = uint32_t(cap + 1) * slot_stride(height == 0);
          return sl_off + cl_round(slot_bytes);
       }
-      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height, uint8_t prefix_len, uint16_t n) noexcept
-          : node_form<tiny>(asize, type_id, seq, height, prefix_len,
-                            height == 0 ? kFlagFixedValues : uint8_t(0))
-      {
-         num_stems_ = n;
-         // caller fills prefix / stems / slots; slots default to kNoChild for inners.
-      }
-      // LEAF fill ctor (does ALL the work — alloc_size↔ctor contract). stems = keys;
-      // slot[i+1] = vals[i] (slot 0 = terminal, unused at Stage A). prefix_len = 0 (u32).
-      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height,
+      // LEAF fill ctor (alloc_size↔ctor contract): regions sized for `cap`, keys live.
+      // stems = keys; slot[i+1] = vals[i] (slot 0 = terminal, unused at Stage A).
+      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height, uint16_t cap,
            std::span<const uint32_t> keys, std::span<const uint64_t> vals) noexcept
-          : node_form<tiny>(asize, type_id, seq, height, 0, kFlagFixedValues)
+          : node_form<tiny>(asize, type_id, seq, height, 0, kFlagFixedValues, cap)
       {
          num_stems_ = uint16_t(keys.size());
          uint32_t* st = u32_stems();
@@ -177,10 +174,10 @@ namespace psitri::wtree
          for (uint16_t i = 0; i < num_stems_; ++i)
             std::memcpy(value_at(uint16_t(i + 1)), &vals[i], kValueBytes);
       }
-      // INNER fill ctor: stems = dividers; children = kids (kids.size() == divs+1).
-      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height,
+      // INNER fill ctor: regions sized for `cap`; stems = divs; children = kids (divs+1).
+      tiny(uint32_t asize, ptr_address_seq seq, uint8_t height, uint16_t cap,
            std::span<const uint32_t> divs, std::span<const ptr_address> kids) noexcept
-          : node_form<tiny>(asize, type_id, seq, height, 0, 0)
+          : node_form<tiny>(asize, type_id, seq, height, 0, uint8_t(0), cap)
       {
          num_stems_ = uint16_t(divs.size());
          uint32_t* st = u32_stems();
