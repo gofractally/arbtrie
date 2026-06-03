@@ -7,15 +7,19 @@
 
 namespace psitri::wtree
 {
-   // A tiny node holds up to kTinyCap stems; built at this capacity so inserts grow it
-   // IN PLACE (no per-key realloc) until full, then split. (Medium/Big absorb larger
-   // single nodes in later stages; for now a node just splits at kTinyCap.)
-   inline constexpr uint16_t kTinyCap = 256;
+   // Nodes are built at capacity so inserts grow IN PLACE (shift) until full, then split.
+   // Leaf cap is kept small: leaf inserts pay an O(live/2) shift, so a tighter leaf means
+   // far less memmove per insert (the dominant insert cost) — the deeper tree it implies
+   // costs little because routing is divs-indexed (~2 cachelines/level). Inners are mutated
+   // only on a child split (rare), so they run wide for high fanout / a shallow tree.
+   inline constexpr uint16_t kLeafCap  = 128;
+   inline constexpr uint16_t kInnerCap = 512;
+   inline constexpr uint16_t kTinyCap  = 512;   // max — sizes the on-stack split scratch
 
    // Build a `tiny` LEAF (fill ctor does the work) with `cap` slack. keys sorted+distinct.
    inline ptr_address build_tiny_leaf(std::span<const uint32_t> keys,
                                       std::span<const uint64_t> vals,
-                                      uint16_t cap = kTinyCap) noexcept
+                                      uint16_t cap = kLeafCap) noexcept
    {
       const uint32_t sz = tiny::alloc_size(0, 0, cap);
       return session().alloc<tiny>(sz, sal::alloc_hint{}, uint8_t(0), cap, keys, vals);
@@ -24,7 +28,7 @@ namespace psitri::wtree
    // Build a `tiny` INNER over `divs` + `kids` (kids.size()==divs+1), `cap` slack.
    inline ptr_address build_tiny_inner(uint8_t height, std::span<const uint32_t> divs,
                                        std::span<const ptr_address> kids,
-                                       uint16_t cap = kTinyCap) noexcept
+                                       uint16_t cap = kInnerCap) noexcept
    {
       const uint32_t sz = tiny::alloc_size(height, 0, cap);
       return session().alloc<tiny>(sz, sal::alloc_hint{}, height, cap, divs, kids);
@@ -78,7 +82,7 @@ namespace psitri::wtree
                       size_t(n - pos) * tiny::kValueBytes);
          std::memcpy(leaf->value_at(uint16_t(pos + 1)), &val, tiny::kValueBytes);
          leaf->num_stems_ = uint16_t(n + 1);
-         leaf->regen_divs();
+         leaf->update_divs_from(pos);
          return r_inplace(leaf->address());
       }
       // full → split. Materialize merged, rewrite THIS node = left half in place, alloc right.
@@ -118,7 +122,7 @@ namespace psitri::wtree
          for (uint16_t j = uint16_t(n + 1); j > i + 1; --j) ch[j] = ch[j - 1];
          ch[i] = left; ch[uint16_t(i + 1)] = right;
          inner->num_stems_ = uint16_t(n + 1);
-         inner->regen_divs();
+         inner->update_divs_from(i);
          return r_inplace(inner->address());
       }
       // full → split inner: promote s2[hh]; rewrite this = left in place, alloc right.

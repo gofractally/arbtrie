@@ -145,13 +145,19 @@ namespace psitri::wtree
       const uint32_t* u32_stems() const noexcept { return reinterpret_cast<const uint32_t*>(base() + stems_off()); }
       // NOTE: intentionally NO u16_stems() on this form → a u16 read here won't compile.
 
-      // Rebuild the divs index from the live stems (call after any stem mutation).
-      void regen_divs() noexcept
+      // Rebuild the divs index from the live stems (call after a bulk stem rewrite:
+      // build, split). Cheap — touches the already-warm stems region.
+      void regen_divs() noexcept { update_divs_from(0); }
+
+      // Refresh only the divs whose group's first stem could have changed. An insert at
+      // `pos` shifts stems[pos..] right, so divs[j]=stems[j*32] changes only for groups
+      // g >= pos/32. Used on in-place insert to avoid rescanning every group.
+      void update_divs_from(uint16_t pos) noexcept
       {
          const uint32_t* st = u32_stems();
          uint32_t*       d  = divs_ptr();
          const uint16_t  K  = ndivs(num_stems_);
-         for (uint16_t j = 0; j < K; ++j) d[j] = st[uint16_t(j * kStemsPerCl)];
+         for (uint16_t j = uint16_t(pos / kStemsPerCl); j < K; ++j) d[j] = st[uint16_t(j * kStemsPerCl)];
       }
 
       // inner: children are ptr_address slots.
