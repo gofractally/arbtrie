@@ -135,7 +135,7 @@ namespace psitri::wtree
       for (uint16_t j = 0; j < i; ++j) c2[cn++] = ch[j];
       c2[cn++] = left; c2[cn++] = right;
       for (uint16_t j = uint16_t(i + 1); j <= n; ++j) c2[cn++] = ch[j];     // sn=n+1, cn=n+2
-      const uint8_t  height = inner->height_;
+      const uint8_t  height = inner->height();
       const uint16_t hh     = uint16_t(sn / 2);
       for (uint16_t j = 0; j < hh; ++j) st[j] = s2[j];                      // left stems
       for (uint16_t j = 0; j <= hh; ++j) ch[j] = c2[j];                     // left children (hh+1)
@@ -171,7 +171,7 @@ namespace psitri::wtree
       node_ref         nref = session().get_ref<sal::alloc_header>(root);
       const ins_result r    = insert_rec(nref, key, val);
       if (!r.split) return r.addr;                            // == root (id kept)
-      const uint8_t     newh    = uint8_t(deref<node_base>(r.addr)->height_ + 1);
+      const uint8_t     newh    = uint8_t(deref<node_base>(r.addr)->height() + 1);
       const ptr_address kids[2] = {r.addr, r.right};
       return build_tiny_inner(newh, std::span<const uint32_t>{&r.div, 1}, std::span<const ptr_address>{kids, 2});
    }

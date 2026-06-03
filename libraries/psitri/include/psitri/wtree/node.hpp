@@ -47,53 +47,62 @@ namespace psitri::wtree
    inline uint16_t ndivs(uint16_t n) noexcept { return uint16_t((n + kStemsPerCl - 1) / kStemsPerCl); }
 
    // ── Tier 1: non-template base (form-independent header) ───────────────
-   // Layout: [psitri::node 12B][height u8][prefix_len u8][flags u8][pad u8][num_stems u16]
+   // Layout: [psitri::node 12B][hpf u16][num_stems u16][cap u16]
    //         [prefix: prefix_len u32 words] then form-specific regions (cacheline-aligned).
+   //
+   // `hpf_` packs height / prefix_len / flags into one u16 (height in the LOW bits so
+   //  is_leaf is a cheap mask): [height:6][prefix_len:6][flags:4].
    class node_base : public psitri::node
    {
      public:
-      uint8_t  height_;       // 12: 0 = leaf, >0 = inner
-      uint8_t  prefix_len_;   // 13: # of u32 prefix words consumed at this node
-      uint8_t  flags_;        // 14: bit0 = fixed_values (leaf)
-      uint8_t  pad_;          // 15
-      uint16_t num_stems_;    // 16: N live routing stems (N+1 slots)
-      uint16_t cap_;          // 18: stem CAPACITY (regions sized for cap; in-place grow ≤ cap)
+      // hpf_ field layout
+      static constexpr uint16_t kHeightBits = 6, kPrefixBits = 6, kFlagBits = 4;
+      static constexpr uint16_t kHeightMask = (1u << kHeightBits) - 1;        // bits [0,6)
+      static constexpr uint16_t kPrefixShift = kHeightBits;                   // bits [6,12)
+      static constexpr uint16_t kPrefixMask = (1u << kPrefixBits) - 1;
+      static constexpr uint16_t kFlagsShift = kHeightBits + kPrefixBits;      // bits [12,16)
 
-      static constexpr uint16_t kHeaderBytes = 20;
-      static constexpr uint8_t  kFlagFixedValues = 0x01;
+      uint16_t hpf_;          // 12: [height:6][prefix_len:6][flags:4]
+      uint16_t num_stems_;    // 14: N live routing stems (N+1 slots)
+      uint16_t cap_;          // 16: stem CAPACITY (regions sized for cap; in-place grow ≤ cap)
+
+      static constexpr uint16_t kHeaderBytes = 18;
+      static constexpr uint16_t kFlagFixedValues = 0x01;   // flag-local bit (within the 4-bit field)
       uint16_t capacity() const noexcept { return cap_; }
 
-      bool     is_leaf()      const noexcept { return height_ == 0; }
-      bool     is_inner()     const noexcept { return height_ != 0; }
+      uint8_t  height()       const noexcept { return uint8_t(hpf_ & kHeightMask); }
+      bool     is_leaf()      const noexcept { return (hpf_ & kHeightMask) == 0; }
+      bool     is_inner()     const noexcept { return (hpf_ & kHeightMask) != 0; }
       uint16_t num_stems()    const noexcept { return num_stems_; }
       uint16_t n_slots()      const noexcept { return uint16_t(num_stems_ + 1); }
-      uint8_t  prefix_len()   const noexcept { return prefix_len_; }
-      bool     fixed_values() const noexcept { return flags_ & kFlagFixedValues; }
+      uint8_t  prefix_len()   const noexcept { return uint8_t((hpf_ >> kPrefixShift) & kPrefixMask); }
+      bool     fixed_values() const noexcept { return (hpf_ >> kFlagsShift) & kFlagFixedValues; }
 
       uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
       const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
 
       uint32_t*       prefix()       noexcept { return reinterpret_cast<uint32_t*>(base() + kHeaderBytes); }
       const uint32_t* prefix() const noexcept { return reinterpret_cast<const uint32_t*>(base() + kHeaderBytes); }
-      std::span<const uint32_t> prefix_span() const noexcept { return {prefix(), prefix_len_}; }
+      std::span<const uint32_t> prefix_span() const noexcept { return {prefix(), prefix_len()}; }
 
       // Offset where the form-specific regions (stems, then slots) begin: after the
       // header + prefix, cacheline-aligned. (Forms with an extension override.)
       uint32_t regions_off() const noexcept
       {
-         return cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len_) * 4u);
+         return cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len()) * 4u);
       }
 
      protected:
       node_base(uint32_t asize, node_type t, ptr_address_seq seq,
                 uint8_t height, uint8_t prefix_len, uint8_t flags, uint16_t cap) noexcept
           : psitri::node(asize, t, seq),
-            height_(height), prefix_len_(prefix_len), flags_(flags), pad_(0),
+            hpf_(uint16_t(height | (uint16_t(prefix_len) << kPrefixShift) | (uint16_t(flags) << kFlagsShift))),
             num_stems_(0), cap_(cap)
       {
+         assert(height <= kHeightMask && prefix_len <= kPrefixMask && flags <= 0xF);
       }
    } __attribute__((packed));
-   static_assert(sizeof(node_base) == 20, "wtree node_base header must be 20 B");
+   static_assert(sizeof(node_base) == 18, "wtree node_base header must be 18 B");
 
    // ── Stem search (branchless SIMD-friendly; node_design_patterns §H) ───
    // upper_bound: count of stems ≤ q, in [0,N]. NEVER binary search.
