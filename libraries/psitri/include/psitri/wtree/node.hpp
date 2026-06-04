@@ -72,7 +72,10 @@ namespace psitri::wtree
       uint16_t num_stems_;          // 14: N live routing stems (N+1 slots)
       uint16_t cap_;                // 16: stem CAPACITY (regions sized for cap; grow ≤ cap)
 
-      static constexpr uint16_t kHeaderBytes = 22;   // 16-B SAL node base + 6 B wtree fields
+      // Offset where the prefix/regions begin = the whole packed header. Derived from
+      // sizeof (no magic number) so it auto-tracks any change to the SAL node base OR this
+      // form's own fields. (sizeof of the enclosing class is legal inside a member body.)
+      static constexpr uint32_t header_bytes() noexcept { return sizeof(node_base); }
       uint16_t capacity() const noexcept { return cap_; }
 
       uint8_t      height()       const noexcept { return uint8_t(height_); }
@@ -87,15 +90,15 @@ namespace psitri::wtree
       uint8_t*       base()       noexcept { return reinterpret_cast<uint8_t*>(this); }
       const uint8_t* base() const noexcept { return reinterpret_cast<const uint8_t*>(this); }
 
-      uint32_t*       prefix()       noexcept { return reinterpret_cast<uint32_t*>(base() + kHeaderBytes); }
-      const uint32_t* prefix() const noexcept { return reinterpret_cast<const uint32_t*>(base() + kHeaderBytes); }
+      uint32_t*       prefix()       noexcept { return reinterpret_cast<uint32_t*>(base() + header_bytes()); }
+      const uint32_t* prefix() const noexcept { return reinterpret_cast<const uint32_t*>(base() + header_bytes()); }
       std::span<const uint32_t> prefix_span() const noexcept { return {prefix(), prefix_len()}; }
 
       // Offset where the form-specific regions (stems, then slots) begin: after the
       // header + prefix, cacheline-aligned. (Forms with an extension override.)
       uint32_t regions_off() const noexcept
       {
-         return cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len()) * 4u);
+         return cl_round(header_bytes() + uint32_t(prefix_len()) * 4u);
       }
 
      protected:
@@ -108,7 +111,6 @@ namespace psitri::wtree
          assert(height <= 0xF && prefix_len <= 0x7FF);
       }
    } __attribute__((packed));
-   static_assert(sizeof(node_base) == 22, "wtree node_base header must be 22 B");
 
    // ── Stem search (branchless SIMD-friendly; node_design_patterns §H) ───
    // upper_bound: count of stems ≤ q, in [0,N]. NEVER binary search.
@@ -214,7 +216,7 @@ namespace psitri::wtree
       // ── alloc_size ↔ ctor (node_design_patterns §A). Regions sized for `cap`. ──
       static uint32_t alloc_size(uint8_t height, uint16_t prefix_len, uint16_t cap) noexcept
       {
-         const uint32_t d_off = cl_round(uint32_t(kHeaderBytes) + uint32_t(prefix_len) * 4u);
+         const uint32_t d_off = cl_round(header_bytes() + uint32_t(prefix_len) * 4u);
          const uint32_t s_off = d_off + cl_round(uint32_t(ndivs(cap)) * 4u);   // divs index
          const uint32_t sl_off = s_off + cl_round(uint32_t(cap) * 4u);
          const uint32_t slot_bytes = uint32_t(cap + 1) * slot_stride(height == 0);
