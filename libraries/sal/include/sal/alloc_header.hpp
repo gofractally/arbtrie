@@ -69,7 +69,7 @@ namespace sal
 
       /// the allocation sequence associated with address(), used to determine priority
       /// during recovery from a crash.
-      constexpr uint16_t sequence() const noexcept { return _address.sequence; }
+      constexpr uint64_t sequence() const noexcept { return _address.sequence; }
 
       void     update_checksum() noexcept { _checksum = calculate_checksum(); }
       uint16_t calculate_checksum() const noexcept
@@ -117,12 +117,16 @@ namespace sal
       }
 
      private:
-      uint16_t        _checksum;
-      ptr_address_seq _address;
+      uint16_t        _checksum;   // MUST stay the first member → offset 0 (recovery reads it
+                                   // at a fixed position regardless of the rest of the header)
+      ptr_address_seq _address;    // {sequence:48, address:32} = 10 B
       uint32_t        _size : 25;  // able to store segment_size -1 (32MB)
       uint32_t        _type : 7;   // 127 types, 3 reserved for internal use
    } __attribute__((packed));
-   static_assert(sizeof(alloc_header) == 12);
+   static_assert(sizeof(alloc_header) == 16);
+   // standard-layout ⇒ the address of the object == address of its first member, so the
+   // first-declared _checksum is guaranteed at offset 0 (the recovery-read invariant).
+   static_assert(std::is_standard_layout_v<alloc_header>, "alloc_header must be standard-layout");
 
    class pending_release_list
    {
@@ -396,6 +400,6 @@ namespace sal
       /// must be the last member of the class
       uint64_t _sync_checksum;
    } __attribute__((packed));
-   static_assert(sizeof(sync_header) == 64);
+   static_assert(sizeof(sync_header) == 68);  // +4 from the 16-B alloc_header base
 
 }  // namespace sal

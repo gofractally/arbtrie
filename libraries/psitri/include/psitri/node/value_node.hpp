@@ -1122,7 +1122,7 @@ namespace psitri
          entries()[_num_versions++] = pack_entry(version, offset);
       }
    } __attribute__((packed));
-   static_assert(sizeof(value_node) == 16);
+   static_assert(sizeof(value_node) == 20);  // 16-B node base + 4 B value_node fields
 
    template <typename T>
    concept is_value_node = std::same_as<std::remove_cvref_t<std::remove_pointer_t<T>>, value_node>;

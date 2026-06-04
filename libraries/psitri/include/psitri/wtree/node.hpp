@@ -72,7 +72,7 @@ namespace psitri::wtree
       uint16_t num_stems_;          // 14: N live routing stems (N+1 slots)
       uint16_t cap_;                // 16: stem CAPACITY (regions sized for cap; grow ≤ cap)
 
-      static constexpr uint16_t kHeaderBytes = 18;
+      static constexpr uint16_t kHeaderBytes = 22;   // 16-B SAL node base + 6 B wtree fields
       uint16_t capacity() const noexcept { return cap_; }
 
       uint8_t      height()       const noexcept { return uint8_t(height_); }
@@ -108,7 +108,7 @@ namespace psitri::wtree
          assert(height <= 0xF && prefix_len <= 0x7FF);
       }
    } __attribute__((packed));
-   static_assert(sizeof(node_base) == 18, "wtree node_base header must be 18 B");
+   static_assert(sizeof(node_base) == 22, "wtree node_base header must be 22 B");
 
    // ── Stem search (branchless SIMD-friendly; node_design_patterns §H) ───
    // upper_bound: count of stems ≤ q, in [0,N]. NEVER binary search.

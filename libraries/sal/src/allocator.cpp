@@ -45,7 +45,7 @@ namespace sal
       {
       }
 
-      bool should_store(ptr_address addr, uint16_t sequence, location new_loc) noexcept
+      bool should_store(ptr_address addr, uint64_t sequence, location new_loc) noexcept
       {
          uint64_t index = *addr;
          uint64_t word  = index >> 6;
@@ -82,14 +82,17 @@ namespace sal
       }
 
      private:
-      static bool sequence_newer(uint16_t candidate, uint16_t current) noexcept
+      static bool sequence_newer(uint64_t candidate, uint64_t current) noexcept
       {
+         // The field holds the 32-bit allocation seq today (wraps at 2^32); compare with a
+         // 32-bit signed-difference window. (When this becomes a monotonic 48-bit MVCC
+         // version it won't wrap and this can drop to a plain >.)
          return candidate != current &&
-                static_cast<int16_t>(candidate - current) > 0;
+                static_cast<int32_t>(uint32_t(candidate) - uint32_t(current)) > 0;
       }
 
       std::vector<uint64_t> _seen;
-      std::vector<uint16_t> _sequence;
+      std::vector<uint64_t> _sequence;
       std::vector<location> _location;
    };
 

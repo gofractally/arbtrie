@@ -296,7 +296,7 @@ TEST_CASE("value_next_ptr layout", "[value_node]")
 
 TEST_CASE("value_node struct size", "[value_node]")
 {
-   CHECK(sizeof(psitri::value_node) == 16);
+   CHECK(sizeof(psitri::value_node) == 20);  // 16-B SAL node base + 4 B value_node fields
 }
 
 namespace

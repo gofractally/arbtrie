@@ -337,7 +337,7 @@ namespace psitri
       */
    } __attribute__((packed));  // class inner_node
    /// if this is not 20, then it will impact alignment of branches
-   static constexpr uint32_t inner_node_size = 20;
+   static constexpr uint32_t inner_node_size = 24;  // 16-B node base + 8 B inner fields
    static_assert(sizeof(inner_node) == inner_node_size);
 
    inline uint32_t inner_node::alloc_size(const branch_set&             branches,

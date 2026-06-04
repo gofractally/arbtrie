@@ -25,18 +25,39 @@ namespace sal
     * facilitate recovery when multiple segments have the same node with
     * the same address. 
     */
+   // 48-bit little-endian version, explicitly packed (no padding, no bitfield ambiguity).
+   // Groundwork for an MVCC creation-version; currently carries the allocation seq counter.
+   struct version_t
+   {
+      uint8_t bytes[6];
+      constexpr version_t(uint64_t v = 0) noexcept
+          : bytes{uint8_t(v), uint8_t(v >> 8), uint8_t(v >> 16),
+                  uint8_t(v >> 24), uint8_t(v >> 32), uint8_t(v >> 40)}
+      {
+      }
+      constexpr uint64_t get() const noexcept
+      {
+         return uint64_t(bytes[0]) | (uint64_t(bytes[1]) << 8) | (uint64_t(bytes[2]) << 16) |
+                (uint64_t(bytes[3]) << 24) | (uint64_t(bytes[4]) << 32) | (uint64_t(bytes[5]) << 40);
+      }
+      constexpr operator uint64_t() const noexcept { return get(); }
+      constexpr bool operator==(const version_t&) const = default;
+   } __attribute__((packed));
+   static_assert(sizeof(version_t) == 6);
+
    class ptr_address_seq
    {
      public:
-      uint16_t    sequence;
-      ptr_address address;
+      ptr_address address;    // the control-block index (the stable identity)
+      version_t   sequence;   // 48-bit; alloc seq today, MVCC creation-version later
 
-      ptr_address_seq() : sequence(0), address(0) {}
-      constexpr ptr_address_seq(ptr_address addr, uint32_t seq) : sequence(seq), address(addr) {}
+      constexpr ptr_address_seq() noexcept : address(0), sequence(0) {}
+      constexpr ptr_address_seq(ptr_address addr, uint64_t seq) noexcept : address(addr), sequence(seq) {}
 
       constexpr      operator ptr_address() const { return address; }
       constexpr bool operator==(const ptr_address_seq& other) const = default;
    } __attribute__((packed));
+   static_assert(sizeof(ptr_address_seq) == 10, "address(4) + version(6)");
 
    using alloc_hint = std::span<const ptr_address>;
 

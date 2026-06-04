@@ -799,7 +799,7 @@ namespace psitri
       char*       alloc_head() noexcept { return (char*)tail() - _alloc_pos; }
 
    } __attribute__((packed));
-   static_assert(sizeof(leaf_node) == 20);
+   static_assert(sizeof(leaf_node) == 24);  // 16-B node base + 8 B leaf_node fields
 
    inline uint32_t leaf_node::alloc_size(key_view key, const value_type& value) noexcept
    {

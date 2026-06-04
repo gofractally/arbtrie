@@ -271,7 +271,7 @@ namespace psitri
          alloc_header::init(asize, sal::header_type(t), seq);
       }
    } __attribute__((packed));
-   static_assert(sizeof(node) == 12);
+   static_assert(sizeof(node) == 16);  // SAL alloc_header is 16 B (48-bit version field)
 
    /**
     * generic utility function that can be used with all nodes to find the new
